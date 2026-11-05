@@ -100,7 +100,7 @@ import {
   codeIndexVectorsFromEnv,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
-import { resolveGoalRepositoryIds } from './canonical-git-source.js';
+import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import {
@@ -803,7 +803,7 @@ export function createStdioMcpRuntime(
         }
         const outcome = await pinGoalBaseAtCommit(goalCanonicalRefs, goalCanonicalOverlays, {
           goalWorkspaceId: input.goalWorkspaceId,
-          canonicalRef: canonicalRefForBranch('main'),
+          canonicalRef: canonicalRefForBranch(input.baseBranch),
           commitSha: input.commitSha,
         }, {
           manifests: goalCanonicalManifests,
@@ -864,8 +864,9 @@ export function createStdioMcpRuntime(
           && entry.parentWorkspaceId === parent.id);
       if (existing !== undefined) return ok({ workspaceId: existing.id });
 
-      // A selected feature/detached worktree may contain commits not on origin/main.
-      // Pin its exact committed head; only new goals on main use fresh origin/main.
+      // A selected feature/detached worktree may contain commits not on the
+      // repository base branch. Pin its exact committed head; only a checkout
+      // already on the base branch uses the freshly fetched remote commit.
       const currentBranch = await gitService.run(runActor, {
         workspaceId: parent.id,
         args: ['branch', '--show-current'],
@@ -875,8 +876,9 @@ export function createStdioMcpRuntime(
         return err(appError('CONFLICT', 'Cannot identify project branch for Goal Workspace admission', true));
       }
       const branchName = currentBranch.value.stdout.trim();
+      const baseBranch = await resolveGoalBaseBranch(parent.realRootPath, branchName, mergePolicy);
       let baseRevision: string | undefined;
-      if (branchName !== 'main' && branchName !== 'master') {
+      if (branchName !== baseBranch) {
         const history = await gitService.log(runActor, parent.id, { maxCommits: 1 });
         if (!history.ok) return history;
         const head = history.value.entries[0]?.hash;
@@ -889,6 +891,7 @@ export function createStdioMcpRuntime(
         goalId,
         parentWorkspaceId: parent.id,
         branchName: `goal/${goalId}`,
+        baseBranch,
         ...(baseRevision === undefined ? {} : { baseRevision }),
         ...(runActor.sessionId === undefined ? {} : { ownerSessionId: runActor.sessionId }),
       });

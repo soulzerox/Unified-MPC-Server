@@ -10,6 +10,8 @@ import {
   type CanonicalGitTreeEntry,
 } from '@unified-mpc/workspace';
 
+import { githubRepositoryFromRemote } from './github-remote.js';
+
 const execFileAsync = promisify(execFile);
 
 const GIT_TIMEOUT_MS = 120_000;
@@ -97,6 +99,38 @@ export async function resolveGoalRepositoryIds(
   const remote = await sourceFor(worktreePath).remoteUrl();
   if (remote === null) return null;
   return [repositoryIdForRemoteUrl(remote), legacyRepositoryIdForRemoteUrl(remote)];
+}
+
+/** Minimal merge-policy lookup the base-branch resolver needs. */
+export interface GoalBaseBranchPolicyPort {
+  getByRepository(repository: string): Promise<{ readonly defaultBranch: string } | undefined>;
+}
+
+/**
+ * Branch admission must treat as the moving base (#210 §1).
+ *
+ * Merge reconciliation advances the canonical ref for the policy's
+ * `defaultBranch`; admission must read the same ref or a non-main policy never
+ * pins. A repository without a policy keeps the checkout's main/master branch,
+ * and a feature checkout falls back to `main` (its exact HEAD is pinned
+ * instead, so the branch name only selects the ref admission may match).
+ */
+export async function resolveGoalBaseBranch(
+  worktreePath: string,
+  currentBranch: string,
+  policyFor: GoalBaseBranchPolicyPort,
+  sourceFor: (cwd: string) => CanonicalGitSource = createCanonicalGitSource,
+): Promise<string> {
+  const fallback = currentBranch === 'main' || currentBranch === 'master' ? currentBranch : 'main';
+  const remote = await sourceFor(worktreePath).remoteUrl();
+  if (remote === null) return fallback;
+  // A local or unknown remote cannot have a merge policy; the reconciliation
+  // path that advances canonical refs requires this same GitHub identity.
+  const repository = await githubRepositoryFromRemote(remote).catch(() => undefined);
+  if (repository === undefined) return fallback;
+  const policy = await policyFor.getByRepository(repository);
+  const configured = policy?.defaultBranch.trim() ?? '';
+  return configured.length === 0 ? fallback : configured;
 }
 
 async function hashBlobs(cwd: string, blobOids: readonly string[]): Promise<ReadonlyMap<string, string>> {

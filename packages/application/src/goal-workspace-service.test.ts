@@ -254,7 +254,7 @@ describe('GoalWorkspaceService', () => {
       { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
     ];
-    const pinned: Array<{ goalWorkspaceId: string; commitSha: string; worktreePath: string }> = [];
+    const pinned: Array<{ goalWorkspaceId: string; commitSha: string; worktreePath: string; baseBranch: string }> = [];
     const admission: GoalCanonicalAdmissionPort = {
       pinBaseAtCommit: async (input) => {
         pinned.push(input);
@@ -275,8 +275,95 @@ describe('GoalWorkspaceService', () => {
         goalWorkspaceId: result.value.workspace.id,
         commitSha: git.refreshedBaseSha,
         worktreePath: path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'),
+        baseBranch: 'main',
       }]);
       expect(result.value.canonicalAdmission).toEqual({ status: 'pinned', baseManifestId: 'manifest-1' });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fetches and pins the repository base branch instead of main', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-trunk-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    git.runResults = [
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+    const pinned: Array<{ goalWorkspaceId: string; commitSha: string; worktreePath: string; baseBranch: string }> = [];
+    const admission: GoalCanonicalAdmissionPort = {
+      pinBaseAtCommit: async (input) => {
+        pinned.push(input);
+        return { status: 'pinned', baseManifestId: 'manifest-trunk' };
+      },
+      releaseBase: async (): Promise<void> => undefined,
+    };
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-trunk'), { recursive: true });
+      const result = await new GoalWorkspaceService(repository, git, { canonicalAdmission: admission }).create({
+        goalId: 'goal-trunk', parentWorkspaceId: 'project-1', branchName: 'codex/goal-trunk', baseBranch: 'trunk',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(git.refreshedRefs).toEqual([{ remote: 'origin', sourceRef: 'refs/heads/trunk' }]);
+      expect(repository.workspaces.find((workspace) => workspace.id !== 'project-1')).toMatchObject({
+        baseRef: 'origin/trunk',
+        baseRevision: git.refreshedBaseSha,
+      });
+      expect(pinned).toEqual([{
+        goalWorkspaceId: result.value.workspace.id,
+        commitSha: git.refreshedBaseSha,
+        worktreePath: path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-trunk'),
+        baseBranch: 'trunk',
+      }]);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('pins an explicit base against the requested branch without fetching a moving ref', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-explicit-branch-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    const explicitBase = 'e'.repeat(40);
+    git.runResults = [
+      { exitCode: 0, stdout: `${explicitBase}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+    const pinned: Array<{ goalWorkspaceId: string; commitSha: string; worktreePath: string; baseBranch: string }> = [];
+    const admission: GoalCanonicalAdmissionPort = {
+      pinBaseAtCommit: async (input) => {
+        pinned.push(input);
+        return { status: 'skipped', reason: 'commit_not_live', detail: 'feature head is not the live branch' };
+      },
+      releaseBase: async (): Promise<void> => undefined,
+    };
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-feature'), { recursive: true });
+      const result = await new GoalWorkspaceService(repository, git, { canonicalAdmission: admission }).create({
+        goalId: 'goal-feature', parentWorkspaceId: 'project-1', branchName: 'codex/goal-feature',
+        baseBranch: 'trunk', baseRevision: explicitBase,
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(git.refreshedRefs).toEqual([]);
+      expect(pinned).toEqual([{
+        goalWorkspaceId: result.value.workspace.id,
+        commitSha: explicitBase,
+        worktreePath: path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-feature'),
+        baseBranch: 'trunk',
+      }]);
     } finally {
       await rm(parentRoot, { recursive: true, force: true });
     }

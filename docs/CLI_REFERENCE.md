@@ -449,7 +449,8 @@ missing-overlay-bases 0
 
 - `--dry-run` prints `repair` lines for the orphan pins it would remove and
   never writes or takes the GC lease. `--apply` takes the single-owner GC lease
-  and removes the planned pins under it, renewing the lease as it removes.
+  and removes reasons from those pins under it, renewing the lease as it
+  removes.
 - A pin is only removed when its manifest is genuinely missing. The manifest
   store is strict-read (a tolerant store is refused), so a corrupt manifest row
   aborts the pass with nothing removed instead of looking like a missing row.
@@ -477,9 +478,11 @@ missing-overlay-bases 0
   overlay with a missing base still holds dirty state; deleting either would
   discard evidence or uncommitted work.
 - An apply prints `applied orphan-pins N` and one `removed <id> <reasons>` line
-  per pin it actually removed. A refused pass prints `refused <reason>`: another
-  owner holds the lease, the fence record is unreadable, or the pass ran without
-  a lease.
+  per pin from which it removed at least one reason, listing only the reasons it
+  removed. A pin re-created before its first removal is absent; a pin re-created
+  mid-removal still appears with just the reasons already removed. A refused
+  pass prints `refused <reason>`: another owner holds the lease, the fence
+  record is unreadable, or the pass ran without a lease.
 - Exit `0` only when the store is healthy after the plan or pass. It exits `1`
   for a refusal, for an unreadable store, or when dangling refs or missing
   overlay bases remain, so a repair that cannot fully heal the store is visible

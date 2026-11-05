@@ -3,7 +3,7 @@ import type { CanonicalStoreRepairReport } from '@unified-mpc/workspace';
 
 export interface IndexRepairCommand {
   readonly kind: 'index-repair';
-  /** Report the orphan pins a repair would remove (`--dry-run`) or remove them (`--apply`). */
+  /** Report the orphan pins a repair would unpin (`--dry-run`) or unpin them (`--apply`). */
   readonly dryRun: boolean;
   /** Print the unprojected report instead of the operator lines. */
   readonly json: boolean;
@@ -49,11 +49,12 @@ export function parseIndexRepairArgs(args: readonly string[]): Result<IndexRepai
  * Render the canonical store repair report (#210 §7 `index_repair`).
  *
  * A dry run prints `repair` lines for the orphan pins it would remove; an apply
- * prints `removed` lines for the pins it actually removed, so a pin that a
- * concurrent writer changed at execution time is visibly absent. The two
- * unrepairable degraded states are always printed with their offending ids:
- * they are operator action, not something this verb may delete. A refused pass
- * prints the reason and nothing else.
+ * prints `removed` lines for pins from which it removed at least one reason,
+ * listing only those reasons. A pin re-created before its first removal is
+ * absent, and one re-created mid-removal appears with only the reasons already
+ * removed. The two unrepairable degraded states are always printed with their
+ * offending ids: they are operator action, not something this verb may delete.
+ * A refused pass prints the reason and nothing else.
  */
 export function formatCanonicalStoreRepair(report: CanonicalStoreRepairReport): string {
   if (report.status === 'refused') return `refused ${report.reason}`;

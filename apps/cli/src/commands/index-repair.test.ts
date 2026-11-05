@@ -63,7 +63,7 @@ describe('formatCanonicalStoreRepair', () => {
     ].join('\n'));
   });
 
-  it('prints only the pins an apply actually removed', () => {
+  it('prints a removed line for each pin it removed a reason from', () => {
     expect(formatCanonicalStoreRepair({
       status: 'applied',
       orphanPins: [{ manifestId: ORPHAN, reasons: ['user-pin'] }],

@@ -38,11 +38,12 @@ export interface CanonicalRevisionPinInput {
  * canonical ref, a Goal base or overlay, an unsettled index job, a rollback
  * marker. Removing one while its owner still depends on the revision would
  * delete reachability evidence, which is exactly the failure prune must
- * prevent. `index repair` is the single exception: it removes every reason
- * only after proving the manifest row is missing, so the pin no longer
- * protects a readable revision. A dangling ref or Goal overlay that still
- * names the missing revision is reported, not repaired, and cannot reach
- * artifacts through it.
+ * prevent. `index repair` is the single exception: it removes reasons only
+ * after proving the manifest row is missing, and re-checks that row before
+ * each removal, so a pin whose row stays missing no longer protects a
+ * readable revision. A dangling ref or Goal overlay that still names the
+ * missing revision is reported, not repaired, and cannot reach artifacts
+ * through it.
  */
 export const OPERATOR_PIN_REASON: RevisionPinReason = 'user-pin';
 

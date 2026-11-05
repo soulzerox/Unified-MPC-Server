@@ -379,7 +379,8 @@ pins none
 - The manifest does not have to exist. Unpinning a revision whose manifest was
   already deleted cleans up an operator orphan pin, so this command remains the
   narrow repair when only the `user-pin` reason is in the way. `index repair`
-  removes every reason from an orphan pin (see below).
+  removes every reason from an orphan pin while its manifest stays missing
+  (see below).
 - Exit `0` for any successful pin or unpin; `1` when the manifest is unknown,
   the GC lease is held or unreadable, or the store cannot be written; `2` for
   arguments that are not `pin|unpin` plus one manifest id and an optional
@@ -433,9 +434,10 @@ retain man:v1:ff0371d8c4e2 pin
 ### `unified-mpc index repair --dry-run|--apply [--json]`
 
 Plans or removes the one degraded state the store can safely repair on its own:
-a revision pin whose manifest row is missing. Every reason on that pin is
-removed, because the manifest it protects no longer exists. Exactly one mode is
-required rather than defaulted.
+a revision pin whose manifest row is missing. While the row stays missing, every
+reason on that pin is removed; because the row is re-checked before each
+removal, a manifest re-created mid-pin keeps its remaining reasons. Exactly one
+mode is required rather than defaulted.
 
 ```bash
 $ unified-mpc index repair --dry-run
@@ -452,8 +454,10 @@ missing-overlay-bases 0
   store is strict-read (a tolerant store is refused), so a corrupt manifest row
   aborts the pass with nothing removed instead of looking like a missing row.
   Classification of every pin finishes before the first unpin, and the row is
-  re-checked immediately before each unpin. A lease loss or write failure after
-  removals begin can leave those removals in place; re-running is idempotent.
+  re-checked immediately before each unpin, so a row re-created mid-pin keeps
+  the remaining reasons instead of losing them. A lease loss or write failure
+  after removals begin can leave those removals in place; re-running is
+  idempotent.
 - Pin records are read strictly too. An unreadable record, a record with no
   valid pin entries, or a file name that is not the canonical lowercase
   manifest id refuses the pass, because reading the reasons from the lowercased

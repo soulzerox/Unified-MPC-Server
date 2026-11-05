@@ -38,9 +38,10 @@ export interface CanonicalStoreRepairDeps {
   readonly now?: Date;
 }
 
-/** One orphan pin removed (apply) or that a dry run would remove. */
+/** One pin that was orphaned when classified. */
 export interface RepairedPin {
   readonly manifestId: string;
+  /** Reasons actually removed by an apply, or that a dry run would attempt. */
   readonly reasons: readonly RevisionPinReason[];
 }
 
@@ -48,9 +49,11 @@ export type CanonicalStoreRepairReport =
   | {
       readonly status: 'planned' | 'applied';
       /**
-       * Pins whose manifest row is missing: removed by an apply, or reported
-       * as the work a dry run would do. Every reason is removed because the
-       * manifest they protected no longer exists.
+       * Pins from which an apply removed at least one reason, or that a dry run
+       * would attempt. A dry run reports every reason on each planned pin; an
+       * apply reports only the reasons it actually removed. The row is
+       * re-checked before each removal, so a pin whose manifest is re-created
+       * before its first removal is omitted and later reasons stay pinned.
        */
       readonly orphanPins: readonly RepairedPin[];
       /**
@@ -66,8 +69,10 @@ export type CanonicalStoreRepairReport =
  * Repair the safe half of canonical store consistency (#210 §7 `index_repair`).
  *
  * The store verify path reports three degraded states. Only one is safe to
- * remove automatically: a pin whose manifest row is genuinely missing. Every
- * reason on that pin is removed.
+ * remove automatically: a pin whose manifest row is genuinely missing. While
+ * the row stays missing, every reason on that pin is removed; the row is
+ * re-checked before each removal, so a row re-created mid-pin keeps the
+ * remaining reasons.
  *
  * Removing the pin is deliberately not reachability-neutral. Artifact-key GC
  * treats every pin id as retention evidence (`collectRetainedManifestIds`), and

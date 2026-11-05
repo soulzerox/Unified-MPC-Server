@@ -5,7 +5,11 @@ import { describe, expect, it } from 'vitest';
 import type { GitCommandResult, GitGuardedRebaseResult, GitStatusResult, GitWorkspaceSnapshot } from '@unified-mpc/git';
 import type { Result, WorkspaceAdmissionReceipt, WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import type { Workspace, WorkspaceRepository, WorkspaceWriterLease } from '@unified-mpc/workspace';
-import { GoalWorkspaceService, type GoalWorkspaceGitPort } from './goal-workspace-service.js';
+import {
+  GoalWorkspaceService,
+  type GoalCanonicalAdmissionPort,
+  type GoalWorkspaceGitPort,
+} from './goal-workspace-service.js';
 
 class MemoryWorkspaceRepository implements WorkspaceRepository {
   public readonly workspaces: Workspace[] = [];
@@ -234,6 +238,138 @@ describe('GoalWorkspaceService', () => {
         baseRef: 'origin/main',
         baseRevision: git.refreshedBaseSha,
       });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a pinned canonical admission for the registered Goal Workspace', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-admission-pin-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    git.runResults = [
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+    const pinned: Array<{ goalWorkspaceId: string; commitSha: string }> = [];
+    const admission: GoalCanonicalAdmissionPort = {
+      pinBaseAtCommit: async (input) => {
+        pinned.push(input);
+        return { status: 'pinned', baseManifestId: 'manifest-1' };
+      },
+    };
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'), { recursive: true });
+      const result = await new GoalWorkspaceService(repository, git, { canonicalAdmission: admission }).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', branchName: 'codex/goal-1',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(pinned).toEqual([{ goalWorkspaceId: result.value.workspace.id, commitSha: git.refreshedBaseSha }]);
+      expect(result.value.canonicalAdmission).toEqual({ status: 'pinned', baseManifestId: 'manifest-1' });
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the created Goal Workspace when canonical admission fails or throws', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-admission-failed-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    git.runResults = [
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+    const failures: GoalCanonicalAdmissionPort[] = [
+      { pinBaseAtCommit: async () => ({ status: 'failed', reason: 'disk full' }) },
+      { pinBaseAtCommit: async (): Promise<never> => { throw new Error('store unavailable'); } },
+    ];
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'), { recursive: true });
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-2'), { recursive: true });
+      const first = await new GoalWorkspaceService(repository, git, { canonicalAdmission: failures[0] }).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', branchName: 'codex/goal-1',
+      });
+      const second = await new GoalWorkspaceService(repository, git, { canonicalAdmission: failures[1] }).create({
+        goalId: 'goal-2', parentWorkspaceId: 'project-1', branchName: 'codex/goal-2',
+      });
+
+      expect(first).toMatchObject({
+        ok: true,
+        value: { workspace: { goalId: 'goal-1' }, canonicalAdmission: { status: 'failed', reason: 'disk full' } },
+      });
+      expect(second).toMatchObject({
+        ok: true,
+        value: { workspace: { goalId: 'goal-2' }, canonicalAdmission: { status: 'failed', reason: 'store unavailable' } },
+      });
+      expect(repository.workspaces.filter((workspace) => workspace.goalId !== undefined)).toHaveLength(2);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('omits canonical admission when the runtime has no port', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-admission-absent-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    const git = new FakeGitPort();
+    git.runResults = [
+      { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+    ];
+
+    try {
+      await mkdir(path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'), { recursive: true });
+      const result = await new GoalWorkspaceService(repository, git).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', branchName: 'codex/goal-1',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect('canonicalAdmission' in result.value).toBe(false);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not pin canonical admission for a snapshot Goal Workspace', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-admission-snapshot-'));
+    const repository = new MemoryWorkspaceRepository();
+    repository.workspaces.push({
+      id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: '2026-09-23T00:00:00.000Z', lifecycleKind: 'project',
+    });
+    let calls = 0;
+    const admission: GoalCanonicalAdmissionPort = {
+      pinBaseAtCommit: async () => {
+        calls += 1;
+        return { status: 'pinned', baseManifestId: 'unexpected' };
+      },
+    };
+
+    try {
+      await writeFile(path.join(parentRoot, 'input.txt'), 'snapshot content');
+      const result = await new GoalWorkspaceService(repository, new FakeGitPort(), { canonicalAdmission: admission }).create({
+        goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'snapshot',
+        parentSource: 'snapshot', baseRevision: 'snapshot-source-v1',
+      });
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(calls).toBe(0);
+      expect('canonicalAdmission' in result.value).toBe(false);
     } finally {
       await rm(parentRoot, { recursive: true, force: true });
     }

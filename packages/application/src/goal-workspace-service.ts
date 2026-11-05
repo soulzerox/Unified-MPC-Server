@@ -45,6 +45,27 @@ export interface GoalWorkspaceServiceOptions {
   readonly maxSnapshotEntries?: number;
   readonly now?: () => Date;
   readonly writerLeaseDurationMs?: number;
+  /** Admission policy that pins the Goal overlay to its exact base commit (#210 §4). */
+  readonly canonicalAdmission?: GoalCanonicalAdmissionPort;
+}
+
+/** Reported admission outcome, flattened so it can cross the MCP boundary. */
+export type GoalCanonicalAdmissionOutcome =
+  | { readonly status: 'pinned'; readonly baseManifestId: string }
+  | { readonly status: 'skipped'; readonly reason: string; readonly detail?: string }
+  | { readonly status: 'failed'; readonly reason: string };
+
+/**
+ * Canonical base-pin policy for a freshly admitted Goal Workspace.
+ *
+ * The runtime owns the canonical stores and ref name; the application only
+ * knows the registered workspace id and the exact commit it admitted.
+ */
+export interface GoalCanonicalAdmissionPort {
+  pinBaseAtCommit(input: {
+    readonly goalWorkspaceId: string;
+    readonly commitSha: string;
+  }): Promise<GoalCanonicalAdmissionOutcome>;
 }
 
 export interface GoalWorkspaceWriterLease extends WorkspaceWriterLease {
@@ -55,6 +76,8 @@ export interface GoalWorkspaceWriterLease extends WorkspaceWriterLease {
 export interface GoalWorkspaceCreateResult {
   readonly workspace: Workspace;
   readonly worktreePath: string;
+  /** Omitted when the runtime constructs no canonical admission port. */
+  readonly canonicalAdmission?: GoalCanonicalAdmissionOutcome;
 }
 
 /** Bounded, read-only evidence used to resume or reconcile a Goal Workspace. */
@@ -129,6 +152,7 @@ export class GoalWorkspaceService {
   private readonly maxSnapshotEntries: number;
   private readonly now: () => Date;
   private readonly writerLeaseDurationMs: number;
+  private readonly canonicalAdmission: GoalCanonicalAdmissionPort | undefined;
 
   public constructor(
     private readonly repository: WorkspaceRepository,
@@ -140,6 +164,7 @@ export class GoalWorkspaceService {
     this.maxSnapshotEntries = positiveLimit(options.maxSnapshotEntries, DEFAULT_MAX_SNAPSHOT_ENTRIES, 'maxSnapshotEntries');
     this.now = options.now ?? ((): Date => new Date());
     this.writerLeaseDurationMs = positiveLimit(options.writerLeaseDurationMs, DEFAULT_WRITER_LEASE_DURATION_MS, 'writerLeaseDurationMs');
+    this.canonicalAdmission = options.canonicalAdmission;
   }
 
   public async acquireWriterLease(goalId: string, ownerId: string): Promise<Result<GoalWorkspaceWriterLease>> {
@@ -366,7 +391,29 @@ export class GoalWorkspaceService {
       await this.removeWorktree(parent.realRootPath, worktreePath);
       return registered;
     }
-    return ok({ workspace: registered.value, worktreePath });
+    const canonicalAdmission = await this.pinCanonicalBase(registered.value.id, resolvedBase);
+    return ok({
+      workspace: registered.value,
+      worktreePath,
+      ...(canonicalAdmission === undefined ? {} : { canonicalAdmission }),
+    });
+  }
+
+  /**
+   * The worktree and registration are already durable here, so admission
+   * pinning never fails Goal creation: any store error is reported as a
+   * `failed` outcome for the runtime to log.
+   */
+  private async pinCanonicalBase(
+    goalWorkspaceId: string,
+    commitSha: string,
+  ): Promise<GoalCanonicalAdmissionOutcome | undefined> {
+    if (this.canonicalAdmission === undefined) return undefined;
+    try {
+      return await this.canonicalAdmission.pinBaseAtCommit({ goalWorkspaceId, commitSha });
+    } catch (error) {
+      return { status: 'failed', reason: errorMessage(error) };
+    }
   }
 
   private async createSnapshot(parent: Workspace, request: GoalWorkspaceCreateRequest): Promise<Result<GoalWorkspaceCreateResult>> {

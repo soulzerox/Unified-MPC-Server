@@ -40,6 +40,7 @@ import {
   type GoalRelocationCustodyPin,
   GoalWorkspaceRetentionEvidenceSealingService,
   createGoalWorktreeReconciliationPort,
+  type GoalCanonicalAdmissionOutcome,
 } from '@unified-mpc/application';
 import { GitAdapter, type GitPublishCredentialDeployment } from '@unified-mpc/git';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
@@ -90,7 +91,7 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { SecretPolicy, WorkspacePathGuard, WorkspaceService, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
+import { CanonicalRefStore, GoalOverlayStore, SecretPolicy, WorkspacePathGuard, WorkspaceService, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
@@ -109,7 +110,7 @@ import {
   type GitHubMergeApi,
 } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApiReader } from './github-merge-observer.js';
-import { createCanonicalMergeAdvance } from './canonical-merge-advance.js';
+import { canonicalRefForBranch, createCanonicalMergeAdvance } from './canonical-merge-advance.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
@@ -778,7 +779,32 @@ export function createStdioMcpRuntime(
         validateAdmission: goalRuntimeControlPlane.validateWorkspaceAdmission.bind(goalRuntimeControlPlane),
       })
     : undefined;
-  const goalWorkspaceService = new GoalWorkspaceService(workspaceRepository);
+  // #210 §4: a Goal admitted from the live canonical commit pins its overlay
+  // base there. The merge reconciliation above owns advancing that ref, so an
+  // admission pins only what the ref already verifiably contains; a Goal
+  // admitted from a historical or feature base is skipped, not failed.
+  const goalCanonicalRoot = path.join(dataPath, 'canonical');
+  const goalCanonicalRefs = new CanonicalRefStore(goalCanonicalRoot);
+  const goalCanonicalOverlays = new GoalOverlayStore(goalCanonicalRoot);
+  const goalWorkspaceService = new GoalWorkspaceService(workspaceRepository, new GitAdapter(), {
+    canonicalAdmission: {
+      pinBaseAtCommit: async (input): Promise<GoalCanonicalAdmissionOutcome> => {
+        const outcome = await pinGoalBaseAtCommit(goalCanonicalRefs, goalCanonicalOverlays, {
+          goalWorkspaceId: input.goalWorkspaceId,
+          canonicalRef: canonicalRefForBranch('main'),
+          commitSha: input.commitSha,
+        });
+        // A skip is expected without canonical data; a failure is not, and no
+        // client may be watching the create result that carries it.
+        if (outcome.status === 'failed') {
+          process.stderr.write(
+            `Unified-MPC Goal canonical pin failed goal=${input.goalWorkspaceId} reason=${outcome.reason}\n`,
+          );
+        }
+        return outcome;
+      },
+    },
+  });
   const goalRunWorkspace: NonNullable<McpApplicationServices['goalRunWorkspace']> = {
     async resolveRunWorkspace(runActor, request) {
       const parent = await workspaceRepository.get(request.workspaceId);

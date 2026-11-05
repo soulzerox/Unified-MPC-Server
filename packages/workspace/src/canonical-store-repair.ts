@@ -83,8 +83,11 @@ export type CanonicalStoreRepairReport =
  * owning admission/advancement paths must reconcile them.
  *
  * Classification finishes before the first unpin. A corrupt manifest row (the
- * strict store throws) or an unreadable ref/overlay/pin root therefore aborts
- * the whole pass with nothing removed. The manifest store must be strict-read;
+ * strict store throws), an unreadable ref/overlay root, or an unreadable or
+ * non-canonical pin record therefore aborts the whole pass with nothing
+ * removed. The pin record is read strictly again before each removal, so a
+ * record that becomes unreadable after classification refuses instead of
+ * looking like an already-removed pin. The manifest store must be strict-read;
  * a tolerant store is refused because a corrupt row would look missing. A
  * lease loss or write failure after removals begin can leave those removals in
  * place, so re-running is idempotent rather than transactional.
@@ -178,7 +181,9 @@ async function runPass(
   const planned: RepairedPin[] = [];
   for (const manifestId of await deps.pins.pinnedManifestIds({ strict: true })) {
     if ((await deps.manifests.get(manifestId)) !== null) continue;
-    const pins = await deps.pins.list(manifestId);
+    // Strict: an unreadable or non-canonical pin record must refuse the pass,
+    // not read back as a pin with no reasons and be silently left in place.
+    const pins = await deps.pins.list(manifestId, { strict: true });
     planned.push({
       manifestId,
       reasons: [...new Set(pins.map((pin) => pin.reason))].sort(),
@@ -197,7 +202,10 @@ async function runPass(
       if ((await deps.manifests.get(orphan.manifestId)) !== null) continue;
       const removed: RevisionPinReason[] = [];
       for (const reason of orphan.reasons) {
-        if (await deps.pins.unpin(orphan.manifestId, reason)) removed.push(reason);
+        // Strict again: the record can become unreadable after classification,
+        // and a tolerant read would report "already gone" while the reason is
+        // still on disk.
+        if (await deps.pins.unpin(orphan.manifestId, reason, { strict: true })) removed.push(reason);
       }
       if (removed.length > 0) orphanPins.push({ manifestId: orphan.manifestId, reasons: removed });
     }

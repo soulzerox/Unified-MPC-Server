@@ -260,6 +260,7 @@ describe('GoalWorkspaceService', () => {
         pinned.push(input);
         return { status: 'pinned', baseManifestId: 'manifest-1' };
       },
+      releaseBase: async (): Promise<void> => undefined,
     };
 
     try {
@@ -291,8 +292,8 @@ describe('GoalWorkspaceService', () => {
       { exitCode: 0, stdout: '', stderr: '' },
     ];
     const failures: GoalCanonicalAdmissionPort[] = [
-      { pinBaseAtCommit: async () => ({ status: 'failed', reason: 'disk full' }) },
-      { pinBaseAtCommit: async (): Promise<never> => { throw new Error('store unavailable'); } },
+      { pinBaseAtCommit: async () => ({ status: 'failed', reason: 'disk full' }), releaseBase: async (): Promise<void> => undefined },
+      { pinBaseAtCommit: async (): Promise<never> => { throw new Error('store unavailable'); }, releaseBase: async (): Promise<void> => undefined },
     ];
 
     try {
@@ -357,6 +358,7 @@ describe('GoalWorkspaceService', () => {
         calls += 1;
         return { status: 'pinned', baseManifestId: 'unexpected' };
       },
+      releaseBase: async (): Promise<void> => undefined,
     };
 
     try {
@@ -817,6 +819,62 @@ describe('GoalWorkspaceService', () => {
       await expect(service.recordIntegrationState('goal-1', 'integrated')).resolves.toMatchObject({ ok: true, value: { integrationState: 'integrated' } });
       await expect(service.remove('goal-1')).resolves.toEqual({ ok: true, value: undefined });
       expect(git.removed).toEqual([workspaceRoot]);
+      expect(repository.workspaces.find((workspace) => workspace.goalId === 'goal-1')?.archivedAt).toBeDefined();
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('releases the canonical overlay after archiving an integrated Goal Workspace', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-release-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({ id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString() });
+      const workspaceRoot = path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1');
+      await mkdir(workspaceRoot, { recursive: true });
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: workspaceRoot, realRootPath: workspaceRoot, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'abc123', branchName: 'goal/goal-1', integrationState: 'integrated',
+      });
+      const events: string[] = [];
+      const archive = repository.archive.bind(repository);
+      repository.archive = async (id: string, archivedAt?: string): Promise<void> => {
+        events.push('archive');
+        await archive(id, archivedAt);
+      };
+      const admission: GoalCanonicalAdmissionPort = {
+        pinBaseAtCommit: async () => ({ status: 'skipped', reason: 'unused' }),
+        releaseBase: async (goalWorkspaceId): Promise<void> => { events.push(`release:${goalWorkspaceId}`); },
+      };
+
+      await expect(new GoalWorkspaceService(repository, new FakeGitPort(), { canonicalAdmission: admission }).remove('goal-1'))
+        .resolves.toEqual({ ok: true, value: undefined });
+      expect(events).toEqual(['archive', 'release:goal-workspace-1']);
+    } finally {
+      await rm(parentRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a removal successful when releasing the canonical overlay fails', async () => {
+    const parentRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-release-fail-'));
+    try {
+      const repository = new MemoryWorkspaceRepository();
+      repository.workspaces.push({ id: 'project-1', displayName: 'Project', rootPath: parentRoot, realRootPath: parentRoot, createdAt: new Date(0).toISOString() });
+      const workspaceRoot = path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1');
+      await mkdir(workspaceRoot, { recursive: true });
+      repository.workspaces.push({
+        id: 'goal-workspace-1', displayName: 'Goal', rootPath: workspaceRoot, realRootPath: workspaceRoot, createdAt: new Date(0).toISOString(),
+        lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+        baseRevision: 'abc123', branchName: 'goal/goal-1', integrationState: 'integrated',
+      });
+      const admission: GoalCanonicalAdmissionPort = {
+        pinBaseAtCommit: async () => ({ status: 'skipped', reason: 'unused' }),
+        releaseBase: async (): Promise<void> => { throw new Error('overlay store unavailable'); },
+      };
+
+      await expect(new GoalWorkspaceService(repository, new FakeGitPort(), { canonicalAdmission: admission }).remove('goal-1'))
+        .resolves.toEqual({ ok: true, value: undefined });
       expect(repository.workspaces.find((workspace) => workspace.goalId === 'goal-1')?.archivedAt).toBeDefined();
     } finally {
       await rm(parentRoot, { recursive: true, force: true });

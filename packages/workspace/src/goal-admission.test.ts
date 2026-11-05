@@ -13,6 +13,12 @@ const C100 = {
   manifestId: 'man:v1:' + 'c'.repeat(64),
 };
 
+const C200 = {
+  commitSha: 'd'.repeat(40),
+  treeOid: 'e'.repeat(40),
+  manifestId: 'man:v1:' + 'f'.repeat(64),
+};
+
 describe('goal admission verify (#210 U11)', () => {
   it('admits a goal whose overlay base still matches the live ref', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-admission-'));
@@ -201,6 +207,52 @@ describe('pinGoalBaseAtCommit (#210 §4)', () => {
       });
 
       expect(outcome).toMatchObject({ status: 'failed', reason: expect.stringContaining('disk full') });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a ref advanced between the strict read and the attach as skipped', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const overlays = new GoalOverlayStore(dir);
+      let reads = 0;
+      const racing = {
+        read: async (): Promise<typeof C100> => (reads++ === 0 ? C100 : C200),
+      } as unknown as CanonicalRefStore;
+
+      const outcome = await pinGoalBaseAtCommit(racing, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      });
+
+      expect(outcome).toMatchObject({ status: 'skipped', reason: 'commit_not_live' });
+      if (outcome.status === 'skipped') expect(outcome.detail).toMatch(/is at/);
+      expect(reads).toBe(3);
+      expect(await overlays.listIds()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a ref deleted between the strict read and the attach as skipped', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const overlays = new GoalOverlayStore(dir);
+      let reads = 0;
+      const racing = {
+        read: async (): Promise<typeof C100 | null> => (reads++ === 0 ? C100 : null),
+      } as unknown as CanonicalRefStore;
+
+      const outcome = await pinGoalBaseAtCommit(racing, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      });
+
+      expect(outcome).toMatchObject({ status: 'skipped', reason: 'no_canonical_ref' });
+      expect(await overlays.listIds()).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

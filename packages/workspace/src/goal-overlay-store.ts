@@ -162,8 +162,12 @@ export class GoalOverlayStore {
     try {
       await rm(this.overlayPath(requireGoalId(goalWorkspaceId)), { force: false });
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      // Absent is an answer ("nothing to release"); any other unlink failure is
+      // a real error and must not be reported as a clean release that leaks a
+      // GC root.
+      if (isMissingPath(error)) return false;
+      throw error;
     }
   }
 

@@ -803,6 +803,18 @@ export function createStdioMcpRuntime(
         }
         return outcome;
       },
+      releaseBase: async (goalWorkspaceId): Promise<void> => {
+        try {
+          await goalCanonicalOverlays.delete(goalWorkspaceId);
+        } catch (error) {
+          // The overlay base is a GC root: a real unlink failure would retain
+          // the removed Goal's manifest and artifacts, so surface it here.
+          process.stderr.write(
+            `Unified-MPC Goal canonical overlay release failed goal=${goalWorkspaceId} `
+            + `reason=${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      },
     },
   });
   const goalRunWorkspace: NonNullable<McpApplicationServices['goalRunWorkspace']> = {

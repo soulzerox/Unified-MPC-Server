@@ -447,10 +447,19 @@ missing-overlay-bases 0
   never writes or takes the GC lease. `--apply` takes the single-owner GC lease
   and removes the planned pins under it, renewing the lease as it removes.
 - A pin is only removed when its manifest is genuinely missing. The manifest
-  store is read strictly, so a corrupt manifest row aborts the pass with
-  nothing removed instead of looking like a missing row. Classification of
-  every pin finishes before the first unpin, so a failure never leaves a
-  half-repaired store.
+  store is strict-read (a tolerant store is refused), so a corrupt manifest row
+  aborts the pass with nothing removed instead of looking like a missing row.
+  Classification of every pin finishes before the first unpin, and the row is
+  re-checked immediately before each unpin. A lease loss or write failure after
+  removals begin can leave those removals in place; re-running is idempotent.
+- Removing an orphan pin is deliberately not reachability-neutral: artifact-key
+  GC treats every pin id as retention evidence, and `assembleGcRoots` refuses
+  the whole pass while a pinned manifest is missing. The repair releases
+  artifacts bound only to the missing manifest to the normal GC grace window
+  and unblocks GC. No live ref, overlay or index job can reach those bindings.
+- The lease acquire is read-then-write, like revision prune, so the
+  single-owner guarantee has the same narrow double-grant window documented
+  there.
 - `dangling-refs` and `missing-overlay-bases` are reported, never deleted. A
   dangling ref must be re-advanced by its owning revision gate, and a Goal
   overlay with a missing base still holds dirty state; deleting either would

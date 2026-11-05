@@ -66,9 +66,16 @@ export type CanonicalStoreRepairReport =
  * Repair the safe half of canonical store consistency (#210 §7 `index_repair`).
  *
  * The store verify path reports three degraded states. Only one is safe to
- * remove automatically: a pin whose manifest row is genuinely missing. That
- * pin protects nothing — revision prune cannot retain an absent manifest and
- * artifact GC cannot walk it — so every reason on it is removed.
+ * remove automatically: a pin whose manifest row is genuinely missing. Every
+ * reason on that pin is removed.
+ *
+ * Removing the pin is deliberately not reachability-neutral. Artifact-key GC
+ * treats every pin id as retention evidence (`collectRetainedManifestIds`), and
+ * `assembleGcRoots` refuses the whole pass while a pinned manifest is missing.
+ * The repair therefore releases artifacts bound only to the missing manifest to
+ * the normal GC grace window and unblocks GC. No live ref, overlay or index job
+ * can reach those bindings, and revision prune could not retain an absent
+ * manifest either. A regression test pins that before/after behaviour.
  *
  * A dangling canonical ref and a Goal overlay whose base manifest is missing
  * are reported, never deleted: dropping the ref discards the evidence of what
@@ -77,15 +84,30 @@ export type CanonicalStoreRepairReport =
  *
  * Classification finishes before the first unpin. A corrupt manifest row (the
  * strict store throws) or an unreadable ref/overlay/pin root therefore aborts
- * the whole pass with nothing removed, instead of half-repairing the store.
- * The apply runs under the U28 GC lease and renews it per removal; a pin
- * command that takes the same lease cannot land while the pass holds it.
+ * the whole pass with nothing removed. The manifest store must be strict-read;
+ * a tolerant store is refused because a corrupt row would look missing. A
+ * lease loss or write failure after removals begin can leave those removals in
+ * place, so re-running is idempotent rather than transactional.
+ *
+ * The apply runs under the U28 GC lease and renews it per removal. A pin command
+ * takes the same lease, so it normally cannot land while the pass holds it; the
+ * acquire path is read-then-write, so the same narrow double-grant window as
+ * revision prune applies.
  */
 export function repairCanonicalStore(
   deps: CanonicalStoreRepairDeps & { readonly dryRun: true },
 ): Promise<CanonicalStoreRepairReport>;
 export function repairCanonicalStore(deps: CanonicalStoreRepairDeps): Promise<CanonicalStoreRepairReport>;
 export async function repairCanonicalStore(deps: CanonicalStoreRepairDeps): Promise<CanonicalStoreRepairReport> {
+  if (!deps.manifests.strict) {
+    // A tolerant store reads a corrupt manifest row as absent; removing its
+    // pins would then destroy evidence the store cannot prove is orphaned.
+    return {
+      status: 'refused',
+      reason: 'canonical store repair requires a strict-read manifest store',
+    };
+  }
+
   const lease = deps.dryRun ? undefined : deps.lease;
   if (lease === undefined && !deps.dryRun) {
     // A caller that forgot the fence must not get a silent unfenced mutation.
@@ -169,6 +191,10 @@ async function runPass(
       // Renew the fence when half the window has passed; a newer generation
       // means this pass no longer owns the store and must stop removing.
       await heartbeat?.assert();
+      // A manifest can be re-created after classification without this lease
+      // (`advanceRevisionFromGit` only takes the advancement fence), so never
+      // unpin a row that exists now.
+      if ((await deps.manifests.get(orphan.manifestId)) !== null) continue;
       const removed: RevisionPinReason[] = [];
       for (const reason of orphan.reasons) {
         if (await deps.pins.unpin(orphan.manifestId, reason)) removed.push(reason);

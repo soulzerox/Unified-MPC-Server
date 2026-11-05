@@ -1693,6 +1693,20 @@ describe('CLI execution dispatcher', () => {
       // A dry run never takes the destructive fence.
       expect(await new GcLeaseStore(canonical).inspect()).toEqual({ status: 'free' });
 
+      const jsonOutput: string[] = [];
+      const jsonErrors: string[] = [];
+      const jsonCode = await runCli(['index', 'repair', '--dry-run', '--json'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => jsonOutput.push(text),
+        writeError: (text) => jsonErrors.push(text),
+      });
+      expect(jsonErrors, jsonErrors.join('\n')).toEqual([]);
+      expect(jsonCode, jsonOutput.join('\n')).toBe(0);
+      expect(JSON.parse(jsonOutput.join('\n'))).toMatchObject({
+        status: 'planned',
+        orphanPins: [{ manifestId: orphan, reasons: ['rollback', 'user-pin'] }],
+      });
+
       const output: string[] = [];
       const applyErrors: string[] = [];
       const code = await runCli(['index', 'repair', '--apply'], {

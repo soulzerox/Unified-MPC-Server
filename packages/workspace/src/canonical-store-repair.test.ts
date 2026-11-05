@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { canonicalManifestId, canonicalRevisionId } from '@unified-mpc/domain';
+import { canonicalManifestId, canonicalRevisionId, fileArtifactId } from '@unified-mpc/domain';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import { CanonicalManifestStore, type StoredManifest } from './canonical-manifest-store.js';
 import { GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
@@ -10,6 +10,9 @@ import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { repairCanonicalStore, type CanonicalStoreRepairLease } from './canonical-store-repair.js';
 import { verifyCanonicalStore } from './canonical-store-verify.js';
+import { CanonicalArtifactStore } from './canonical-artifact-store.js';
+import { collectRetainedManifestIds, planRepositoryArtifactGc } from './artifact-key-gc.js';
+import { assembleGcRoots } from './artifact-gc-roots.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -291,6 +294,149 @@ describe('canonical store repair (#210 §7)', () => {
         refs: s.refs, manifests: s.manifests, pins: s.pins, overlays: s.overlays,
       });
       expect(verify.status).toBe('healthy');
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('releases artifact retention and unblocks GC roots when the orphan pin is removed', async () => {
+    const s = await scenario();
+    try {
+      await s.pins.pin(MISSING, 'rollback', 'orphan');
+      const artifacts = new CanonicalArtifactStore(s.dir);
+      const orphanKey = fileArtifactId({
+        sourceContentSha256: H('7'),
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+      });
+      const liveKey = fileArtifactId({
+        sourceContentSha256: H('8'),
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+      });
+      await artifacts.put({
+        kind: 'file',
+        artifactKey: orphanKey,
+        repositoryId: REPO,
+        sourceContentSha256: H('7'),
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+        bindings: [{ path: 'src/orphan.ts', manifestId: MISSING }],
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+      // A second artifact stays reachable through the live ref, so the plan has
+      // reachability evidence and does not refuse for the wrong reason.
+      await artifacts.put({
+        kind: 'file',
+        artifactKey: liveKey,
+        repositoryId: REPO,
+        sourceContentSha256: H('8'),
+        language: 'typescript',
+        sourceKind: 'source',
+        representationVersion: 'v1',
+        bindings: [{ path: 'src/live.ts', manifestId: s.live.manifestId }],
+        createdAt: '2026-10-17T00:00:00.000Z',
+      });
+
+      // While the pin exists it is retention evidence, but the missing
+      // manifest also refuses the whole GC root assembly.
+      const before = await collectRetainedManifestIds({
+        refs: s.refs, pins: s.pins, overlays: s.overlays, indexJobManifestIds: [],
+      });
+      expect(before).toContain(MISSING);
+      const beforePlan = await planRepositoryArtifactGc({
+        store: artifacts, repositoryId: REPO, retainedManifestIds: before,
+      });
+      expect(beforePlan).toMatchObject({ status: 'planned', unreachable: [] });
+      if (beforePlan.status !== 'planned') throw new Error('expected a plan');
+      expect(beforePlan.reachable.sort()).toEqual([orphanKey, liveKey].sort());
+      await expect(assembleGcRoots({
+        manifests: s.manifests, refs: s.refs, pins: s.pins, overlays: s.overlays, indexJobManifestIds: [],
+      })).rejects.toThrow('missing manifests on disk');
+
+      const report = await repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.strictManifests,
+        pins: s.pins,
+        overlays: s.overlays,
+        dryRun: false,
+        lease: leaseFor(s.lease),
+      });
+      expect(report).toMatchObject({ status: 'applied', orphanPins: [{ manifestId: MISSING }] });
+
+      // The pin is gone, so the artifact bound only to the missing manifest is
+      // now a GC candidate and root assembly can proceed. This is the intended
+      // reachability change, not a no-op.
+      const after = await collectRetainedManifestIds({
+        refs: s.refs, pins: s.pins, overlays: s.overlays, indexJobManifestIds: [],
+      });
+      expect(after).not.toContain(MISSING);
+      const afterPlan = await planRepositoryArtifactGc({
+        store: artifacts, repositoryId: REPO, retainedManifestIds: after,
+      });
+      expect(afterPlan).toMatchObject({ status: 'planned', reachable: [liveKey], unreachable: [orphanKey] });
+      await expect(assembleGcRoots({
+        manifests: s.manifests, refs: s.refs, pins: s.pins, overlays: s.overlays, indexJobManifestIds: [],
+      })).resolves.toBeDefined();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a tolerant manifest store instead of treating a corrupt row as missing', async () => {
+    const s = await scenario();
+    try {
+      await s.pins.pin(MISSING, 'user-pin', 'orphan');
+      const report = await repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.manifests,
+        pins: s.pins,
+        overlays: s.overlays,
+        dryRun: true,
+      });
+      expect(report).toMatchObject({ status: 'refused' });
+      if (report.status !== 'refused') throw new Error('expected a refusal');
+      expect(report.reason).toContain('strict-read');
+      expect(await s.pins.isPinned(MISSING)).toBe(true);
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a pin in place when its manifest is re-created after classification', async () => {
+    const s = await scenario();
+    try {
+      const orphan = manifestFor('f'.repeat(40), [{ path: 'orphan.ts', contentHash: H('7') }]);
+      await s.manifests.put(orphan);
+      await s.pins.pin(orphan.manifestId, 'user-pin', 'orphan');
+      await rm(path.join(s.dir, 'manifests', `${orphan.manifestId}.json`));
+      const recreatedPins = {
+        pinnedManifestIds: (options?: Parameters<RevisionPinRegistry['pinnedManifestIds']>[0]) =>
+          s.pins.pinnedManifestIds(options),
+        list: async (manifestId: string) => {
+          // Simulate advanceRevisionFromGit re-creating the row between the
+          // classification read and the removal loop.
+          await s.manifests.put(orphan);
+          return s.pins.list(manifestId);
+        },
+        unpin: (manifestId: string, reason: Parameters<RevisionPinRegistry['unpin']>[1]) =>
+          s.pins.unpin(manifestId, reason),
+      } as unknown as RevisionPinRegistry;
+
+      const report = await repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.strictManifests,
+        pins: recreatedPins,
+        overlays: s.overlays,
+        dryRun: false,
+        lease: leaseFor(s.lease),
+      });
+      expect(report).toMatchObject({ status: 'applied', orphanPins: [] });
+      expect(await s.pins.isPinned(orphan.manifestId)).toBe(true);
+      expect(await s.manifests.get(orphan.manifestId)).not.toBeNull();
     } finally {
       await rm(s.dir, { recursive: true, force: true });
     }

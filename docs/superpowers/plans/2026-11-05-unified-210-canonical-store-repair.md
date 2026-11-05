@@ -53,11 +53,19 @@ repairCanonicalStore({
   `pins.pinnedManifestIds({ strict: true })`), matching revision prune: an
   unreadable root must refuse rather than look absent.
 - Only pins whose manifest is genuinely missing (`manifests.get()` returned
-  `null`) are removed, and **every** reason on that manifest is removed — the
-  manifest is gone, so no reason protects reachability any more.
+  `null`) are removed, the row is re-checked immediately before each unpin, and
+  **every** reason on that manifest is removed.
+- Removing the pin is deliberately not reachability-neutral: artifact-key GC
+  treats every pin id as retention evidence and `assembleGcRoots` refuses while
+  a pinned manifest is missing, so the repair releases artifacts bound only to
+  the missing manifest to the normal grace window and unblocks GC. A regression
+  test pins the before/after retention and roots behaviour.
+- The workspace function refuses a tolerant manifest store, so strictness is not
+  just a CLI wiring convention.
 - `--apply` requires the shared GC lease and renews it per removal, exactly like
-  revision prune. A pin cannot land while the repair holds the fence because
-  `pinCanonicalRevision` takes the same lease.
+  revision prune. A pin command takes the same lease, so it normally cannot land
+  while the repair holds the fence; the acquire path is read-then-write, so the
+  same narrow double-grant window as revision prune applies.
 - `--dry-run` never takes the lease and never writes.
 
 ### 2. `index repair --dry-run|--apply [--json]`
@@ -84,8 +92,9 @@ example cannot silently dispatch elsewhere.
 - No automatic deletion of dangling refs or Goal overlays; both need their
   owning store to re-advance/re-admit, and deleting them would destroy evidence
   or dirty state.
-- No artifact reachability change: removing a pin for a missing manifest cannot
-  free a live artifact, because there is no manifest row to walk.
+- No artifact deletion in this pass. Reachability does change: artifacts bound
+  only to the missing manifest become GC candidates under the normal grace
+  window, which is the intended unblock described above.
 - No `index verify` verb in this slice; `index status` already reports the same
   verify report.
 - No change to the pin registry format or to `index revision unpin`.
@@ -95,9 +104,13 @@ example cannot silently dispatch elsewhere.
 1. Workspace unit tests: dry run removes nothing and reports the orphan; apply
    removes every reason and leaves healthy state; a corrupt manifest is not
    removed and the pass throws before any mutation; an apply without a lease is
-   refused; an unreadable pin record is refused by the strict root read.
+   refused; an unreadable pin record is refused by the strict root read; a
+   tolerant manifest store is refused; a manifest re-created after
+   classification stays pinned; removing the orphan pin releases artifact
+   retention and lets root assembly proceed.
 2. CLI boundary tests with real stores: dry run leaves the pin file; apply
-   removes it and exits `0`; a corrupt manifest exits `1` with the pin intact;
-   a dangling ref keeps exit `1` after the repairable pin is removed.
+   removes it and exits `0`; `--json` prints the unprojected report; a corrupt
+   manifest exits `1` with the pin intact; a dangling ref keeps exit `1` after
+   the repairable pin is removed.
 3. Targeted `vitest`/`tsc`/`eslint`, then the full `verify:local` profile on the
    exact head before the review capsule.

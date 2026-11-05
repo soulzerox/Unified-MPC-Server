@@ -85,9 +85,10 @@ export type CanonicalStoreRepairReport =
  * Classification finishes before the first unpin. A corrupt manifest row (the
  * strict store throws), an unreadable ref/overlay root, or an unreadable or
  * non-canonical pin record therefore aborts the whole pass with nothing
- * removed. The pin record is read strictly again before each removal, so a
- * record that becomes unreadable after classification refuses instead of
- * looking like an already-removed pin. The manifest store must be strict-read;
+ * removed. The manifest row and the pin record are read strictly again before
+ * each removal: a row re-created after classification stops the remaining
+ * removals, and a record that becomes unreadable refuses instead of looking
+ * like an already-removed pin. The manifest store must be strict-read;
  * a tolerant store is refused because a corrupt row would look missing. A
  * lease loss or write failure after removals begin can leave those removals in
  * place, so re-running is idempotent rather than transactional.
@@ -193,15 +194,16 @@ async function runPass(
   const orphanPins: RepairedPin[] = [];
   if (!deps.dryRun) {
     for (const orphan of planned) {
-      // Renew the fence when half the window has passed; a newer generation
-      // means this pass no longer owns the store and must stop removing.
-      await heartbeat?.assert();
-      // A manifest can be re-created after classification without this lease
-      // (`advanceRevisionFromGit` only takes the advancement fence), so never
-      // unpin a row that exists now.
-      if ((await deps.manifests.get(orphan.manifestId)) !== null) continue;
       const removed: RevisionPinReason[] = [];
       for (const reason of orphan.reasons) {
+        // A manifest can be re-created after classification without this lease
+        // (`advanceRevisionFromGit` only takes the advancement fence), so prove
+        // it is still missing immediately before *every* removal. A pin may
+        // carry several reasons, and the row can reappear between two of them.
+        if ((await deps.manifests.get(orphan.manifestId)) !== null) break;
+        // Renew the fence when half the window has passed; a newer generation
+        // means this pass no longer owns the store and must stop removing.
+        await heartbeat?.assert();
         // Strict again: the record can become unreadable after classification,
         // and a tolerant read would report "already gone" while the reason is
         // still on disk.

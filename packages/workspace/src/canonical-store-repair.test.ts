@@ -493,6 +493,99 @@ describe('canonical store repair (#210 §7)', () => {
     }
   });
 
+  it('re-checks the manifest before every reason removal', async () => {
+    const s = await scenario();
+    try {
+      const orphan = manifestFor('f'.repeat(40), [{ path: 'orphan.ts', contentHash: H('7') }]);
+      await s.manifests.put(orphan);
+      await s.pins.pin(orphan.manifestId, 'rollback', 'orphan');
+      await s.pins.pin(orphan.manifestId, 'user-pin', 'orphan');
+      await rm(path.join(s.dir, 'manifests', `${orphan.manifestId}.json`));
+      let recreated = false;
+      const recreatedPins = {
+        pinnedManifestIds: (options?: Parameters<RevisionPinRegistry['pinnedManifestIds']>[0]) =>
+          s.pins.pinnedManifestIds(options),
+        list: (manifestId: string, options?: Parameters<RevisionPinRegistry['list']>[1]) =>
+          s.pins.list(manifestId, options),
+        unpin: async (
+          manifestId: string,
+          reason: Parameters<RevisionPinRegistry['unpin']>[1],
+          options?: Parameters<RevisionPinRegistry['unpin']>[2],
+        ): Promise<boolean> => {
+          const removed = await s.pins.unpin(manifestId, reason, options);
+          if (removed && !recreated) {
+            // Simulate advanceRevisionFromGit re-creating the row after the
+            // first of this pin's reasons has already been removed.
+            recreated = true;
+            await s.manifests.put(orphan);
+          }
+          return removed;
+        },
+      } as unknown as RevisionPinRegistry;
+
+      const report = await repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.strictManifests,
+        pins: recreatedPins,
+        overlays: s.overlays,
+        dryRun: false,
+        lease: leaseFor(s.lease),
+      });
+      // The first removal happened while the manifest was missing; the
+      // remaining reason survives because the row exists before its removal.
+      expect(report).toMatchObject({
+        status: 'applied',
+        orphanPins: [{ manifestId: orphan.manifestId, reasons: ['rollback'] }],
+      });
+      expect((await s.pins.list(orphan.manifestId)).map((pin) => pin.reason)).toEqual(['user-pin']);
+      expect(await s.manifests.get(orphan.manifestId)).not.toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a pin record that turns unreadable before the removal', async () => {
+    const s = await scenario();
+    try {
+      const orphan = manifestFor('f'.repeat(40), [{ path: 'orphan.ts', contentHash: H('7') }]);
+      await s.manifests.put(orphan);
+      await s.pins.pin(orphan.manifestId, 'user-pin', 'orphan');
+      await rm(path.join(s.dir, 'manifests', `${orphan.manifestId}.json`));
+      let corrupted = false;
+      const corruptingPins = {
+        pinnedManifestIds: (options?: Parameters<RevisionPinRegistry['pinnedManifestIds']>[0]) =>
+          s.pins.pinnedManifestIds(options),
+        list: (manifestId: string, options?: Parameters<RevisionPinRegistry['list']>[1]) =>
+          s.pins.list(manifestId, options),
+        unpin: async (
+          manifestId: string,
+          reason: Parameters<RevisionPinRegistry['unpin']>[1],
+          options?: Parameters<RevisionPinRegistry['unpin']>[2],
+        ): Promise<boolean> => {
+          if (!corrupted) {
+            corrupted = true;
+            await writeFile(path.join(s.dir, 'pins', `${manifestId}.json`), '{not a pin', 'utf8');
+          }
+          // Pass the call site's options through: a dropped `{ strict: true }`
+          // makes the tolerant read answer false and hides the corruption.
+          return s.pins.unpin(manifestId, reason, options);
+        },
+      } as unknown as RevisionPinRegistry;
+
+      await expect(repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.strictManifests,
+        pins: corruptingPins,
+        overlays: s.overlays,
+        dryRun: false,
+        lease: leaseFor(s.lease),
+      })).rejects.toThrow('cannot read revision pin');
+      expect(await s.lease.read()).toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
   it('stops removing when a newer generation takes the fence mid-pass', async () => {
     const s = await scenario();
     try {

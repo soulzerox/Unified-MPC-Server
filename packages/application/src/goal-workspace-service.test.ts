@@ -254,7 +254,7 @@ describe('GoalWorkspaceService', () => {
       { exitCode: 0, stdout: `${git.refreshedBaseSha}\n`, stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
     ];
-    const pinned: Array<{ goalWorkspaceId: string; commitSha: string }> = [];
+    const pinned: Array<{ goalWorkspaceId: string; commitSha: string; worktreePath: string }> = [];
     const admission: GoalCanonicalAdmissionPort = {
       pinBaseAtCommit: async (input) => {
         pinned.push(input);
@@ -271,7 +271,11 @@ describe('GoalWorkspaceService', () => {
 
       expect(result.ok).toBe(true);
       if (!result.ok) throw new Error(result.error.message);
-      expect(pinned).toEqual([{ goalWorkspaceId: result.value.workspace.id, commitSha: git.refreshedBaseSha }]);
+      expect(pinned).toEqual([{
+        goalWorkspaceId: result.value.workspace.id,
+        commitSha: git.refreshedBaseSha,
+        worktreePath: path.join(parentRoot, '.unified-mpc', 'worktrees', 'goal-1'),
+      }]);
       expect(result.value.canonicalAdmission).toEqual({ status: 'pinned', baseManifestId: 'manifest-1' });
     } finally {
       await rm(parentRoot, { recursive: true, force: true });

@@ -2,7 +2,13 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash, type Hash } from 'node:crypto';
 import { promisify } from 'node:util';
 
-import type { CanonicalGitRevision, CanonicalGitSource, CanonicalGitTreeEntry } from '@unified-mpc/workspace';
+import {
+  legacyRepositoryIdForRemoteUrl,
+  repositoryIdForRemoteUrl,
+  type CanonicalGitRevision,
+  type CanonicalGitSource,
+  type CanonicalGitTreeEntry,
+} from '@unified-mpc/workspace';
 
 const execFileAsync = promisify(execFile);
 
@@ -73,6 +79,24 @@ export function createCanonicalGitSource(cwd: string): CanonicalGitSource {
       return url === undefined || url.length === 0 ? null : url;
     },
   };
+}
+
+/**
+ * Repository identities a Goal worktree may legitimately pin (#210 §1).
+ *
+ * Canonical refs are store-wide and two repositories can share a commit sha, so
+ * the admission guard needs the identity the worktree itself belongs to. Both
+ * the current normalized id and the id the released operator command wrote for
+ * the same remote are accepted once. A checkout without `origin` has no
+ * provable identity, and `null` lets admission skip instead of guessing.
+ */
+export async function resolveGoalRepositoryIds(
+  worktreePath: string,
+  sourceFor: (cwd: string) => CanonicalGitSource = createCanonicalGitSource,
+): Promise<readonly string[] | null> {
+  const remote = await sourceFor(worktreePath).remoteUrl();
+  if (remote === null) return null;
+  return [repositoryIdForRemoteUrl(remote), legacyRepositoryIdForRemoteUrl(remote)];
 }
 
 async function hashBlobs(cwd: string, blobOids: readonly string[]): Promise<ReadonlyMap<string, string>> {

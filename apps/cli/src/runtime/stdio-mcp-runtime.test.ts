@@ -16,7 +16,7 @@ import { permissionProfiles } from '@unified-mpc/permissions';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DEFAULT_EXTENSIONS_SETTINGS, EXTENSIONS_SETTINGS_KEY, EXTENSIONS_SETTINGS_SCHEMA_VERSION, IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@unified-mpc/shared';
-import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
+import { appError, canonicalManifestId, err, ok, type ResultBudget } from '@unified-mpc/domain';
 import {
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
   type ThaiRagProviderDriver,
@@ -24,8 +24,10 @@ import {
 import { createStdioMcpRuntime, thaiRagProviderLaunchEnv } from './stdio-mcp-runtime.js';
 import { sharedActivityLeaseDirectoryPath } from '@unified-mpc/mcp-server';
 import {
+  CanonicalManifestStore,
   CanonicalRefStore,
   GoalOverlayStore,
+  repositoryIdForRemoteUrl,
   DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
   sharedProcessResourceAdmissionController,
   tryAdmitVerificationHeavy,
@@ -114,7 +116,16 @@ describe('stdio MCP runtime', () => {
   });
 
 
-  it('pins a Goal admitted from the live canonical commit to its base manifest', async () => {
+  async function canonicalGoalFixture(projectId: string, repositoryIdOverride?: string): Promise<{
+    readonly dataPath: string;
+    readonly rootPath: string;
+    readonly canonicalRoot: string;
+    readonly mainSha: string;
+    readonly manifestId: string;
+    readonly projectId: string;
+    readonly db: SqliteDatabase;
+    readonly runtime: ReturnType<typeof createStdioMcpRuntime>;
+  }> {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-pin-data-'));
     const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-pin-source-'));
     const originPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-pin-origin-'));
@@ -131,29 +142,102 @@ describe('stdio MCP runtime', () => {
     gitAt(rootPath, 'remote', 'add', 'origin', originPath);
     gitAt(rootPath, 'push', '-q', '-u', 'origin', 'main');
     const mainSha = gitAt(rootPath, 'rev-parse', 'HEAD');
-    const project = { id: 'canonical-pin-project', displayName: 'Canonical pin', rootPath, realRootPath: rootPath, createdAt: '2026-11-05T00:00:00.000Z' };
+    const repositoryId = repositoryIdOverride ?? repositoryIdForRemoteUrl(originPath);
+    const entries = [{ path: 'README.md', contentHash: createHash('sha256').update('base\n').digest('hex') }];
+    const manifestId = canonicalManifestId({ repositoryId, revisionId: mainSha, entries });
+    const project = { id: projectId, displayName: 'Canonical pin', rootPath, realRootPath: rootPath, createdAt: '2026-11-05T00:00:00.000Z' };
+    const db = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
+    await new SqliteWorkspaceRepository(db).insert(project);
+    const canonicalRoot = path.join(dataPath, 'canonical');
+    await new CanonicalManifestStore(canonicalRoot).put({
+      manifestId,
+      repositoryId,
+      revisionId: mainSha,
+      commitSha: mainSha,
+      treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'),
+      targetRef: 'refs/remotes/origin/main',
+      entries,
+      createdAt: '2026-11-05T00:00:00.000Z',
+    });
+    await new CanonicalRefStore(canonicalRoot).promote('refs/remotes/origin/main', {
+      expectedCurrent: null,
+      current: null,
+      target: { commitSha: mainSha, treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'), manifestId },
+      targetVerified: true,
+    });
+    return { dataPath, rootPath, canonicalRoot, mainSha, manifestId, projectId, db, runtime: createStdioMcpRuntime(dataPath, project) };
+  }
+
+  it('pins a Goal admitted from the live canonical commit to its base manifest', async () => {
+    const fixture = await canonicalGoalFixture('canonical-pin-project');
+    try {
+      const result = await fixture.runtime.services.goalRunWorkspace?.resolveRunWorkspace(fixture.runtime.actor, {
+        workspaceId: fixture.projectId, goalKey: 'canonical-pin',
+      });
+      expect(result?.ok).toBe(true);
+      if (result === undefined || !result.ok) return;
+      const overlay = await new GoalOverlayStore(fixture.canonicalRoot).read(result.value.workspaceId);
+      expect(overlay).toMatchObject({
+        goalWorkspaceId: result.value.workspaceId,
+        baseCommitSha: fixture.mainSha,
+        baseManifestId: fixture.manifestId,
+      });
+    } finally {
+      await fixture.runtime.close();
+      fixture.db.close();
+    }
+  });
+
+  it('refuses to pin a live manifest that belongs to another repository', async () => {
+    const fixture = await canonicalGoalFixture(
+      'canonical-pin-foreign-project',
+      repositoryIdForRemoteUrl('git@github.com:someone/else.git'),
+    );
+    try {
+      const result = await fixture.runtime.services.goalRunWorkspace?.resolveRunWorkspace(fixture.runtime.actor, {
+        workspaceId: fixture.projectId, goalKey: 'canonical-pin-foreign',
+      });
+      expect(result?.ok).toBe(true);
+      if (result === undefined || !result.ok) return;
+      expect(await new GoalOverlayStore(fixture.canonicalRoot).read(result.value.workspaceId)).toBeNull();
+    } finally {
+      await fixture.runtime.close();
+      fixture.db.close();
+    }
+  });
+
+  it('admits a Goal whose repository has no origin without pinning the shared ref', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-no-origin-data-'));
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-no-origin-source-'));
+    temporaryRoots.push(dataPath, rootPath);
+    const gitAt = (cwd: string, ...args: string[]): string =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    gitAt(rootPath, 'init', '-q', '-b', 'main');
+    gitAt(rootPath, 'config', 'user.name', 'Unified Test');
+    gitAt(rootPath, 'config', 'user.email', 'test@example.invalid');
+    await writeFile(path.join(rootPath, 'README.md'), 'base\n');
+    gitAt(rootPath, 'add', 'README.md');
+    gitAt(rootPath, 'commit', '-qm', 'base');
+    gitAt(rootPath, 'checkout', '-qb', 'feature/no-origin');
+    const featureSha = gitAt(rootPath, 'rev-parse', 'HEAD');
+    const project = { id: 'no-origin-project', displayName: 'No origin', rootPath, realRootPath: rootPath, createdAt: '2026-11-05T00:00:00.000Z' };
     const db = new SqliteDatabase(path.join(dataPath, 'unified-mpc.sqlite'));
     await new SqliteWorkspaceRepository(db).insert(project);
     const canonicalRoot = path.join(dataPath, 'canonical');
     await new CanonicalRefStore(canonicalRoot).promote('refs/remotes/origin/main', {
       expectedCurrent: null,
       current: null,
-      target: { commitSha: mainSha, treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'), manifestId: 'manifest-live' },
+      target: { commitSha: featureSha, treeOid: gitAt(rootPath, 'rev-parse', 'HEAD^{tree}'), manifestId: 'man:v1:' + '9'.repeat(64) },
       targetVerified: true,
     });
     const runtime = createStdioMcpRuntime(dataPath, project);
     try {
       const result = await runtime.services.goalRunWorkspace?.resolveRunWorkspace(runtime.actor, {
-        workspaceId: project.id, goalKey: 'canonical-pin',
+        workspaceId: project.id, goalKey: 'no-origin',
       });
       expect(result?.ok).toBe(true);
       if (result === undefined || !result.ok) return;
-      const overlay = await new GoalOverlayStore(canonicalRoot).read(result.value.workspaceId);
-      expect(overlay).toMatchObject({
-        goalWorkspaceId: result.value.workspaceId,
-        baseCommitSha: mainSha,
-        baseManifestId: 'manifest-live',
-      });
+      expect(await new GoalOverlayStore(canonicalRoot).read(result.value.workspaceId)).toBeNull();
     } finally {
       await runtime.close();
       db.close();

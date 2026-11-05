@@ -5,8 +5,8 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { advanceRevisionFromGit } from '@unified-mpc/workspace';
-import { createCanonicalGitSource } from './canonical-git-source.js';
+import { advanceRevisionFromGit, legacyRepositoryIdForRemoteUrl, repositoryIdForRemoteUrl } from '@unified-mpc/workspace';
+import { createCanonicalGitSource, resolveGoalRepositoryIds } from './canonical-git-source.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -147,6 +147,35 @@ describe('canonical Git source adapter (#210 §2)', () => {
     } finally {
       await rm(repo, { recursive: true, force: true });
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Goal repository identity resolution (#210 §1)', () => {
+  it('accepts the current and released-legacy ids for one GitHub remote', async () => {
+    const dir = await tempRepo();
+    try {
+      const remote = 'git@github.com:Example/Repo.git';
+      await git(dir, ['remote', 'add', 'origin', remote]);
+
+      const ids = await resolveGoalRepositoryIds(dir);
+
+      expect(ids).toEqual([
+        repositoryIdForRemoteUrl(remote),
+        legacyRepositoryIdForRemoteUrl(remote),
+      ]);
+      expect(ids?.[0]).not.toBe(ids?.[1]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when the checkout has no origin remote', async () => {
+    const dir = await tempRepo();
+    try {
+      expect(await resolveGoalRepositoryIds(dir)).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

@@ -91,7 +91,7 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { CanonicalRefStore, GoalOverlayStore, SecretPolicy, WorkspacePathGuard, WorkspaceService, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
+import { CanonicalManifestStore, CanonicalRefStore, GoalOverlayStore, SecretPolicy, WorkspacePathGuard, WorkspaceService, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
@@ -100,6 +100,7 @@ import {
   codeIndexVectorsFromEnv,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
+import { resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
 import {
@@ -786,13 +787,27 @@ export function createStdioMcpRuntime(
   const goalCanonicalRoot = path.join(dataPath, 'canonical');
   const goalCanonicalRefs = new CanonicalRefStore(goalCanonicalRoot);
   const goalCanonicalOverlays = new GoalOverlayStore(goalCanonicalRoot);
+  const goalCanonicalManifests = new CanonicalManifestStore(goalCanonicalRoot, { strictReads: true });
   const goalWorkspaceService = new GoalWorkspaceService(workspaceRepository, new GitAdapter(), {
     canonicalAdmission: {
       pinBaseAtCommit: async (input): Promise<GoalCanonicalAdmissionOutcome> => {
+        // Refs are store-wide; only the Goal worktree itself proves which
+        // repository the live manifest it names must belong to (#210 §1).
+        const repositoryIds = await resolveGoalRepositoryIds(input.worktreePath);
+        if (repositoryIds === null) {
+          return {
+            status: 'skipped',
+            reason: 'repository_unknown',
+            detail: `no origin remote in ${input.worktreePath}`,
+          };
+        }
         const outcome = await pinGoalBaseAtCommit(goalCanonicalRefs, goalCanonicalOverlays, {
           goalWorkspaceId: input.goalWorkspaceId,
           canonicalRef: canonicalRefForBranch('main'),
           commitSha: input.commitSha,
+        }, {
+          manifests: goalCanonicalManifests,
+          expectedRepositoryIds: repositoryIds,
         });
         // A skip is expected without canonical data; a failure is not, and no
         // client may be watching the create result that carries it.

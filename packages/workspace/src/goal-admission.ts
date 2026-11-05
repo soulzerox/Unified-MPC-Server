@@ -1,4 +1,5 @@
 import type { CanonicalRefStore } from './canonical-ref-store.js';
+import type { CanonicalManifestStore } from './canonical-manifest-store.js';
 import { GoalOverlayStore, type GoalOverlay } from './goal-overlay-store.js';
 import { attachGoalBasePin } from './goal-base-pin.js';
 import { errorMessage } from './reachability-read.js';
@@ -57,11 +58,24 @@ export interface GoalCanonicalPinInput {
   readonly commitSha: string;
 }
 
+/**
+ * Repository identity proof for one admission pin (#210 §1).
+ *
+ * Canonical refs are store-wide and two repositories can share a commit sha,
+ * so a live ref alone does not prove the manifest it names belongs to the Goal
+ * worktree's repository. `expectedRepositoryIds` lists every id the runtime
+ * accepts for that worktree (current and released-legacy spelling).
+ */
+export interface GoalCanonicalRepositoryGuard {
+  readonly manifests: CanonicalManifestStore;
+  readonly expectedRepositoryIds: readonly string[];
+}
+
 export type GoalBasePinOutcome =
   | { readonly status: 'pinned'; readonly baseManifestId: string }
   | {
       readonly status: 'skipped';
-      readonly reason: 'no_canonical_ref' | 'commit_not_live';
+      readonly reason: 'no_canonical_ref' | 'commit_not_live' | 'repository_mismatch';
       readonly detail: string;
     }
   | { readonly status: 'failed'; readonly reason: string };
@@ -85,6 +99,7 @@ export async function pinGoalBaseAtCommit(
   refs: CanonicalRefStore,
   overlays: GoalOverlayStore,
   input: GoalCanonicalPinInput,
+  repositoryGuard?: GoalCanonicalRepositoryGuard,
 ): Promise<GoalBasePinOutcome> {
   try {
     const live = await refs.read(input.canonicalRef, { strict: true });
@@ -101,6 +116,26 @@ export async function pinGoalBaseAtCommit(
         reason: 'commit_not_live',
         detail: `canonical ref ${input.canonicalRef} is at ${live.commitSha.slice(0, 12)}, not ${input.commitSha.slice(0, 12)}`,
       };
+    }
+    if (repositoryGuard !== undefined) {
+      const manifest = await repositoryGuard.manifests.get(live.manifestId);
+      if (manifest === null) {
+        // An overlay roots GC at this manifest id. Pinning a base whose
+        // manifest row is gone would root GC at nothing, so this is a store
+        // failure, never the ordinary "no canonical data" skip.
+        return {
+          status: 'failed',
+          reason: `live canonical manifest ${live.manifestId} is missing; refusing to pin goal ${input.goalWorkspaceId}`,
+        };
+      }
+      if (!repositoryGuard.expectedRepositoryIds.includes(manifest.repositoryId)) {
+        return {
+          status: 'skipped',
+          reason: 'repository_mismatch',
+          detail: `live canonical manifest ${live.manifestId} belongs to ${manifest.repositoryId}, `
+            + `not the Goal repository ${repositoryGuard.expectedRepositoryIds.join('|') || '(unknown)'}`,
+        };
+      }
     }
     const overlay = await attachGoalBasePin(refs, overlays, {
       goalWorkspaceId: input.goalWorkspaceId,

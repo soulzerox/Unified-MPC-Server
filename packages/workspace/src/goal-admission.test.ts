@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { canonicalManifestId } from '@unified-mpc/domain';
+import { CanonicalManifestStore } from './canonical-manifest-store.js';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import { GoalOverlayStore } from './goal-overlay-store.js';
 import { attachGoalBasePin } from './goal-base-pin.js';
@@ -97,6 +99,29 @@ describe('goal admission verify (#210 U11)', () => {
 
 describe('pinGoalBaseAtCommit (#210 §4)', () => {
   const REF = 'refs/remotes/origin/main';
+  const GOAL_REPOSITORY = 'repo:goal';
+  const OTHER_REPOSITORY = 'repo:other';
+
+  async function storedManifest(
+    dir: string,
+    repositoryId: string,
+    base = C100,
+  ): Promise<{ manifests: CanonicalManifestStore; manifestId: string }> {
+    const entries = [{ path: 'README.md', contentHash: '1'.repeat(64) }];
+    const manifestId = canonicalManifestId({ repositoryId, revisionId: base.commitSha, entries });
+    const manifests = new CanonicalManifestStore(dir);
+    await manifests.put({
+      manifestId,
+      repositoryId,
+      revisionId: base.commitSha,
+      commitSha: base.commitSha,
+      treeOid: base.treeOid,
+      targetRef: REF,
+      entries,
+      createdAt: '2026-11-05T00:00:00.000Z',
+    });
+    return { manifests, manifestId };
+  }
 
   it('pins the overlay when the live canonical ref is the requested commit', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
@@ -282,6 +307,135 @@ describe('pinGoalBaseAtCommit (#210 §4)', () => {
       expect(outcome.status).toBe('failed');
       if (outcome.status === 'failed') expect(outcome.reason).toMatch(/cannot pin goal|no canonical ref/);
       expect(await overlays.listIds()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a live manifest that belongs to another repository (#210 §1)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const { manifests, manifestId } = await storedManifest(dir, OTHER_REPOSITORY);
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { ...C100, manifestId },
+        targetVerified: true,
+      });
+
+      const outcome = await pinGoalBaseAtCommit(refs, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      }, { manifests, expectedRepositoryIds: [GOAL_REPOSITORY] });
+
+      expect(outcome).toMatchObject({ status: 'skipped', reason: 'repository_mismatch' });
+      if (outcome.status === 'skipped') expect(outcome.detail).toContain(OTHER_REPOSITORY);
+      expect(await overlays.listIds()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when the live manifest row is missing instead of pinning nothing', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const missingManifestId = 'man:v1:' + '9'.repeat(64);
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { ...C100, manifestId: missingManifestId },
+        targetVerified: true,
+      });
+
+      const outcome = await pinGoalBaseAtCommit(refs, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      }, {
+        manifests: new CanonicalManifestStore(dir, { strictReads: true }),
+        expectedRepositoryIds: [GOAL_REPOSITORY],
+      });
+
+      expect(outcome.status).toBe('failed');
+      if (outcome.status === 'failed') expect(outcome.reason).toMatch(/manifest .* is missing/);
+      expect(await overlays.listIds()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins when the live manifest has the Goal repository id', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const { manifests, manifestId } = await storedManifest(dir, GOAL_REPOSITORY);
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { ...C100, manifestId },
+        targetVerified: true,
+      });
+
+      const outcome = await pinGoalBaseAtCommit(refs, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      }, { manifests, expectedRepositoryIds: [GOAL_REPOSITORY] });
+
+      expect(outcome).toMatchObject({ status: 'pinned', baseManifestId: manifestId });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins a manifest written under the released legacy repository id', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const legacyRepository = 'repo:legacy';
+      const { manifests, manifestId } = await storedManifest(dir, legacyRepository);
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { ...C100, manifestId },
+        targetVerified: true,
+      });
+
+      const outcome = await pinGoalBaseAtCommit(refs, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      }, { manifests, expectedRepositoryIds: [GOAL_REPOSITORY, legacyRepository] });
+
+      expect(outcome).toMatchObject({ status: 'pinned', baseManifestId: manifestId });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the previous pin behaviour when no repository guard is supplied', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const unverifiableManifestId = 'man:v1:' + '9'.repeat(64);
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { ...C100, manifestId: unverifiableManifestId },
+        targetVerified: true,
+      });
+
+      const outcome = await pinGoalBaseAtCommit(refs, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      });
+
+      expect(outcome).toMatchObject({ status: 'pinned', baseManifestId: unverifiableManifestId });
+      expect(await overlays.read('goal-1')).toMatchObject({ baseManifestId: unverifiableManifestId });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

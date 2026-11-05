@@ -1,5 +1,7 @@
 import type { CanonicalRefStore } from './canonical-ref-store.js';
 import { GoalOverlayStore, type GoalOverlay } from './goal-overlay-store.js';
+import { attachGoalBasePin } from './goal-base-pin.js';
+import { errorMessage } from './reachability-read.js';
 
 export interface GoalAdmissionInput {
   readonly goalWorkspaceId: string;
@@ -47,3 +49,66 @@ export async function verifyGoalAdmission(
 }
 
 export { GoalOverlayStore };
+
+/** One exact commit a Goal Workspace wants to pin its overlay base to. */
+export interface GoalCanonicalPinInput {
+  readonly goalWorkspaceId: string;
+  readonly canonicalRef: string;
+  readonly commitSha: string;
+}
+
+export type GoalBasePinOutcome =
+  | { readonly status: 'pinned'; readonly baseManifestId: string }
+  | {
+      readonly status: 'skipped';
+      readonly reason: 'no_canonical_ref' | 'commit_not_live';
+      readonly detail: string;
+    }
+  | { readonly status: 'failed'; readonly reason: string };
+
+/**
+ * Pin a Goal overlay to the exact commit admission resolved (#210 §4).
+ *
+ * This is the admission policy, not a generic attach: it reads the canonical
+ * ref strictly first, so a corrupt ref is reported instead of being read as
+ * "never promoted" and replaced by a pin against nothing. A store that has
+ * never advanced, or a Goal admitted from a historical/feature commit that is
+ * not the live ref, is an explicit skip — Goal creation must keep working in
+ * repositories without canonical data. Only when the live ref *is* the
+ * requested commit does the overlay attach, using the state just read.
+ *
+ * Never throws: the worktree and registration are already durable when this
+ * runs, so a write failure is an outcome for the caller to report, not a
+ * reason to fail Goal creation.
+ */
+export async function pinGoalBaseAtCommit(
+  refs: CanonicalRefStore,
+  overlays: GoalOverlayStore,
+  input: GoalCanonicalPinInput,
+): Promise<GoalBasePinOutcome> {
+  try {
+    const live = await refs.read(input.canonicalRef, { strict: true });
+    if (live === null) {
+      return {
+        status: 'skipped',
+        reason: 'no_canonical_ref',
+        detail: `no canonical ref at ${input.canonicalRef}`,
+      };
+    }
+    if (live.commitSha !== input.commitSha) {
+      return {
+        status: 'skipped',
+        reason: 'commit_not_live',
+        detail: `canonical ref ${input.canonicalRef} is at ${live.commitSha.slice(0, 12)}, not ${input.commitSha.slice(0, 12)}`,
+      };
+    }
+    const overlay = await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: input.goalWorkspaceId,
+      canonicalRef: input.canonicalRef,
+      expectedBase: live,
+    });
+    return { status: 'pinned', baseManifestId: overlay.baseManifestId };
+  } catch (error) {
+    return { status: 'failed', reason: errorMessage(error) };
+  }
+}

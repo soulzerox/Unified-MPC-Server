@@ -346,7 +346,9 @@ pins user-pin
 
 - The command only ever writes `user-pin`. Other reasons (`canonical-ref`,
   `goal-base`, `goal-overlay`, `index-job`, `rollback`) are owned by the store
-  that depends on the revision and are never touched by the CLI.
+  that depends on the revision and are never touched by the pin/unpin verbs;
+  `index repair` may remove them only when the manifest row is missing
+  (see below).
 - A well-formed id whose manifest is not stored is refused (`unknown revision
   manifest`) instead of leaving an orphan pin the store verify path would report
   as degraded.
@@ -452,6 +454,12 @@ missing-overlay-bases 0
   Classification of every pin finishes before the first unpin, and the row is
   re-checked immediately before each unpin. A lease loss or write failure after
   removals begin can leave those removals in place; re-running is idempotent.
+- Pin records are read strictly too. An unreadable record, a record with no
+  valid pin entries, or a file name that is not the canonical lowercase
+  manifest id refuses the pass, because reading the reasons from the lowercased
+  path would otherwise look like "no reasons" and report `applied orphan-pins
+  0` while the pin still degrades the store. The record is read strictly again
+  before each reason is removed.
 - Removing an orphan pin is deliberately not reachability-neutral: artifact-key
   GC treats every pin id as retention evidence, and `assembleGcRoots` refuses
   the whole pass while a pinned manifest is missing. The repair releases

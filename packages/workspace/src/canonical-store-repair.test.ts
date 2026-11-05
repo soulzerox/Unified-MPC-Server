@@ -268,6 +268,57 @@ describe('canonical store repair (#210 §7)', () => {
     }
   });
 
+  it('reads orphan-pin reasons strictly after the listing accepted the id', async () => {
+    const s = await scenario();
+    try {
+      await mkdir(path.join(s.dir, 'pins'), { recursive: true });
+      await writeFile(path.join(s.dir, 'pins', `${MISSING}.json`), '{not a pin', 'utf8');
+      // Force the listing past the id it would return, so the only read left is
+      // the one that resolves the reasons. A tolerant read here would plan the
+      // pin with no reasons and report the store repaired.
+      class ListingOnlyPins extends RevisionPinRegistry {
+        public override async pinnedManifestIds(): Promise<string[]> {
+          return [MISSING];
+        }
+      }
+      await expect(repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.strictManifests,
+        pins: new ListingOnlyPins(s.dir),
+        overlays: s.overlays,
+        dryRun: true,
+      })).rejects.toThrow('cannot read revision pin');
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a non-canonical pin file name instead of reporting the store repaired', async () => {
+    const s = await scenario();
+    try {
+      await mkdir(path.join(s.dir, 'pins'), { recursive: true });
+      const record = [{ manifestId: MISSING, reason: 'user-pin', note: 'hold', createdAt: '2026-11-05T00:00:00.000Z' }];
+      const pinPath = path.join(s.dir, 'pins', `${MISSING.toUpperCase()}.json`);
+      await writeFile(pinPath, JSON.stringify(record), 'utf8');
+
+      // A case-insensitive pin file name passes the strict listing regex but
+      // resolves to a different, absent path when the reasons are read back.
+      // Claiming `applied orphan-pins 0` would leave the store degraded.
+      await expect(repairCanonicalStore({
+        refs: s.refs,
+        manifests: s.strictManifests,
+        pins: s.pins,
+        overlays: s.overlays,
+        dryRun: false,
+        lease: leaseFor(s.lease),
+      })).rejects.toThrow('cannot read revision pin');
+      expect(await s.pins.list(MISSING)).toEqual([]);
+      expect(await s.lease.read()).toBeNull();
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
   it('is idempotent and leaves the verify report healthy', async () => {
     const s = await scenario();
     try {

@@ -257,4 +257,33 @@ describe('pinGoalBaseAtCommit (#210 §4)', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('keeps a corrupt ref that only the error-path re-read sees as failed', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-pin-'));
+    try {
+      const overlays = new GoalOverlayStore(dir);
+      let reads = 0;
+      const racing = {
+        read: async (_ref: string, options?: { strict?: boolean }): Promise<typeof C100 | null> => {
+          if (reads++ === 0) return C100;
+          // The attach's tolerant read sees "never promoted"; only a strict
+          // re-read may report the corruption as a store failure.
+          if (options?.strict === true) throw new Error('cannot read canonical ref: corrupt');
+          return null;
+        },
+      } as unknown as CanonicalRefStore;
+
+      const outcome = await pinGoalBaseAtCommit(racing, overlays, {
+        goalWorkspaceId: 'goal-1',
+        canonicalRef: REF,
+        commitSha: C100.commitSha,
+      });
+
+      expect(outcome.status).toBe('failed');
+      if (outcome.status === 'failed') expect(outcome.reason).toMatch(/cannot pin goal|no canonical ref/);
+      expect(await overlays.listIds()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

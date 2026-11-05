@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, chmod, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { GoalOverlayStore } from './goal-overlay-store.js';
@@ -70,6 +70,22 @@ describe('goal overlay store (#210 U8)', () => {
       expect(await reopened.read('goal-1')).toBeNull();
       expect(await reopened.delete('goal-1')).toBe(false);
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('raises a real unlink failure instead of reporting a release', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'goal-overlay-'));
+    const overlays = path.join(dir, 'overlays');
+    try {
+      const store = new GoalOverlayStore(dir);
+      await store.create('goal-1', BASE);
+      await chmod(overlays, 0o500);
+      await expect(store.delete('goal-1')).rejects.toThrow();
+      await chmod(overlays, 0o700);
+      expect(await store.read('goal-1')).not.toBeNull();
+    } finally {
+      await chmod(overlays, 0o700).catch(() => undefined);
       await rm(dir, { recursive: true, force: true });
     }
   });

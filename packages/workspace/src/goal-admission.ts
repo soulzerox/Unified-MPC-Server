@@ -109,6 +109,30 @@ export async function pinGoalBaseAtCommit(
     });
     return { status: 'pinned', baseManifestId: overlay.baseManifestId };
   } catch (error) {
+    // The ref is read twice (strictly here, again inside attachGoalBasePin).
+    // A concurrent advance between those reads is the same "not live" answer
+    // one read later; report it as a skip so an ordinary merge reconciliation
+    // does not surface as a store failure. A re-read that still resolves to
+    // the requested commit keeps the original failure.
+    try {
+      const liveAgain = await refs.read(input.canonicalRef, { strict: true });
+      if (liveAgain === null) {
+        return {
+          status: 'skipped',
+          reason: 'no_canonical_ref',
+          detail: `no canonical ref at ${input.canonicalRef}`,
+        };
+      }
+      if (liveAgain.commitSha !== input.commitSha) {
+        return {
+          status: 'skipped',
+          reason: 'commit_not_live',
+          detail: `canonical ref ${input.canonicalRef} is at ${liveAgain.commitSha.slice(0, 12)}, not ${input.commitSha.slice(0, 12)}`,
+        };
+      }
+    } catch {
+      // The re-read failed too; the original error is the honest outcome.
+    }
     return { status: 'failed', reason: errorMessage(error) };
   }
 }

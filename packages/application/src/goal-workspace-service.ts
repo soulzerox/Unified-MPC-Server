@@ -66,6 +66,12 @@ export interface GoalCanonicalAdmissionPort {
     readonly goalWorkspaceId: string;
     readonly commitSha: string;
   }): Promise<GoalCanonicalAdmissionOutcome>;
+  /**
+   * Release the Goal's canonical overlay after removal. Idempotent. The adapter
+   * owns reporting: a throw is swallowed here so a removal that already
+   * happened is never reported as failed and retried into a missing Goal.
+   */
+  releaseBase(goalWorkspaceId: string): Promise<void>;
 }
 
 export interface GoalWorkspaceWriterLease extends WorkspaceWriterLease {
@@ -919,7 +925,22 @@ export class GoalWorkspaceService {
     } catch (error: unknown) {
       return err(appError('CONFLICT', `Goal Workspace registration could not be archived: ${errorMessage(error)}`, true));
     }
+    await this.releaseCanonicalBase(workspace.id);
     return ok(undefined);
+  }
+
+  /**
+   * Best-effort overlay release after the worktree and registration are gone.
+   * The adapter reports a real unlink failure; a throw here would turn a
+   * completed removal into a failure that cannot be retried.
+   */
+  private async releaseCanonicalBase(goalWorkspaceId: string): Promise<void> {
+    if (this.canonicalAdmission === undefined) return;
+    try {
+      await this.canonicalAdmission.releaseBase(goalWorkspaceId);
+    } catch {
+      // Adapter-owned reporting; removal already happened.
+    }
   }
 
   private async findActiveGoal(goalId: string): Promise<Workspace | null> {

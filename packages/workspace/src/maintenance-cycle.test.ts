@@ -299,6 +299,32 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     });
   });
 
+  it('keeps the compaction failure when verification throws while diagnosing it', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore, controller } = await depsFor(root);
+    const report = await runMaintenanceCycle({
+      ...deps,
+      verifyStore: async () => {
+        throw new Error('manifest unreadable');
+      },
+      compactStore: async () => {
+        throw new Error('disk I/O error');
+      },
+    });
+    // The verification error must not replace the compaction failure that
+    // triggered the diagnosis, and the refusal still releases both locks.
+    expect(report).toEqual({
+      status: 'refused',
+      reason: 'compaction-failed',
+      detail: 'disk I/O error; verification threw: manifest unreadable',
+      tookFence: true,
+      tookAdmission: true,
+    });
+    expect(await leaseStore.read()).toBeNull();
+    expect(controller.snapshot().activeOperations).toBe(0);
+    expect(controller.snapshot().activeCost).toBe(0);
+  });
+
   it('propagates a lost fence before compaction and releases the grant', async () => {
     const root = await tempRoot();
     const { deps, leaseStore } = await depsFor(root);
@@ -308,6 +334,30 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
         throw new GcLeaseLostError('fence replaced');
       },
     })).rejects.toThrow('fence replaced');
+    expect(await leaseStore.read()).toBeNull();
+  });
+
+  it('stops before compaction when the heartbeat assert finds the fence lost', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore } = await depsFor(root);
+    let compactionCalls = 0;
+    // Half the TTL later the heartbeat is due. The GC stub released the grant
+    // instead of renewing it, so the assert at the compaction boundary fails
+    // closed and the callback is never reached — an assert-driven loss, not a
+    // callback that throws on its own.
+    await expect(runMaintenanceCycle({
+      ...deps,
+      clock: () => new Date(NOW.getTime() + 30_000),
+      runGcQuarantine: async (fence) => {
+        await leaseStore.release({ ownerId: fence.ownerId, generation: fence.generation });
+        return { status: 'planned', reachable: [H('a')], unreachable: [], quarantined: [] };
+      },
+      compactStore: async () => {
+        compactionCalls += 1;
+        return { status: 'skipped', reason: 'reader-pressure', detail: 'never reached' };
+      },
+    })).rejects.toThrow('no longer held');
+    expect(compactionCalls).toBe(0);
     expect(await leaseStore.read()).toBeNull();
   });
 

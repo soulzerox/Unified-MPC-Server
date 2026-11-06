@@ -782,8 +782,10 @@ verdict, not a failure of the GC pass around it.
   and expiry, the admission reason, the GC planner's reason, the compaction
   error (`compaction-failed`), or the degraded dangling-ref/overlay/pin counts.
   If compaction fails and verification is also degraded, the refusal is
-  `verify-degraded` and its detail carries both diagnoses. The token alone is
-  not the diagnosis.
+  `verify-degraded` and its detail carries both diagnoses. If verification
+  itself throws while diagnosing a compaction failure, the refusal stays
+  `compaction-failed` and its detail carries the compaction error followed by
+  `verification threw: <error>`. The token alone is not the diagnosis.
 - `completed` and `skipped` exit `0`.
 - `--json` prints the unprojected `MaintenanceCycleReport`, including the
   refusal detail.

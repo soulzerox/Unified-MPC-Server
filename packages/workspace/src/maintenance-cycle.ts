@@ -304,8 +304,23 @@ export async function runMaintenanceCycle(
           const detail = error instanceof Error ? error.message : String(error);
           // Verify before refusing: a compaction failure might also have
           // damaged the store, and the degraded counts are the stronger
-          // diagnosis than the thrown message alone.
-          const verification = await verifyStore();
+          // diagnosis than the thrown message alone. A verification that
+          // throws (strict manifest reads fail on a corrupt manifest) must not
+          // replace the compaction failure that led here, so keep both
+          // messages and stay fail-closed.
+          let verification: CanonicalStoreVerifyReport;
+          try {
+            verification = await verifyStore();
+          } catch (verifyError) {
+            const verifyDetail = verifyError instanceof Error ? verifyError.message : String(verifyError);
+            return {
+              status: 'refused',
+              reason: 'compaction-failed',
+              detail: `${detail}; verification threw: ${verifyDetail}`,
+              tookFence: true,
+              tookAdmission: true,
+            };
+          }
           if (verification.status === 'degraded') {
             return {
               status: 'refused',

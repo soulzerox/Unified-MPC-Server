@@ -19,6 +19,11 @@ import { ResourceAdmissionController } from './resource-admission.js';
  * mutated; every taken fence and lease is released in a finally, even when
  * GC or verification throws.
  *
+ * The GC pass receives the live fence and renews it at its destructive
+ * boundary. It must not acquire a second lease: the record is held for the
+ * whole cycle, so a re-acquire would self-deny, while skipping the renewal
+ * would let a long pass outlive the window.
+ *
  * The caller wires real dependencies: `physical`/`diskFreeBytes` come from
  * `SqliteDatabase.physicalMetrics` (@unified-mpc/storage, #373), `runGcQuarantine`
  * runs `runGcCycle` (#210 U22/#373) under this cycle's fence, and `verifyStore`
@@ -39,10 +44,25 @@ export interface MaintenanceCycleDeps {
   readonly controller: ResourceAdmissionController;
   readonly resourceClass: ResourceAdmissionClass;
   readonly admissionCost: number;
-  /** Runs GC quarantine while this cycle's fence is held. */
-  readonly runGcQuarantine: () => Promise<GcCycleReport>;
+  /**
+   * Runs GC quarantine while this cycle's fence is held. It receives the live
+   * fence so the pass can renew and assert that same record at its own
+   * destructive boundary: re-acquiring it would self-deny, and skipping the
+   * renewal would let a long pass outlive the window.
+   */
+  readonly runGcQuarantine: (fence: MaintenanceCycleFence) => Promise<GcCycleReport>;
   /** Post-maintenance integrity verification (manifest↔artifact↔vector↔FTS↔CPG). */
   readonly verifyStore: () => Promise<CanonicalStoreVerifyReport>;
+}
+
+/** The fence this cycle acquired, handed to the GC pass it owns. */
+export interface MaintenanceCycleFence {
+  readonly store: GcLeaseStore;
+  readonly ownerId: string;
+  readonly generation: number;
+  readonly ttlMs: number;
+  /** Grant time; the GC pass renews this record against it. */
+  readonly grantedAt: Date;
 }
 
 export type MaintenanceCycleReport =
@@ -172,7 +192,13 @@ export async function runMaintenanceCycle(
     admission = acquired;
 
     try {
-      const gc = await runGcQuarantine();
+      const gc = await runGcQuarantine({
+        store: leaseStore,
+        ownerId,
+        generation: fence.generation,
+        ttlMs,
+        grantedAt: now,
+      });
       if (gc.status === 'refused') {
         return { status: 'refused', reason: 'gc-refused', tookFence: true, tookAdmission: true };
       }

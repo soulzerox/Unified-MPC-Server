@@ -37,6 +37,7 @@ import {
   type CanonicalRevisionPinReport,
   type CanonicalStoreRepairReport,
   type GcCycleReport,
+  type GcCycleHeldFence,
   type GcExpireReport,
   type GcStatusReport,
   type GitRevisionAdvanceResult,
@@ -883,6 +884,12 @@ interface CanonicalGcRun {
    * it: `runGcCycle` would self-deny a second acquire of the same live record.
    */
   readonly lease?: { readonly store: GcLeaseStore; readonly ownerId: string; readonly ttlMs: number };
+  /**
+   * The fence a wider owner already holds. Passed instead of `lease` so the
+   * pass still renews and asserts that record before its write, without
+   * acquiring or releasing it.
+   */
+  readonly heldFence?: GcCycleHeldFence;
 }
 
 /**
@@ -939,6 +946,7 @@ async function runCanonicalGc(root: string, input: CanonicalGcRun): Promise<GcCy
     graceMs: input.graceMs,
     dryRun: input.dryRun,
     ...(input.lease === undefined ? {} : { lease: input.lease }),
+    ...(input.heldFence === undefined ? {} : { heldFence: input.heldFence }),
   });
 }
 
@@ -1276,10 +1284,20 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         controller: sharedProcessResourceAdmissionController(),
         resourceClass: 'verification_heavy',
         admissionCost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
-        // The cycle holds the single-owner fence for the whole pass, so the
-        // GC closure runs without a lease of its own: a second acquire of the
-        // same live record would self-deny.
-        runGcQuarantine: () => runCanonicalGc(root, { dryRun: input.dryRun, graceMs: DEFAULT_GC_GRACE_MS }),
+        // The cycle holds the single-owner fence for the whole pass, so the GC
+        // closure renews and asserts that same record instead of taking a
+        // second lease, which would self-deny while the record is live.
+        runGcQuarantine: (fence) => runCanonicalGc(root, {
+          dryRun: input.dryRun,
+          graceMs: DEFAULT_GC_GRACE_MS,
+          heldFence: {
+            store: fence.store,
+            ownerId: fence.ownerId,
+            generation: fence.generation,
+            ttlMs: fence.ttlMs,
+            grantedAt: fence.grantedAt,
+          },
+        }),
         // Strict reads: a corrupt manifest must degrade the verdict instead of
         // reading as "missing" and hiding a live binding.
         verifyStore: () => verifyCanonicalStore({

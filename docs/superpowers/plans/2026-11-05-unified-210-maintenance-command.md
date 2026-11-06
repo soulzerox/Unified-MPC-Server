@@ -70,6 +70,16 @@ cycle; asking `runGcCycle` to acquire the same fence again would self-deny
 (the record is live until the cycle's `finally`). The helper keeps its own
 `lease` option for the standalone `index gc` verb, which does own its fence.
 
+Review fix: "no lease" is not enough. `runGcCycle` renews the fence at its own
+destructive boundary, and with no lease it had no heartbeat, so a pass that
+outlived the 15-minute window could let another process acquire the expired
+record and mutate concurrently — the defect #646 fixed for the other
+destructive passes. The cycle now hands its live fence to the GC pass
+(`GcCycleInput.heldFence`, produced from `MaintenanceCycleFence`). With a held
+fence the pass renews and asserts that exact record before its only write, and
+never acquires or releases it: the cycle still owns the grant and its
+`finally`. Supplying both `lease` and `heldFence` is refused outright.
+
 ### 4. Refusal vocabulary is the cycle's
 
 The command prints the cycle report, not a re-derived verdict:
@@ -111,9 +121,13 @@ a preference: the same code in a new file is refused before the first write.
   `fence-acquire-failed` without touching quarantine and without releasing a
   fence it never owned; a fresh data path then skips below threshold in both
   modes, leaves no quarantine row, releases the cycle's own fence, and exits 0.
-  The cycle's GC/verify path under pressure is already covered by
-  `packages/workspace/src/maintenance-cycle.test.ts`; the CLI test pins the
-  wiring and fence sharing it adds.
+  The cycle's GC/verify path under pressure is covered by
+  `packages/workspace/src/maintenance-cycle.test.ts`, which now also captures
+  the fence handed to GC (same store, owner, generation, TTL and grant time)
+  and asserts the cycle released it. `gc-cycle.test.ts` covers the held-fence
+  contract directly: renewal of the caller's grant without a release, abort
+  when the generation was replaced, and refusal when both a lease and a held
+  fence are supplied.
 
 ## Not in scope
 

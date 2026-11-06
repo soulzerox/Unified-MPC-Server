@@ -17,6 +17,25 @@ export interface GcCycleLease {
   readonly clock?: () => Date;
 }
 
+/**
+ * A fence the caller already holds.
+ *
+ * Used by a pass that runs inside a wider owner (the maintenance cycle) so it
+ * still renews and asserts the *same* record before its only write instead of
+ * acquiring a second one — which would self-deny while the record is live. The
+ * GC cycle never releases a held fence; the owner that acquired it does.
+ */
+export interface GcCycleHeldFence {
+  readonly store: GcLeaseStore;
+  readonly ownerId: string;
+  readonly generation: number;
+  readonly ttlMs: number;
+  /** Grant time; the first renewal falls due half a window later. */
+  readonly grantedAt: Date;
+  /** Clock used by the lease heartbeat; defaults to the wall clock. */
+  readonly clock?: () => Date;
+}
+
 /** One prunable canonical artifact: a key is only resolvable inside its repository. */
 export interface GcCycleArtifactCandidate {
   readonly repositoryId: string;
@@ -37,6 +56,13 @@ export interface GcCycleInput {
   readonly dryRun: boolean;
   /** Single-owner guard for the quarantine mutation (#210 §12); dry runs take none. */
   readonly lease?: GcCycleLease;
+  /**
+   * A fence this caller already holds (#210 §12). Mutually exclusive with
+   * `lease`; supplied when the GC pass runs inside a wider owner such as the
+   * maintenance cycle. The pass renews and asserts this record before its
+   * write, and never releases it.
+   */
+  readonly heldFence?: GcCycleHeldFence;
 }
 
 export type GcCycleReport =
@@ -80,7 +106,9 @@ export interface GcCycleStores {
  * or unreadable fence refuses before anything is quarantined) and
  * releases it in a finally, even on refusal. The window is renewed while the
  * cycle is still working, so a long plan cannot let the fence expire and admit
- * a concurrent destructive pass. Dry runs are read-only and deliberately
+ * a concurrent destructive pass. A caller that already holds the fence passes
+ * `heldFence` instead: the same renewal and assert run against that record, and
+ * the caller's own finally releases it. Dry runs are read-only and deliberately
  * unfenced.
  *
  * Artifact candidates (optional) are planned in the same pass with the
@@ -93,7 +121,12 @@ export async function runGcCycle(
   input: GcCycleInput,
 ): Promise<GcCycleReport> {
   const lease = input.dryRun ? undefined : input.lease;
+  const heldFence = input.dryRun ? undefined : input.heldFence;
+  if (lease !== undefined && heldFence !== undefined) {
+    return { status: 'refused', reason: 'gc cycle refuses both a lease and a held fence' };
+  }
   let granted: { readonly generation: number; readonly heartbeat: GcLeaseHeartbeat } | undefined;
+  let held: GcLeaseHeartbeat | undefined;
   if (lease !== undefined) {
     const acquired = await lease.store.acquire({ ownerId: lease.ownerId, now: input.now, ttlMs: lease.ttlMs });
     if (acquired.status === 'denied') {
@@ -115,9 +148,20 @@ export async function runGcCycle(
         ...(lease.clock === undefined ? {} : { clock: lease.clock }),
       }),
     };
+  } else if (heldFence !== undefined) {
+    // The caller acquired this record; reuse it so a long plan still renews
+    // and a moved generation still aborts before the quarantine write.
+    held = new GcLeaseHeartbeat({
+      store: heldFence.store,
+      ownerId: heldFence.ownerId,
+      generation: heldFence.generation,
+      ttlMs: heldFence.ttlMs,
+      grantedAt: heldFence.grantedAt,
+      ...(heldFence.clock === undefined ? {} : { clock: heldFence.clock }),
+    });
   }
   try {
-    return await runCycle(stores, input, granted?.heartbeat);
+    return await runCycle(stores, input, granted?.heartbeat ?? held);
   } finally {
     if (lease !== undefined && granted !== undefined) {
       await lease.store.release({ ownerId: lease.ownerId, generation: granted.generation });

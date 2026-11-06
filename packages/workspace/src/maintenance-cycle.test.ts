@@ -10,7 +10,7 @@ import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { ResourceAdmissionController } from './resource-admission.js';
 import { DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS } from './resource-admission.js';
 import { GcLeaseStore } from './gc-lease.js';
-import { runMaintenanceCycle } from './maintenance-cycle.js';
+import { runMaintenanceCycle, type MaintenanceCycleDeps, type MaintenanceCycleFence } from './maintenance-cycle.js';
 
 const NOW = new Date('2026-10-18T10:00:00.000Z');
 const H = (n: string): string => n.repeat(64).slice(0, 64);
@@ -116,6 +116,7 @@ async function depsFor(root: string, overrides: {
   controller: ResourceAdmissionController;
   leaseStore: GcLeaseStore;
   gcCalls: () => number;
+  gcFence: () => MaintenanceCycleFence | undefined;
   manifestId: string;
 }> {
   const { refs, manifests, pins, overlays } = stores(root);
@@ -124,8 +125,10 @@ async function depsFor(root: string, overrides: {
   const controller = new ResourceAdmissionController(DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS);
   const physical = overrides.physical ?? evidence();
   let gcCalls = 0;
-  const runGcQuarantine = async (): Promise<{ status: 'planned'; reachable: string[]; unreachable: string[]; quarantined: string[] }> => {
+  let lastFence: MaintenanceCycleFence | undefined;
+  const runGcQuarantine = async (fence: MaintenanceCycleFence): Promise<{ status: 'planned'; reachable: string[]; unreachable: string[]; quarantined: string[] }> => {
     gcCalls += 1;
+    lastFence = fence;
     return { status: 'planned', reachable: [H('a')], unreachable: [], quarantined: [] };
   };
   const verifyStore = overrides.verifyDegraded ? degradedVerify : healthyVerify;
@@ -144,7 +147,7 @@ async function depsFor(root: string, overrides: {
     runGcQuarantine,
     verifyStore,
   };
-  return { deps, refs, manifests, pins, overlays, controller, leaseStore, gcCalls: () => gcCalls, manifestId };
+  return { deps, refs, manifests, pins, overlays, controller, leaseStore, gcCalls: () => gcCalls, gcFence: () => lastFence, manifestId };
 }
 
 describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
@@ -164,6 +167,27 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     // Fence released: a second cycle can acquire the same store.
     const second = await runMaintenanceCycle(deps);
     expect(second.status).toBe('completed');
+  });
+
+  it('hands the GC pass the live fence instead of letting it acquire a second one', async () => {
+    const root = await tempRoot();
+    const { deps, gcFence, leaseStore } = await depsFor(root);
+
+    const report = await runMaintenanceCycle(deps);
+    expect(report.status).toBe('completed');
+
+    const fence = gcFence();
+    expect(fence).toBeDefined();
+    // The GC pass renews and asserts this exact record: same store, owner and
+    // generation the cycle was granted. A second acquire would self-deny while
+    // it is live, and no heartbeat at all would let a long pass outlive it.
+    expect(fence?.store).toBe(leaseStore);
+    expect(fence?.ownerId).toBe('maintenance-worker');
+    expect(fence?.generation).toBe(1);
+    expect(fence?.ttlMs).toBe(60_000);
+    expect(fence?.grantedAt).toEqual(NOW);
+    // The owner released it; the GC pass never did.
+    expect(await leaseStore.read()).toBeNull();
   });
 
   it('skips below threshold without taking admission', async () => {

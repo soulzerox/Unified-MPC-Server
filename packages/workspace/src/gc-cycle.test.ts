@@ -205,6 +205,106 @@ describe('GC cycle under the cleanup lease (#210 U30)', () => {
     }
   });
 
+  it('renews a caller-held fence and leaves the release to its owner', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      const acquired = await lease.acquire({ ownerId: 'maintenance', now: NOW, ttlMs: GRACE });
+      if (acquired.status !== 'granted') throw new Error(`expected a granted lease, got ${acquired.status}`);
+      let now = NOW;
+      const listIds = deps.overlays.listIds.bind(deps.overlays);
+      deps.overlays.listIds = async (options): Promise<string[]> => {
+        const ids = await listIds(options);
+        now = new Date(NOW.getTime() + GRACE);
+        return ids;
+      };
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        heldFence: {
+          store: lease,
+          ownerId: 'maintenance',
+          generation: acquired.generation,
+          ttlMs: GRACE,
+          grantedAt: NOW,
+          clock: () => now,
+        },
+      });
+      expect(report).toMatchObject({ status: 'planned', quarantined: [H('2')] });
+      expect((await deps.quarantine.list()).map((entry) => entry.hash)).toEqual([H('2')]);
+      // Renewed against the caller's grant, still held: a pass that did not
+      // acquire the fence must never release it.
+      expect(await lease.inspect()).toMatchObject({
+        status: 'held',
+        ownerId: 'maintenance',
+        generation: acquired.generation,
+        expiresAt: new Date(NOW.getTime() + GRACE * 2).toISOString(),
+      });
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops before the write when the caller-held fence was replaced', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      const acquired = await lease.acquire({ ownerId: 'maintenance', now: NOW, ttlMs: GRACE });
+      if (acquired.status !== 'granted') throw new Error(`expected a granted lease, got ${acquired.status}`);
+      let now = NOW;
+      const listIds = deps.overlays.listIds.bind(deps.overlays);
+      deps.overlays.listIds = async (options): Promise<string[]> => {
+        const ids = await listIds(options);
+        await lease.release({ ownerId: 'maintenance', generation: acquired.generation });
+        await lease.acquire({ ownerId: 'gc_successor', now, ttlMs: GRACE });
+        now = new Date(NOW.getTime() + GRACE);
+        return ids;
+      };
+      await expect(runGcCycle(deps, {
+        candidates: [H('1'), H('2')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        heldFence: {
+          store: lease,
+          ownerId: 'maintenance',
+          generation: acquired.generation,
+          ttlMs: GRACE,
+          grantedAt: NOW,
+          clock: () => now,
+        },
+      })).rejects.toThrow(GcLeaseLostError);
+      expect(await deps.quarantine.list()).toEqual([]);
+      expect(await lease.inspect()).toMatchObject({ status: 'held', ownerId: 'gc_successor' });
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a pass that supplies both a lease and a held fence', async () => {
+    const deps = await scenario();
+    try {
+      const lease = new GcLeaseStore(deps.dir);
+      const report = await runGcCycle(deps, {
+        candidates: [H('1')],
+        indexJobManifestIds: [],
+        now: NOW, graceMs: GRACE, dryRun: false,
+        lease: { store: lease, ownerId: 'gc_me', ttlMs: GRACE },
+        heldFence: {
+          store: lease,
+          ownerId: 'maintenance',
+          generation: 1,
+          ttlMs: GRACE,
+          grantedAt: NOW,
+        },
+      });
+      expect(report).toEqual({ status: 'refused', reason: 'gc cycle refuses both a lease and a held fence' });
+      expect(await deps.quarantine.list()).toEqual([]);
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
   it('stops before the quarantine write when a newer generation takes the fence', async () => {
     const deps = await scenario();
     try {

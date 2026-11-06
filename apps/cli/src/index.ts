@@ -42,6 +42,7 @@ import {
   type GcStatusReport,
   type GitRevisionAdvanceResult,
   type LogicalSpaceReport,
+  type MaintenanceCompactionReport,
   type MaintenanceCycleReport,
   type RevisionPruneReport,
   type StoredArtifact,
@@ -1261,7 +1262,8 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       // Real measured pressure: the gate refuses unmeasurable headroom and
       // skips below threshold or under reader pressure instead of inferring
       // safety. The passive checkpoint stays bounded and non-blocking.
-      const physical = await getWorkspaceState().database.physicalMetrics();
+      const database = getWorkspaceState().database;
+      const physical = await database.physicalMetrics();
       return runMaintenanceCycle({
         physical: {
           databaseBytes: physical.databaseBytes,
@@ -1298,6 +1300,11 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
             grantedAt: fence.grantedAt,
           },
         }),
+        // A dry run reports the compaction the pressure gate admitted; an
+        // apply vacuums and truncates under the fence the cycle already holds.
+        compactStore: input.dryRun
+          ? async (): Promise<MaintenanceCompactionReport> => ({ status: 'planned', reason: 'pressure-justified' })
+          : async (): Promise<MaintenanceCompactionReport> => database.compact(),
         // Strict reads: a corrupt manifest must degrade the verdict instead of
         // reading as "missing" and hiding a live binding.
         verifyStore: () => verifyCanonicalStore({

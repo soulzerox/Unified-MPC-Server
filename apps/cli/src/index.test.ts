@@ -17,6 +17,7 @@ import {
   RevisionPinRegistry,
   type StoredManifest,
 } from '@unified-mpc/workspace';
+import { SqliteDatabase } from '@unified-mpc/storage';
 import { createDefaultCliDependencies, parseCliArgs, runCli, type CliDependencies } from './index.js';
 
 const sourceRuntimeAdmissionIdentity = {
@@ -1316,6 +1317,7 @@ describe('CLI execution dispatcher', () => {
             quarantined: [],
             quarantinedArtifacts: [],
           },
+          compaction: { status: 'planned', reason: 'pressure-justified' },
           verification: { status: 'healthy', danglingRefs: [], missingOverlays: [], orphanedPins: [], manifests: [] },
           tookFence: true,
           tookAdmission: true,
@@ -1327,6 +1329,7 @@ describe('CLI execution dispatcher', () => {
     expect(seenDryRun).toBe(true);
     expect(completed).toEqual([
       'completed (dry-run) verification healthy manifests 0'
+        + '\ncompaction planned (pressure-justified)'
         + `\nplanned (dry-run) reachable 0 unreachable 1 artifact-unreachable 0\nunreachable ${content}`,
     ]);
 
@@ -1450,6 +1453,72 @@ describe('CLI execution dispatcher', () => {
         // The cycle released its own fence, so the next run is not blocked.
         expect(await lease.read()).toBeNull();
       }
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('compacts a real pressure-justified database under the maintenance fence', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-compact-'));
+    const dataPath = path.join(root, 'data');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      await seedCanonicalGcFixture(dataPath);
+      const databasePath = path.join(dataPath, 'unified-mpc.sqlite');
+      const database = new SqliteDatabase(databasePath);
+      let pressuredBytes: number;
+      try {
+        database.connection.exec('CREATE TABLE maintenance_bulk (id INTEGER PRIMARY KEY, body TEXT);');
+        database.connection.exec('BEGIN;');
+        const body = 'z'.repeat(1024 * 1024);
+        for (let i = 0; i < 90; i++) {
+          database.connection.prepare('INSERT INTO maintenance_bulk VALUES (?, ?)').run(i, body);
+        }
+        database.connection.exec('COMMIT;');
+        database.connection.exec('DELETE FROM maintenance_bulk WHERE id >= 5;');
+        const measured = database.physicalMetrics({ checkpointMode: 'none' });
+        pressuredBytes = measured.databaseBytes;
+        // If this predicate is false the test would silently stop exercising
+        // compaction; fail loudly instead.
+        expect(measured.compactionRecommended, measured.compactionReason ?? 'no pressure').toBe(true);
+      } finally {
+        database.close();
+      }
+
+      const output: string[] = [];
+      const errors: string[] = [];
+      const code = await runCli(['index', 'maintenance', '--apply'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => output.push(text),
+        writeError: (text) => errors.push(text),
+      });
+      expect(errors, errors.join('\n')).toEqual([]);
+      expect(code, output.join('\n')).toBe(0);
+      expect(output[0]).toContain('completed (applied)');
+      expect(output[0]).toContain('compaction compacted');
+
+      const reopened = new SqliteDatabase(databasePath);
+      try {
+        const after = reopened.physicalMetrics({ checkpointMode: 'none' });
+        expect(after.databaseBytes).toBeLessThan(pressuredBytes);
+        expect(after.freelistBytes).toBe(0);
+      } finally {
+        reopened.close();
+      }
+      // The cycle released its own fence after compaction.
+      expect(await new GcLeaseStore(path.join(dataPath, 'canonical')).read()).toBeNull();
     } finally {
       if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
       else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;

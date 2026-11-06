@@ -1,6 +1,6 @@
 import type { PhysicalSpaceEvidence } from './compaction-gate.js';
 import { compactionGate } from './compaction-gate.js';
-import { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseHeartbeat, GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
 import type { CanonicalStoreVerifyReport } from './canonical-store-verify.js';
 import type { GcCycleReport } from './gc-cycle.js';
 import type { ResourceAdmissionClass } from './resource-admission.js';
@@ -9,15 +9,15 @@ import { ResourceAdmissionController } from './resource-admission.js';
 /**
  * One bounded maintenance cycle (#210 §3, §5-§7).
  *
- * Decides whether physical compaction may run, then runs GC quarantine plus
- * post-maintenance integrity under a single existing owner fence and one
- * admission-controller lease. Nothing here creates a second lock or a
- * duplicate scheduler; it consumes #145's ResourceAdmissionController and
- * #210 §12's GcLeaseStore.
+ * Decides whether physical compaction may run, then runs GC quarantine,
+ * physical compaction and post-maintenance integrity under a single existing
+ * owner fence and one admission-controller lease. Nothing here creates a
+ * second lock or a duplicate scheduler; it consumes #145's
+ * ResourceAdmissionController and #210 §12's GcLeaseStore.
  *
  * Fail-closed: headroom/fence/admission problems refuse before anything is
  * mutated; every taken fence and lease is released in a finally, even when
- * GC or verification throws.
+ * GC, compaction or verification throws.
  *
  * The GC pass receives the live fence and renews it at its destructive
  * boundary. It must not acquire a second lease: the record is held for the
@@ -51,9 +51,39 @@ export interface MaintenanceCycleDeps {
    * renewal would let a long pass outlive the window.
    */
   readonly runGcQuarantine: (fence: MaintenanceCycleFence) => Promise<GcCycleReport>;
+  /**
+   * Physically compacts the store after a successful GC pass. Omitted by
+   * embedders that only want the safety decision and GC; the report then says
+   * `not-requested` instead of claiming a compaction happened.
+   */
+  readonly compactStore?: () => Promise<MaintenanceCompactionReport>;
   /** Post-maintenance integrity verification (manifest↔artifact↔vector↔FTS↔CPG). */
   readonly verifyStore: () => Promise<CanonicalStoreVerifyReport>;
+  /** Injectable clock for the fence heartbeat; defaults to the wall clock. */
+  readonly clock?: () => Date;
 }
+
+/** What the cycle did with physical SQLite compaction. */
+export type MaintenanceCompactionReport =
+  | { readonly status: 'not-requested' }
+  | { readonly status: 'planned'; readonly reason: 'pressure-justified' }
+  | {
+    readonly status: 'skipped';
+    readonly reason: 'reader-pressure';
+    readonly detail: string;
+  }
+  | {
+    readonly status: 'compacted';
+    readonly beforeBytes: number;
+    readonly afterBytes: number;
+    readonly reclaimedBytes: number;
+    readonly beforeFreelistBytes: number;
+    readonly afterFreelistBytes: number;
+    /** A reader blocked the final WAL truncate; reclamation may be partial. */
+    readonly checkpointBusy: boolean;
+    readonly checkpointTruncated: boolean;
+    readonly walBytesAfter: number;
+  };
 
 /** The fence this cycle acquired, handed to the GC pass it owns. */
 export interface MaintenanceCycleFence {
@@ -74,6 +104,7 @@ export type MaintenanceCycleReport =
       | 'fence-acquire-failed'
       | 'admission-rejected'
       | 'gc-refused'
+      | 'compaction-failed'
       | 'verify-degraded';
     /**
      * Why the refusal happened, from the component that made the decision:
@@ -94,6 +125,7 @@ export type MaintenanceCycleReport =
   | {
     readonly status: 'completed';
     readonly gc: GcCycleReport;
+    readonly compaction: MaintenanceCompactionReport;
     readonly verification: CanonicalStoreVerifyReport;
     readonly tookFence: boolean;
     readonly tookAdmission: boolean;
@@ -131,7 +163,9 @@ export async function runMaintenanceCycle(
     resourceClass,
     admissionCost,
     runGcQuarantine,
+    compactStore,
     verifyStore,
+    clock,
   } = deps;
   const headroomMarginBytes = options.headroomMarginBytes ?? DEFAULT_HEADROOM_MARGIN_BYTES;
   const headroomMultiplier = options.headroomMultiplier ?? 2;
@@ -247,12 +281,56 @@ export async function runMaintenanceCycle(
         };
       }
 
+      const heartbeat = compactStore === undefined
+        ? undefined
+        : new GcLeaseHeartbeat({
+          store: leaseStore,
+          ownerId,
+          generation: fence.generation,
+          ttlMs,
+          grantedAt: now,
+          ...(clock === undefined ? {} : { clock }),
+        });
+
+      let compaction: MaintenanceCompactionReport = { status: 'not-requested' };
+      if (compactStore !== undefined) {
+        // GC renewed at its own destructive boundary. Compaction is the next
+        // one, so assert the same record again before touching the database.
+        await heartbeat?.assert();
+        try {
+          compaction = await compactStore();
+        } catch (error) {
+          if (error instanceof GcLeaseLostError) throw error;
+          const detail = error instanceof Error ? error.message : String(error);
+          // Verify before refusing: a compaction failure might also have
+          // damaged the store, and the degraded counts are the stronger
+          // diagnosis than the thrown message alone.
+          const verification = await verifyStore();
+          if (verification.status === 'degraded') {
+            return {
+              status: 'refused',
+              reason: 'verify-degraded',
+              detail: `${degradedDetail(verification)}; compaction failed: ${detail}`,
+              tookFence: true,
+              tookAdmission: true,
+            };
+          }
+          return {
+            status: 'refused',
+            reason: 'compaction-failed',
+            detail,
+            tookFence: true,
+            tookAdmission: true,
+          };
+        }
+      }
+
       const verification = await verifyStore();
       if (verification.status === 'degraded') {
         return {
           status: 'refused',
           reason: 'verify-degraded',
-          detail: `dangling refs ${verification.danglingRefs.length} missing overlays ${verification.missingOverlays.length} orphaned pins ${verification.orphanedPins.length}`,
+          detail: degradedDetail(verification),
           tookFence: true,
           tookAdmission: true,
         };
@@ -261,6 +339,7 @@ export async function runMaintenanceCycle(
       return {
         status: 'completed',
         gc,
+        compaction,
         verification,
         tookFence: true,
         tookAdmission: true,
@@ -271,4 +350,8 @@ export async function runMaintenanceCycle(
   } finally {
     await leaseStore.release({ ownerId, generation: fence.generation });
   }
+}
+
+function degradedDetail(report: CanonicalStoreVerifyReport): string {
+  return `dangling refs ${report.danglingRefs.length} missing overlays ${report.missingOverlays.length} orphaned pins ${report.orphanedPins.length}`;
 }

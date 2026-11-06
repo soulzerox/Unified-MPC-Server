@@ -139,6 +139,74 @@ describe('readSqlitePhysicalMetrics (#210 SQLite physical space boundary)', () =
     }
   });
 
+  it('physically reclaims a deleted payload and truncates the WAL', async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, 'compact.sqlite');
+    const db = new SqliteDatabase(file);
+    try {
+      db.connection.exec('CREATE TABLE bulk (id INTEGER PRIMARY KEY, body TEXT);');
+      db.connection.exec('BEGIN;');
+      const body = 'x'.repeat(64 * 1024);
+      for (let i = 0; i < 200; i++) {
+        db.connection.prepare('INSERT INTO bulk VALUES (?, ?)').run(i, body);
+      }
+      db.connection.exec('COMMIT;');
+      db.connection.exec('DELETE FROM bulk WHERE id > 10;');
+
+      const before = db.physicalMetrics({ checkpointMode: 'none' });
+      expect(before.freelistBytes).toBeGreaterThan(0);
+
+      const result = db.compact();
+      expect(result.status).toBe('compacted');
+      if (result.status !== 'compacted') throw new Error('unreachable');
+      expect(result.beforeBytes).toBe(before.databaseBytes);
+      expect(result.afterBytes).toBeLessThan(result.beforeBytes);
+      expect(result.reclaimedBytes).toBe(result.beforeBytes - result.afterBytes);
+      expect(result.afterFreelistBytes).toBe(0);
+      expect(result.checkpointBusy).toBe(false);
+      expect(result.checkpointTruncated).toBe(true);
+      expect(result.walBytesAfter).toBe(0);
+      expect(db.physicalMetrics({ checkpointMode: 'none' }).freelistCount).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports a reader-blocked truncate instead of claiming full reclamation', async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, 'compact-reader.sqlite');
+    const writer = new SqliteDatabase(file);
+    const reader = new DatabaseSync(file, { timeout: 5_000 });
+    try {
+      writer.connection.exec('CREATE TABLE bulk (id INTEGER PRIMARY KEY, body TEXT);');
+      writer.connection.exec('BEGIN;');
+      const body = 'y'.repeat(64 * 1024);
+      for (let i = 0; i < 200; i++) {
+        writer.connection.prepare('INSERT INTO bulk VALUES (?, ?)').run(i, body);
+      }
+      writer.connection.exec('COMMIT;');
+      writer.connection.exec('DELETE FROM bulk WHERE id > 10;');
+
+      reader.exec('BEGIN;');
+      reader.prepare('SELECT count(*) AS n FROM bulk').get();
+
+      const result = writer.compact();
+      // VACUUM may run while the reader keeps its snapshot, or SQLite may
+      // report the reader as busy up front. Both are safe verdicts; what must
+      // never happen is a claim that the reader did not affect truncation.
+      if (result.status === 'skipped') {
+        expect(result.reason).toBe('reader-pressure');
+      } else {
+        expect(result.checkpointBusy).toBe(true);
+        expect(result.checkpointTruncated).toBe(false);
+      }
+      reader.exec('ROLLBACK;');
+    } finally {
+      reader.close();
+      writer.close();
+    }
+  });
+
   it('stays bounded and non-blocking for a reader holding an open WAL snapshot', async () => {
     const dir = await tempDir();
     const file = path.join(dir, 'reader.sqlite');

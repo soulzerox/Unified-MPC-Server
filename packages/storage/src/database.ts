@@ -7,6 +7,7 @@ import {
   type SqlitePhysicalMetrics,
   type SqlitePhysicalMetricsOptions,
 } from './sqlite-physical-metrics.js';
+
 import { AUDIT_MIGRATION_SQL } from './migrations/audit-migration.js';
 import { AUDIT_SCOPE_MIGRATION_SQL } from './migrations/audit-scope-migration.js';
 import { CHECKPOINT_MIGRATION_SQL } from './migrations/checkpoint-migration.js';
@@ -52,6 +53,41 @@ import { HEAVY_JOB_QUEUE_MIGRATION_SQL } from './migrations/heavy-job-queue-migr
 import { PUBLISH_APPROVAL_MIGRATION_SQL } from './migrations/publish-approval-migration.js';
 import { PUBLISH_CREDENTIAL_MIGRATION_SQL } from './migrations/publish-credential-migration.js';
 import { PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL } from './migrations/publish-approval-fingerprint-migration.js';
+
+export type SqliteCompactionResult =
+  | {
+    readonly status: 'compacted';
+    readonly beforeBytes: number;
+    readonly afterBytes: number;
+    readonly reclaimedBytes: number;
+    readonly beforeFreelistBytes: number;
+    readonly afterFreelistBytes: number;
+    /** A reader blocked the final WAL truncate; reclamation may be partial. */
+    readonly checkpointBusy: boolean;
+    readonly checkpointTruncated: boolean;
+    readonly walBytesAfter: number;
+  }
+  | {
+    readonly status: 'skipped';
+    readonly reason: 'reader-pressure';
+    readonly detail: string;
+  };
+
+/**
+ * SQLITE_BUSY / SQLITE_LOCKED, including the message-only shape some
+ * `node:sqlite` builds and wrapped errors expose.
+ */
+function isSqliteBusyError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const errcode = (error as { errcode?: unknown }).errcode;
+  if (errcode === 5 || errcode === 6) return true;
+  const message = error.message.toLowerCase();
+  return message.includes('database is locked')
+    || message.includes('database table is locked')
+    || message.includes('database schema is locked')
+    || message.includes('sqlite_busy')
+    || message.includes('sqlite_locked');
+}
 
 export interface SqliteDatabaseOptions {
   readonly backupDirectory?: string;
@@ -223,6 +259,57 @@ export class SqliteDatabase {
 
   public physicalMetrics(options?: SqlitePhysicalMetricsOptions): SqlitePhysicalMetrics {
     return readSqlitePhysicalMetrics(this.connection, this.filename, options);
+  }
+
+  /**
+   * Physically compact the database after logical GC (#210 §2-§3).
+   *
+   * `VACUUM` rebuilds the file but writes the result through the WAL, so the
+   * main file can stay at its old size until the WAL is checkpointed.
+   * `wal_checkpoint(TRUNCATE)` copies those frames back and reclaims WAL space;
+   * a reader can block the truncate, and that is reported instead of claiming
+   * unproven reclamation. A busy `VACUUM` is a reader-pressure skip; every
+   * other error is a real failure.
+   *
+   * This is the physical half only: the caller must hold the existing
+   * single-owner fence and have measured pressure before calling it.
+   */
+  public compact(): SqliteCompactionResult {
+    const before = readSqlitePhysicalMetrics(this.connection, this.filename, { checkpointMode: 'none' });
+    try {
+      this.connection.exec('VACUUM;');
+    } catch (error) {
+      if (isSqliteBusyError(error)) {
+        return {
+          status: 'skipped',
+          reason: 'reader-pressure',
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+      throw error;
+    }
+
+    let checkpointBusy = false;
+    try {
+      const row = this.connection.prepare('PRAGMA wal_checkpoint(TRUNCATE);').get() as Record<string, unknown> | undefined;
+      checkpointBusy = Number(row?.busy) === 1;
+    } catch (error) {
+      if (!isSqliteBusyError(error)) throw error;
+      checkpointBusy = true;
+    }
+
+    const after = readSqlitePhysicalMetrics(this.connection, this.filename, { checkpointMode: 'none' });
+    return {
+      status: 'compacted',
+      beforeBytes: before.databaseBytes,
+      afterBytes: after.databaseBytes,
+      reclaimedBytes: Math.max(0, before.databaseBytes - after.databaseBytes),
+      beforeFreelistBytes: before.freelistBytes,
+      afterFreelistBytes: after.freelistBytes,
+      checkpointBusy,
+      checkpointTruncated: !checkpointBusy,
+      walBytesAfter: after.walBytes,
+    };
   }
 
   private hasMigrationId(value: unknown, expectedId: string): boolean {

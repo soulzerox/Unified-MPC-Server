@@ -9,7 +9,7 @@ import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { ResourceAdmissionController } from './resource-admission.js';
 import { DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS } from './resource-admission.js';
-import { GcLeaseStore } from './gc-lease.js';
+import { GcLeaseLostError, GcLeaseStore } from './gc-lease.js';
 import { runMaintenanceCycle, type MaintenanceCycleDeps, type MaintenanceCycleFence } from './maintenance-cycle.js';
 import type { CanonicalStoreVerifyReport } from './canonical-store-verify.js';
 
@@ -166,6 +166,7 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     expect(report.status).toBe('completed');
     if (report.status !== 'completed') throw new Error('unreachable');
     expect(report.gc.status).toBe('planned');
+    expect(report.compaction).toEqual({ status: 'not-requested' });
     expect(report.verification.status).toBe('healthy');
     expect(report.tookFence).toBe(true);
     expect(report.tookAdmission).toBe(true);
@@ -194,6 +195,119 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     expect(fence?.ttlMs).toBe(60_000);
     expect(fence?.grantedAt).toEqual(NOW);
     // The owner released it; the GC pass never did.
+    expect(await leaseStore.read()).toBeNull();
+  });
+
+  it('compacts only after GC, under the same fence, and reports the evidence', async () => {
+    const root = await tempRoot();
+    const { deps, gcCalls } = await depsFor(root);
+    let gcCallsWhenCompacted = -1;
+    const compacted = {
+      status: 'compacted' as const,
+      beforeBytes: 10_000,
+      afterBytes: 4_000,
+      reclaimedBytes: 6_000,
+      beforeFreelistBytes: 7_000,
+      afterFreelistBytes: 0,
+      checkpointBusy: false,
+      checkpointTruncated: true,
+      walBytesAfter: 0,
+    };
+
+    const report = await runMaintenanceCycle({
+      ...deps,
+      compactStore: async () => {
+        gcCallsWhenCompacted = gcCalls();
+        return compacted;
+      },
+    });
+    expect(gcCallsWhenCompacted).toBe(1);
+    expect(report.status).toBe('completed');
+    if (report.status !== 'completed') throw new Error('unreachable');
+    expect(report.compaction).toEqual(compacted);
+    expect(report.verification.status).toBe('healthy');
+  });
+
+  it('renews the cycle fence at the compaction boundary', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore } = await depsFor(root);
+    let expiresAtDuringCompaction: string | undefined;
+
+    const report = await runMaintenanceCycle({
+      ...deps,
+      // Half the 60s window has elapsed when compaction starts.
+      clock: () => new Date(NOW.getTime() + 31_000),
+      compactStore: async () => {
+        expiresAtDuringCompaction = (await leaseStore.read())?.expiresAt;
+        return { status: 'planned', reason: 'pressure-justified' };
+      },
+    });
+    expect(report.status).toBe('completed');
+    // The renewal is written against the grant, not a second acquisition.
+    expect(expiresAtDuringCompaction).toBe('2026-10-18T10:01:31.000Z');
+  });
+
+  it('reports a reader-pressure compaction skip without failing the cycle', async () => {
+    const root = await tempRoot();
+    const { deps } = await depsFor(root);
+    const report = await runMaintenanceCycle({
+      ...deps,
+      compactStore: async () => ({ status: 'skipped', reason: 'reader-pressure', detail: 'database is locked' }),
+    });
+    expect(report.status).toBe('completed');
+    if (report.status !== 'completed') throw new Error('unreachable');
+    expect(report.compaction).toEqual({ status: 'skipped', reason: 'reader-pressure', detail: 'database is locked' });
+    expect(report.verification.status).toBe('healthy');
+  });
+
+  it('refuses compaction-failed and releases both locks', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore, controller } = await depsFor(root);
+    const report = await runMaintenanceCycle({
+      ...deps,
+      compactStore: async () => {
+        throw new Error('disk I/O error');
+      },
+    });
+    expect(report).toEqual({
+      status: 'refused',
+      reason: 'compaction-failed',
+      detail: 'disk I/O error',
+      tookFence: true,
+      tookAdmission: true,
+    });
+    expect(await leaseStore.read()).toBeNull();
+    expect(controller.snapshot().activeOperations).toBe(0);
+    expect(controller.snapshot().activeCost).toBe(0);
+  });
+
+  it('reports degraded verification, not just the compaction error, when both fail', async () => {
+    const root = await tempRoot();
+    const { deps } = await depsFor(root, { verifyDegraded: true });
+    const report = await runMaintenanceCycle({
+      ...deps,
+      compactStore: async () => {
+        throw new Error('disk I/O error');
+      },
+    });
+    expect(report).toEqual({
+      status: 'refused',
+      reason: 'verify-degraded',
+      detail: 'dangling refs 1 missing overlays 1 orphaned pins 1; compaction failed: disk I/O error',
+      tookFence: true,
+      tookAdmission: true,
+    });
+  });
+
+  it('propagates a lost fence before compaction and releases the grant', async () => {
+    const root = await tempRoot();
+    const { deps, leaseStore } = await depsFor(root);
+    await expect(runMaintenanceCycle({
+      ...deps,
+      compactStore: async () => {
+        throw new GcLeaseLostError('fence replaced');
+      },
+    })).rejects.toThrow('fence replaced');
     expect(await leaseStore.read()).toBeNull();
   });
 

@@ -747,16 +747,26 @@ bytes reachable=unmeasured unreferenced=unmeasured
 One bounded, operator-triggered maintenance pass over the canonical store. It
 measures the database and the free space on the data filesystem, then runs the
 maintenance cycle: headroom pre-flight, the single-owner GC fence, one
-resource-admission lease, GC under that same fence, and post-maintenance
-verification with strict manifest reads. Nothing schedules itself; this command
-is the trigger.
+resource-admission lease, GC under that same fence, physical SQLite compaction
+when the pressure gate admits it, and post-maintenance verification with strict
+manifest reads. Nothing schedules itself; this command is the trigger.
 
 ```bash
 $ unified-mpc index maintenance --dry-run
 completed (dry-run) verification healthy manifests 1
+compaction planned (pressure-justified)
 planned (dry-run) reachable 3 unreachable 1 artifact-unreachable 0
 unreachable <sha256>
 ```
+
+Physical compaction is `VACUUM` followed by `wal_checkpoint(TRUNCATE)`, so the
+rebuilt database is copied back out of the WAL and the WAL is reclaimed. The
+line reports measured before/after bytes, reclaimed bytes and the freelist
+before/after. A reader that blocks the truncate adds
+`checkpoint busy (WAL not truncated)`; the pass never claims reclamation it
+could not prove, and a later maintenance run retries. A `VACUUM` that reports
+the database busy is a successful `compaction skipped (reader-pressure): ...`
+verdict, not a failure of the GC pass around it.
 
 - Exactly one of `--dry-run` or `--apply` is required; any other shape exits `2`.
 - The pass is pressure-gated: below the compaction threshold it prints
@@ -769,8 +779,11 @@ unreachable <sha256>
   (`DEFAULT_GC_GRACE_MS`); the cycle has no `--grace` flag.
 - A refusal prints `refused <reason>: <detail>` and exits `1`. The detail is the
   deciding component's own evidence: required vs free bytes, the fence holder
-  and expiry, the admission reason, the GC planner's reason, or the degraded
-  dangling-ref/overlay/pin counts. The token alone is not the diagnosis.
+  and expiry, the admission reason, the GC planner's reason, the compaction
+  error (`compaction-failed`), or the degraded dangling-ref/overlay/pin counts.
+  If compaction fails and verification is also degraded, the refusal is
+  `verify-degraded` and its detail carries both diagnoses. The token alone is
+  not the diagnosis.
 - `completed` and `skipped` exit `0`.
 - `--json` prints the unprojected `MaintenanceCycleReport`, including the
   refusal detail.

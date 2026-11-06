@@ -37,7 +37,7 @@ async function write(root: string, relativePath: string, contents: string): Prom
 }
 
 describe('buildCanonicalSourceExpectations (#210 §13)', () => {
-  it('fences the effective view hash and declares view-only paths as deletions', async () => {
+  it('fences live bytes and reports every view path the worktree no longer holds', async () => {
     const root = await tempRoot();
     await write(root, 'src/a.ts', HELLO);
     await write(root, 'src/dirty.ts', DIRTY);
@@ -45,8 +45,8 @@ describe('buildCanonicalSourceExpectations (#210 §13)', () => {
     const view = new Map<string, string>([
       ['src/a.ts', HELLO_HASH],
       // The declared revision says this path holds different bytes than disk:
-      // the fence must publish the declared hash so the provider sees the drift
-      // instead of adopting the live byte under that revision.
+      // the fence publishes what the scanner will read and reports the drift,
+      // because no hash here can make the worktree match the view.
       ['src/dirty.ts', 'f'.repeat(64)],
       // Tracked in the revision but removed from the worktree.
       ['src/gone.ts', 'e'.repeat(64)],
@@ -60,19 +60,21 @@ describe('buildCanonicalSourceExpectations (#210 §13)', () => {
     });
     expect(plan.expectedPaths).toEqual({
       'src/a.ts': HELLO_HASH,
-      'src/dirty.ts': 'f'.repeat(64),
+      'src/dirty.ts': DIRTY_HASH,
     });
     expect(plan.deletedPaths).toEqual(['src/gone.ts']);
+    expect(plan.driftedPaths).toEqual(['src/dirty.ts', 'src/gone.ts']);
   });
 
-  it('uses the view hash for tracked paths and the live hash for untracked ones', async () => {
+  it('keeps the view hash for a tracked path that still matches and hashes untracked paths live', async () => {
     const root = await tempRoot();
     await write(root, 'src/a.ts', HELLO);
     await write(root, 'src/b.ts', DIRTY);
     await write(root, 'src/untracked.ts', DIRTY);
     const view = new Map<string, string>([
       ['src/a.ts', HELLO_HASH],
-      // As above: the view is authoritative even when the worktree disagrees.
+      // The worktree disagrees with the view: live hash plus drift, never the
+      // view hash, so the request cannot claim bytes the view does not hold.
       ['src/b.ts', HELLO_HASH],
       ['src/only-in-view.ts', 'c'.repeat(64)],
     ]);
@@ -83,10 +85,11 @@ describe('buildCanonicalSourceExpectations (#210 §13)', () => {
     });
     expect(plan.expectedPaths).toEqual({
       'src/a.ts': HELLO_HASH,
-      'src/b.ts': HELLO_HASH,
+      'src/b.ts': DIRTY_HASH,
       'src/untracked.ts': DIRTY_HASH,
     });
     expect(plan.deletedPaths).toEqual(['src/only-in-view.ts']);
+    expect(plan.driftedPaths).toEqual(['src/b.ts', 'src/only-in-view.ts']);
 
     await expect(buildCanonicalSourceExpectations({
       rootPath: root,
@@ -106,6 +109,8 @@ describe('buildCanonicalSourceExpectations (#210 §13)', () => {
     });
     expect(plan.expectedPaths).toEqual({});
     expect(plan.deletedPaths).toEqual(['src/a.ts']);
+    // A removal the caller already declared is not drift.
+    expect(plan.driftedPaths).toEqual([]);
   });
 
   it('sends nothing for a full request with no revision view', async () => {

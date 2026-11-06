@@ -701,7 +701,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
    * repository; a missing ref is `absent` and a Goal whose base drifted is
    * `goal_unadmitted`, and both keep indexing instead of failing. The fence is
    * built from the same view the bytes come from: the manifest only when the
-   * checkout is exactly on it, or the admitted Goal's logical view.
+   * checkout is exactly on it, or the admitted Goal's logical view. A view that
+   * the worktree no longer holds is never claimed: the request records `dirty`
+   * and fences the live bytes, so an unsynced overlay or a probe race degrades
+   * the binding instead of turning an ordinary index into `stale_index`.
    */
   private async canonicalCodeIndexPlan(
     workspace: {
@@ -774,11 +777,22 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         });
         const tombstones = await this.goalTombstones(goalWorkspaceId);
         const fence = await this.buildCanonicalFence(workspace.rootPath, requestedPaths, view, tombstones);
+        if (fence.drifted) {
+          // A Goal's worktree may be dirty because the overlay records the
+          // changed bytes. When it does not — no entry yet for a change, or a
+          // tombstone that was never recorded — the logical view is not what
+          // this worktree holds, so claiming it would publish bytes the base
+          // revision never contained. Index unbound instead.
+          return ok({
+            binding: 'dirty',
+            bindingReason: 'view_drift',
+            fence: fence.fence,
+            ...fence.fields,
+          });
+        }
         if (!this.revisionManifestSupported) {
           return ok({ binding: 'unsupported', fence: fence.fence, ...fence.fields });
         }
-        // A Goal's worktree may be dirty: the overlay records the changed bytes,
-        // and admission, not `dirtyState`, decides the binding.
         return ok({ binding: 'bound', fence: fence.fence, ...fence.fields, sourceIdentity: identity });
       }
       const evidence = await this.workspaceEvidence(workspace.workspaceId);
@@ -793,8 +807,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         evidence?.deletedPaths ?? [],
       );
       // Only a clean checkout exactly on the manifest commit contains the
-      // revision's bytes. Anything else still indexes, but never claims them.
-      if (evidence?.dirtyState !== 'clean' || !sameRevision) {
+      // revision's bytes. A path that drifted from the manifest between the
+      // evidence probe and the fence disproves the same claim, so all three
+      // gate `bound`.
+      if (evidence?.dirtyState !== 'clean' || !sameRevision || fence.drifted) {
         return ok({ binding: 'dirty', fence: fence.fence, ...fence.fields });
       }
       if (!this.revisionManifestSupported) {
@@ -842,10 +858,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   ): Promise<{
     readonly fence: CanonicalIndexRecord['fence'];
     readonly fields: Pick<CanonicalIndexPlan, 'expectedPaths' | 'deletedPaths'>;
+    /** The worktree no longer holds the path set the caller's view declared. */
+    readonly drifted: boolean;
   }> {
     // The fence flag is independent of the identity flag: a provider can
     // consume `expected_paths` without recording a revision anchor (#210 §4).
-    if (!this.expectedHashFenceSupported) return { fence: 'none', fields: {} };
+    if (!this.expectedHashFenceSupported) return { fence: 'none', fields: {}, drifted: false };
     const plan = await buildCanonicalSourceExpectations({
       rootPath,
       requestedPaths: requestedPaths.length === 0 ? null : requestedPaths,
@@ -865,6 +883,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         ...(expectedPaths === undefined ? {} : { expectedPaths }),
         ...(deleted === undefined ? {} : { deletedPaths: deleted }),
       },
+      drifted: plan.driftedPaths.length > 0,
     };
   }
 

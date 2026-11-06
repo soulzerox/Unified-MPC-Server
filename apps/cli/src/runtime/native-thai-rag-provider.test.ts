@@ -3450,7 +3450,10 @@ describe('canonical code_index source identity (#210 §13)', () => {
   it('fences live bytes and declares tracked deletions for a dirty plain checkout', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
-    await write(workspaceRoot, 'src/a.ts', HELLO);
+    // The worktree holds bytes the manifest does not describe: a scoped request
+    // must fence them live instead of declaring the committed hash, which the
+    // provider would report as `stale_index`.
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
     await seedSource(dataRoot, [
       { path: 'src/a.ts', contentHash: HELLO_HASH },
       { path: 'src/b.ts', contentHash: WORLD_HASH },
@@ -3473,8 +3476,45 @@ describe('canonical code_index source identity (#210 §13)', () => {
     if (!result.ok) return;
     const args = demandCalls(calls)[0]!;
     expect(args).not.toHaveProperty('source_identity');
-    expect(args.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(args.expected_paths).toEqual({ 'src/a.ts': DIRTY_HASH });
     expect(args.deleted_paths).toEqual(['src/b.ts']);
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'dirty', canonical_fence: 'fenced' },
+    });
+    await driver.stop();
+  });
+
+  it('does not stale a full request because one tracked file is dirty', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    await write(workspaceRoot, 'src/b.ts', WORLD);
+    await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      evidence: sourceEvidence({ dirtyState: 'dirty' }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    // The unchanged leaf keeps its manifest hash; only the drifted one is live.
+    expect(args.expected_paths).toEqual({
+      'src/a.ts': DIRTY_HASH,
+      'src/b.ts': WORLD_HASH,
+    });
     expect(result.value).toMatchObject({
       structuredContent: { canonical_binding: 'dirty', canonical_fence: 'fenced' },
     });
@@ -3564,6 +3604,57 @@ describe('canonical code_index source identity (#210 §13)', () => {
     await driver.stop();
   });
 
+  it('indexes a Goal whose overlay does not describe the worktree unbound instead of stale', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    // No overlay entry records this edit (the overlay writer is a later
+    // rollout step). The logical view is the pinned base, which the worktree no
+    // longer holds, so claiming it would fence `HELLO_HASH` and the provider
+    // would abort the whole index as `stale_index`.
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    const manifest = await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const refs = new CanonicalRefStore(canonicalRoot);
+    const overlays = new GoalOverlayStore(canonicalRoot);
+    await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: workspaceId,
+      canonicalRef: CANONICAL_REF,
+      expectedBase: {
+        commitSha: COMMIT,
+        treeOid: manifest.treeOid,
+        manifestId: manifest.manifestId,
+      },
+    });
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      evidence: sourceEvidence({ dirtyState: 'dirty' }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    expect(args.expected_paths).toEqual({ 'src/a.ts': DIRTY_HASH });
+    expect(result.value).toMatchObject({
+      structuredContent: {
+        canonical_binding: 'dirty',
+        canonical_binding_reason: 'view_drift',
+        canonical_fence: 'fenced',
+      },
+    });
+    await driver.stop();
+  });
+
   it('indexes an unadmitted Goal unbound with live hashes and no full-request fence', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -3647,7 +3738,7 @@ describe('canonical code_index source identity (#210 §13)', () => {
   it.each([
     ['stale_index', 'CONFLICT'],
     ['invalid_input', 'INVALID_INPUT'],
-  ])('passes through a %s refusal with its payload', async (providerCode, mappedCode) => {
+  ])('maps a %s refusal onto the documented Unified error', async (providerCode, mappedCode) => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     await write(workspaceRoot, 'src/a.ts', HELLO);

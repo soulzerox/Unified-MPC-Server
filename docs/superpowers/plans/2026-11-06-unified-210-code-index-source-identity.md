@@ -247,6 +247,17 @@ omitted from `expected_paths`, and the remaining tree leaves are fenced. A
 removal is a declaration, not a fence, so it neither hides an unexpected live
 file nor requires the skip rule.
 
+> **Implementation note (2026-11-07).** The provider only ever reads the live
+> byte, so the fence publishes the view hash only where the worktree still holds
+> it; a tracked path whose bytes disagree with the view is fenced live and
+> reported as drift. Declaring the view hash there made an ordinary dirty
+> checkout — and an admitted Goal whose overlay has no entry yet for a change —
+> fail the whole index as `stale_index`. The fence therefore carries
+> `driftedPaths`, and the adapter downgrades the binding to `dirty`
+> (`canonical_binding_reason: 'view_drift'` for a Goal) instead of claiming a
+> view the worktree no longer contains. The overlay writer is a later rollout
+> step; until it lands, a Goal with edits indexes unbound rather than failing.
+
 Until the provider rule above is released, a scoped request sends no
 `expected_paths` either: a requested hidden, ignored, sensitive, minified,
 binary, oversized or symlinked path would otherwise turn an ordinary demand
@@ -335,8 +346,9 @@ Unified side:
 - the adapter takes the Goal branch only for `lifecycleKind === 'goal'` with a
   non-null `goalId`, and both workspace paths (ordinary and strict FD3) carry
   those fields; only a plain checkout with `dirtyState: 'clean'` may carry
-  `source_identity`, while an admitted Goal binds through its view regardless of
-  worktree dirtiness;
+  `source_identity`, while an admitted Goal binds through its view whenever the
+  worktree still holds that view (worktree dirtiness alone does not unbind it);
+  a view the fence reports as drifted records `dirty` instead;
 - an existing `verification.json` record without `dirtyState`/`deletedPaths`
   still parses (`unknown`/empty) and does not force a re-index;
 - the automatic admission pass stays unanchored: it sends no identity or fence

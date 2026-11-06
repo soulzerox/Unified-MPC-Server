@@ -33,6 +33,14 @@ export interface CanonicalSourceExpectationInput {
 export interface CanonicalSourceExpectations {
   readonly expectedPaths: Readonly<Record<string, string>>;
   readonly deletedPaths: readonly string[];
+  /**
+   * Paths the view claims but the worktree no longer holds: a tracked file
+   * whose bytes differ from the view entry, or a view entry missing from disk
+   * without a declared removal. A caller that still claimed the view for this
+   * request would publish those bytes under it, so the adapter downgrades the
+   * binding instead of treating the fence as a claim about the revision.
+   */
+  readonly driftedPaths: readonly string[];
 }
 
 /** A requested path the caller cannot describe at all: neither view nor disk knows it. */
@@ -46,17 +54,19 @@ export class CanonicalSourceExpectationError extends Error {
 /**
  * Build the provider's source fence for one `code_index` request (#210 §13).
  *
- * `expected_paths` is the hash of the byte this call believes it is
- * publishing: the effective-view hash for a tracked path, and the live content
- * hash only for a path the view does not describe (dirty or untracked). The
- * view is the caller's declaration of the revision it means to publish, so a
- * live byte that disagrees with it is drift the provider must report as a
- * violation instead of content silently adopted under that revision. A tracked
- * path that is absent from disk is never an expectation — the scanner cannot
- * observe bytes for it — so it becomes a declaration in `deleted_paths` and is
- * removed from the fence. A requested path that exists nowhere is refused
- * before the child call instead of being "declared" as a deletion the caller
- * never owned.
+ * `expected_paths` is the hash of the byte the scanner will read: the
+ * effective-view hash when the worktree still holds it, and the live content
+ * hash for a path the view does not describe or no longer matches. The fence
+ * never declares a view hash for bytes the worktree already contradicts —
+ * doing so turns a dirty checkout or an unsynced Goal overlay into
+ * `stale_index`, and the provider only ever observes the live byte. Paths whose
+ * bytes disagree with the view are reported in `driftedPaths` so the caller can
+ * stop claiming the view for this request instead of publishing drift under it.
+ * A tracked path that is absent from disk is never an expectation — the
+ * scanner cannot observe bytes for it — so it becomes a declaration in
+ * `deleted_paths` and is removed from the fence. A requested path that exists
+ * nowhere is refused before the child call instead of being "declared" as a
+ * deletion the caller never owned.
  *
  * A removal is a declaration, not a fence: it never hides an unexpected live
  * file, so it needs no skip-policy rule in the caller.
@@ -74,6 +84,7 @@ export async function buildCanonicalSourceExpectations(
     : dedupeRequestedPaths(input.requestedPaths);
   const expected = new Map<string, string>();
   const deleted = new Set<string>();
+  const drifted = new Set<string>();
   for (const candidate of candidates) {
     if (declared.has(candidate)) {
       deleted.add(candidate);
@@ -82,14 +93,23 @@ export async function buildCanonicalSourceExpectations(
     const live = await hashLivePath(input.rootPath, candidate);
     if (live.kind === 'unfenceable') continue;
     if (live.kind === 'file') {
-      // Tracked paths keep the effective-view hash so a byte that drifted from
-      // the declared revision fails the provider's fence instead of being
-      // published as that revision. Only an untracked path (no view entry)
-      // falls back to the byte on disk.
-      expected.set(candidate, input.view?.get(candidate) ?? live.contentHash);
+      const viewHash = input.view?.get(candidate);
+      if (viewHash !== undefined && viewHash !== live.contentHash) {
+        // The view says these bytes belong to the declared revision, but the
+        // worktree holds something else. Fence what the scanner will actually
+        // read, and report the disagreement so the caller does not claim the
+        // view for it.
+        drifted.add(candidate);
+        expected.set(candidate, live.contentHash);
+        continue;
+      }
+      expected.set(candidate, viewHash ?? live.contentHash);
       continue;
     }
     if (input.view?.has(candidate) === true) {
+      // Tracked in the view but gone from the worktree: a removal is only a
+      // declaration, so it is drift unless the caller already declared it.
+      drifted.add(candidate);
       deleted.add(candidate);
       continue;
     }
@@ -104,6 +124,7 @@ export async function buildCanonicalSourceExpectations(
   return {
     expectedPaths: Object.fromEntries([...expected].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
     deletedPaths: [...deleted].sort(),
+    driftedPaths: [...drifted].sort(),
   };
 }
 

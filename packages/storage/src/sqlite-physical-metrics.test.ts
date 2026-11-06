@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -169,6 +169,60 @@ describe('readSqlitePhysicalMetrics (#210 SQLite physical space boundary)', () =
       expect(db.physicalMetrics({ checkpointMode: 'none' }).freelistCount).toBe(0);
     } finally {
       db.close();
+    }
+  });
+
+  it('survives a crash between VACUUM and checkpoint and reclaims it on the next pass', async () => {
+    // issue-210 acceptance addition: interruption inside the compaction window
+    // must not lose rows or leave a file the next maintenance pass cannot free.
+    const dir = await tempDir();
+    const file = path.join(dir, 'crash.sqlite');
+    const crashFile = path.join(dir, 'crash-copy.sqlite');
+    const db = new SqliteDatabase(file);
+    try {
+      db.connection.exec('CREATE TABLE bulk (id INTEGER PRIMARY KEY, body TEXT);');
+      db.connection.exec('BEGIN;');
+      const body = 'z'.repeat(64 * 1024);
+      for (let i = 0; i < 120; i++) {
+        db.connection.prepare('INSERT INTO bulk VALUES (?, ?)').run(i, body);
+      }
+      db.connection.exec('COMMIT;');
+      db.connection.exec('DELETE FROM bulk WHERE id > 10;');
+
+      // VACUUM writes the rebuilt database through the WAL, so a process that
+      // dies before `wal_checkpoint(TRUNCATE)` leaves the old main file plus a
+      // WAL that carries the new one. Snapshot exactly those two files into a
+      // second directory; the shared-memory file is not copied because SQLite
+      // rebuilds it from the WAL.
+      db.connection.exec('VACUUM;');
+      await copyFile(file, crashFile);
+      await copyFile(`${file}-wal`, `${crashFile}-wal`);
+      expect((await stat(`${crashFile}-wal`)).size).toBeGreaterThan(0);
+    } finally {
+      db.close();
+    }
+
+    const reopened = new SqliteDatabase(crashFile);
+    try {
+      // Recovery from the surviving WAL: no row is lost and the file is sound.
+      expect(reopened.connection.prepare('PRAGMA integrity_check;').get()).toEqual({ integrity_check: 'ok' });
+      expect(reopened.connection.prepare('SELECT count(*) AS n FROM bulk').get()).toEqual({ n: 11 });
+
+      const before = reopened.physicalMetrics({ checkpointMode: 'none' });
+      // The abandoned VACUUM already rebuilt the pages, but the main file is
+      // still at its pre-crash size until a truncating checkpoint runs.
+      expect(before.freelistCount).toBe(0);
+      expect(before.walBytes).toBeGreaterThan(0);
+
+      const result = reopened.compact();
+      expect(result.status).toBe('compacted');
+      if (result.status !== 'compacted') throw new Error('unreachable');
+      expect(result.walBytesAfter).toBe(0);
+      expect(result.afterBytes).toBeLessThan(before.databaseBytes);
+      expect(reopened.connection.prepare('PRAGMA integrity_check;').get()).toEqual({ integrity_check: 'ok' });
+      expect(reopened.connection.prepare('SELECT count(*) AS n FROM bulk').get()).toEqual({ n: 11 });
+    } finally {
+      reopened.close();
     }
   });
 

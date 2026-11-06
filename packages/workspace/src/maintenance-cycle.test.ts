@@ -11,6 +11,7 @@ import { ResourceAdmissionController } from './resource-admission.js';
 import { DEFAULT_PROCESS_RESOURCE_ADMISSION_LIMITS } from './resource-admission.js';
 import { GcLeaseStore } from './gc-lease.js';
 import { runMaintenanceCycle, type MaintenanceCycleDeps, type MaintenanceCycleFence } from './maintenance-cycle.js';
+import type { CanonicalStoreVerifyReport } from './canonical-store-verify.js';
 
 const NOW = new Date('2026-10-18T10:00:00.000Z');
 const H = (n: string): string => n.repeat(64).slice(0, 64);
@@ -96,8 +97,14 @@ function healthyVerify(): Promise<{ status: 'healthy' }> {
   return Promise.resolve({ status: 'healthy' });
 }
 
-function degradedVerify(): Promise<{ status: 'degraded' }> {
-  return Promise.resolve({ status: 'degraded' });
+function degradedVerify(): Promise<CanonicalStoreVerifyReport> {
+  return Promise.resolve({
+    status: 'degraded',
+    danglingRefs: [{ ref: REF, manifestId: H('d') }],
+    missingOverlays: ['ws_missing'],
+    orphanedPins: [H('e')],
+    manifests: [],
+  });
 }
 
 async function depsFor(root: string, overrides: {
@@ -213,12 +220,24 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     const root = await tempRoot();
     const { deps } = await depsFor(root, { diskFreeBytes: null });
     const r1 = await runMaintenanceCycle(deps);
-    expect(r1).toEqual({ status: 'refused', reason: 'headroom-unknown', tookFence: false, tookAdmission: false });
+    expect(r1).toEqual({
+      status: 'refused',
+      reason: 'headroom-unknown',
+      detail: 'databaseBytes 104857600 diskFreeBytes unknown',
+      tookFence: false,
+      tookAdmission: false,
+    });
 
     const root2 = await tempRoot();
     const { deps: deps2 } = await depsFor(root2, { diskFreeBytes: 10 * 1024 * 1024 });
     const r2 = await runMaintenanceCycle(deps2);
-    expect(r2).toEqual({ status: 'refused', reason: 'headroom-insufficient', tookFence: false, tookAdmission: false });
+    expect(r2).toEqual({
+      status: 'refused',
+      reason: 'headroom-insufficient',
+      detail: 'required 276824064 bytes free 10485760',
+      tookFence: false,
+      tookAdmission: false,
+    });
   });
 
   it('refuses when the fence is held or corrupt, failing closed', async () => {
@@ -228,14 +247,27 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     const leaseStore = deps.leaseStore;
     await leaseStore.acquire({ ownerId: 'other-worker', now: NOW, ttlMs: 60_000 });
     const r1 = await runMaintenanceCycle(deps);
-    expect(r1).toEqual({ status: 'refused', reason: 'fence-acquire-failed', tookFence: false, tookAdmission: false });
+    expect(r1).toEqual({
+      status: 'refused',
+      reason: 'fence-acquire-failed',
+      detail: 'held by other-worker until 2026-10-18T10:01:00.000Z',
+      tookFence: false,
+      tookAdmission: false,
+    });
   });
 
   it('refuses when admission is rejected', async () => {
     const root = await tempRoot();
     const { deps } = await depsFor(root, { admissionCost: 999_999 });
     const report = await runMaintenanceCycle(deps);
-    expect(report).toEqual({ status: 'refused', reason: 'admission-rejected', tookFence: true, tookAdmission: false });
+    expect(report).toMatchObject({
+      status: 'refused',
+      reason: 'admission-rejected',
+      tookFence: true,
+      tookAdmission: false,
+    });
+    if (report.status !== 'refused') throw new Error('unexpected');
+    expect(report.detail).toMatch(/^admission denied: /);
     // Fence released: another cycle can still run.
     const deps2 = await depsFor(root);
     expect((await runMaintenanceCycle(deps2.deps)).status).toBe('completed');
@@ -246,14 +278,26 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
     const { deps } = await depsFor(root);
     const runGcQuarantine = async (): Promise<{ status: 'refused'; reason: string }> => ({ status: 'refused', reason: 'missing root manifest' });
     const report = await runMaintenanceCycle({ ...deps, runGcQuarantine });
-    expect(report).toEqual({ status: 'refused', reason: 'gc-refused', tookFence: true, tookAdmission: true });
+    expect(report).toEqual({
+      status: 'refused',
+      reason: 'gc-refused',
+      detail: 'missing root manifest',
+      tookFence: true,
+      tookAdmission: true,
+    });
   });
 
   it('refuses when post-maintenance verification is degraded', async () => {
     const root = await tempRoot();
     const { deps } = await depsFor(root, { verifyDegraded: true });
     const report = await runMaintenanceCycle(deps);
-    expect(report).toEqual({ status: 'refused', reason: 'verify-degraded', tookFence: true, tookAdmission: true });
+    expect(report).toEqual({
+      status: 'refused',
+      reason: 'verify-degraded',
+      detail: 'dangling refs 1 missing overlays 1 orphaned pins 1',
+      tookFence: true,
+      tookAdmission: true,
+    });
   });
 
   it('releases the fence and admission lease when GC quarantine throws', async () => {

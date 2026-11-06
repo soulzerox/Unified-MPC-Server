@@ -183,12 +183,14 @@ export function parseIndexMaintenanceArgs(args: readonly string[]): Result<Index
  * Render one maintenance cycle report (#210 §3, §5-§7).
  *
  * The cycle's own verdict is the only summary: a refusal is printed as the
- * safety decision it is, a skip as a successful "nothing to do", and a
- * completed pass keeps the existing GC plan/apply lines instead of inventing a
- * second rendering of the same counts.
+ * safety decision it is — token plus the deciding component's detail, so an
+ * operator sees the holder, the numbers or the degraded counts rather than an
+ * opaque token — a skip as a successful "nothing to do", and a completed pass
+ * keeps the existing GC plan/apply lines instead of inventing a second
+ * rendering of the same counts.
  */
 export function formatIndexMaintenance(report: MaintenanceCycleReport, dryRun: boolean): string {
-  if (report.status === 'refused') return `refused ${report.reason}`;
+  if (report.status === 'refused') return `refused ${report.reason}: ${report.detail}`;
   if (report.status === 'skipped') return `skipped ${report.reason}`;
   const mode = dryRun ? 'dry-run' : 'applied';
   return [

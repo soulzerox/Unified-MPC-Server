@@ -264,13 +264,14 @@ describe('formatIndexMaintenance', () => {
     }, true)).toBe('skipped below-threshold');
   });
 
-  it('prints a refusal as the safety verdict', () => {
+  it('prints a refusal as the safety verdict with the deciding detail', () => {
     expect(formatIndexMaintenance({
       status: 'refused',
       reason: 'headroom-insufficient',
+      detail: 'required 276824064 bytes free 10485760',
       tookFence: false,
       tookAdmission: false,
-    }, false)).toBe('refused headroom-insufficient');
+    }, false)).toBe('refused headroom-insufficient: required 276824064 bytes free 10485760');
   });
 });
 
@@ -279,6 +280,7 @@ describe('indexMaintenanceExitCode', () => {
     expect(indexMaintenanceExitCode({
       status: 'refused',
       reason: 'admission-rejected',
+      detail: 'admission denied: global-cost-limit',
       tookFence: true,
       tookAdmission: false,
     })).toBe(1);

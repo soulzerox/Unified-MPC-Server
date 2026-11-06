@@ -742,6 +742,39 @@ bytes reachable=unmeasured unreferenced=unmeasured
 - Exit `0` for `measured`, `1` for `refused` or an unreadable store, `2` for
   arguments that are not `space` plus an optional `--json`.
 
+### `unified-mpc index maintenance (--dry-run | --apply) [--json]`
+
+One bounded, operator-triggered maintenance pass over the canonical store. It
+measures the database and the free space on the data filesystem, then runs the
+maintenance cycle: headroom pre-flight, the single-owner GC fence, one
+resource-admission lease, GC under that same fence, and post-maintenance
+verification with strict manifest reads. Nothing schedules itself; this command
+is the trigger.
+
+```bash
+$ unified-mpc index maintenance --dry-run
+completed (dry-run) verification healthy manifests 1
+planned (dry-run) reachable 3 unreachable 1 artifact-unreachable 0
+unreachable <sha256>
+```
+
+- Exactly one of `--dry-run` or `--apply` is required; any other shape exits `2`.
+- The pass is pressure-gated: below the compaction threshold it prints
+  `skipped below-threshold` and does not run GC. `index gc --apply` remains the
+  unconditional GC verb.
+- `--dry-run` still takes the fence and the admission decision — the safety
+  decision must be the same one an apply takes — but runs GC in plan mode and
+  verifies read-only.
+- `--apply` quarantines with the default seven-day grace window
+  (`DEFAULT_GC_GRACE_MS`); the cycle has no `--grace` flag.
+- A refusal prints `refused <reason>: <detail>` and exits `1`. The detail is the
+  deciding component's own evidence: required vs free bytes, the fence holder
+  and expiry, the admission reason, the GC planner's reason, or the degraded
+  dangling-ref/overlay/pin counts. The token alone is not the diagnosis.
+- `completed` and `skipped` exit `0`.
+- `--json` prints the unprojected `MaintenanceCycleReport`, including the
+  refusal detail.
+
 ---
 
 ## 10. Exit Code Contract

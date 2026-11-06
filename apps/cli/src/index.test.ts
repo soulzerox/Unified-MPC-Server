@@ -1347,11 +1347,17 @@ describe('CLI execution dispatcher', () => {
     const refused: string[] = [];
     const refusedCode = await runCli(['index', 'maintenance', '--apply'], {
       ...baseDependencies,
-      indexMaintenance: async () => ({ status: 'refused', reason: 'headroom-insufficient', tookFence: false, tookAdmission: false }),
+      indexMaintenance: async () => ({
+        status: 'refused',
+        reason: 'headroom-insufficient',
+        detail: 'required 276824064 bytes free 10485760',
+        tookFence: false,
+        tookAdmission: false,
+      }),
       write: (text) => refused.push(text),
     });
     expect(refusedCode).toBe(1);
-    expect(refused).toEqual(['refused headroom-insufficient']);
+    expect(refused).toEqual(['refused headroom-insufficient: required 276824064 bytes free 10485760']);
 
     const json: string[] = [];
     const jsonCode = await runCli(['index', 'maintenance', '--dry-run', '--json'], {
@@ -1420,7 +1426,8 @@ describe('CLI execution dispatcher', () => {
         writeError: () => undefined,
       });
       expect(refusedCode).toBe(1);
-      expect(refused).toEqual(['refused fence-acquire-failed']);
+      expect(refused).toHaveLength(1);
+      expect(refused[0]).toMatch(/^refused fence-acquire-failed: held by other_gc until \d{4}-\d{2}-\d{2}T/);
       expect(await quarantine.list()).toEqual([]);
       // The refused cycle never owned the fence, so it must not release it.
       expect((await lease.read())?.ownerId).toBe('other_gc');

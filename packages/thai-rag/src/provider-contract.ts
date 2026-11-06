@@ -118,6 +118,10 @@ export interface ThaiRagProviderHandshake {
   readonly workspaceReady?: boolean;
   readonly embeddingIndexGeneration: number;
   readonly degradedReasons?: readonly string[];
+  /** Provider capability flag: `revision_manifest` source identity is supported. */
+  readonly revisionManifest?: boolean;
+  /** Provider capability flag: `expected_hash_fence` verification is supported. */
+  readonly expectedHashFence?: boolean;
   readonly components?: ThaiRagProviderComponents;
   readonly legacyAdapter?: string;
 }

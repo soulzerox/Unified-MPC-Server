@@ -1649,6 +1649,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.workspaceIndexJobIds.set(workspace.id, job.jobId);
     const monitor = (async (): Promise<Result<void>> => {
       try {
+        // #210 §13 (rollout step 5): an automatic admission generation is a
+        // code_index request like any other, so it makes the same canonical
+        // claim. The resolver's ordinary outcomes (absent, goal_unadmitted,
+        // dirty, unsupported) keep indexing and only change what the ledger
+        // records; a corrupt canonical store refuses the admission exactly as
+        // it refuses a demand pass.
+        const canonical = await this.canonicalCodeIndexPlan({
+          workspaceId: workspace.id,
+          rootPath: path.resolve(workspace.realRootPath),
+          ...(workspace.lifecycleKind === undefined ? {} : { lifecycleKind: workspace.lifecycleKind }),
+          ...(workspace.goalId === undefined ? {} : { goalId: workspace.goalId }),
+        }, []);
+        if (!canonical.ok) {
+          await this.jobs.fail(job.jobId, canonical.error.message, ownerId);
+          await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
+          return canonical;
+        }
+        this.canonicalIndexRecords.set(job.jobId, canonical.value);
+        const canonicalArgs = canonicalChildArgs(canonical.value);
         let indexed: Result<unknown>;
         // issue-202: trial-first — bounded foreground probe proves the
         // pipeline before full admission. Trial failure takes the same
@@ -1662,6 +1681,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
               background: false,
               max_files: 3,
               vectors: this.codeIndexVectors,
+              ...canonicalArgs,
             })
             : normalizeWorkerCallResult(
               'code_index',
@@ -1672,6 +1692,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
                 background: false,
                 max_files: 3,
                 vectors: this.codeIndexVectors,
+                ...canonicalArgs,
               }),
             ))));
           if (!trial.ok) indexed = trial;
@@ -1693,6 +1714,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             background: true,
             mode: 'delta',
             vectors: this.codeIndexVectors,
+            ...canonicalArgs,
           }));
           if (!started.ok) {
             indexed = started;
@@ -1725,11 +1747,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             background: true,
             mode: 'delta',
             vectors: this.codeIndexVectors,
+            ...canonicalArgs,
           });
           indexed = normalizeWorkerCallResult('code_index', raw);
         }
 
-        if (indexed.ok) await this.jobs.complete(job.jobId, indexed.value, ownerId);
+        if (indexed.ok) await this.jobs.complete(job.jobId, this.mergeCanonicalJobResult(job.jobId, indexed.value), ownerId);
         else await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
 
         if (!this.refreshIsCurrent(generation) || !this.started || !indexed.ok) {
@@ -1769,6 +1792,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         const releasedAdmissionSlot = this.indexingWorkspaceId === workspace.id;
         if (releasedAdmissionSlot) this.indexingWorkspaceId = undefined;
         this.workspaceIndexMonitors.delete(job.jobId);
+        // The terminal writes above already merged the admission's canonical
+        // claim into the job ledger; keep only one entry per live admission.
+        this.canonicalIndexRecords.delete(job.jobId);
         if (releasedAdmissionSlot) this.scheduleNextQueuedWorkspaceAdmission(generation);
       }
     })();

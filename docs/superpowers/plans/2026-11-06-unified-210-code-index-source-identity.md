@@ -29,9 +29,12 @@ The accepted shape (shape-only validation, fail-closed):
 | `tree_oid` | no | exact 40/64-hex Git object id |
 | `revision_id` | no | `rev:v1:<64-hex>` |
 
-`expected_paths` is `{ repo-relative path: 64-hex content hash }`, `deleted_paths`
-is a list whose members must also appear in `expected_paths`. Both require
-generation mode, which is the provider default.
+`expected_paths` is `{ repo-relative path: 64-hex content hash }`. `deleted_paths`
+is a list of declared removals whose members **must not** appear in
+`expected_paths`: the provider refuses the overlap as a contradiction
+(`deleted_paths cannot also be expected with a content hash`). A removal is
+honored, not fenced — the caller owns the path set, the provider owns hiding it.
+Both require generation mode, which is the provider default.
 
 Refusals already defined by the provider:
 
@@ -67,10 +70,22 @@ Consequences:
 Add one resolver, owned by `packages/workspace`, not the CLI:
 
 ~~~ts
-resolveCanonicalSourceIdentity(rootPath): Promise<CanonicalSourceIdentity | null>
+resolveCanonicalSourceIdentity(input: {
+  rootPath: string;                          // workspace checkout
+  canonicalRoot: string;                     // <dataPath>/canonical
+  expectedRepositoryIds: readonly string[];  // this checkout's repository
+}): Promise<CanonicalSourceIdentity | null>
 ~~~
 
-It reads the active canonical ref with `CanonicalRefStore` and its manifest with
+The canonical store is store-wide, not per checkout, and one ref is bound to one
+repository, so `rootPath` alone cannot name the binding. The caller derives
+`expectedRepositoryIds` with the existing `resolveGoalRepositoryIds(rootPath)`
+(the same selector `pinGoalBaseAtCommit` already uses), and the resolver accepts
+only a ref whose manifest `repositoryId` is in that set. Zero matching refs or
+more than one is refused rather than guessed: the resolver never selects a
+binding it cannot attribute to this checkout.
+
+It reads the selected ref with `CanonicalRefStore` and its manifest with
 `CanonicalManifestStore`, and returns exactly the provider fields:
 
 ~~~ts
@@ -84,42 +99,59 @@ It reads the active canonical ref with `CanonicalRefStore` and its manifest with
 }
 ~~~
 
-Returns `null` — never a partial object — when there is no active ref or the
-manifest is missing. A partial binding would be refused by the provider anyway;
-deciding it locally keeps the failure at the caller.
+`null` means "this repository has no canonical ref" and is the only quiet case. A
+ref that exists but whose manifest is missing, unreadable, or bound to another
+repository is an error: returning `null` there would turn a dangling ref or a
+corrupt store into a silent unanchored index.
 
 ### 2. Send it, or send nothing
 
 `codeIndex()` sends `source_identity` only when the resolver returned a value and
-the provider handshake advertises the capability (see §4). It never invents
-identity from `WorkspaceSourceEvidenceIdentity`: that record is dirty/source
-evidence, not a manifest anchor, and its `repositoryIdentity` is a hash of the
-Git dir, not `repository_id`.
+the provider handshake advertises the capability (see §4). Every field comes from
+the ref/manifest record. `WorkspaceSourceEvidenceIdentity` may help identify
+*which* checkout and repository this is, but it never supplies a binding field:
+its `repositoryIdentity` is admission evidence, not `repository_id`.
 
-### 3. Fence the files this call actually asks for
+### 3. Fence the files this call asks for — and the ones it does not
 
-When the request has `paths`:
+Expected hashes are relative to the *effective* source of the checkout, not only
+the base manifest: a Goal workspace indexes overlay bytes, so for each path
 
-- look each path up in the manifest;
-- a requested path absent from the manifest is refused locally before the child
-  call — it cannot be part of the revision being declared;
-- send `expected_paths` for exactly those paths, with the manifest hashes.
+- overlay entry with a content hash (`modified` or `added`) → use that hash;
+- overlay tombstone (`deleted`, null hash) → add the path to `deleted_paths`,
+  never to `expected_paths`;
+- otherwise → the base manifest hash.
 
-When the request is full (no `paths`), do not send `expected_paths`: the
-provider re-scans the workspace and the manifest id is the anchor.
+When the request has `paths`, send `expected_paths` for exactly those paths. A
+requested path with neither an overlay entry nor a manifest entry is refused
+locally before the child call: it cannot be part of the revision being declared.
+
+When the request is full (no `paths`), still send `expected_paths` for every path
+the resolver can name (overlay first, base manifest fallback). The provider's
+`scope_expected_paths` fences the whole mapping on an unscoped run. Omitting it
+would leave `manifest_id` as a recorded declaration only: the provider has no Git
+and cannot compare the manifest to the bytes it just scanned, so a full pass could
+publish newer content under revision M's identity. Sending every entry is the
+price of binding a full pass; if that payload ever becomes a measured problem, the
+provider can grow a manifest-digest fence instead of Unified weakening this one.
 
 `deleted_paths` comes from the Goal overlay tombstones for the same scope, read
-through `GoalOverlayStore`; a tombstone is a declared removal, not a fence
-violation.
+through `GoalOverlayStore`.
 
-### 4. Capability gate, and the cross-repo prerequisite
+### 4. Capability gate and fingerprint compatibility
 
-Add `canonical_source_identity` to the Thai-RAG handshake capability list first
-(one-line provider change + handshake test). Unified gates on it:
+The provider declares the capability through its contract shape, and
+`CONTRACT_FINGERPRINT` is the hash of that shape. This repo accepts only
+fingerprints listed in `SUPPORTED_INDEX_JOB_CONTRACTS`
+(`packages/thai-rag/src/provider-contract.ts`), so the provider cannot ship the
+capability first without breaking every handshake:
 
-- capability present → send the binding when resolved;
-- capability absent → omit it (today's behavior), and record a warning in the
-  index result so an operator can see the workspace is unanchored.
+1. this repo adds the new fingerprint entry (and its required-capability set) to
+   `SUPPORTED_INDEX_JOB_CONTRACTS` — a no-op while no provider emits it;
+2. thai-rag-mcp adds `canonical_source_identity` plus its handshake test;
+3. this repo sends the binding only when the handshake lists the capability.
+   Absent capability → omit it and record `canonical_binding: 'absent'` in the
+   index result, so an operator can see the workspace is unanchored.
 
 This keeps an older provider from refusing every index request with
 `invalid_input`, and makes "unanchored" visible instead of silent.
@@ -139,13 +171,20 @@ Unified side:
 - `codeIndex()` forwards `source_identity` byte-for-byte for a workspace with an
   active manifest (regression shape of the dropped `paths` bug, #346 U10);
 - a workspace with no canonical ref sends no `source_identity` and still indexes;
-- a scoped request sends `expected_paths` for exactly its `paths`, with the
-  manifest hashes;
-- a requested path missing from the manifest is refused before the child call,
-  and nothing is sent;
-- overlay tombstones become `deleted_paths`;
+- a ref whose manifest is missing, unreadable, or bound to another repository is
+  refused, not treated as the quiet null case;
+- a scoped request sends `expected_paths` for exactly its `paths`;
+- overlay-modified and overlay-added paths are fenced with the overlay hash, and
+  untouched paths with the base manifest hash;
+- overlay tombstones become `deleted_paths` and never appear in `expected_paths`;
+- a requested path in neither the overlay nor the manifest is refused before the
+  child call, and nothing is sent;
+- a full request sends the complete expectation map, and a path moved past the
+  manifest refuses publication with `stale_index`;
 - `stale_index` and `invalid_input` pass through unchanged with their payloads;
-- the capability gate: absent capability omits the block and records the warning.
+- the capability gate: absent capability omits the block and records the warning;
+- the fingerprint gate: an unknown provider fingerprint is still refused, and the
+  new fingerprint is accepted only with the required capability set.
 
 Provider side (follow-up in thai-rag-mcp):
 
@@ -155,28 +194,32 @@ Provider side (follow-up in thai-rag-mcp):
 
 ## Open decisions
 
-1. **Where does `ref` come from?** A manifest row stores `targetRef`, but the
-   same manifest can be promoted under several refs. Recommended: send the ref
-   the resolver observed as active (`CanonicalRefStore` list), and treat the
-   manifest id as the authoritative anchor.
-2. **Full-request fencing.** A full request has no `paths`, so no per-file fence.
-   Recommended: keep it that way and rely on the provider's pre-activation
-   re-scan plus `manifest_id`; sending the whole 695-entry manifest on every full
-   pass is the expensive alternative.
+1. **Which ref is this checkout's?** A manifest row stores `targetRef`, but the
+   same manifest can be promoted under several refs and the store is store-wide.
+   Recommended: match on `expectedRepositoryIds` from the checkout's origin and
+   require exactly one ref; ambiguity refuses. Never fall back to "the only ref
+   in the store".
+2. **Full-request fencing.** Recommended: send the complete expectation map, even
+   though it is the whole manifest. A recorded `manifest_id` with no fence does
+   not bind bytes, and a weaker caller-side rule would only move the hole. If the
+   payload becomes measurable, add a provider-side manifest digest.
 3. **Unanchored warning surface.** Recommended: put it in the existing index
    result JSON (`canonical_binding: 'absent'`) rather than a new command.
 
 ## Rollout order
 
-1. thai-rag-mcp: capability + handshake test (no behavior change).
-2. This repo: resolver, adapter wiring, fence, capability gate, tests.
-3. Make the binding mandatory only after a full local reindex proves every
+1. This repo: add the new fingerprint and required capabilities to
+   `SUPPORTED_INDEX_JOB_CONTRACTS` (no provider emits it yet; no behavior change).
+2. thai-rag-mcp: capability + handshake test.
+3. This repo: resolver, adapter wiring, fence, capability gate, tests.
+4. Make the binding mandatory only after a full local reindex proves every
    canonical workspace resolves; until then an unanchored pass is allowed but
    recorded.
 
 ## Non-goals
 
-- No second Git resolver in Thai-RAG, and no Git calls from this slice.
+- No Git resolution inside Thai-RAG. Unified reuses its existing origin-remote
+  reader only to select the ref; the provider still owns no Git.
 - No schema migration; the manifest store already carries every field.
 - No change to GC, admission, leases or the maintenance cycle.
 - No WebUI projection here; §11 owns that.

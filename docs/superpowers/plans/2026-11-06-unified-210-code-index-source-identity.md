@@ -79,9 +79,11 @@ resolveCanonicalSourceIdentity(input: {
 }): Promise<CanonicalSourceResolution>
 ~~~
 
-The caller passes the exact ref it means to bind, derived the same way the rest
-of the runtime derives it (`resolveGoalBaseBranch(rootPath)` +
-`canonicalRefForBranch(defaultBranch)`), so the resolver never scans the store
+The caller passes the exact ref it means to bind. The runtime supplies a
+`canonicalRefFor(workspace)` port that resolves it where the inputs already live
+— `resolveGoalBaseBranch(realRootPath, branchName, mergePolicy)` +
+`canonicalRefForBranch(defaultBranch)` — because the driver itself has no branch
+or merge-policy port and must not grow one. The resolver never scans the store
 or picks among refs.
 
 - **Plain checkout.** Strict-read the named ref and its manifest. The manifest
@@ -89,17 +91,22 @@ or picks among refs.
   a repository with an origin that has never promoted one is unbound, and with
   `expectedRepositoryIds === null` (no origin) no canonical ref can ever be
   bound.
-- **Goal workspace.** Run `verifyGoalAdmission(refs, overlays, {
-  goalWorkspaceId, canonicalRef })`. `admitted: true` binds the returned
-  `baseManifestId`. `admitted: false` is **not** a store error and must not
-  block indexing: Goal creation deliberately succeeds with no pin when the
-  base was not the live canonical ref (`no_canonical_ref`, `commit_not_live`,
-  `repository_mismatch`), and `rebaseStaleBase` advances `baseRevision`
-  without re-pinning the overlay. Neither case has a re-pin path in this
-  slice, so the request proceeds unbound (expectations only once §3's skip rule
-  is released), sends no `source_identity`, and records
-  `canonical_binding: 'goal_unadmitted'` plus the admission reason. Only a
-  corrupt or unreadable overlay is an error.
+- **Goal workspace.** Strict-read the named ref and the overlay, then run
+  `verifyGoalAdmission(refs, overlays, { goalWorkspaceId, canonicalRef })`.
+  `verifyGoalAdmission` itself reads the ref tolerantly (`refs.read` returns
+  `null` for a corrupt file), so the resolver must not treat its `null` result
+  as "never promoted": it strict-reads first, or `verifyGoalAdmission` gains a
+  strict option. A corrupt ref is an error, never `goal_unadmitted`.
+  `admitted: true` binds the returned `baseManifestId`. `admitted: false` is
+  **not** a store error and must not block indexing: Goal creation deliberately
+  succeeds with no pin when the base was not the live canonical ref
+  (`no_canonical_ref`, `commit_not_live`, `repository_mismatch`), and
+  `rebaseStaleBase` advances `baseRevision` without re-pinning the overlay.
+  Neither case has a re-pin path in this slice, so the request proceeds unbound
+  (expectations only once §3's skip rule is released), sends no
+  `source_identity`, and records `canonical_binding: 'goal_unadmitted'` plus
+  the admission reason. Only a genuinely missing overlay is `goal_unadmitted`;
+  a corrupt or unreadable overlay is an error.
 
 It returns a resolution, not a bare identity:
 
@@ -122,13 +129,13 @@ interface CanonicalSourceIdentity {
 `absent` is only "this repository can never bind a canonical ref" (no origin,
 or no ref has ever been promoted). `goal_unadmitted` is the legitimate Goal
 state described above, not a store failure. Every other state is an error: a
-foreign manifest, a corrupt ref, a dangling manifest record, and a mismatched
-`repository_id` all refuse. Reads are strict (`CanonicalRefStore.read(ref, {
-strict: true })`, `CanonicalManifestStore(..., { strictReads: true })`) so a
-corrupt store is reported instead of being read as "never promoted". The
-resolver also reads the overlay strictly before calling
-`verifyGoalAdmission`, so a corrupt overlay is an error while a missing one is
-`goal_unadmitted`.
+foreign manifest, a corrupt ref (plain or Goal), a dangling manifest record, and
+a mismatched `repository_id` all refuse. Reads are strict
+(`CanonicalRefStore.read(ref, { strict: true })`,
+`CanonicalManifestStore(..., { strictReads: true })`) so a corrupt store is
+reported instead of being read as "never promoted". The resolver also reads the
+overlay strictly before calling `verifyGoalAdmission`, so a corrupt overlay is
+an error while a missing one is `goal_unadmitted`.
 
 ### 2. Send it only for a view the revision actually describes
 
@@ -161,24 +168,41 @@ ref/manifest record.
 a binding field: its `repositoryIdentity` is admission evidence, not
 `repository_id`.
 
-This decision needs two facts that do not reach `codeIndex()` today. Both are
+This decision needs facts that do not reach `codeIndex()` today. All are
 additive plumbing in this slice, not provider changes:
 
 - **Goal identity.** `NativeThaiRagWorkspace` carries only `id`, `rootPath` and
-  `realRootPath`; the `workspacesProvider` mapping in
-  `apps/cli/src/runtime/stdio-mcp-runtime.ts` drops `lifecycleKind` and
-  `goalId`. Widen the provider workspace type with both and stop dropping
-  them. The overlay key is the workspace id itself (`pinGoalBaseAtCommit` is
-  called with `registered.value.id`), so `goal: { goalWorkspaceId:
-  workspace.id }` is supplied only for `lifecycleKind === 'goal'` with a
-  non-null `goalId`; every other workspace takes the plain-checkout path.
-- **Cleanliness.** `WorkspaceSourceEvidenceIdentity` has no clean/dirty
-  boolean, and the admission mapping drops `GitWorkspaceSnapshot.statusEntries`.
-  Add `dirtyState: 'clean' | 'dirty' | 'unknown'`, populate it from
-  `statusEntries.length === 0` (`unknown` when no observation exists), compare
-  it in `classifyWorkspaceSourceEvidence`, and treat anything other than
-  `'clean'` as unbound. Do not infer cleanliness from `dirtyFingerprint`: the
-  empty-string sentinel is an implementation detail, not a contract.
+  `realRootPath`, and both workspace paths drop `lifecycleKind`/`goalId`: the
+  `workspacesProvider` mapping in
+  `apps/cli/src/runtime/stdio-mcp-runtime.ts` and
+  `createStrictThaiRagGoalAdmissionProvider` in
+  `apps/cli/src/runtime/native-thai-rag-goal-admission.ts`. Widen the provider
+  workspace type with both and stop dropping them in **both** paths; otherwise
+  a strict FD3 workspace silently takes the plain-checkout branch. The overlay
+  key is the workspace id itself (`pinGoalBaseAtCommit` is called with
+  `registered.value.id`), so `goal: { goalWorkspaceId: workspace.id }` is
+  supplied only for `lifecycleKind === 'goal'` with a non-null `goalId`; every
+  other workspace takes the plain-checkout path.
+- **Cleanliness and deletions (plain checkouts).**
+  `WorkspaceSourceEvidenceIdentity` has no clean/dirty boolean, and the
+  admission mapping drops `GitWorkspaceSnapshot.statusEntries`. Add
+  `dirtyState: 'clean' | 'dirty' | 'unknown'` from
+  `statusEntries.length === 0` (`unknown` when no observation exists), plus
+  `deletedPaths: readonly string[]` from the entries whose kind is deleted.
+  Compare `dirtyState` in `classifyWorkspaceSourceEvidence`; `unknown` on
+  either side is ignored (the existing fingerprints still decide), so a legacy
+  record never becomes stale solely for the missing field. For a **plain
+  checkout**, anything other than `'clean'` is unbound (records `dirty`). A Goal
+  workspace's worktree may legitimately be dirty because its overlay records
+  the changed bytes; its binding is decided by admission and the overlay, never
+  by `dirtyState`, so an admitted Goal with a non-empty overlay still binds.
+  Do not infer cleanliness from `dirtyFingerprint`: the empty-string sentinel
+  is an implementation detail, not a contract.
+  `dirtyState` and `deletedPaths` are optional in the persisted
+  `verification.json` reader (`isSourceIdentity`): a missing `dirtyState` reads
+  as `unknown` and a missing `deletedPaths` as empty, so existing
+  `schemaVersion: 1` records still parse and no migration or forced re-index is
+  required.
 
 ### 3. Fence the bytes this call asks for
 
@@ -211,14 +235,27 @@ request shapes.
 believes it is publishing: the effective-view hash (overlay or manifest) for a
 tracked, unmodified path, the live content hash for a dirty or untracked path. A
 requested path that exists nowhere — neither on disk nor in the view — is refused
-before the child call. Until the provider rule above is released, a scoped
-request sends no `expected_paths` either: a requested hidden, ignored, sensitive,
-minified, binary, oversized or symlinked path would otherwise turn an ordinary
-demand index into `stale_index`.
+before the child call.
+
+A tracked path deleted on disk is **never** an expectation: the scanner cannot
+observe bytes for it, so any hash would be reported as an absent-path violation.
+When a requested path is absent on disk but present in the view, it is declared
+in `deleted_paths` and omitted from `expected_paths`; when it is absent from
+both, the request is refused. The same rule applies to a full request: the
+`deletedPaths` collected from `statusEntries` are sent as `deleted_paths`,
+omitted from `expected_paths`, and the remaining tree leaves are fenced. A
+removal is a declaration, not a fence, so it neither hides an unexpected live
+file nor requires the skip rule.
+
+Until the provider rule above is released, a scoped request sends no
+`expected_paths` either: a requested hidden, ignored, sensitive, minified,
+binary, oversized or symlinked path would otherwise turn an ordinary demand
+index into `stale_index`.
 
 **Full request (no `paths`).** The manifest is every leaf of the Git tree, so
 the same rule is what makes the full map safe: skipped-but-present leaves are
-reported as unfenced instead of stalling the pass.
+reported as unfenced instead of stalling the pass. `deleted_paths` is still
+sent for tracked deletions even while `expected_paths` is withheld.
 
 Until the rule is released, neither shape sends expectations: record
 `canonical_fence: 'unfenced'` when a manifest is known and `'none'` otherwise.
@@ -256,6 +293,11 @@ this provider cannot consume it), and `canonical_fence: 'none'`.
   `source_identity`, `expected_paths` and `deleted_paths`.
 - The provider remains the only owner of semantic artifact identity; Unified
   sends source truth only.
+- The automatic admission pass (`startWorkspaceAdmissionIndex`, which calls
+  `code_index` directly with `max_files: 3` and then `mode: 'delta'`) is out of
+  scope in this slice. It stays unanchored, sends no identity or fence and
+  records no `canonical_binding`; routing it through the same resolver is a
+  listed follow-up, not a silent behaviour change.
 
 ## Test matrix
 
@@ -265,16 +307,20 @@ Unified side:
   an active manifest (regression shape of the dropped `paths` bug, #346 U10);
 - a workspace with no canonical ref, and a checkout with no origin, send no
   `source_identity`, still index, and record `absent`;
-- a corrupt ref read, a dangling manifest and a foreign `repositoryId` are
-  refused, never the quiet null; a failed Goal admission is not refused;
+- a corrupt ref read (plain and Goal), a dangling manifest and a foreign
+  `repositoryId` are refused, never the quiet null; a failed Goal admission is
+  not refused;
 - a Goal workspace is bound only while its pinned base equals the live ref; a
   drifted or never-pinned Goal still indexes, sends no `source_identity`, and
   records `canonical_binding: 'goal_unadmitted'` with the reason; a scoped
   request uses live hashes and a full request sends no expectations;
-- the admitted Goal binds its base manifest; a tombstone becomes `deleted_paths`
+- the admitted Goal binds its base manifest, including when its worktree is
+  dirty because the overlay is non-empty; a tombstone becomes `deleted_paths`
   and never `expected_paths`;
 - a scoped request sends the effective hash per path; a dirty path uses the live
   content hash;
+- a tracked deletion in a dirty plain checkout is sent as `deleted_paths`,
+  omitted from `expected_paths`, for scoped and full requests alike;
 - a requested path that exists nowhere is refused before the child call, and
   nothing is sent;
 - before the provider skip rule, neither a scoped nor a full request sends
@@ -283,11 +329,18 @@ Unified side:
 - after it, a scoped request that names a skipped-but-present path is not
   `stale_index` (it is reported as unfenced), while a moved hash and an absent
   path still refuse;
-- a dirty plain checkout sends expectations without `source_identity` once the
-  skip rule is released, and records `canonical_binding: 'dirty'`;
+- a dirty plain checkout sends expectations only for paths present on disk,
+  declares tracked deletions in `deleted_paths`, records `canonical_binding:
+  'dirty'`, and sends no `source_identity`;
 - the adapter takes the Goal branch only for `lifecycleKind === 'goal'` with a
-  non-null `goalId`, and only a clean checkout (`dirtyState: 'clean'`) may carry
-  `source_identity`;
+  non-null `goalId`, and both workspace paths (ordinary and strict FD3) carry
+  those fields; only a plain checkout with `dirtyState: 'clean'` may carry
+  `source_identity`, while an admitted Goal binds through its view regardless of
+  worktree dirtiness;
+- an existing `verification.json` record without `dirtyState`/`deletedPaths`
+  still parses (`unknown`/empty) and does not force a re-index;
+- the automatic admission pass stays unanchored: it sends no identity or fence
+  and records no `canonical_binding`;
 - `stale_index` and `invalid_input` pass through unchanged with their payloads;
 - the gate: flags absent → binding `'absent'` or `'unsupported'` as above and
   fence `'none'`; flags present → identity and fencing;
@@ -307,10 +360,13 @@ Provider side (follow-up in thai-rag-mcp):
 ## Open decisions
 
 1. **Which ref is this checkout's?** The store is store-wide, so the caller names
-   the ref explicitly (`resolveGoalBaseBranch` + `canonicalRefForBranch`) and the
-   resolver validates its manifest against `expectedRepositoryIds`. Recommended:
-   this explicit ref, never a scan of store refs. A checkout with no origin has
-   `expectedRepositoryIds === null`, can never match, and records `absent`.
+   the ref explicitly. The runtime supplies a `canonicalRefFor(workspace)` port
+   that resolves it with `resolveGoalBaseBranch` + `canonicalRefForBranch` where
+   `branchName` and the merge-policy port already exist; the driver receives no
+   policy port. The resolver validates its manifest against
+   `expectedRepositoryIds`. Recommended: this explicit ref, never a scan of
+   store refs. A checkout with no origin has `expectedRepositoryIds === null`,
+   can never match, and records `absent`.
 2. **Fencing a request the scanner does not fully scan.** Recommended: the
    provider intersection rule above, applied to scoped and full requests alike,
    then send expectations. Interim behaviour is unfenced, explicitly labelled
@@ -335,7 +391,9 @@ Provider side (follow-up in thai-rag-mcp):
    released; then scoped expectations, then full expectations.
 4. Goal re-pin on `rebaseStaleBase` so an advanced base can bind again; until
    then a drifted Goal indexes unbound and records `goal_unadmitted`.
-5. Make the binding mandatory only after a full local reindex proves every
+5. Route `startWorkspaceAdmissionIndex` through the same resolver, so automatic
+   admission generations are anchored too.
+6. Make the binding mandatory only after a full local reindex proves every
    canonical workspace resolves; until then an unanchored pass is allowed but
    recorded.
 
@@ -345,7 +403,11 @@ Provider side (follow-up in thai-rag-mcp):
   reader only to select the ref; the provider still owns no Git.
 - No new contract fingerprint and no new capability string.
 - No second base+overlay merge; `resolveGoalLogicalView` stays the one owner.
-- No schema migration; the manifest store already carries every field.
+- No schema migration: the manifest store already carries every field, and the
+  new verification fields are optional so existing `schemaVersion: 1` records
+  keep parsing.
+- No routing of the automatic admission pass in this slice; it is listed in the
+  rollout, not silently included.
 - No change to GC, admission, leases or the maintenance cycle.
 - No Goal overlay re-pin on `rebaseStaleBase` in this slice; an unadmitted Goal
   indexes unbound (`goal_unadmitted`) until that follow-up lands.

@@ -132,7 +132,7 @@ export class ThaiRagWorkspaceVerificationStore {
     const stored: StoredVerification = {
       schemaVersion: 1,
       workspaceId: namespace.value.workspaceId,
-      sourceIdentity: input.sourceIdentity,
+      sourceIdentity: normalizeSourceIdentity(input.sourceIdentity),
       verifiedAt: this.now().toISOString(),
       outcome: input.outcome,
       ...(input.providerStatus === undefined ? {} : { providerStatus: input.providerStatus }),
@@ -214,7 +214,7 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
   return {
     schemaVersion: 1,
     workspaceId: value.workspaceId,
-    sourceIdentity: value.sourceIdentity,
+    sourceIdentity: normalizeSourceIdentity(value.sourceIdentity),
     verifiedAt: value.verifiedAt,
     outcome: value.outcome,
     ...(value.providerStatus === undefined ? {} : { providerStatus: value.providerStatus }),
@@ -228,11 +228,28 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
   };
 }
 
+/**
+ * Persisted evidence written before #210 has no `dirtyState`/`deletedPaths`.
+ * Normalizing both on write and read keeps the record shape stable without a
+ * schema bump: a missing cleanliness reads as `unknown` (never decides
+ * freshness on its own) and missing deletions read as none.
+ */
+function normalizeSourceIdentity(identity: WorkspaceSourceEvidenceIdentity): WorkspaceSourceEvidenceIdentity {
+  return {
+    ...identity,
+    dirtyState: identity.dirtyState ?? 'unknown',
+    deletedPaths: Array.from(new Set(identity.deletedPaths ?? [])).sort(),
+  };
+}
+
 function isSourceIdentity(value: unknown): value is WorkspaceSourceEvidenceIdentity {
   if (!isRecord(value)) return false;
   return ['repositoryIdentity', 'gitCommonDirIdentity', 'worktreeIdentity', 'workspaceHead', 'dirtyFingerprint', 'stagedFingerprint']
     .every((key) => typeof value[key] === 'string' && value[key].length > 0)
-    && (value.branchName === undefined || typeof value.branchName === 'string');
+    && (value.branchName === undefined || typeof value.branchName === 'string')
+    && (value.dirtyState === undefined || value.dirtyState === 'clean' || value.dirtyState === 'dirty' || value.dirtyState === 'unknown')
+    && (value.deletedPaths === undefined
+      || (Array.isArray(value.deletedPaths) && value.deletedPaths.every((entry) => typeof entry === 'string' && entry.length > 0)));
 }
 
 function isOutcome(value: unknown): value is ThaiRagVerificationOutcome {

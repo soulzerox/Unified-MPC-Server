@@ -133,6 +133,23 @@ describe('classifyWorkspaceSourceEvidence', () => {
     expect(classifyWorkspaceSourceEvidence(undefined, source)).toBe('unknown');
     expect(classifyWorkspaceSourceEvidence(source, undefined)).toBe('unknown');
   });
+
+  it('compares known cleanliness but ignores unknown on either side (#210 §13)', () => {
+    const clean = { ...source, dirtyState: 'clean' as const };
+    const dirty = { ...source, dirtyState: 'dirty' as const };
+    const unknown = { ...source, dirtyState: 'unknown' as const };
+    expect(classifyWorkspaceSourceEvidence(clean, clean)).toBe('fresh');
+    expect(classifyWorkspaceSourceEvidence(clean, dirty)).toBe('stale');
+    expect(classifyWorkspaceSourceEvidence(clean, unknown)).toBe('fresh');
+    expect(classifyWorkspaceSourceEvidence(unknown, dirty)).toBe('fresh');
+    // A legacy record has no field at all and must not become stale for it.
+    expect(classifyWorkspaceSourceEvidence(source, dirty)).toBe('fresh');
+    // Deletions are evidence, not a comparison key: fingerprints still decide.
+    expect(classifyWorkspaceSourceEvidence(
+      { ...clean, deletedPaths: ['src/a.ts'] },
+      { ...clean, deletedPaths: [] },
+    )).toBe('fresh');
+  });
 });
 
 const safeRebaseEvidence = {

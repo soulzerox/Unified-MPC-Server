@@ -39,6 +39,8 @@ export * from './goal-overlay-store.js';
 export * from './goal-base-pin.js';
 export * from './goal-admission.js';
 export * from './goal-logical-view.js';
+export * from './canonical-source-identity.js';
+export * from './canonical-source-expectations.js';
 export * from './revision-pin-registry.js';
 export * from './resource-pressure.js';
 export * from './path-containment.js';

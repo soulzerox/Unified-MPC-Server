@@ -95,6 +95,56 @@ describe('ThaiRagWorkspaceVerificationStore', () => {
     await expect(new ThaiRagWorkspaceVerificationStore(dataRoot).get(WORKSPACE)).resolves.toEqual({ ok: true, value: null });
   });
 
+  it('reads a legacy record without dirtyState/deletedPaths as unknown/none (#210 §13)', async () => {
+    const dataRoot = await root();
+    const namespace = resolveThaiRagWorkspaceNamespace(dataRoot, WORKSPACE);
+    expect(namespace.ok).toBe(true);
+    if (!namespace.ok) return;
+    await mkdir(namespace.value.root, { recursive: true });
+    await writeFile(path.join(namespace.value.root, 'verification.json'), JSON.stringify({
+      schemaVersion: 1,
+      workspaceId: WORKSPACE,
+      sourceIdentity: identity,
+      verifiedAt: '2026-10-26T00:00:00.000Z',
+      outcome: 'unchanged',
+      indexedFiles: 0,
+      skippedFiles: 0,
+      totalFiles: 0,
+    }), 'utf8');
+    const loaded = await new ThaiRagWorkspaceVerificationStore(dataRoot).get(WORKSPACE);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok || loaded.value === null) return;
+    expect(loaded.value.sourceIdentity).toMatchObject(identity);
+    expect(loaded.value.sourceIdentity.dirtyState).toBe('unknown');
+    expect(loaded.value.sourceIdentity.deletedPaths).toEqual([]);
+    // A legacy record still authorizes a skip: the fingerprints did not move.
+    await expect(new ThaiRagWorkspaceVerificationStore(dataRoot).isFresh(WORKSPACE, identity))
+      .resolves.toEqual({ ok: true, value: true });
+  });
+
+  it('normalizes dirtyState and sorts declared deletions on write and read', async () => {
+    const dataRoot = await root();
+    const store = new ThaiRagWorkspaceVerificationStore(dataRoot);
+    const recorded = await store.record(input({
+      sourceIdentity: {
+        ...identity,
+        dirtyState: 'dirty',
+        deletedPaths: ['src/z.ts', 'src/a.ts', 'src/z.ts'],
+      },
+    }));
+    expect(recorded.ok).toBe(true);
+    if (!recorded.ok) return;
+    expect(recorded.value.sourceIdentity.dirtyState).toBe('dirty');
+    expect(recorded.value.sourceIdentity.deletedPaths).toEqual(['src/a.ts', 'src/z.ts']);
+    const reloaded = await store.get(WORKSPACE);
+    expect(reloaded.ok).toBe(true);
+    if (!reloaded.ok || reloaded.value === null) return;
+    expect(reloaded.value.sourceIdentity).toEqual(recorded.value.sourceIdentity);
+    // A known cleanliness change is real evidence, not an ignored unknown.
+    await expect(store.isFresh(WORKSPACE, { ...identity, dirtyState: 'clean' }))
+      .resolves.toEqual({ ok: true, value: false });
+  });
+
   it('rejects a non-canonical workspace id before writing', async () => {
     const dataRoot = await root();
     const result = await new ThaiRagWorkspaceVerificationStore(dataRoot).record(input({ workspaceId: 'repo' }));

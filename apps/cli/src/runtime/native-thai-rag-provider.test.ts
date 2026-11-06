@@ -1,9 +1,22 @@
+import { createHash } from 'node:crypto';
 import { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
+import {
+  canonicalManifestId,
+  computeTreeOid,
+  type WorkspaceSourceEvidenceIdentity,
+} from '@unified-mpc/domain';
 import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '@unified-mpc/extensions';
+import {
+  CanonicalManifestStore,
+  CanonicalRefStore,
+  GoalOverlayStore,
+  attachGoalBasePin,
+  type StoredManifest,
+  type WorkspaceLifecycleKind,
+} from '@unified-mpc/workspace';
 import {
   THAI_RAG_CANCEL_CAPABILITY,
   THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
@@ -3167,5 +3180,492 @@ describe('startup demand-first reindex (issue-202 T8)', () => {
       expect(args.background).toBe(true);
       expect(args.force).not.toBe(true);
     }
+  });
+});
+
+describe('canonical code_index source identity (#210 §13)', () => {
+  const CANONICAL_REF = 'refs/remotes/origin/main';
+  const REPOSITORY_ID = 'repo_abc123';
+  const COMMIT = 'c'.repeat(40);
+  const HELLO = 'hello\n';
+  const WORLD = 'world\n';
+  const DIRTY = 'dirty\n';
+  const HELLO_HASH = sha256(HELLO);
+  const WORLD_HASH = sha256(WORLD);
+  const DIRTY_HASH = sha256(DIRTY);
+
+  interface CapturedCall {
+    readonly tool: string;
+    readonly args: Readonly<Record<string, unknown>>;
+  }
+
+  function sha256(value: string): string {
+    return createHash('sha256').update(value).digest('hex');
+  }
+
+  async function write(root: string, relativePath: string, contents: string): Promise<void> {
+    const target = path.join(root, relativePath);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, contents, 'utf8');
+  }
+
+  async function seedSource(
+    dataRoot: string,
+    entries: ReadonlyArray<{ readonly path: string; readonly contentHash: string }>,
+  ): Promise<StoredManifest> {
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const repositoryId = REPOSITORY_ID;
+    const revisionId = `rev:v1:${'e'.repeat(64)}`;
+    const treeOid = computeTreeOid(entries);
+    const manifest: StoredManifest = {
+      manifestId: canonicalManifestId({ repositoryId, revisionId, entries }),
+      repositoryId,
+      revisionId,
+      commitSha: COMMIT,
+      treeOid,
+      targetRef: CANONICAL_REF,
+      entries,
+      createdAt: '2026-11-06T00:00:00.000Z',
+    };
+    await new CanonicalManifestStore(canonicalRoot, { strictReads: true }).put(manifest);
+    await new CanonicalRefStore(canonicalRoot).promote(CANONICAL_REF, {
+      expectedCurrent: null,
+      current: null,
+      target: { commitSha: COMMIT, treeOid, manifestId: manifest.manifestId },
+      targetVerified: true,
+    });
+    return manifest;
+  }
+
+  function sourceEvidence(overrides: Partial<WorkspaceSourceEvidenceIdentity> = {}): WorkspaceSourceEvidenceIdentity {
+    return {
+      repositoryIdentity: 'repo-identity',
+      gitCommonDirIdentity: 'git-common-identity',
+      worktreeIdentity: 'worktree-identity',
+      workspaceHead: COMMIT,
+      dirtyFingerprint: '',
+      stagedFingerprint: '',
+      dirtyState: 'clean',
+      deletedPaths: [],
+      ...overrides,
+    };
+  }
+
+  function canonicalHandshake(flags: {
+    readonly revisionManifest?: boolean;
+    readonly expectedHashFence?: boolean;
+  } = {}): Record<string, unknown> {
+    return {
+      ...defaultHandshake(),
+      revision_manifest: flags.revisionManifest ?? true,
+      expected_hash_fence: flags.expectedHashFence ?? true,
+    };
+  }
+
+  function createCanonicalDriver(options: {
+    readonly dataRoot: string;
+    readonly workspaceRoot: string;
+    readonly calls: CapturedCall[];
+    readonly lifecycleKind?: WorkspaceLifecycleKind;
+    readonly goalId?: string;
+    readonly handshake?: Record<string, unknown>;
+    readonly evidence?: WorkspaceSourceEvidenceIdentity | null;
+    readonly source?: { readonly canonicalRef: string; readonly expectedRepositoryIds: readonly string[] | null } | null;
+    readonly onCodeIndex?: (args: Readonly<Record<string, unknown>>) => unknown;
+  }): NativeThaiRagProviderDriver {
+    return new NativeThaiRagProviderDriver({
+      dataRoot: options.dataRoot,
+      launchConfig: { command: '/python' },
+      canonicalRoot: path.join(options.dataRoot, 'canonical'),
+      workspacesProvider: async (): Promise<readonly {
+        id: string;
+        rootPath: string;
+        realRootPath: string;
+        lifecycleKind?: WorkspaceLifecycleKind;
+        goalId?: string;
+      }[]> => [{
+        id: workspaceId,
+        rootPath: options.workspaceRoot,
+        realRootPath: options.workspaceRoot,
+        ...(options.lifecycleKind === undefined ? {} : { lifecycleKind: options.lifecycleKind }),
+        ...(options.goalId === undefined ? {} : { goalId: options.goalId }),
+      }],
+      codeIndexSourceProvider: async () => options.source === undefined
+        ? { canonicalRef: CANONICAL_REF, expectedRepositoryIds: [REPOSITORY_ID] }
+        : options.source,
+      workspaceSourceIdentityProvider: async () => (
+        options.evidence === undefined ? sourceEvidence() : options.evidence
+      ),
+      clientFactory: clientFactory({
+        handshake: options.handshake ?? canonicalHandshake(),
+        onCall: async (tool, args): Promise<unknown> => {
+          options.calls.push({ tool, args });
+          if (tool !== 'code_index') return success(tool);
+          return options.onCodeIndex === undefined
+            ? success('code_index', { status: 'ok', indexed: 0 })
+            : options.onCodeIndex(args);
+        },
+      }),
+    });
+  }
+
+  /** The caller's demand pass, excluding startup admission's trial/delta calls. */
+  function demandCalls(calls: readonly CapturedCall[]): Readonly<Record<string, unknown>>[] {
+    return calls
+      .filter(({ tool, args }) => tool === 'code_index' && args.background === false && args.max_files === undefined)
+      .map(({ args }) => args);
+  }
+
+  async function startCanonicalDriver(
+    driver: NativeThaiRagProviderDriver,
+    dataRoot: string,
+  ): Promise<void> {
+    const started = await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    });
+    expect(started.ok).toBe(true);
+  }
+
+  it('forwards the exact source identity and live fence for a clean checkout', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await write(workspaceRoot, 'src/b.ts', WORLD);
+    const manifest = await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({ dataRoot, workspaceRoot, calls });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const demand = demandCalls(calls);
+    expect(demand).toHaveLength(1);
+    const args = demand[0]!;
+    expect(args.source_identity).toEqual({
+      repository_id: REPOSITORY_ID,
+      manifest_id: manifest.manifestId,
+      revision_id: manifest.revisionId,
+      commit_sha: COMMIT,
+      tree_oid: manifest.treeOid,
+      ref: CANONICAL_REF,
+    });
+    expect(args.expected_paths).toEqual({
+      'src/a.ts': HELLO_HASH,
+      'src/b.ts': WORLD_HASH,
+    });
+    expect(args).not.toHaveProperty('deleted_paths');
+    // Unified-side state must never be forwarded: the child refuses unknown fields.
+    expect(args).not.toHaveProperty('canonical_binding');
+    expect(args).not.toHaveProperty('canonical_fence');
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'bound', canonical_fence: 'fenced' },
+    });
+    // The automatic admission pass stays unanchored (#210 §13 non-goal).
+    const admission = calls.filter(({ tool, args: callArgs }) => tool === 'code_index'
+      && (callArgs.max_files !== undefined || callArgs.background === true));
+    expect(admission.length).toBeGreaterThan(0);
+    for (const { args: callArgs } of admission) {
+      expect(callArgs).not.toHaveProperty('source_identity');
+      expect(callArgs).not.toHaveProperty('expected_paths');
+      expect(callArgs).not.toHaveProperty('canonical_binding');
+    }
+    await driver.stop();
+  });
+
+  it.each([
+    ['a provider with no source port', null],
+    ['a checkout without an origin', { canonicalRef: CANONICAL_REF, expectedRepositoryIds: null }],
+  ])('records absent and sends nothing for %s', async (_label, source) => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      source: source as { readonly canonicalRef: string; readonly expectedRepositoryIds: readonly string[] | null } | null,
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    expect(args).not.toHaveProperty('expected_paths');
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'absent', canonical_fence: 'none' },
+    });
+    await driver.stop();
+  });
+
+  it('refuses a corrupt canonical ref instead of reading it as never promoted', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    await writeFile(
+      path.join(dataRoot, 'canonical', 'refs', 'remotes', 'origin', 'main.json'),
+      '{not json',
+      'utf8',
+    );
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({ dataRoot, workspaceRoot, calls });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('INTERNAL_ERROR');
+    expect(result.error.details).toMatchObject({ reason: 'canonical_source_invalid' });
+    expect(demandCalls(calls)).toHaveLength(0);
+    await driver.stop();
+  });
+
+  it('fences live bytes and declares tracked deletions for a dirty plain checkout', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      evidence: sourceEvidence({ dirtyState: 'dirty', deletedPaths: ['src/b.ts'] }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+      paths: ['src/a.ts', 'src/b.ts'],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    expect(args.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(args.deleted_paths).toEqual(['src/b.ts']);
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'dirty', canonical_fence: 'fenced' },
+    });
+    await driver.stop();
+  });
+
+  it('refuses a requested path that exists in neither the worktree nor the view', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      evidence: sourceEvidence({ dirtyState: 'dirty', workspaceHead: '9'.repeat(40) }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+      paths: ['src/missing.ts'],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('INVALID_INPUT');
+    expect(result.error.details).toMatchObject({
+      reason: 'canonical_source_unknown_path',
+      path: 'src/missing.ts',
+    });
+    expect(demandCalls(calls)).toHaveLength(0);
+    await driver.stop();
+  });
+
+  it('binds an admitted Goal through its overlay even when the worktree is dirty', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    const manifest = await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const refs = new CanonicalRefStore(canonicalRoot);
+    const overlays = new GoalOverlayStore(canonicalRoot);
+    await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: workspaceId,
+      canonicalRef: CANONICAL_REF,
+      expectedBase: {
+        commitSha: COMMIT,
+        treeOid: manifest.treeOid,
+        manifestId: manifest.manifestId,
+      },
+    });
+    await overlays.upsert(workspaceId, { path: 'src/a.ts', kind: 'modified', contentHash: DIRTY_HASH });
+    await overlays.upsert(workspaceId, { path: 'src/b.ts', kind: 'deleted', contentHash: null });
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      evidence: sourceEvidence({ dirtyState: 'dirty', deletedPaths: ['src/b.ts'] }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+      paths: ['src/a.ts'],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args.source_identity).toMatchObject({
+      manifest_id: manifest.manifestId,
+      commit_sha: COMMIT,
+      repository_id: REPOSITORY_ID,
+    });
+    expect(args.expected_paths).toEqual({ 'src/a.ts': DIRTY_HASH });
+    expect(args.deleted_paths).toEqual(['src/b.ts']);
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'bound', canonical_fence: 'fenced' },
+    });
+    await driver.stop();
+  });
+
+  it('indexes an unadmitted Goal unbound with live hashes and no full-request fence', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-2',
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const scoped = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+      paths: ['src/a.ts'],
+    });
+    expect(scoped.ok).toBe(true);
+    if (!scoped.ok) return;
+    const scopedArgs = demandCalls(calls)[0]!;
+    expect(scopedArgs).not.toHaveProperty('source_identity');
+    expect(scopedArgs.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(scoped.value).toMatchObject({
+      structuredContent: {
+        canonical_binding: 'goal_unadmitted',
+        canonical_fence: 'fenced',
+      },
+    });
+    expect(
+      (scoped.value as { structuredContent?: Record<string, unknown> }).structuredContent?.canonical_binding_reason,
+    ).toMatch(/no overlay/);
+
+    const full = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(full.ok).toBe(true);
+    if (!full.ok) return;
+    const fullArgs = demandCalls(calls)[1]!;
+    expect(fullArgs).not.toHaveProperty('source_identity');
+    expect(fullArgs).not.toHaveProperty('expected_paths');
+    expect(full.value).toMatchObject({
+      structuredContent: { canonical_binding: 'goal_unadmitted', canonical_fence: 'none' },
+    });
+    await driver.stop();
+  });
+
+  it('withholds the identity but still fences when the provider cannot record revisions', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      handshake: canonicalHandshake({ revisionManifest: false, expectedHashFence: true }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    // The two flags gate independently: this provider still consumes the fence.
+    expect(args.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'unsupported', canonical_fence: 'fenced' },
+    });
+    await driver.stop();
+  });
+
+  it.each([
+    ['stale_index', 'CONFLICT'],
+    ['invalid_input', 'INVALID_INPUT'],
+  ])('passes through a %s refusal with its payload', async (providerCode, mappedCode) => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      // Only the caller's demand pass is allowed to fail: the startup admission
+      // probe/delta must succeed or its own failure would mask this one.
+      onCodeIndex: (args) => (args.max_files !== undefined || args.background === true
+        ? success('code_index', { status: 'ok', indexed: 0 })
+        : structuredFailure(providerCode)),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe(mappedCode);
+    expect(result.error.details).toMatchObject({ reason: providerCode, providerStatus: 'error' });
+    await driver.stop();
   });
 });

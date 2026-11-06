@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 import type { WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import type { SqliteWorkspaceRepository } from '@unified-mpc/storage';
-import type { Workspace } from '@unified-mpc/workspace';
+import type { Workspace, WorkspaceLifecycleKind } from '@unified-mpc/workspace';
 
 /**
  * A strictly HOST-owned read boundary, never derived from the MCP caller.
@@ -29,12 +29,24 @@ export function createStrictThaiRagGoalAdmissionProvider(
   repository: Pick<SqliteWorkspaceRepository, 'list' | 'getAdmissionReceipt'>,
   now: () => number = Date.now,
   git: TrustedSourceGitRunner = trustedSourceGitRunner,
-): () => Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> {
+): () => Promise<readonly {
+  id: string;
+  rootPath: string;
+  realRootPath: string;
+  lifecycleKind?: WorkspaceLifecycleKind;
+  goalId?: string;
+}[]> {
   return async () => {
     const currentTime = now();
     if (!Number.isFinite(currentTime)) throw new Error('thai_rag_admission_clock_unavailable');
     const workspaces = await repository.list();
-    const eligible: Array<{ id: string; rootPath: string; realRootPath: string }> = [];
+    const eligible: Array<{
+      id: string;
+      rootPath: string;
+      realRootPath: string;
+      lifecycleKind?: WorkspaceLifecycleKind;
+      goalId?: string;
+    }> = [];
     for (const workspace of workspaces) {
       if (workspace.lifecycleKind === 'goal' || workspace.goalId !== undefined) {
         // No silent promotion of a Goal to an ordinary project if its lease,
@@ -54,7 +66,15 @@ export function createStrictThaiRagGoalAdmissionProvider(
         if (workspace.goalWorkspaceKind === 'snapshot'
           && !(await hasCurrentSnapshotRootIdentity(workspace, receipt!))) continue;
       }
-      eligible.push({ id: workspace.id, rootPath: workspace.rootPath, realRootPath: workspace.realRootPath });
+      eligible.push({
+        id: workspace.id,
+        rootPath: workspace.rootPath,
+        realRootPath: workspace.realRootPath,
+        // #210 §13: the strict FD3 path must carry the same Goal identity as
+        // the ordinary provider, or its `code_index` silently indexes unanchored.
+        ...(workspace.lifecycleKind === undefined ? {} : { lifecycleKind: workspace.lifecycleKind }),
+        ...(workspace.goalId === undefined ? {} : { goalId: workspace.goalId }),
+      });
     }
     return eligible;
   };

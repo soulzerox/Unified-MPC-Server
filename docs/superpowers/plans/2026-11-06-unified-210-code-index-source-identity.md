@@ -34,7 +34,8 @@ is a list of declared removals whose members **must not** appear in
 `expected_paths`: the provider refuses the overlap as a contradiction
 (`deleted_paths cannot also be expected with a content hash`). A removal is
 honored, not fenced — the caller owns the path set, the provider owns hiding it.
-Both require generation mode, which is the provider default.
+`source_identity` and `expected_paths` require generation mode; `deleted_paths`
+alone is accepted in legacy mode too.
 
 Refusals already defined by the provider:
 
@@ -72,44 +73,53 @@ Add one resolver, owned by `packages/workspace`, not the CLI:
 ~~~ts
 resolveCanonicalSourceIdentity(input: {
   canonicalRoot: string;                            // <dataPath>/canonical
+  canonicalRef: string;                             // refs/remotes/origin/main
   expectedRepositoryIds: readonly string[] | null;  // this checkout's origin
-  goal: { goalWorkspaceId: string; canonicalRef: string } | null;
+  goal: { goalWorkspaceId: string } | null;
 }): Promise<CanonicalSourceIdentity | null>
 ~~~
 
-Two cases, because a Goal workspace is not a ref follower:
+The caller passes the exact ref it means to bind, derived the same way the rest
+of the runtime derives it (`resolveGoalBaseBranch(rootPath)` +
+`canonicalRefForBranch(defaultBranch)`), so the resolver never scans the store
+or picks among refs.
 
-- **Plain checkout.** Refs are store-wide and one ref is bound to one repository,
-  so `rootPath` alone cannot name the binding. `expectedRepositoryIds` comes from
-  the existing `resolveGoalRepositoryIds(rootPath)`; the resolver accepts only the
-  single ref whose manifest `repositoryId` is in that set.
-- **Goal workspace.** Its base is the overlay's `baseManifestId`, pinned when the
-  Goal was admitted, not whatever the ref points at now. The resolver reads the
-  overlay, runs `verifyGoalAdmission(refs, overlays, { goalWorkspaceId,
-  canonicalRef })`, and only then loads that base manifest. A drifted base or a
-  missing overlay fails closed.
+- **Plain checkout.** Strict-read the named ref and its manifest. The manifest
+  `repositoryId` must be in `expectedRepositoryIds`. A missing ref is `null`
+  only when this repository could have one at all: with
+  `expectedRepositoryIds === null` (no origin) no canonical ref can ever be
+  bound, so the resolver returns `null` and the pass records `absent`.
+- **Goal workspace.** Admission requires the overlay base to equal the live ref
+  (`verifyGoalAdmission` refuses any drift), so a Goal whose main moved must
+  re-pin rather than be indexed against a stale base. Run
+  `verifyGoalAdmission(refs, overlays, { goalWorkspaceId, canonicalRef })`, use
+  its returned `baseManifestId`, and treat `admitted: false` as an error.
 
 It returns exactly the provider fields, all from the selected manifest/ref:
 
 ~~~ts
 {
   repository_id,      // manifest.repositoryId
-  manifest_id,        // man:v1:… (the Goal base for a Goal workspace)
+  manifest_id,        // man:v1:… (the admitted Goal base)
   revision_id,        // rev:v1:…
   commit_sha,
   tree_oid,
-  ref,                // the canonical ref the manifest was promoted under
+  ref,                // canonicalRef
 }
 ~~~
 
 `null` is only "this repository has never promoted a canonical ref". Every other
-state is an error, not a quiet null: an unknown repository
-(`expectedRepositoryIds` is null), more than one matching ref, a ref whose
-manifest is missing/unreadable/foreign, or a failed Goal admission. Returning
-`null` there would turn a dangling ref or a corrupt store into a silent
-unanchored index.
+state is an error, not a quiet null: a null repository id is the no-origin case
+above, while a foreign manifest, a corrupt or dangling record, and a failed Goal
+admission all refuse. Reads are strict (`CanonicalRefStore.read(ref, { strict:
+true })`, `CanonicalManifestStore(..., { strictReads: true })`) so a corrupt
+store is reported instead of being read as "never promoted".
 
 ### 2. Send it only for a view the revision actually describes
+
+The adapter owns this decision, not the resolver: it already collects
+`WorkspaceSourceEvidenceIdentity` (head, dirty and staged fingerprints) for
+admission, and compares that to the resolver's `commit_sha`.
 
 `source_identity` claims "these bytes are revision M". Send it only when that is
 true:
@@ -123,10 +133,12 @@ carries expectations only (next section) and records `canonical_binding: 'dirty'
 it never attaches revision M to bytes it does not contain. Untracked additions in
 a scoped request are the same case.
 
-Every identity field comes from the ref/manifest record.
-`WorkspaceSourceEvidenceIdentity` may identify *which* checkout this is, but it
-never supplies a binding field: its `repositoryIdentity` is admission evidence,
-not `repository_id`.
+`canonical_binding` is a Unified-side field in the index result and job ledger —
+operator-facing state, never sent to the provider, whose identity validator would
+refuse an unknown field. Every identity field comes from the ref/manifest record.
+`WorkspaceSourceEvidenceIdentity` may decide *whether* to send, but never supplies
+a binding field: its `repositoryIdentity` is admission evidence, not
+`repository_id`.
 
 ### 3. Fence the bytes this call asks for
 
@@ -180,7 +192,10 @@ Flags absent → omit identity and expectations, and record `canonical_binding:
 
 - `paths`/`max_files` semantics and admission stay exactly as they are.
 - The resolver never writes, promotes or repairs a ref.
-- A workspace with no canonical ref keeps indexing without a binding.
+- A workspace with no canonical ref — including a checkout with no origin, which
+  can never have one — keeps indexing and records `absent`.
+- `canonical_binding` stays a Unified-side result field; the provider sees only
+  `source_identity`, `expected_paths` and `deleted_paths`.
 - The provider remains the only owner of semantic artifact identity; Unified
   sends source truth only.
 
@@ -190,11 +205,12 @@ Unified side:
 
 - `codeIndex()` forwards `source_identity` byte-for-byte for a clean checkout with
   an active manifest (regression shape of the dropped `paths` bug, #346 U10);
-- a workspace with no canonical ref sends no `source_identity` and still indexes;
-- an unknown repository, an ambiguous ref set, a dangling manifest, a foreign
-  repository and a failed Goal admission are all refused, never the quiet null;
-- a Goal workspace binds the overlay's `baseManifestId`, even when the ref has
-  advanced past it, and a drifted base refuses;
+- a workspace with no canonical ref, and a checkout with no origin, send no
+  `source_identity`, still index, and record `absent`;
+- a corrupt ref read, a dangling manifest, a foreign `repositoryId` and a failed
+  Goal admission are refused, never the quiet null;
+- a Goal workspace is admitted only while its pinned base equals the live ref;
+  drift refuses and the Goal must re-pin, and the admitted base manifest is bound;
 - a scoped request sends the effective hash per path; a dirty path uses the live
   content hash; a tombstone becomes `deleted_paths` and never `expected_paths`;
 - a requested path that exists nowhere is refused before the child call, and
@@ -206,6 +222,7 @@ Unified side:
   `stale_index`;
 - `stale_index` and `invalid_input` pass through unchanged with their payloads;
 - the gate: flags absent → `'absent'`; flags present → identity and expectations;
+- `canonical_binding` never appears in the child arguments;
 - the existing conformance fixture still validates: this slice changes no
   fingerprint.
 
@@ -218,10 +235,11 @@ Provider side (follow-up in thai-rag-mcp):
 
 ## Open decisions
 
-1. **Which ref is this checkout's?** The store is store-wide and a marker can be
-   promoted under several refs. Recommended: match `expectedRepositoryIds` and
-   require exactly one ref; a Goal workspace uses its pinned overlay base instead.
-   Never fall back to "the only ref in the store".
+1. **Which ref is this checkout's?** The store is store-wide, so the caller names
+   the ref explicitly (`resolveGoalBaseBranch` + `canonicalRefForBranch`) and the
+   resolver validates its manifest against `expectedRepositoryIds`. Recommended:
+   this explicit ref, never a scan of store refs. A checkout with no origin has
+   `expectedRepositoryIds === null`, can never match, and records `absent`.
 2. **Full-run fencing.** Recommended: the provider intersection rule above, then
    send the complete map. Interim behaviour is recorded-but-unfenced, explicitly
    labelled rather than silently weaker.

@@ -75,6 +75,13 @@ export type MaintenanceCycleReport =
       | 'admission-rejected'
       | 'gc-refused'
       | 'verify-degraded';
+    /**
+     * Why the refusal happened, from the component that made the decision:
+     * the headroom numbers, the fence holder and expiry, the admission
+     * controller's reason, the GC planner's reason, or the degraded counts.
+     * The token alone cannot tell an operator what to fix.
+     */
+    readonly detail: string;
     readonly tookFence: boolean;
     readonly tookAdmission: boolean;
   }
@@ -131,17 +138,37 @@ export async function runMaintenanceCycle(
 
   // Cheap pre-flight before any lock: headroom must be measurable and sufficient.
   if (diskFreeBytes === null || !Number.isFinite(diskFreeBytes) || physical.databaseBytes < 0) {
-    return { status: 'refused', reason: 'headroom-unknown', tookFence: false, tookAdmission: false };
+    return {
+      status: 'refused',
+      reason: 'headroom-unknown',
+      detail: `databaseBytes ${physical.databaseBytes} diskFreeBytes ${diskFreeBytes === null ? 'unknown' : String(diskFreeBytes)}`,
+      tookFence: false,
+      tookAdmission: false,
+    };
   }
   const requiredFreeBytes = physical.databaseBytes * headroomMultiplier + headroomMarginBytes;
   if (diskFreeBytes < requiredFreeBytes) {
-    return { status: 'refused', reason: 'headroom-insufficient', tookFence: false, tookAdmission: false };
+    return {
+      status: 'refused',
+      reason: 'headroom-insufficient',
+      detail: `required ${requiredFreeBytes} bytes free ${diskFreeBytes}`,
+      tookFence: false,
+      tookAdmission: false,
+    };
   }
 
   // Single-owner fence for the whole cycle (#210 §12).
   const fence = await leaseStore.acquire({ ownerId, now, ttlMs });
   if (fence.status !== 'granted') {
-    return { status: 'refused', reason: 'fence-acquire-failed', tookFence: false, tookAdmission: false };
+    return {
+      status: 'refused',
+      reason: 'fence-acquire-failed',
+      detail: fence.reason === 'held'
+        ? `held by ${fence.holder} until ${fence.expiresAt}`
+        : 'fence record is unreadable',
+      tookFence: false,
+      tookAdmission: false,
+    };
   }
 
   let tookAdmission = false;
@@ -175,7 +202,12 @@ export async function runMaintenanceCycle(
         gate.reason === 'headroom-unknown' || gate.reason === 'headroom-insufficient'
           ? gate.reason
           : 'fence-acquire-failed';
-      return { status: 'refused', reason, tookFence: true, tookAdmission: false };
+      const detail = gate.reason === 'headroom-insufficient'
+        ? `required ${requiredFreeBytes} bytes free ${diskFreeBytes}`
+        : gate.reason === 'headroom-unknown'
+          ? `databaseBytes ${physical.databaseBytes} diskFreeBytes unknown`
+          : `fence ${gate.reason}`;
+      return { status: 'refused', reason, detail, tookFence: true, tookAdmission: false };
     }
 
     // One bounded admission-controller lease (#145 scheduling).
@@ -186,7 +218,13 @@ export async function runMaintenanceCycle(
       cost: admissionCost,
     });
     if (!acquired.admitted) {
-      return { status: 'refused', reason: 'admission-rejected', tookFence: true, tookAdmission: false };
+      return {
+        status: 'refused',
+        reason: 'admission-rejected',
+        detail: `admission denied: ${acquired.reason}`,
+        tookFence: true,
+        tookAdmission: false,
+      };
     }
     tookAdmission = true;
     admission = acquired;
@@ -200,7 +238,13 @@ export async function runMaintenanceCycle(
         grantedAt: now,
       });
       if (gc.status === 'refused') {
-        return { status: 'refused', reason: 'gc-refused', tookFence: true, tookAdmission: true };
+        return {
+          status: 'refused',
+          reason: 'gc-refused',
+          detail: gc.reason.length > 0 ? gc.reason : 'gc planner refused without a reason',
+          tookFence: true,
+          tookAdmission: true,
+        };
       }
 
       const verification = await verifyStore();
@@ -208,6 +252,7 @@ export async function runMaintenanceCycle(
         return {
           status: 'refused',
           reason: 'verify-degraded',
+          detail: `dangling refs ${verification.danglingRefs.length} missing overlays ${verification.missingOverlays.length} orphaned pins ${verification.orphanedPins.length}`,
           tookFence: true,
           tookAdmission: true,
         };

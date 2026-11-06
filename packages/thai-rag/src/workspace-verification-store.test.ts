@@ -95,7 +95,7 @@ describe('ThaiRagWorkspaceVerificationStore', () => {
     await expect(new ThaiRagWorkspaceVerificationStore(dataRoot).get(WORKSPACE)).resolves.toEqual({ ok: true, value: null });
   });
 
-  it('reads a legacy record without dirtyState/deletedPaths as unknown/none (#210 §13)', async () => {
+  it('reads a legacy record without dirtyState/deletedPaths/changedPaths as unknown/none (#210 §13)', async () => {
     const dataRoot = await root();
     const namespace = resolveThaiRagWorkspaceNamespace(dataRoot, WORKSPACE);
     expect(namespace.ok).toBe(true);
@@ -117,12 +117,13 @@ describe('ThaiRagWorkspaceVerificationStore', () => {
     expect(loaded.value.sourceIdentity).toMatchObject(identity);
     expect(loaded.value.sourceIdentity.dirtyState).toBe('unknown');
     expect(loaded.value.sourceIdentity.deletedPaths).toEqual([]);
+    expect(loaded.value.sourceIdentity.changedPaths).toEqual([]);
     // A legacy record still authorizes a skip: the fingerprints did not move.
     await expect(new ThaiRagWorkspaceVerificationStore(dataRoot).isFresh(WORKSPACE, identity))
       .resolves.toEqual({ ok: true, value: true });
   });
 
-  it('normalizes dirtyState and sorts declared deletions on write and read', async () => {
+  it('normalizes dirtyState and sorts declared deletions and changed paths on write and read', async () => {
     const dataRoot = await root();
     const store = new ThaiRagWorkspaceVerificationStore(dataRoot);
     const recorded = await store.record(input({
@@ -130,12 +131,14 @@ describe('ThaiRagWorkspaceVerificationStore', () => {
         ...identity,
         dirtyState: 'dirty',
         deletedPaths: ['src/z.ts', 'src/a.ts', 'src/z.ts'],
+        changedPaths: ['src/z.ts', 'src/new.ts', 'src/a.ts', 'src/new.ts'],
       },
     }));
     expect(recorded.ok).toBe(true);
     if (!recorded.ok) return;
     expect(recorded.value.sourceIdentity.dirtyState).toBe('dirty');
     expect(recorded.value.sourceIdentity.deletedPaths).toEqual(['src/a.ts', 'src/z.ts']);
+    expect(recorded.value.sourceIdentity.changedPaths).toEqual(['src/a.ts', 'src/new.ts', 'src/z.ts']);
     const reloaded = await store.get(WORKSPACE);
     expect(reloaded.ok).toBe(true);
     if (!reloaded.ok || reloaded.value === null) return;

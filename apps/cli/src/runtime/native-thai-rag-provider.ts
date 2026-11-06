@@ -777,12 +777,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         });
         const tombstones = await this.goalTombstones(goalWorkspaceId);
         const fence = await this.buildCanonicalFence(workspace.rootPath, requestedPaths, view, tombstones);
-        if (fence.drifted) {
-          // A Goal's worktree may be dirty because the overlay records the
-          // changed bytes. When it does not — no entry yet for a change, or a
-          // tombstone that was never recorded — the logical view is not what
-          // this worktree holds, so claiming it would publish bytes the base
-          // revision never contained. Index unbound instead.
+        // A Goal's worktree may be dirty because the overlay records the
+        // changed bytes. When it does not — no entry yet for a change, an
+        // addition, or a tombstone that was never recorded — the logical view
+        // is not what this worktree holds, so claiming it would publish bytes
+        // the base revision never contained. The fence sees only view keys, so
+        // the status paths from the admission probe supply the additions.
+        const evidence = await this.workspaceEvidence(workspace.workspaceId);
+        if (fence.drifted || !this.goalViewCoversWorktree(evidence, view, tombstones)) {
           return ok({
             binding: 'dirty',
             bindingReason: 'view_drift',
@@ -863,13 +865,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   }> {
     // The fence flag is independent of the identity flag: a provider can
     // consume `expected_paths` without recording a revision anchor (#210 §4).
-    if (!this.expectedHashFenceSupported) return { fence: 'none', fields: {}, drifted: false };
+    // Drift is not a provider feature, though: it decides whether the caller
+    // may still claim the view, so the view is always hashed and the flag only
+    // gates what is sent.
     const plan = await buildCanonicalSourceExpectations({
       rootPath,
       requestedPaths: requestedPaths.length === 0 ? null : requestedPaths,
       view,
       ...(deletedPaths.length === 0 ? {} : { deletedPaths }),
     });
+    if (!this.expectedHashFenceSupported) {
+      return { fence: 'none', fields: {}, drifted: plan.driftedPaths.length > 0 };
+    }
     const expectedPaths = Object.keys(plan.expectedPaths).length === 0 ? undefined : plan.expectedPaths;
     const deleted = plan.deletedPaths.length === 0 ? undefined : plan.deletedPaths;
     const fence = expectedPaths !== undefined || deleted !== undefined
@@ -885,6 +892,27 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       },
       drifted: plan.driftedPaths.length > 0,
     };
+  }
+
+  /**
+   * A Goal may legitimately be dirty because its overlay records the changed
+   * bytes, so `dirtyState` cannot be the binding gate. The fence only hashes
+   * the view's own keys, though, so an added path the overlay never recorded
+   * is invisible to it. The admission probe's status paths are the additions
+   * counterpart: bind only when the worktree was clean, or every changed path
+   * is described by the logical view or an overlay tombstone.
+   */
+  private goalViewCoversWorktree(
+    evidence: WorkspaceSourceEvidenceIdentity | null,
+    view: ReadonlyMap<string, string>,
+    tombstones: readonly string[],
+  ): boolean {
+    if (evidence?.dirtyState === 'clean') return true;
+    const changed = evidence?.changedPaths;
+    // An empty set on a dirty worktree is a legacy record, not proof.
+    if (changed === undefined || changed.length === 0) return false;
+    const declared = new Set(tombstones);
+    return changed.every((candidate) => view.has(candidate) || declared.has(candidate));
   }
 
   private mergeCanonicalJobResult(jobId: string, result: unknown): unknown {

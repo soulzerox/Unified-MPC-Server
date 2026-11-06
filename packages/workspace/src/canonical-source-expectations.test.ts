@@ -89,7 +89,9 @@ describe('buildCanonicalSourceExpectations (#210 §13)', () => {
       'src/untracked.ts': DIRTY_HASH,
     });
     expect(plan.deletedPaths).toEqual(['src/only-in-view.ts']);
-    expect(plan.driftedPaths).toEqual(['src/b.ts', 'src/only-in-view.ts']);
+    // The untracked file is a live addition the view never described: its
+    // live byte is fenced, but it disproves the view for this request.
+    expect(plan.driftedPaths).toEqual(['src/b.ts', 'src/only-in-view.ts', 'src/untracked.ts']);
 
     await expect(buildCanonicalSourceExpectations({
       rootPath: root,

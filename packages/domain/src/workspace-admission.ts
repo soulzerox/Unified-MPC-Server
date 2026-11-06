@@ -20,6 +20,15 @@ export interface WorkspaceSourceEvidenceIdentity {
    * covered by `dirtyFingerprint`, so this is evidence, not a comparison key.
    */
   readonly deletedPaths?: readonly string[];
+  /**
+   * Every path the worktree status reported (added, modified, deleted,
+   * renamed, untracked) at observation time (#210 §13). The fence only hashes
+   * the view's own keys, so an addition the overlay never recorded is
+   * invisible there; a Goal binds only when every changed path is described by
+   * the logical view or a declared tombstone. Optional so a record written
+   * before this field still parses.
+   */
+  readonly changedPaths?: readonly string[];
 }
 
 export type WorkspaceEvidenceFreshness = 'fresh' | 'stale' | 'unknown' | 'not_reusable';

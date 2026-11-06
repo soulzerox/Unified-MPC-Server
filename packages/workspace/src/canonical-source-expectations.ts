@@ -34,11 +34,12 @@ export interface CanonicalSourceExpectations {
   readonly expectedPaths: Readonly<Record<string, string>>;
   readonly deletedPaths: readonly string[];
   /**
-   * Paths the view claims but the worktree no longer holds: a tracked file
-   * whose bytes differ from the view entry, or a view entry missing from disk
-   * without a declared removal. A caller that still claimed the view for this
-   * request would publish those bytes under it, so the adapter downgrades the
-   * binding instead of treating the fence as a claim about the revision.
+   * Paths where the view and the worktree disagree: a tracked file whose bytes
+   * differ from the view entry, a view entry missing from disk without a
+   * declared removal, or a requested live file the view does not describe. A
+   * caller that still claimed the view for this request would publish those
+   * bytes under it, so the adapter downgrades the binding instead of treating
+   * the fence as a claim about the revision.
    */
   readonly driftedPaths: readonly string[];
 }
@@ -60,8 +61,9 @@ export class CanonicalSourceExpectationError extends Error {
  * never declares a view hash for bytes the worktree already contradicts —
  * doing so turns a dirty checkout or an unsynced Goal overlay into
  * `stale_index`, and the provider only ever observes the live byte. Paths whose
- * bytes disagree with the view are reported in `driftedPaths` so the caller can
- * stop claiming the view for this request instead of publishing drift under it.
+ * bytes disagree with the view, and live paths the view does not describe at
+ * all, are reported in `driftedPaths` so the caller can stop claiming the view
+ * for this request instead of publishing drift under it.
  * A tracked path that is absent from disk is never an expectation — the
  * scanner cannot observe bytes for it — so it becomes a declaration in
  * `deleted_paths` and is removed from the fence. A requested path that exists
@@ -99,6 +101,16 @@ export async function buildCanonicalSourceExpectations(
         // worktree holds something else. Fence what the scanner will actually
         // read, and report the disagreement so the caller does not claim the
         // view for it.
+        drifted.add(candidate);
+        expected.set(candidate, live.contentHash);
+        continue;
+      }
+      if (input.view !== null && viewHash === undefined) {
+        // A live file the view does not describe at all: an addition the
+        // caller's declared revision never contained. A full request cannot
+        // reach this (its candidates are view keys), but a scoped request can
+        // name a new path, and publishing it as the view's byte would be a
+        // revision claim the byte does not satisfy.
         drifted.add(candidate);
         expected.set(candidate, live.contentHash);
         continue;

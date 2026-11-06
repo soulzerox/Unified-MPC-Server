@@ -229,16 +229,19 @@ function parseStoredVerification(value: unknown, workspaceId: CanonicalWorkspace
 }
 
 /**
- * Persisted evidence written before #210 has no `dirtyState`/`deletedPaths`.
- * Normalizing both on write and read keeps the record shape stable without a
+ * Persisted evidence written before #210 has no `dirtyState`/`deletedPaths`,
+ * and evidence written before the additions counterpart has no `changedPaths`.
+ * Normalizing them on write and read keeps the record shape stable without a
  * schema bump: a missing cleanliness reads as `unknown` (never decides
- * freshness on its own) and missing deletions read as none.
+ * freshness on its own), missing deletions read as none, and a missing change
+ * set reads as empty (a dirty Goal then never claims the view).
  */
 function normalizeSourceIdentity(identity: WorkspaceSourceEvidenceIdentity): WorkspaceSourceEvidenceIdentity {
   return {
     ...identity,
     dirtyState: identity.dirtyState ?? 'unknown',
     deletedPaths: Array.from(new Set(identity.deletedPaths ?? [])).sort(),
+    changedPaths: Array.from(new Set(identity.changedPaths ?? [])).sort(),
   };
 }
 
@@ -249,7 +252,9 @@ function isSourceIdentity(value: unknown): value is WorkspaceSourceEvidenceIdent
     && (value.branchName === undefined || typeof value.branchName === 'string')
     && (value.dirtyState === undefined || value.dirtyState === 'clean' || value.dirtyState === 'dirty' || value.dirtyState === 'unknown')
     && (value.deletedPaths === undefined
-      || (Array.isArray(value.deletedPaths) && value.deletedPaths.every((entry) => typeof entry === 'string' && entry.length > 0)));
+      || (Array.isArray(value.deletedPaths) && value.deletedPaths.every((entry) => typeof entry === 'string' && entry.length > 0)))
+    && (value.changedPaths === undefined
+      || (Array.isArray(value.changedPaths) && value.changedPaths.every((entry) => typeof entry === 'string' && entry.length > 0)));
 }
 
 function isOutcome(value: unknown): value is ThaiRagVerificationOutcome {

@@ -54,6 +54,12 @@ describe('strict-only Thai-RAG trusted Goal workspace admission scopes', () => {
       const validReceipt = { ...receipt(writer!.generation), worktreeIdentity: rootIdentity };
       expect(await registry.compareAndSwapAdmissionReceipt(GOAL, 0, writer!.generation, validReceipt)).toBe(true);
       expect((await authorized()).map(x => x.id).sort()).toEqual([GOAL, PROJECT].sort());
+      // #210 §13: the strict FD3 mapping must carry the Goal identity, or the
+      // adapter sends every strict Goal down the plain-checkout branch.
+      const admitted = await authorized();
+      expect(admitted.find(x => x.id === GOAL))
+        .toMatchObject({ lifecycleKind: 'goal', goalId: 'goal-1' });
+      expect(admitted.find(x => x.id === PROJECT) ?? {}).not.toHaveProperty('lifecycleKind');
       // An attacker replaces a registered snapshot root with a symlink to an
       // unrelated directory without changing receipt, lease, or SQLite epoch.
       await rename(snapshotRoot, path.join(base, 'parked'));

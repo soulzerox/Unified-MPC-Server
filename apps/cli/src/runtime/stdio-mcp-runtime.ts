@@ -433,6 +433,9 @@ export function createStdioMcpRuntime(
           deletedPaths: source.statusEntries
             .filter((entry) => entry.kind === 'deleted')
             .map((entry) => entry.path),
+          // The additions counterpart: the fence cannot see a Goal path the
+          // overlay never recorded, so the binding check needs the full set.
+          changedPaths: Array.from(new Set(source.statusEntries.map((entry) => entry.path))).sort(),
         };
       } catch {
         return null;

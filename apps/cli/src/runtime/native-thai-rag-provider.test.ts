@@ -3247,6 +3247,7 @@ describe('canonical code_index source identity (#210 §13)', () => {
       stagedFingerprint: '',
       dirtyState: 'clean',
       deletedPaths: [],
+      changedPaths: [],
       ...overrides,
     };
   }
@@ -3579,7 +3580,11 @@ describe('canonical code_index source identity (#210 §13)', () => {
       calls,
       lifecycleKind: 'goal',
       goalId: 'goal-1',
-      evidence: sourceEvidence({ dirtyState: 'dirty', deletedPaths: ['src/b.ts'] }),
+      evidence: sourceEvidence({
+        dirtyState: 'dirty',
+        deletedPaths: ['src/b.ts'],
+        changedPaths: ['src/a.ts', 'src/b.ts'],
+      }),
     });
     await startCanonicalDriver(driver, dataRoot);
 
@@ -3632,7 +3637,7 @@ describe('canonical code_index source identity (#210 §13)', () => {
       calls,
       lifecycleKind: 'goal',
       goalId: 'goal-1',
-      evidence: sourceEvidence({ dirtyState: 'dirty' }),
+      evidence: sourceEvidence({ dirtyState: 'dirty', changedPaths: ['src/a.ts'] }),
     });
     await startCanonicalDriver(driver, dataRoot);
 
@@ -3651,6 +3656,152 @@ describe('canonical code_index source identity (#210 §13)', () => {
         canonical_binding_reason: 'view_drift',
         canonical_fence: 'fenced',
       },
+    });
+    await driver.stop();
+  });
+
+  it('indexes a Goal with an added file the overlay never recorded unbound', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    // The base file still matches the view, so the fence reports no drift. The
+    // added file is not a view key at all; without the status-path coverage the
+    // full request would index these bytes while claiming revision M.
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await write(workspaceRoot, 'src/new.ts', DIRTY);
+    const manifest = await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const refs = new CanonicalRefStore(canonicalRoot);
+    const overlays = new GoalOverlayStore(canonicalRoot);
+    await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: workspaceId,
+      canonicalRef: CANONICAL_REF,
+      expectedBase: {
+        commitSha: COMMIT,
+        treeOid: manifest.treeOid,
+        manifestId: manifest.manifestId,
+      },
+    });
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      evidence: sourceEvidence({ dirtyState: 'dirty', changedPaths: ['src/new.ts'] }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    expect(args.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(result.value).toMatchObject({
+      structuredContent: {
+        canonical_binding: 'dirty',
+        canonical_binding_reason: 'view_drift',
+        canonical_fence: 'fenced',
+      },
+    });
+    await driver.stop();
+  });
+
+  it('downgrades a drifted Goal even when the provider cannot consume the fence', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    const manifest = await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const refs = new CanonicalRefStore(canonicalRoot);
+    const overlays = new GoalOverlayStore(canonicalRoot);
+    await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: workspaceId,
+      canonicalRef: CANONICAL_REF,
+      expectedBase: {
+        commitSha: COMMIT,
+        treeOid: manifest.treeOid,
+        manifestId: manifest.manifestId,
+      },
+    });
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      handshake: canonicalHandshake({ revisionManifest: true, expectedHashFence: false }),
+      evidence: sourceEvidence({ dirtyState: 'dirty', changedPaths: ['src/a.ts'] }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    // The fence fields are withheld, but "not built" is not "no drift": the
+    // identity must not be claimed for bytes the view does not hold.
+    expect(args).not.toHaveProperty('source_identity');
+    expect(args).not.toHaveProperty('expected_paths');
+    expect(result.value).toMatchObject({
+      structuredContent: {
+        canonical_binding: 'dirty',
+        canonical_binding_reason: 'view_drift',
+        canonical_fence: 'none',
+      },
+    });
+    await driver.stop();
+  });
+
+  it('binds a covered Goal even when the provider cannot consume the fence', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    const manifest = await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const refs = new CanonicalRefStore(canonicalRoot);
+    const overlays = new GoalOverlayStore(canonicalRoot);
+    await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: workspaceId,
+      canonicalRef: CANONICAL_REF,
+      expectedBase: {
+        commitSha: COMMIT,
+        treeOid: manifest.treeOid,
+        manifestId: manifest.manifestId,
+      },
+    });
+    await overlays.upsert(workspaceId, { path: 'src/a.ts', kind: 'modified', contentHash: DIRTY_HASH });
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      handshake: canonicalHandshake({ revisionManifest: true, expectedHashFence: false }),
+      evidence: sourceEvidence({ dirtyState: 'dirty', changedPaths: ['src/a.ts'] }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args.source_identity).toMatchObject({ commit_sha: COMMIT });
+    expect(args).not.toHaveProperty('expected_paths');
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'bound', canonical_fence: 'none' },
     });
     await driver.stop();
   });

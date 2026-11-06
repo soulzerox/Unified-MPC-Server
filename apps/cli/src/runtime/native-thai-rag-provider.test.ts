@@ -2344,6 +2344,44 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('exposes source-identity capability flags through health', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: { ...defaultHandshake(), revision_manifest: true, expected_hash_fence: false } }),
+    });
+    await expect(driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).resolves.toMatchObject({
+      ok: true,
+      value: { revisionManifest: true, expectedHashFence: false },
+    });
+    await expect(driver.health()).resolves.toMatchObject({
+      ok: true,
+      value: { revisionManifest: true, expectedHashFence: false },
+    });
+    await driver.stop();
+  });
+
+  it.each([
+    ['revision_manifest', 'yes'],
+    ['expected_hash_fence', 1],
+  ])('fails closed on a malformed %s capability flag', async (flag, value) => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({ handshake: { ...defaultHandshake(), [flag]: value } }),
+    });
+    const started = await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 });
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.error.details?.reason).toBe('malformed-handshake');
+    await driver.stop();
+  });
+
   it('accepts provider schema drift when the versioned handshake is valid', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

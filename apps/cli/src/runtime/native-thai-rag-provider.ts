@@ -1709,6 +1709,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ...(handshake.value.compatibilityRange === undefined ? {} : { compatibilityRange: handshake.value.compatibilityRange }),
       contractFingerprint: handshake.value.contractFingerprint,
       generation: handshake.value.generation,
+      ...(handshake.value.revisionManifest === undefined ? {} : { revisionManifest: handshake.value.revisionManifest }),
+      ...(handshake.value.expectedHashFence === undefined ? {} : { expectedHashFence: handshake.value.expectedHashFence }),
       ...(handshake.value.degradedReasons === undefined ? {} : { degradation: handshake.value.degradedReasons }),
       activeJobs: [...new Set([...handshake.value.components.activeJobs, ...activeJobs.map((job) => job.jobId)])],
     };
@@ -1911,7 +1913,9 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
     || typeof data.generation.index !== 'string'
     || typeof data.generation.storage !== 'string'
     || typeof data.embedding_index_generation !== 'number'
-     || (data.degraded_reasons !== undefined && (!Array.isArray(data.degraded_reasons) || !data.degraded_reasons.every((reason) => typeof reason === 'string')))) {
+    || (data.revision_manifest !== undefined && typeof data.revision_manifest !== 'boolean')
+    || (data.expected_hash_fence !== undefined && typeof data.expected_hash_fence !== 'boolean')
+    || (data.degraded_reasons !== undefined && (!Array.isArray(data.degraded_reasons) || !data.degraded_reasons.every((reason) => typeof reason === 'string')))) {
     return err(appError('CONFLICT', 'Native Thai-RAG worker returned malformed handshake metadata', true, { reason: 'malformed-handshake' }));
   }
   const components = isRecord(data.components) ? parseProviderComponents(data.components) : undefined;
@@ -1942,6 +1946,8 @@ function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake
     ...(data.degraded_reasons === undefined ? {} : { degradedReasons: data.degraded_reasons }),
      ...(components === undefined ? {} : { components }),
     embeddingIndexGeneration: data.embedding_index_generation,
+    ...(typeof data.revision_manifest === 'boolean' ? { revisionManifest: data.revision_manifest } : {}),
+    ...(typeof data.expected_hash_fence === 'boolean' ? { expectedHashFence: data.expected_hash_fence } : {}),
     ...(typeof data.legacy_adapter === 'string' ? { legacyAdapter: data.legacy_adapter } : {}),
   });
 }

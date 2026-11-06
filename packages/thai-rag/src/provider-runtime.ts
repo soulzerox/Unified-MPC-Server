@@ -9,7 +9,14 @@ import {
   type ThaiRagProviderHealth,
 } from './provider-contract.js';
 
-export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents & Pick<ThaiRagProviderHealth, 'capabilities' | 'workspaceScopeModel' | 'embedding' | 'compatibilityRange' | 'contractFingerprint' | 'contractVersion' | 'generation'> & { readonly degradation?: readonly string[]; readonly indexJobContractVersion?: string };
+export type ThaiRagProviderDriverHealth = ThaiRagProviderComponents
+  & Pick<ThaiRagProviderHealth, 'capabilities' | 'workspaceScopeModel' | 'embedding' | 'compatibilityRange' | 'contractFingerprint' | 'contractVersion' | 'generation'>
+  & {
+    readonly degradation?: readonly string[];
+    readonly indexJobContractVersion?: string;
+    readonly revisionManifest?: boolean;
+    readonly expectedHashFence?: boolean;
+  };
 
 export interface ThaiRagProviderDriverStartOptions {
   readonly providerRoot: string;

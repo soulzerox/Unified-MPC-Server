@@ -71,90 +71,110 @@ Add one resolver, owned by `packages/workspace`, not the CLI:
 
 ~~~ts
 resolveCanonicalSourceIdentity(input: {
-  rootPath: string;                          // workspace checkout
-  canonicalRoot: string;                     // <dataPath>/canonical
-  expectedRepositoryIds: readonly string[];  // this checkout's repository
+  canonicalRoot: string;                            // <dataPath>/canonical
+  expectedRepositoryIds: readonly string[] | null;  // this checkout's origin
+  goal: { goalWorkspaceId: string; canonicalRef: string } | null;
 }): Promise<CanonicalSourceIdentity | null>
 ~~~
 
-The canonical store is store-wide, not per checkout, and one ref is bound to one
-repository, so `rootPath` alone cannot name the binding. The caller derives
-`expectedRepositoryIds` with the existing `resolveGoalRepositoryIds(rootPath)`
-(the same selector `pinGoalBaseAtCommit` already uses), and the resolver accepts
-only a ref whose manifest `repositoryId` is in that set. Zero matching refs or
-more than one is refused rather than guessed: the resolver never selects a
-binding it cannot attribute to this checkout.
+Two cases, because a Goal workspace is not a ref follower:
 
-It reads the selected ref with `CanonicalRefStore` and its manifest with
-`CanonicalManifestStore`, and returns exactly the provider fields:
+- **Plain checkout.** Refs are store-wide and one ref is bound to one repository,
+  so `rootPath` alone cannot name the binding. `expectedRepositoryIds` comes from
+  the existing `resolveGoalRepositoryIds(rootPath)`; the resolver accepts only the
+  single ref whose manifest `repositoryId` is in that set.
+- **Goal workspace.** Its base is the overlay's `baseManifestId`, pinned when the
+  Goal was admitted, not whatever the ref points at now. The resolver reads the
+  overlay, runs `verifyGoalAdmission(refs, overlays, { goalWorkspaceId,
+  canonicalRef })`, and only then loads that base manifest. A drifted base or a
+  missing overlay fails closed.
+
+It returns exactly the provider fields, all from the selected manifest/ref:
 
 ~~~ts
 {
   repository_id,      // manifest.repositoryId
-  manifest_id,        // man:v1:…
+  manifest_id,        // man:v1:… (the Goal base for a Goal workspace)
   revision_id,        // rev:v1:…
   commit_sha,
   tree_oid,
-  ref,                // the ref the manifest was promoted under
+  ref,                // the canonical ref the manifest was promoted under
 }
 ~~~
 
-`null` means "this repository has no canonical ref" and is the only quiet case. A
-ref that exists but whose manifest is missing, unreadable, or bound to another
-repository is an error: returning `null` there would turn a dangling ref or a
-corrupt store into a silent unanchored index.
+`null` is only "this repository has never promoted a canonical ref". Every other
+state is an error, not a quiet null: an unknown repository
+(`expectedRepositoryIds` is null), more than one matching ref, a ref whose
+manifest is missing/unreadable/foreign, or a failed Goal admission. Returning
+`null` there would turn a dangling ref or a corrupt store into a silent
+unanchored index.
 
-### 2. Send it, or send nothing
+### 2. Send it only for a view the revision actually describes
 
-`codeIndex()` sends `source_identity` only when the resolver returned a value and
-the provider handshake advertises the capability (see §4). Every field comes from
-the ref/manifest record. `WorkspaceSourceEvidenceIdentity` may help identify
-*which* checkout and repository this is, but it never supplies a binding field:
-its `repositoryIdentity` is admission evidence, not `repository_id`.
+`source_identity` claims "these bytes are revision M". Send it only when that is
+true:
 
-### 3. Fence the files this call asks for — and the ones it does not
+- a clean checkout whose HEAD is the manifest commit, or
+- a Goal workspace whose admission-verified logical view is the source indexed.
 
-Expected hashes are relative to the *effective* source of the checkout, not only
-the base manifest: a Goal workspace indexes overlay bytes, so for each path
+A dirty plain checkout is not representable: the revision does not contain its
+uncommitted bytes, and the identity schema has no dirty marker. That request
+carries expectations only (next section) and records `canonical_binding: 'dirty'`;
+it never attaches revision M to bytes it does not contain. Untracked additions in
+a scoped request are the same case.
 
-- overlay entry with a content hash (`modified` or `added`) → use that hash;
-- overlay tombstone (`deleted`, null hash) → add the path to `deleted_paths`,
-  never to `expected_paths`;
-- otherwise → the base manifest hash.
+Every identity field comes from the ref/manifest record.
+`WorkspaceSourceEvidenceIdentity` may identify *which* checkout this is, but it
+never supplies a binding field: its `repositoryIdentity` is admission evidence,
+not `repository_id`.
 
-When the request has `paths`, send `expected_paths` for exactly those paths. A
-requested path with neither an overlay entry nor a manifest entry is refused
-locally before the child call: it cannot be part of the revision being declared.
+### 3. Fence the bytes this call asks for
 
-When the request is full (no `paths`), still send `expected_paths` for every path
-the resolver can name (overlay first, base manifest fallback). The provider's
-`scope_expected_paths` fences the whole mapping on an unscoped run. Omitting it
-would leave `manifest_id` as a recorded declaration only: the provider has no Git
-and cannot compare the manifest to the bytes it just scanned, so a full pass could
-publish newer content under revision M's identity. Sending every entry is the
-price of binding a full pass; if that payload ever becomes a measured problem, the
-provider can grow a manifest-digest fence instead of Unified weakening this one.
+For a Goal workspace, do not re-derive the merge: `resolveGoalLogicalView(refs,
+overlays, …)` already verifies admission and applies overlay-over-base with
+tombstones removed. Reuse it, and read the overlay entries separately for
+`deleted_paths` (a tombstone is a declared removal and must not appear in
+`expected_paths`).
 
-`deleted_paths` comes from the Goal overlay tombstones for the same scope, read
-through `GoalOverlayStore`.
+**Scoped request (`paths`).** An expectation is the hash of the byte the caller
+believes it is publishing: the effective-view hash (overlay or manifest) for a
+tracked, unmodified path, the live content hash for a dirty or untracked path. A
+requested path that exists nowhere — neither on disk nor in the view — is refused
+before the child call.
 
-### 4. Capability gate and fingerprint compatibility
+**Full request (no `paths`).** The manifest is every leaf of the Git tree, while
+the provider's scanner deliberately skips `gitignored`, `hidden`, `sensitive`,
+`binary`, `too_large` and other reasons (`thai_rag/source_scanner.py`,
+`_SKIP_REASONS`). Sending the whole map today would make an ordinary full pass
+`stale_index` on every skipped path. Full-run fencing therefore needs one
+provider rule, landed before Unified sends a full map:
 
-The provider declares the capability through its contract shape, and
-`CONTRACT_FINGERPRINT` is the hash of that shape. This repo accepts only
-fingerprints listed in `SUPPORTED_INDEX_JOB_CONTRACTS`
-(`packages/thai-rag/src/provider-contract.ts`), so the provider cannot ship the
-capability first without breaking every handshake:
+> an expectation is a violation only when the path was scanned and its hash
+> differs, or when the path is absent from disk; a skipped-but-present path is
+> reported as `unfenced_paths`, not as stale.
 
-1. this repo adds the new fingerprint entry (and its required-capability set) to
-   `SUPPORTED_INDEX_JOB_CONTRACTS` — a no-op while no provider emits it;
-2. thai-rag-mcp adds `canonical_source_identity` plus its handshake test;
-3. this repo sends the binding only when the handshake lists the capability.
-   Absent capability → omit it and record `canonical_binding: 'absent'` in the
-   index result, so an operator can see the workspace is unanchored.
+Until that rule exists, a full pass sends no expectations and records
+`canonical_binding: 'recorded'`: the manifest id is recorded but the bytes are not
+fenced. Do not substitute a caller-side filter for this — matching the provider's
+skip policy in Unified would be a second, drifting copy of it.
 
-This keeps an older provider from refusing every index request with
-`invalid_input`, and makes "unanchored" visible instead of silent.
+### 4. Gate on the flags that already exist
+
+The handshake already carries `revision_manifest` and `expected_hash_fence` as
+top-level booleans (`CAPABILITY_FLAGS` in `thai_rag/provider.py`, emitted as
+`**CAPABILITY_FLAGS`). The `capabilities` array is the operations list, not a
+feature list, and Unified's `parseProviderHandshake` does not read the flags
+today. So:
+
+1. this repo parses those booleans into the handshake type and gates on
+   `revision_manifest` and `expected_hash_fence`;
+2. no new capability string and no `CONTRACT_FINGERPRINT` change;
+3. if a new flag is ever needed it lives in `CAPABILITY_FLAGS`, which changes the
+   fingerprint, so it must be added to `SUPPORTED_INDEX_JOB_CONTRACTS` here
+   before the provider can ship it.
+
+Flags absent → omit identity and expectations, and record `canonical_binding:
+'absent'`.
 
 ### 5. What must not change
 
@@ -168,50 +188,54 @@ This keeps an older provider from refusing every index request with
 
 Unified side:
 
-- `codeIndex()` forwards `source_identity` byte-for-byte for a workspace with an
-  active manifest (regression shape of the dropped `paths` bug, #346 U10);
+- `codeIndex()` forwards `source_identity` byte-for-byte for a clean checkout with
+  an active manifest (regression shape of the dropped `paths` bug, #346 U10);
 - a workspace with no canonical ref sends no `source_identity` and still indexes;
-- a ref whose manifest is missing, unreadable, or bound to another repository is
-  refused, not treated as the quiet null case;
-- a scoped request sends `expected_paths` for exactly its `paths`;
-- overlay-modified and overlay-added paths are fenced with the overlay hash, and
-  untouched paths with the base manifest hash;
-- overlay tombstones become `deleted_paths` and never appear in `expected_paths`;
-- a requested path in neither the overlay nor the manifest is refused before the
-  child call, and nothing is sent;
-- a full request sends the complete expectation map, and a path moved past the
-  manifest refuses publication with `stale_index`;
+- an unknown repository, an ambiguous ref set, a dangling manifest, a foreign
+  repository and a failed Goal admission are all refused, never the quiet null;
+- a Goal workspace binds the overlay's `baseManifestId`, even when the ref has
+  advanced past it, and a drifted base refuses;
+- a scoped request sends the effective hash per path; a dirty path uses the live
+  content hash; a tombstone becomes `deleted_paths` and never `expected_paths`;
+- a requested path that exists nowhere is refused before the child call, and
+  nothing is sent;
+- a dirty plain checkout sends expectations without `source_identity` and records
+  `canonical_binding: 'dirty'`;
+- a full request before the provider rule sends no expectations and records
+  `'recorded'`; after it, sends the complete map and a moved path refuses with
+  `stale_index`;
 - `stale_index` and `invalid_input` pass through unchanged with their payloads;
-- the capability gate: absent capability omits the block and records the warning;
-- the fingerprint gate: an unknown provider fingerprint is still refused, and the
-  new fingerprint is accepted only with the required capability set.
+- the gate: flags absent → `'absent'`; flags present → identity and expectations;
+- the existing conformance fixture still validates: this slice changes no
+  fingerprint.
 
 Provider side (follow-up in thai-rag-mcp):
 
-- handshake advertises `canonical_source_identity`;
-- an unchanged revision reuses the recorded anchor across a restart;
-- a moved path refuses publication and leaves the active generation intact.
+- the scoped fence is unchanged;
+- the full-run intersection rule reports skipped-but-present paths as
+  `unfenced_paths` and still refuses an absent path as stale;
+- an unchanged revision reuses the recorded anchor across a restart.
 
 ## Open decisions
 
-1. **Which ref is this checkout's?** A manifest row stores `targetRef`, but the
-   same manifest can be promoted under several refs and the store is store-wide.
-   Recommended: match on `expectedRepositoryIds` from the checkout's origin and
-   require exactly one ref; ambiguity refuses. Never fall back to "the only ref
-   in the store".
-2. **Full-request fencing.** Recommended: send the complete expectation map, even
-   though it is the whole manifest. A recorded `manifest_id` with no fence does
-   not bind bytes, and a weaker caller-side rule would only move the hole. If the
-   payload becomes measurable, add a provider-side manifest digest.
-3. **Unanchored warning surface.** Recommended: put it in the existing index
-   result JSON (`canonical_binding: 'absent'`) rather than a new command.
+1. **Which ref is this checkout's?** The store is store-wide and a marker can be
+   promoted under several refs. Recommended: match `expectedRepositoryIds` and
+   require exactly one ref; a Goal workspace uses its pinned overlay base instead.
+   Never fall back to "the only ref in the store".
+2. **Full-run fencing.** Recommended: the provider intersection rule above, then
+   send the complete map. Interim behaviour is recorded-but-unfenced, explicitly
+   labelled rather than silently weaker.
+3. **Dirty binding.** Recommended: `canonical_binding: 'dirty'` with expectations
+   and no identity. The alternative — refusing demand indexing on a dirty
+   checkout — breaks #346 U10 and is rejected.
 
 ## Rollout order
 
-1. This repo: add the new fingerprint and required capabilities to
-   `SUPPORTED_INDEX_JOB_CONTRACTS` (no provider emits it yet; no behavior change).
-2. thai-rag-mcp: capability + handshake test.
-3. This repo: resolver, adapter wiring, fence, capability gate, tests.
+1. This repo: parse the existing handshake flags into the typed handshake. No
+   behaviour change, no fingerprint change.
+2. thai-rag-mcp: the full-run intersection rule plus `unfenced_paths`.
+3. This repo: resolver, adapter wiring, scoped expectations, tests; enable full
+   expectations only after step 2 is released.
 4. Make the binding mandatory only after a full local reindex proves every
    canonical workspace resolves; until then an unanchored pass is allowed but
    recorded.
@@ -220,6 +244,8 @@ Provider side (follow-up in thai-rag-mcp):
 
 - No Git resolution inside Thai-RAG. Unified reuses its existing origin-remote
   reader only to select the ref; the provider still owns no Git.
+- No new contract fingerprint and no new capability string.
+- No second base+overlay merge; `resolveGoalLogicalView` stays the one owner.
 - No schema migration; the manifest store already carries every field.
 - No change to GC, admission, leases or the maintenance cycle.
 - No WebUI projection here; §11 owns that.

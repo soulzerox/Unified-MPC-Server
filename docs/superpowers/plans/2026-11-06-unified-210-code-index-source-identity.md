@@ -307,7 +307,9 @@ this provider cannot consume it), and `canonical_fence: 'none'`.
 
 ### 5. What must not change
 
-- `paths`/`max_files` semantics and admission stay exactly as they are.
+- `paths`/`max_files` semantics stay exactly as they are; the automatic
+  admission pass now makes the same canonical claim as a demand pass (rollout
+  step 5).
 - The resolver never writes, promotes or repairs a ref.
 - A workspace with no canonical ref — including a checkout with no origin, which
   can never have one — keeps indexing and records `absent`.
@@ -318,10 +320,25 @@ this provider cannot consume it), and `canonical_fence: 'none'`.
 - The provider remains the only owner of semantic artifact identity; Unified
   sends source truth only.
 - The automatic admission pass (`startWorkspaceAdmissionIndex`, which calls
-  `code_index` directly with `max_files: 3` and then `mode: 'delta'`) is out of
-  scope in this slice. It stays unanchored, sends no identity or fence and
-  records no `canonical_binding`; routing it through the same resolver is a
-  listed follow-up, not a silent behaviour change.
+  `code_index` directly with `max_files: 3` and then `mode: 'delta'`) resolves
+  the same plan as `codeIndex()`: both calls carry the identity and fence, and
+  the local job ledger records `canonical_binding`/`canonical_fence`. Its
+  ordinary resolver outcomes keep indexing; a corrupt canonical store refuses
+  the admission before any child call. A provider-loss restart re-issues the
+  delta without identity, so the adapter drops the original anchor instead of
+  claiming revision M for bytes that request never fenced.
+
+> **Implementation note (2026-11-07, rollout step 5).** Admission resolves the
+> plan once with an empty path set (a full request) and spreads the child fields
+> into both the bounded trial and the delta, so the provider's intersection rule
+> decides which of the declared paths it actually sees. The plan is held under
+> the local admission job id, merged into the terminal job result as
+> `canonical_binding`/`canonical_fence`, and dropped in the monitor's `finally`.
+> A corrupt ref/manifest/overlay refuses the admission with
+> `canonical_source_invalid` before any child call; `absent`, `goal_unadmitted`,
+> `dirty` and `unsupported` keep indexing and only change what is recorded. The
+> pass still only reads the worktree and the canonical stores: it never
+> promotes, repairs or writes a ref.
 
 ## Test matrix
 
@@ -373,8 +390,13 @@ Unified side:
   `changedPaths` still parses (`unknown`/empty) and does not force a re-index;
   an empty change set on a dirty Goal never proves the view, so it stays
   unbound;
-- the automatic admission pass stays unanchored: it sends no identity or fence
-  and records no `canonical_binding`;
+- the automatic admission pass resolves the same plan: the bounded trial and the
+  delta both send `source_identity` and the full fence for a clean checkout, and
+  the completed local job records `canonical_binding`/`canonical_fence`; a dirty
+  checkout fences live bytes and declares `deleted_paths` (`dirty`); an admitted
+  Goal sends its overlay expectations and tombstones (`bound`); a provider-loss
+  restart re-issues the delta without identity and the ledger keeps no anchor; a
+  corrupt canonical store refuses the admission before any `code_index` call;
 - `stale_index` and `invalid_input` keep their provider code, status and retry
   classification (including `providerReason`); the provider's `stale_paths` /
   `unfenced_paths` detail fields are not forwarded to the caller;
@@ -427,8 +449,11 @@ Provider side (follow-up in thai-rag-mcp):
    released; then scoped expectations, then full expectations.
 4. Goal re-pin on `rebaseStaleBase` so an advanced base can bind again; until
    then a drifted Goal indexes unbound and records `goal_unadmitted`.
-5. Route `startWorkspaceAdmissionIndex` through the same resolver, so automatic
-   admission generations are anchored too.
+5. *(landed 2026-11-07)* Route `startWorkspaceAdmissionIndex` through the same
+   resolver, so automatic admission generations are anchored too. The trial and
+   the delta send the identity and fence, the completed local job records
+   `canonical_binding`/`canonical_fence`, and a provider-loss restart drops the
+   original anchor instead of claiming it.
 6. Make the binding mandatory only after a full local reindex proves every
    canonical workspace resolves; until then an unanchored pass is allowed but
    recorded.
@@ -442,8 +467,6 @@ Provider side (follow-up in thai-rag-mcp):
 - No schema migration: the manifest store already carries every field, and the
   new verification fields are optional so existing `schemaVersion: 1` records
   keep parsing.
-- No routing of the automatic admission pass in this slice; it is listed in the
-  rollout, not silently included.
 - No change to GC, admission, leases or the maintenance cycle.
 - No Goal overlay re-pin on `rebaseStaleBase` in this slice; an unadmitted Goal
   indexes unbound (`goal_unadmitted`) until that follow-up lands.

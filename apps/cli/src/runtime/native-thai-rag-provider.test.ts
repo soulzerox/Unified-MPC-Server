@@ -3324,6 +3324,28 @@ describe('canonical code_index source identity (#210 §13)', () => {
       .map(({ args }) => args);
   }
 
+  /** The automatic admission pass: the bounded trial and the background delta. */
+  function admissionCalls(calls: readonly CapturedCall[]): Readonly<Record<string, unknown>>[] {
+    return calls
+      .filter(({ tool, args }) => tool === 'code_index'
+        && (args.max_files !== undefined || args.background === true))
+      .map(({ args }) => args);
+  }
+
+  async function readAdmissionJob(dataRoot: string): Promise<{
+    readonly jobId: string;
+    readonly status: string;
+    readonly providerJobId?: string;
+    readonly result?: unknown;
+  }> {
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; workspaceId: string; status: string; providerJobId?: string; result?: unknown }>;
+    };
+    const job = persisted.jobs.find((entry) => entry.workspaceId === workspaceId);
+    if (job === undefined) throw new Error('admission job not found');
+    return job;
+  }
+
   async function startCanonicalDriver(
     driver: NativeThaiRagProviderDriver,
     dataRoot: string,
@@ -3379,15 +3401,315 @@ describe('canonical code_index source identity (#210 §13)', () => {
     expect(result.value).toMatchObject({
       structuredContent: { canonical_binding: 'bound', canonical_fence: 'fenced' },
     });
-    // The automatic admission pass stays unanchored (#210 §13 non-goal).
-    const admission = calls.filter(({ tool, args: callArgs }) => tool === 'code_index'
-      && (callArgs.max_files !== undefined || callArgs.background === true));
+    // Admission makes the same canonical claim as the demand pass (#210 §13
+    // rollout step 5): the bounded trial and the delta both name the source.
+    const admission = admissionCalls(calls);
     expect(admission.length).toBeGreaterThan(0);
-    for (const { args: callArgs } of admission) {
-      expect(callArgs).not.toHaveProperty('source_identity');
-      expect(callArgs).not.toHaveProperty('expected_paths');
+    for (const callArgs of admission) {
+      expect(callArgs.source_identity).toEqual({
+        repository_id: REPOSITORY_ID,
+        manifest_id: manifest.manifestId,
+        revision_id: manifest.revisionId,
+        commit_sha: COMMIT,
+        tree_oid: manifest.treeOid,
+        ref: CANONICAL_REF,
+      });
+      expect(callArgs.expected_paths).toEqual({
+        'src/a.ts': HELLO_HASH,
+        'src/b.ts': WORLD_HASH,
+      });
+      expect(callArgs).not.toHaveProperty('deleted_paths');
       expect(callArgs).not.toHaveProperty('canonical_binding');
+      expect(callArgs).not.toHaveProperty('canonical_fence');
     }
+    await driver.stop();
+  });
+
+  it('anchors a cancellable admission generation and records its binding', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await write(workspaceRoot, 'src/b.ts', WORLD);
+    const manifest = await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      handshake: { ...cancellableHandshake(), revision_manifest: true, expected_hash_fence: true },
+      includeCancelIndex: true,
+      indexJobPollMs: 10,
+      onCodeIndex: (args) => {
+        if (args.max_files !== undefined) return success('code_index', { status: 'ok', indexed: 3 });
+        if (args.mode === 'delta') {
+          return success('code_index', {
+            status: 'ok',
+            data: { status: 'running', job_id: 'idx_admission_bound', workspace_id: workspaceId },
+          });
+        }
+        return success('code_index', { status: 'ok', indexed: 2 });
+      },
+      onTool: (tool, args) => (tool === 'index_status'
+        ? success('index_status', {
+          status: 'ok',
+          data: {
+            status: 'done',
+            job_id: args.job_id,
+            workspace_id: workspaceId,
+            result: { status: 'ok', indexed: 2 },
+          },
+        })
+        : success(tool)),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    // A workspace-scoped call triggers the automatic admission pass.
+    await expect(driver.call('pre_edit_context', {
+      workspace_id: workspaceId,
+      file_path: 'src/a.ts',
+    })).resolves.toMatchObject({ ok: true });
+
+    const admission = admissionCalls(calls);
+    expect(admission).toHaveLength(2);
+    for (const args of admission) {
+      expect(args.source_identity).toEqual({
+        repository_id: REPOSITORY_ID,
+        manifest_id: manifest.manifestId,
+        revision_id: manifest.revisionId,
+        commit_sha: COMMIT,
+        tree_oid: manifest.treeOid,
+        ref: CANONICAL_REF,
+      });
+      expect(args.expected_paths).toEqual({
+        'src/a.ts': HELLO_HASH,
+        'src/b.ts': WORLD_HASH,
+      });
+      expect(args).not.toHaveProperty('canonical_binding');
+    }
+    expect(admission[0]!.max_files).toBe(3);
+    expect(admission[1]).toMatchObject({ background: true, mode: 'delta' });
+
+    const job = await readAdmissionJob(dataRoot);
+    expect(job.status).toBe('completed');
+    const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: job.jobId });
+    expect(status).toMatchObject({
+      ok: true,
+      value: {
+        status: 'completed',
+        result: { status: 'ok', indexed: 2, canonical_binding: 'bound', canonical_fence: 'fenced' },
+      },
+    });
+    await driver.stop();
+  });
+
+  it('fences live bytes and declares deletions on an automatic admission', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    // The worktree holds bytes the manifest does not describe and a tracked
+    // deletion; the admission pass must fence the live byte and declare the
+    // removal instead of claiming the revision.
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      evidence: sourceEvidence({
+        dirtyState: 'dirty',
+        deletedPaths: ['src/b.ts'],
+        changedPaths: ['src/a.ts', 'src/b.ts'],
+      }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+    await expect(driver.call('pre_edit_context', {
+      workspace_id: workspaceId,
+      file_path: 'src/a.ts',
+    })).resolves.toMatchObject({ ok: true });
+
+    const admission = admissionCalls(calls);
+    expect(admission.length).toBeGreaterThan(0);
+    for (const args of admission) {
+      expect(args).not.toHaveProperty('source_identity');
+      expect(args.expected_paths).toEqual({ 'src/a.ts': DIRTY_HASH });
+      expect(args.deleted_paths).toEqual(['src/b.ts']);
+    }
+
+    const job = await readAdmissionJob(dataRoot);
+    expect(job.status).toBe('completed');
+    const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: job.jobId });
+    const completed = status.ok && isRecord(status.value) ? status.value : {};
+    const result = isRecord(completed.result) ? completed.result : {};
+    expect(completed.status).toBe('completed');
+    expect(result.structuredContent).toMatchObject({
+      canonical_binding: 'dirty',
+      canonical_fence: 'fenced',
+    });
+    await driver.stop();
+  });
+
+  it('binds an admitted Goal on its automatic admission generation', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', DIRTY);
+    const manifest = await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    const canonicalRoot = path.join(dataRoot, 'canonical');
+    const refs = new CanonicalRefStore(canonicalRoot);
+    const overlays = new GoalOverlayStore(canonicalRoot);
+    await attachGoalBasePin(refs, overlays, {
+      goalWorkspaceId: workspaceId,
+      canonicalRef: CANONICAL_REF,
+      expectedBase: {
+        commitSha: COMMIT,
+        treeOid: manifest.treeOid,
+        manifestId: manifest.manifestId,
+      },
+    });
+    await overlays.upsert(workspaceId, { path: 'src/a.ts', kind: 'modified', contentHash: DIRTY_HASH });
+    await overlays.upsert(workspaceId, { path: 'src/b.ts', kind: 'deleted', contentHash: null });
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      handshake: { ...cancellableHandshake(), revision_manifest: true, expected_hash_fence: true },
+      includeCancelIndex: true,
+      indexJobPollMs: 10,
+      evidence: sourceEvidence({
+        dirtyState: 'dirty',
+        deletedPaths: ['src/b.ts'],
+        changedPaths: ['src/a.ts', 'src/b.ts'],
+      }),
+      onCodeIndex: (args) => (args.max_files !== undefined
+        ? success('code_index', { status: 'ok', indexed: 3 })
+        : success('code_index', {
+          status: 'ok',
+          data: { status: 'running', job_id: 'idx_admission_goal', workspace_id: workspaceId },
+        })),
+      onTool: (tool, args) => (tool === 'index_status'
+        ? success('index_status', {
+          status: 'ok',
+          data: {
+            status: 'done',
+            job_id: args.job_id,
+            workspace_id: workspaceId,
+            result: { status: 'ok', indexed: 2 },
+          },
+        })
+        : success(tool)),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+    await expect(driver.call('pre_edit_context', {
+      workspace_id: workspaceId,
+      file_path: 'src/a.ts',
+    })).resolves.toMatchObject({ ok: true });
+
+    const admission = admissionCalls(calls);
+    expect(admission).toHaveLength(2);
+    for (const args of admission) {
+      expect(args.source_identity).toMatchObject({
+        repository_id: REPOSITORY_ID,
+        manifest_id: manifest.manifestId,
+        commit_sha: COMMIT,
+        ref: CANONICAL_REF,
+      });
+      expect(args.expected_paths).toEqual({ 'src/a.ts': DIRTY_HASH });
+      expect(args.deleted_paths).toEqual(['src/b.ts']);
+    }
+
+    const job = await readAdmissionJob(dataRoot);
+    const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: job.jobId });
+    expect(status).toMatchObject({
+      ok: true,
+      value: {
+        status: 'completed',
+        result: { status: 'ok', indexed: 2, canonical_binding: 'bound', canonical_fence: 'fenced' },
+      },
+    });
+    await driver.stop();
+  });
+
+  it('does not claim the admission anchor after a provider-loss restart', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const deltaStarts: Readonly<Record<string, unknown>>[] = [];
+    const restartStarts: Readonly<Record<string, unknown>>[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      handshake: { ...cancellableHandshake(), revision_manifest: true, expected_hash_fence: true },
+      includeCancelIndex: true,
+      indexJobPollMs: 10,
+      onCodeIndex: (args) => {
+        if (args.max_files !== undefined) return success('code_index', { status: 'ok', indexed: 3 });
+        if (args.mode === 'delta') {
+          deltaStarts.push(args);
+          return success('code_index', {
+            status: 'ok',
+            data: { status: 'running', job_id: 'idx_admission_lost_1', workspace_id: workspaceId },
+          });
+        }
+        restartStarts.push(args);
+        return success('code_index', {
+          status: 'ok',
+          data: { status: 'running', job_id: 'idx_admission_lost_2', workspace_id: workspaceId },
+        });
+      },
+      onTool: (tool, args) => {
+        if (tool !== 'index_status') return success(tool);
+        if (args.job_id === 'idx_admission_lost_1') return structuredFailure('index job is unknown');
+        return success('index_status', {
+          status: 'ok',
+          data: {
+            status: 'done',
+            job_id: args.job_id,
+            workspace_id: workspaceId,
+            result: { status: 'ok', indexed: 1 },
+          },
+        });
+      },
+    });
+    await startCanonicalDriver(driver, dataRoot);
+    await expect(driver.call('pre_edit_context', {
+      workspace_id: workspaceId,
+      file_path: 'src/a.ts',
+    })).resolves.toMatchObject({ ok: true });
+
+    expect(deltaStarts).toHaveLength(1);
+    expect(deltaStarts[0]!.source_identity).toMatchObject({ commit_sha: COMMIT });
+    expect(deltaStarts[0]!.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(restartStarts).toHaveLength(1);
+    expect(restartStarts[0]).toMatchObject({ background: true });
+    expect(restartStarts[0]).not.toHaveProperty('source_identity');
+    expect(restartStarts[0]).not.toHaveProperty('expected_paths');
+
+    const job = await readAdmissionJob(dataRoot);
+    expect(job.providerJobId).toBe('idx_admission_lost_2');
+    const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: job.jobId });
+    expect(status).toMatchObject({
+      ok: true,
+      value: { status: 'completed', result: { status: 'ok', indexed: 1 } },
+    });
+    // The replacement sent no identity or fence, so the ledger must not keep
+    // the anchor the original admission call resolved.
+    const completed = status.ok && isRecord(status.value) && isRecord(status.value.result) ? status.value.result : {};
+    expect(completed).not.toHaveProperty('canonical_binding');
+    expect(completed).not.toHaveProperty('canonical_fence');
     await driver.stop();
   });
 
@@ -3422,7 +3744,7 @@ describe('canonical code_index source identity (#210 §13)', () => {
     await driver.stop();
   });
 
-  it('refuses a corrupt canonical ref instead of reading it as never promoted', async () => {
+  it('refuses an automatic admission against a corrupt canonical store', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
     await write(workspaceRoot, 'src/a.ts', HELLO);
@@ -3435,6 +3757,42 @@ describe('canonical code_index source identity (#210 §13)', () => {
     const calls: CapturedCall[] = [];
     const driver = createCanonicalDriver({ dataRoot, workspaceRoot, calls });
     await startCanonicalDriver(driver, dataRoot);
+
+    // A corrupt store is not "never promoted": the admission refuses before
+    // any trial or delta reaches the child.
+    const result = await driver.call('pre_edit_context', {
+      workspace_id: workspaceId,
+      file_path: 'src/a.ts',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('INTERNAL_ERROR');
+    expect(result.error.details).toMatchObject({ reason: 'canonical_source_invalid' });
+    expect(calls.filter(({ tool }) => tool === 'code_index')).toHaveLength(0);
+    const job = await readAdmissionJob(dataRoot);
+    expect(job.status).toBe('failed');
+    await driver.stop();
+  });
+
+  it('refuses a corrupt canonical ref instead of reading it as never promoted', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({ dataRoot, workspaceRoot, calls });
+    await startCanonicalDriver(driver, dataRoot);
+    // Admit once against the healthy store so only the demand pass below meets
+    // the corrupt ref; admission has its own refusal test.
+    await expect(driver.call('pre_edit_context', {
+      workspace_id: workspaceId,
+      file_path: 'src/a.ts',
+    })).resolves.toMatchObject({ ok: true });
+    await writeFile(
+      path.join(dataRoot, 'canonical', 'refs', 'remotes', 'origin', 'main.json'),
+      '{not json',
+      'utf8',
+    );
 
     const result = await driver.call('code_index', {
       workspace_id: workspaceId,

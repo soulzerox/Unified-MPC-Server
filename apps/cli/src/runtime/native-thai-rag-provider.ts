@@ -1148,7 +1148,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const providerJobId = nestedString(started.value, 'job_id');
     if (providerJobId === undefined) return undefined;
     const rebound = await this.jobs.bindProviderJob(jobId, providerJobId, ownerId);
-    return rebound === null ? undefined : providerJobId;
+    if (rebound === null) return undefined;
+    // The replacement sends no identity or fence, so the original anchor must
+    // not survive into its ledger result: merging it would claim revision M for
+    // bytes this call never fenced. Anchoring a restart is a later rollout step.
+    this.canonicalIndexRecords.delete(jobId);
+    return providerJobId;
   }
 
   private startIndexJobMonitor(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): void {

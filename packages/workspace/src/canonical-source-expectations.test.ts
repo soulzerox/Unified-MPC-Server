@@ -37,13 +37,16 @@ async function write(root: string, relativePath: string, contents: string): Prom
 }
 
 describe('buildCanonicalSourceExpectations (#210 §13)', () => {
-  it('fences the live byte of every leaf and declares view-only paths as deletions', async () => {
+  it('fences the effective view hash and declares view-only paths as deletions', async () => {
     const root = await tempRoot();
     await write(root, 'src/a.ts', HELLO);
     await write(root, 'src/dirty.ts', DIRTY);
     await symlink(path.join(root, 'src/a.ts'), path.join(root, 'src/link.ts'));
     const view = new Map<string, string>([
       ['src/a.ts', HELLO_HASH],
+      // The declared revision says this path holds different bytes than disk:
+      // the fence must publish the declared hash so the provider sees the drift
+      // instead of adopting the live byte under that revision.
       ['src/dirty.ts', 'f'.repeat(64)],
       // Tracked in the revision but removed from the worktree.
       ['src/gone.ts', 'e'.repeat(64)],
@@ -57,28 +60,31 @@ describe('buildCanonicalSourceExpectations (#210 §13)', () => {
     });
     expect(plan.expectedPaths).toEqual({
       'src/a.ts': HELLO_HASH,
-      'src/dirty.ts': DIRTY_HASH,
+      'src/dirty.ts': 'f'.repeat(64),
     });
     expect(plan.deletedPaths).toEqual(['src/gone.ts']);
   });
 
-  it('uses the live hash for each requested path and refuses a path that exists nowhere', async () => {
+  it('uses the view hash for tracked paths and the live hash for untracked ones', async () => {
     const root = await tempRoot();
     await write(root, 'src/a.ts', HELLO);
     await write(root, 'src/b.ts', DIRTY);
+    await write(root, 'src/untracked.ts', DIRTY);
     const view = new Map<string, string>([
       ['src/a.ts', HELLO_HASH],
+      // As above: the view is authoritative even when the worktree disagrees.
       ['src/b.ts', HELLO_HASH],
       ['src/only-in-view.ts', 'c'.repeat(64)],
     ]);
     const plan = await buildCanonicalSourceExpectations({
       rootPath: root,
-      requestedPaths: ['src/a.ts', 'src/b.ts', 'src/only-in-view.ts'],
+      requestedPaths: ['src/a.ts', 'src/b.ts', 'src/untracked.ts', 'src/only-in-view.ts'],
       view,
     });
     expect(plan.expectedPaths).toEqual({
       'src/a.ts': HELLO_HASH,
-      'src/b.ts': DIRTY_HASH,
+      'src/b.ts': HELLO_HASH,
+      'src/untracked.ts': DIRTY_HASH,
     });
     expect(plan.deletedPaths).toEqual(['src/only-in-view.ts']);
 

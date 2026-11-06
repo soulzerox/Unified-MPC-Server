@@ -3272,11 +3272,15 @@ describe('canonical code_index source identity (#210 §13)', () => {
     readonly evidence?: WorkspaceSourceEvidenceIdentity | null;
     readonly source?: { readonly canonicalRef: string; readonly expectedRepositoryIds: readonly string[] | null } | null;
     readonly onCodeIndex?: (args: Readonly<Record<string, unknown>>) => unknown;
+    readonly onTool?: (tool: string, args: Readonly<Record<string, unknown>>) => unknown;
+    readonly includeCancelIndex?: boolean;
+    readonly indexJobPollMs?: number;
   }): NativeThaiRagProviderDriver {
     return new NativeThaiRagProviderDriver({
       dataRoot: options.dataRoot,
       launchConfig: { command: '/python' },
       canonicalRoot: path.join(options.dataRoot, 'canonical'),
+      ...(options.indexJobPollMs === undefined ? {} : { indexJobPollMs: options.indexJobPollMs }),
       workspacesProvider: async (): Promise<readonly {
         id: string;
         rootPath: string;
@@ -3298,9 +3302,12 @@ describe('canonical code_index source identity (#210 §13)', () => {
       ),
       clientFactory: clientFactory({
         handshake: options.handshake ?? canonicalHandshake(),
+        ...(options.includeCancelIndex === true ? { includeCancelIndex: true } : {}),
         onCall: async (tool, args): Promise<unknown> => {
           options.calls.push({ tool, args });
-          if (tool !== 'code_index') return success(tool);
+          if (tool !== 'code_index') {
+            return options.onTool === undefined ? success(tool) : options.onTool(tool, args);
+          }
           return options.onCodeIndex === undefined
             ? success('code_index', { status: 'ok', indexed: 0 })
             : options.onCodeIndex(args);
@@ -3666,6 +3673,162 @@ describe('canonical code_index source identity (#210 §13)', () => {
     if (result.ok) return;
     expect(result.error.code).toBe(mappedCode);
     expect(result.error.details).toMatchObject({ reason: providerCode, providerStatus: 'error' });
+    await driver.stop();
+  });
+
+  it('withholds the fence when the provider cannot consume expectations', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      handshake: canonicalHandshake({ revisionManifest: true, expectedHashFence: false }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    // The identity flag alone decides the anchor; the fence flag is orthogonal.
+    expect(args.source_identity).toMatchObject({ commit_sha: COMMIT });
+    expect(args).not.toHaveProperty('expected_paths');
+    expect(args).not.toHaveProperty('deleted_paths');
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'bound', canonical_fence: 'none' },
+    });
+    await driver.stop();
+  });
+
+  it('binds a dirty checkout ahead of unsupported when the provider cannot record revisions', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      handshake: canonicalHandshake({ revisionManifest: false, expectedHashFence: true }),
+      // Exactly on the manifest commit but with uncommitted edits: the dirty
+      // state is the caller-visible reason, not the provider's missing flag.
+      evidence: sourceEvidence({ dirtyState: 'dirty' }),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const args = demandCalls(calls)[0]!;
+    expect(args).not.toHaveProperty('source_identity');
+    expect(args.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(result.value).toMatchObject({
+      structuredContent: { canonical_binding: 'dirty', canonical_fence: 'fenced' },
+    });
+    await driver.stop();
+  });
+
+  it('drops the original anchor when a restart re-issues code_index without identity', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const originalStarts: Readonly<Record<string, unknown>>[] = [];
+    const restartStarts: Readonly<Record<string, unknown>>[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      handshake: {
+        ...cancellableHandshake(),
+        revision_manifest: true,
+        expected_hash_fence: true,
+      },
+      includeCancelIndex: true,
+      indexJobPollMs: 10,
+      onCodeIndex: (args) => {
+        if (args.mode === 'delta') {
+          return success('code_index', {
+            status: 'ok',
+            data: { status: 'running', job_id: 'idx_admission', workspace_id: workspaceId },
+          });
+        }
+        if (args.background === true) {
+          if (originalStarts.length === 0) {
+            originalStarts.push(args);
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_1', workspace_id: workspaceId },
+            });
+          }
+          restartStarts.push(args);
+          return success('code_index', {
+            status: 'ok',
+            data: { status: 'running', job_id: 'idx_provider_2', workspace_id: workspaceId },
+          });
+        }
+        return success('code_index', { status: 'ok' });
+      },
+      onTool: (tool, args) => {
+        if (tool !== 'index_status') return success(tool);
+        // The provider lost its registry entry for the first job (issue #449);
+        // the restart runs under a new provider job id and must finish clean.
+        if (args.job_id === 'idx_provider_1') return structuredFailure('index job is unknown');
+        return success('index_status', {
+          status: 'ok',
+          data: {
+            status: 'done',
+            job_id: args.job_id,
+            workspace_id: workspaceId,
+            result: { status: 'ok', indexed: 1 },
+          },
+        });
+      },
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const started = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+      background: true,
+    });
+    expect(started).toMatchObject({ ok: true, value: { status: 'running', canonical_binding: 'bound' } });
+    if (!started.ok || !isRecord(started.value) || typeof started.value.job_id !== 'string') {
+      throw new Error('missing local job id');
+    }
+    const localJobId = started.value.job_id;
+
+    let terminal: Awaited<ReturnType<typeof driver.call>> | undefined;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      terminal = await driver.call('index_status', { workspace_id: workspaceId, job_id: localJobId });
+      if (terminal.ok && isRecord(terminal.value) && terminal.value.status === 'completed') break;
+    }
+    expect(terminal).toMatchObject({ ok: true, value: { status: 'completed' } });
+
+    expect(originalStarts).toHaveLength(1);
+    expect(originalStarts[0]!.source_identity).toMatchObject({ commit_sha: COMMIT });
+    expect(originalStarts[0]!.expected_paths).toEqual({ 'src/a.ts': HELLO_HASH });
+    expect(restartStarts).toHaveLength(1);
+    expect(restartStarts[0]).not.toHaveProperty('source_identity');
+    expect(restartStarts[0]).not.toHaveProperty('expected_paths');
+    // The replacement sent no identity or fence, so the ledger must not claim
+    // the original binding for the bytes it published.
+    const completed = terminal.ok && isRecord(terminal.value) ? terminal.value : {};
+    const completedResult = isRecord(completed.result) ? completed.result : {};
+    expect(completedResult).toEqual({ status: 'ok', indexed: 1 });
     await driver.stop();
   });
 });

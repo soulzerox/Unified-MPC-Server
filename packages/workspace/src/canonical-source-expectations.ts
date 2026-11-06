@@ -47,12 +47,16 @@ export class CanonicalSourceExpectationError extends Error {
  * Build the provider's source fence for one `code_index` request (#210 §13).
  *
  * `expected_paths` is the hash of the byte this call believes it is
- * publishing: the live content hash for every present path, because that is
- * what the scanner hashes. A tracked path that is absent from disk is never an
- * expectation — the scanner cannot observe bytes for it — so it becomes a
- * declaration in `deleted_paths` and is removed from the fence. A requested
- * path that exists nowhere is refused before the child call instead of being
- * "declared" as a deletion the caller never owned.
+ * publishing: the effective-view hash for a tracked path, and the live content
+ * hash only for a path the view does not describe (dirty or untracked). The
+ * view is the caller's declaration of the revision it means to publish, so a
+ * live byte that disagrees with it is drift the provider must report as a
+ * violation instead of content silently adopted under that revision. A tracked
+ * path that is absent from disk is never an expectation — the scanner cannot
+ * observe bytes for it — so it becomes a declaration in `deleted_paths` and is
+ * removed from the fence. A requested path that exists nowhere is refused
+ * before the child call instead of being "declared" as a deletion the caller
+ * never owned.
  *
  * A removal is a declaration, not a fence: it never hides an unexpected live
  * file, so it needs no skip-policy rule in the caller.
@@ -78,7 +82,11 @@ export async function buildCanonicalSourceExpectations(
     const live = await hashLivePath(input.rootPath, candidate);
     if (live.kind === 'unfenceable') continue;
     if (live.kind === 'file') {
-      expected.set(candidate, live.contentHash);
+      // Tracked paths keep the effective-view hash so a byte that drifted from
+      // the declared revision fails the provider's fence instead of being
+      // published as that revision. Only an untracked path (no view entry)
+      // falls back to the byte on disk.
+      expected.set(candidate, input.view?.get(candidate) ?? live.contentHash);
       continue;
     }
     if (input.view?.has(candidate) === true) {

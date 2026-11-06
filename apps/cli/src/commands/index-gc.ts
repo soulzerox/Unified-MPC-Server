@@ -1,5 +1,5 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import type { GcCycleReport } from '@unified-mpc/workspace';
+import type { GcCycleReport, MaintenanceCycleReport } from '@unified-mpc/workspace';
 
 export interface IndexGcCommand {
   readonly kind: 'index-gc';
@@ -129,4 +129,75 @@ function renderApplied(report: Extract<GcCycleReport, { status: 'planned' }>): s
 /** A refused plan is a blocking condition for the store, not a successful read. */
 export function indexGcExitCode(report: GcCycleReport): number {
   return report.status === 'planned' ? 0 : 1;
+}
+
+export interface IndexMaintenanceCommand {
+  readonly kind: 'index-maintenance';
+  /** `--dry-run` plans; `--apply` is the only mutating mode. */
+  readonly dryRun: boolean;
+  /** Print the cycle report as JSON instead of the operator lines. */
+  readonly json: boolean;
+}
+
+const INDEX_MAINTENANCE_USAGE = 'Usage: unified-mpc index maintenance (--dry-run | --apply) [--json]';
+
+/**
+ * Parse `index maintenance --dry-run|--apply [--json]`.
+ *
+ * Exactly one mode is required, never defaulted, for the same reason as
+ * `index gc`: the verb must not become a mutation by omission. There is no
+ * `--grace`: the maintenance cycle runs one bounded pass with the documented
+ * default quarantine window, so a flag that only one inner verb understood
+ * would silently do nothing.
+ */
+export function parseIndexMaintenanceArgs(args: readonly string[]): Result<IndexMaintenanceCommand> {
+  if (args[0] !== 'maintenance') return err(appError('INVALID_INPUT', INDEX_MAINTENANCE_USAGE));
+
+  let dryRun: boolean | undefined;
+  let json = false;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--dry-run') {
+      if (dryRun !== undefined) return err(appError('INVALID_INPUT', INDEX_MAINTENANCE_USAGE));
+      dryRun = true;
+      continue;
+    }
+    if (argument === '--apply') {
+      if (dryRun !== undefined) return err(appError('INVALID_INPUT', INDEX_MAINTENANCE_USAGE));
+      dryRun = false;
+      continue;
+    }
+    if (argument === '--json') {
+      if (json) return err(appError('INVALID_INPUT', INDEX_MAINTENANCE_USAGE));
+      json = true;
+      continue;
+    }
+    return err(appError('INVALID_INPUT', INDEX_MAINTENANCE_USAGE));
+  }
+
+  if (dryRun === undefined) return err(appError('INVALID_INPUT', INDEX_MAINTENANCE_USAGE));
+  return ok({ kind: 'index-maintenance', dryRun, json });
+}
+
+/**
+ * Render one maintenance cycle report (#210 §3, §5-§7).
+ *
+ * The cycle's own verdict is the only summary: a refusal is printed as the
+ * safety decision it is, a skip as a successful "nothing to do", and a
+ * completed pass keeps the existing GC plan/apply lines instead of inventing a
+ * second rendering of the same counts.
+ */
+export function formatIndexMaintenance(report: MaintenanceCycleReport, dryRun: boolean): string {
+  if (report.status === 'refused') return `refused ${report.reason}`;
+  if (report.status === 'skipped') return `skipped ${report.reason}`;
+  const mode = dryRun ? 'dry-run' : 'applied';
+  return [
+    `completed (${mode}) verification ${report.verification.status} manifests ${report.verification.manifests.length}`,
+    formatIndexGc(report.gc, dryRun),
+  ].join('\n');
+}
+
+/** A refusal blocks the store; a skip and a completed pass are both success. */
+export function indexMaintenanceExitCode(report: MaintenanceCycleReport): number {
+  return report.status === 'refused' ? 1 : 0;
 }

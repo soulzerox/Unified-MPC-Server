@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_GC_GRACE_MS, formatIndexGc, indexGcExitCode, parseGcGrace, parseIndexGcArgs } from './index-gc.js';
+import {
+  DEFAULT_GC_GRACE_MS,
+  formatIndexGc,
+  formatIndexMaintenance,
+  indexGcExitCode,
+  indexMaintenanceExitCode,
+  parseGcGrace,
+  parseIndexGcArgs,
+  parseIndexMaintenanceArgs,
+} from './index-gc.js';
 
 const CONTENT = 'a'.repeat(64);
 const ARTIFACT_KEY = `file:v1:${'b'.repeat(64)}`;
@@ -149,5 +158,149 @@ describe('indexGcExitCode', () => {
     } as const;
     expect(indexGcExitCode(planned)).toBe(0);
     expect(indexGcExitCode({ status: 'refused', reason: 'missing manifests' })).toBe(1);
+  });
+});
+
+describe('parseIndexMaintenanceArgs', () => {
+  it('parses the mode flag in any position', () => {
+    expect(parseIndexMaintenanceArgs(['maintenance', '--dry-run'])).toEqual({
+      ok: true,
+      value: { kind: 'index-maintenance', dryRun: true, json: false },
+    });
+    expect(parseIndexMaintenanceArgs(['maintenance', '--json', '--apply'])).toEqual({
+      ok: true,
+      value: { kind: 'index-maintenance', dryRun: false, json: true },
+    });
+  });
+
+  it('requires exactly one explicit mode', () => {
+    expect(parseIndexMaintenanceArgs(['maintenance'])).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(parseIndexMaintenanceArgs(['maintenance', '--json'])).toMatchObject({ ok: false });
+    expect(parseIndexMaintenanceArgs(['maintenance', '--dry-run', '--apply'])).toMatchObject({ ok: false });
+    expect(parseIndexMaintenanceArgs(['maintenance', '--apply', '--apply'])).toMatchObject({ ok: false });
+  });
+
+  it('rejects duplicate, unknown and positional arguments', () => {
+    expect(parseIndexMaintenanceArgs(['maintenance', '--dry-run', '--dry-run'])).toMatchObject({ ok: false });
+    expect(parseIndexMaintenanceArgs(['maintenance', '--apply', '--json', '--json'])).toMatchObject({ ok: false });
+    expect(parseIndexMaintenanceArgs(['maintenance', '--apply', '--force'])).toMatchObject({ ok: false });
+    expect(parseIndexMaintenanceArgs(['maintenance', CONTENT, '--apply'])).toMatchObject({ ok: false });
+  });
+
+  it('rejects the per-verb grace flag the cycle does not thread', () => {
+    expect(parseIndexMaintenanceArgs(['maintenance', '--apply', '--grace', '7d'])).toMatchObject({ ok: false });
+  });
+
+  it('rejects the other index verbs', () => {
+    expect(parseIndexMaintenanceArgs(['gc', '--dry-run'])).toMatchObject({ ok: false });
+    expect(parseIndexMaintenanceArgs(['status'])).toMatchObject({ ok: false });
+  });
+});
+
+const HEALTHY_VERIFICATION = {
+  status: 'healthy',
+  danglingRefs: [],
+  missingOverlays: [],
+  orphanedPins: [],
+  manifests: [{ manifestId: 'manifest_1', pinned: true, reasons: ['operator'] }],
+} as const;
+
+describe('formatIndexMaintenance', () => {
+  it('prints a completed dry run with the GC plan it would apply', () => {
+    expect(formatIndexMaintenance({
+      status: 'completed',
+      gc: {
+        status: 'planned',
+        reachable: [],
+        unreachable: [CONTENT],
+        unreachableArtifacts: [{ repositoryId: REPO, artifactKey: ARTIFACT_KEY }],
+        quarantined: [],
+        quarantinedArtifacts: [],
+      },
+      verification: HEALTHY_VERIFICATION,
+      tookFence: true,
+      tookAdmission: true,
+    }, true)).toBe([
+      'completed (dry-run) verification healthy manifests 1',
+      'planned (dry-run) reachable 0 unreachable 1 artifact-unreachable 1',
+      `unreachable ${CONTENT}`,
+      `artifact-unreachable ${REPO} ${ARTIFACT_KEY}`,
+    ].join('\n'));
+  });
+
+  it('prints a completed apply with the rows it quarantined', () => {
+    expect(formatIndexMaintenance({
+      status: 'completed',
+      gc: {
+        status: 'planned',
+        reachable: [],
+        unreachable: [CONTENT],
+        unreachableArtifacts: [],
+        quarantined: [CONTENT],
+        quarantinedArtifacts: [],
+      },
+      verification: HEALTHY_VERIFICATION,
+      tookFence: true,
+      tookAdmission: true,
+    }, false)).toBe([
+      'completed (applied) verification healthy manifests 1',
+      'applied quarantined 1 artifact-quarantined 0',
+      `quarantined ${CONTENT}`,
+    ].join('\n'));
+  });
+
+  it('prints a skip as a successful verdict, not a failure', () => {
+    expect(formatIndexMaintenance({
+      status: 'skipped',
+      reason: 'reader-pressure',
+      tookFence: true,
+      tookAdmission: false,
+    }, false)).toBe('skipped reader-pressure');
+    expect(formatIndexMaintenance({
+      status: 'skipped',
+      reason: 'below-threshold',
+      tookFence: true,
+      tookAdmission: false,
+    }, true)).toBe('skipped below-threshold');
+  });
+
+  it('prints a refusal as the safety verdict', () => {
+    expect(formatIndexMaintenance({
+      status: 'refused',
+      reason: 'headroom-insufficient',
+      tookFence: false,
+      tookAdmission: false,
+    }, false)).toBe('refused headroom-insufficient');
+  });
+});
+
+describe('indexMaintenanceExitCode', () => {
+  it('exits 1 only for a refusal', () => {
+    expect(indexMaintenanceExitCode({
+      status: 'refused',
+      reason: 'admission-rejected',
+      tookFence: true,
+      tookAdmission: false,
+    })).toBe(1);
+    expect(indexMaintenanceExitCode({
+      status: 'skipped',
+      reason: 'below-threshold',
+      tookFence: true,
+      tookAdmission: false,
+    })).toBe(0);
+    expect(indexMaintenanceExitCode({
+      status: 'completed',
+      gc: {
+        status: 'planned',
+        reachable: [],
+        unreachable: [],
+        unreachableArtifacts: [],
+        quarantined: [],
+        quarantinedArtifacts: [],
+      },
+      verification: HEALTHY_VERIFICATION,
+      tookFence: true,
+      tookAdmission: true,
+    })).toBe(0);
   });
 });

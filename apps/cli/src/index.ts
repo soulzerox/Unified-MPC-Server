@@ -15,6 +15,7 @@ import {
   CanonicalArtifactStore,
   CanonicalManifestStore,
   CanonicalRefStore,
+  DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
   expireGcQuarantine,
   GcLeaseStore,
   gcStatus,
@@ -26,7 +27,10 @@ import {
   repairCanonicalStore,
   RevisionPinRegistry,
   runGcCycle,
+  runMaintenanceCycle,
+  sharedProcessResourceAdmissionController,
   unpinCanonicalRevision,
+  verifyCanonicalStore,
   WorkspaceService,
   type CanonicalStatusReport,
   type CanonicalRevisionListReport,
@@ -37,6 +41,7 @@ import {
   type GcStatusReport,
   type GitRevisionAdvanceResult,
   type LogicalSpaceReport,
+  type MaintenanceCycleReport,
   type RevisionPruneReport,
   type StoredArtifact,
   type Workspace,
@@ -120,10 +125,15 @@ import {
   type IndexRepairCommand,
 } from './commands/index-repair.js';
 import {
+  DEFAULT_GC_GRACE_MS,
   formatIndexGc,
+  formatIndexMaintenance,
   indexGcExitCode,
+  indexMaintenanceExitCode,
   parseIndexGcArgs,
+  parseIndexMaintenanceArgs,
   type IndexGcCommand,
+  type IndexMaintenanceCommand,
 } from './commands/index-gc.js';
 import {
   formatIndexGcExpire,
@@ -197,6 +207,7 @@ export type CliCommand =
   | IndexRevisionPruneCommand
   | IndexRepairCommand
   | IndexGcCommand
+  | IndexMaintenanceCommand
   | IndexGcExpireCommand
   | IndexGcStatusCommand
   | IndexStatusCommand
@@ -254,6 +265,9 @@ export interface CliDependencies {
     readonly dryRun: boolean;
     readonly graceMs: number;
   }): Promise<GcCycleReport>;
+  indexMaintenance?(input: {
+    readonly dryRun: boolean;
+  }): Promise<MaintenanceCycleReport>;
   indexGcExpire?(input: {
     readonly dryRun: boolean;
   }): Promise<GcExpireReport>;
@@ -289,6 +303,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
+    if (args[1] === 'maintenance') return parseIndexMaintenanceArgs(args.slice(1));
     if (args[1] === 'repair') return parseIndexRepairArgs(args.slice(1));
     if (args[1] === 'space') return parseIndexSpaceArgs(args.slice(1));
     if (args[1] === 'gc') {
@@ -303,7 +318,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
       if (args[2] === 'advance') return parseIndexRevisionArgs(args.slice(1));
       return err(appError('INVALID_INPUT', 'Usage: unified-mpc index revision list|pin|unpin|prune|advance ...'));
     }
-    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|space|revision|gc|repair ...'));
+    return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|space|revision|gc|maintenance|repair ...'));
   }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
@@ -344,6 +359,7 @@ Commands:
   index gc expire --dry-run              Plan quarantine expiry and deletion without deleting
   index gc expire --apply                Release due quarantine rows and delete artifacts
   index gc status [--json]               Report the GC lease and quarantine deadlines
+  index maintenance --dry-run|--apply    Plan or run one bounded maintenance cycle (--json for the report)
   index status [--json]                  Report canonical store health, refs and blocking state
   index space [--json]                   Report logical canonical-space counts, never physical bytes
   publish-credential grant <remote>      Grant a publish credential lease from stdin
@@ -524,6 +540,20 @@ Commands:
         });
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexGc(report, parsed.value.dryRun));
         return indexGcExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-maintenance': {
+      if (dependencies.indexMaintenance === undefined) {
+        writeError('Canonical index service is not available');
+        return 1;
+      }
+      try {
+        const report = await dependencies.indexMaintenance({ dryRun: parsed.value.dryRun });
+        write(parsed.value.json ? JSON.stringify(report, null, 2) : formatIndexMaintenance(report, parsed.value.dryRun));
+        return indexMaintenanceExitCode(report);
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -845,6 +875,90 @@ async function readIndexJobManifestsForGc(jobs: IndexJobLedger): Promise<StrictI
   }
 }
 
+interface CanonicalGcRun {
+  readonly dryRun: boolean;
+  readonly graceMs: number;
+  /**
+   * Set when this pass owns the fence. Omitted when the caller already holds
+   * it: `runGcCycle` would self-deny a second acquire of the same live record.
+   */
+  readonly lease?: { readonly store: GcLeaseStore; readonly ownerId: string; readonly ttlMs: number };
+}
+
+/**
+ * Plan or apply artifact GC against one canonical root.
+ *
+ * Shared by `index gc` (which owns its fence) and by the maintenance cycle's
+ * GC closure (which runs under the cycle's fence). Reads the index-job ledger
+ * immediately before planning so a live job cannot lose its manifest to a
+ * stale list, and a corrupt artifact record refuses the pass instead of hiding
+ * both a candidate and the bindings that keep live artifacts reachable.
+ */
+async function runCanonicalGc(root: string, input: CanonicalGcRun): Promise<GcCycleReport> {
+  const artifacts = new CanonicalArtifactStore(root);
+  // A GC plan must read the whole store: a skipped corrupt record hides both a
+  // candidate and the bindings that keep live artifacts reachable.
+  let stored: StoredArtifact[];
+  try {
+    stored = await artifacts.list({ strict: true });
+  } catch (error) {
+    return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
+  }
+  const contentHashes = new Set<string>();
+  const artifactCandidates: { repositoryId: string; artifactKey: string }[] = [];
+  const seen = new Set<string>();
+  for (const artifact of stored) {
+    // Semantic (chunk) artifacts are owned by the Thai-RAG GC boundary, and
+    // the artifact-key planner reads file bindings only, so feeding chunk
+    // keys here would mark every one of them unreachable.
+    if (artifact.kind !== 'file') continue;
+    contentHashes.add(artifact.sourceContentSha256);
+    const identity = `${artifact.repositoryId}\u0000${artifact.artifactKey}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    artifactCandidates.push({ repositoryId: artifact.repositoryId, artifactKey: artifact.artifactKey });
+  }
+  const jobs = new IndexJobLedger(root);
+  // A refusal returns before the lease is taken, so nothing is quarantined.
+  const ledger = await readIndexJobManifestsForGc(jobs);
+  if (ledger.status === 'refused') return ledger;
+  return runGcCycle({
+    refs: new CanonicalRefStore(root),
+    manifests: new CanonicalManifestStore(root),
+    pins: new RevisionPinRegistry(root),
+    overlays: new GoalOverlayStore(root),
+    quarantine: new ArtifactQuarantineStore(root),
+    artifacts,
+  }, {
+    candidates: [...contentHashes].sort(),
+    artifactCandidates,
+    indexJobManifestIds: ledger.manifestIds,
+    now: new Date(),
+    // The caller's window: every row this pass writes carries the same
+    // deadline, so a later `index gc expire --apply` can prove grace.
+    graceMs: input.graceMs,
+    dryRun: input.dryRun,
+    ...(input.lease === undefined ? {} : { lease: input.lease }),
+  });
+}
+
+/**
+ * Free bytes on the filesystem that holds the data path.
+ *
+ * `statfsSync` reports blocks available to an unprivileged writer, which is the
+ * number that matters when the maintenance copy needs headroom. Any failure
+ * returns null so the cycle refuses as `headroom-unknown` instead of guessing.
+ */
+function availableDiskBytes(target: string): number | null {
+  try {
+    const stats = fs.statfsSync(target);
+    const free = Number(stats.bavail) * Number(stats.bsize);
+    return Number.isSafeInteger(free) && free >= 0 ? free : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createDefaultCliDependencies(options: DefaultCliDependenciesOptions = {}): CliDependencies {
   let workspaceState: {
     readonly database: SqliteDatabase;
@@ -1120,55 +1234,60 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       const dataPath = resolveDataPathFromShared();
       assertStorageIdentitySafe(dataPath);
       const root = path.join(dataPath, 'canonical');
-      const artifacts = new CanonicalArtifactStore(root);
-      // A GC plan must read the whole store: a skipped corrupt record hides
-      // both a candidate and the bindings that keep live artifacts reachable.
-      let stored: StoredArtifact[];
-      try {
-        stored = await artifacts.list({ strict: true });
-      } catch (error) {
-        return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
-      }
-      const contentHashes = new Set<string>();
-      const artifactCandidates: { repositoryId: string; artifactKey: string }[] = [];
-      const seen = new Set<string>();
-      for (const artifact of stored) {
-        // Semantic (chunk) artifacts are owned by the Thai-RAG GC boundary, and
-        // the artifact-key planner reads file bindings only, so feeding chunk
-        // keys here would mark every one of them unreachable.
-        if (artifact.kind !== 'file') continue;
-        contentHashes.add(artifact.sourceContentSha256);
-        const identity = `${artifact.repositoryId}\u0000${artifact.artifactKey}`;
-        if (seen.has(identity)) continue;
-        seen.add(identity);
-        artifactCandidates.push({ repositoryId: artifact.repositoryId, artifactKey: artifact.artifactKey });
-      }
-      const jobs = new IndexJobLedger(root);
-      // A refusal returns before the lease is taken, so nothing is quarantined.
-      const ledger = await readIndexJobManifestsForGc(jobs);
-      if (ledger.status === 'refused') return ledger;
       // Only the mutating pass takes the U28 fence; a dry run stays read-only
       // and unfenced, exactly like the expire verb.
       const lease = input.dryRun
         ? undefined
         : { store: new GcLeaseStore(root), ownerId: gcLeaseOwnerId(), ttlMs: GC_LEASE_TTL_MS };
-      return runGcCycle({
-        refs: new CanonicalRefStore(root),
-        manifests: new CanonicalManifestStore(root),
-        pins: new RevisionPinRegistry(root),
-        overlays: new GoalOverlayStore(root),
-        quarantine: new ArtifactQuarantineStore(root),
-        artifacts,
-      }, {
-        candidates: [...contentHashes].sort(),
-        artifactCandidates,
-        indexJobManifestIds: ledger.manifestIds,
-        now: new Date(),
-        // The caller's window: every row this pass writes carries the same
-        // deadline, so a later `index gc expire --apply` can prove grace.
-        graceMs: input.graceMs,
+      return runCanonicalGc(root, {
         dryRun: input.dryRun,
+        graceMs: input.graceMs,
         ...(lease === undefined ? {} : { lease }),
+      });
+    },
+    indexMaintenance: async (input): Promise<MaintenanceCycleReport> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      const root = path.join(dataPath, 'canonical');
+      const now = new Date();
+      // Real measured pressure: the gate refuses unmeasurable headroom and
+      // skips below threshold or under reader pressure instead of inferring
+      // safety. The passive checkpoint stays bounded and non-blocking.
+      const physical = await getWorkspaceState().database.physicalMetrics();
+      return runMaintenanceCycle({
+        physical: {
+          databaseBytes: physical.databaseBytes,
+          freelistBytes: physical.freelistBytes,
+          freelistRatio: physical.freelistRatio,
+          compactionRecommended: physical.compactionRecommended,
+          // A checkpoint a reader blocked is the only cross-process pressure
+          // signal a one-shot CLI can observe.
+          checkpointBusy: physical.checkpoint.busy,
+        },
+        diskFreeBytes: availableDiskBytes(dataPath),
+        // This process is the only reader it can prove: it holds no
+        // long-lived transaction of its own.
+        activeReaderCount: 0,
+        ownerId: gcLeaseOwnerId(),
+        workspaceId: 'canonical-store',
+        now,
+        ttlMs: GC_LEASE_TTL_MS,
+        leaseStore: new GcLeaseStore(root),
+        controller: sharedProcessResourceAdmissionController(),
+        resourceClass: 'verification_heavy',
+        admissionCost: DEFAULT_VERIFICATION_HEAVY_ADMISSION_COST,
+        // The cycle holds the single-owner fence for the whole pass, so the
+        // GC closure runs without a lease of its own: a second acquire of the
+        // same live record would self-deny.
+        runGcQuarantine: () => runCanonicalGc(root, { dryRun: input.dryRun, graceMs: DEFAULT_GC_GRACE_MS }),
+        // Strict reads: a corrupt manifest must degrade the verdict instead of
+        // reading as "missing" and hiding a live binding.
+        verifyStore: () => verifyCanonicalStore({
+          refs: new CanonicalRefStore(root),
+          manifests: new CanonicalManifestStore(root, { strictReads: true }),
+          pins: new RevisionPinRegistry(root),
+          overlays: new GoalOverlayStore(root),
+        }),
       });
     },
     indexGcExpire: async (input): Promise<GcExpireReport> => {

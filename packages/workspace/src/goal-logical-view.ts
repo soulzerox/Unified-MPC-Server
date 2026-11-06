@@ -1,11 +1,37 @@
 import type { CanonicalRefStore } from './canonical-ref-store.js';
-import type { GoalOverlayStore } from './goal-overlay-store.js';
+import type { GoalOverlay, GoalOverlayStore } from './goal-overlay-store.js';
 import { verifyGoalAdmission } from './goal-admission.js';
 
 export interface GoalLogicalViewInput {
   readonly goalWorkspaceId: string;
   readonly canonicalRef: string;
   readonly baseEntries: readonly { readonly path: string; readonly contentHash: string }[];
+}
+
+/**
+ * Merge one base manifest with a Goal overlay, tombstones winning last (#210 U14).
+ *
+ * This is the single base+overlay merge: `resolveGoalLogicalView` and the
+ * source-fence builder must agree byte-for-byte on which content a path holds,
+ * so neither may re-derive the order. A null overlay is the plain-checkout
+ * view: the base entries unchanged.
+ */
+export function applyGoalOverlay(
+  baseEntries: readonly { readonly path: string; readonly contentHash: string }[],
+  overlay: GoalOverlay | null,
+): Map<string, string> {
+  const view = new Map<string, string>();
+  for (const entry of baseEntries) {
+    view.set(entry.path, entry.contentHash);
+  }
+  for (const entry of overlay?.entries ?? []) {
+    if (entry.contentHash === null) {
+      view.delete(entry.path);
+    } else {
+      view.set(entry.path, entry.contentHash);
+    }
+  }
+  return view;
 }
 
 /**
@@ -30,16 +56,5 @@ export async function resolveGoalLogicalView(
   if (!verdict.admitted) {
     throw new Error(`goal not admissible: ${verdict.reason}`);
   }
-  const view = new Map<string, string>();
-  for (const entry of input.baseEntries) {
-    view.set(entry.path, entry.contentHash);
-  }
-  for (const entry of verdict.overlay.entries) {
-    if (entry.contentHash === null) {
-      view.delete(entry.path);
-    } else {
-      view.set(entry.path, entry.contentHash);
-    }
-  }
-  return view;
+  return applyGoalOverlay(input.baseEntries, verdict.overlay);
 }

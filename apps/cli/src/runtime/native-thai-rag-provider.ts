@@ -16,6 +16,18 @@ import {
   type McpServerLaunchConfig,
 } from '@unified-mpc/extensions';
 import { parseBooleanSetting } from '@unified-mpc/shared';
+import {
+  CanonicalManifestStore,
+  CanonicalRefStore,
+  CanonicalSourceExpectationError,
+  GoalOverlayStore,
+  buildCanonicalSourceExpectations,
+  resolveCanonicalSourceIdentity,
+  resolveGoalLogicalView,
+  type CanonicalSourceIdentity,
+  type CanonicalSourceResolution,
+  type WorkspaceLifecycleKind,
+} from '@unified-mpc/workspace';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
 import {
   ThaiRagIndexJobStore,
@@ -126,6 +138,13 @@ export interface NativeThaiRagWorkspace {
   readonly id: string;
   readonly rootPath?: string;
   readonly realRootPath: string;
+  /**
+   * `goal` selects the overlay-backed source view for `code_index` (#210 §13);
+   * every other lifecycle kind is a plain checkout. Both workspace providers
+   * must carry these fields, or a strict FD3 Goal silently indexes unanchored.
+   */
+  readonly lifecycleKind?: WorkspaceLifecycleKind;
+  readonly goalId?: string;
 }
 
 export interface NativeThaiRagProviderDriverOptions {
@@ -180,6 +199,35 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly workspaceSourceIdentityProvider?: (
     workspace: NativeThaiRagWorkspace,
   ) => Promise<WorkspaceSourceEvidenceIdentity | null>;
+  /**
+   * The exact canonical ref this workspace means to bind, plus the repository
+   * ids its origin proves (#210 §13). The driver owns no branch or merge-policy
+   * port, so the runtime resolves them where that state already lives. `null`
+   * means this checkout can never name a ref and indexes `absent`.
+   */
+  readonly codeIndexSourceProvider?: (
+    workspace: NativeThaiRagWorkspace,
+  ) => Promise<{ readonly canonicalRef: string; readonly expectedRepositoryIds: readonly string[] | null } | null>;
+  /** Canonical store root; defaults to `<dataRoot>/canonical`. */
+  readonly canonicalRoot?: string;
+}
+
+/**
+ * Unified-side description of the identity claim a `code_index` call makes
+ * (#210 §13). `canonical_binding` and `canonical_fence` are operator-facing
+ * result fields: they are never sent to the provider, whose identity validator
+ * would refuse an unknown field.
+ */
+export interface CanonicalIndexRecord {
+  readonly binding: 'bound' | 'dirty' | 'absent' | 'goal_unadmitted' | 'unsupported';
+  readonly fence: 'fenced' | 'unfenced' | 'none';
+  readonly bindingReason?: string;
+}
+
+interface CanonicalIndexPlan extends CanonicalIndexRecord {
+  readonly sourceIdentity?: CanonicalSourceIdentity;
+  readonly expectedPaths?: Readonly<Record<string, string>>;
+  readonly deletedPaths?: readonly string[];
 }
 
 export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
@@ -191,6 +239,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly snapshotProbeTimeoutMs: number;
   private readonly jobs: ThaiRagIndexJobStore;
   private readonly verifications: ThaiRagWorkspaceVerificationStore;
+  private readonly canonicalRefs: CanonicalRefStore;
+  private readonly canonicalManifests: CanonicalManifestStore;
+  private readonly canonicalOverlays: GoalOverlayStore;
+  /** Binding/fence per Unified job id, merged into the job ledger on completion. */
+  private readonly canonicalIndexRecords = new Map<string, CanonicalIndexRecord>();
+  private readonly workspaceMetadata = new Map<string, { readonly lifecycleKind?: WorkspaceLifecycleKind; readonly goalId?: string }>();
+  private revisionManifestSupported = false;
+  private expectedHashFenceSupported = false;
   private readonly healthRefreshMs: number;
   private readonly indexJobPollMs: number;
   private readonly indexStatusTimeoutMs: number;
@@ -280,6 +336,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       options.indexJobStuckTimeoutMs === undefined ? undefined : { stuckJobTimeoutMs: options.indexJobStuckTimeoutMs },
     );
     this.verifications = new ThaiRagWorkspaceVerificationStore(options.dataRoot);
+    const canonicalRoot = options.canonicalRoot ?? path.join(options.dataRoot, 'canonical');
+    this.canonicalRefs = new CanonicalRefStore(canonicalRoot);
+    // Strict reads: a corrupt ref/manifest must refuse the index, never read as
+    // "never promoted" and silently drop the identity claim (#210 §13).
+    this.canonicalManifests = new CanonicalManifestStore(canonicalRoot, { strictReads: true });
+    this.canonicalOverlays = new GoalOverlayStore(canonicalRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
     this.indexStatusTimeoutMs = Math.max(1_000, Math.floor(options.indexStatusTimeoutMs ?? DEFAULT_INDEX_STATUS_TIMEOUT_MS));
@@ -395,6 +457,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.cancellableIndexJobs = versionSupportsCancellation
       && healthHandshake.value.indexJobContractVersion === '1.1'
       && healthHandshake.value.capabilities.includes(THAI_RAG_CANCEL_CAPABILITY);
+    // Both the version and the live health handshake must attest a flag before
+    // this adapter relies on it: either child can be an older provider (#210 §4).
+    this.revisionManifestSupported = handshake.value.revisionManifest === true
+      && healthHandshake.value.revisionManifest === true;
+    this.expectedHashFenceSupported = handshake.value.expectedHashFence === true
+      && healthHandshake.value.expectedHashFence === true;
     this.sessions.pin(SERVER_NAME);
     this.started = true;
     for (const workspaceId of this.workspaceRoots.keys()) {
@@ -604,6 +672,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       && args.max_files > 0
       ? args.max_files
       : undefined;
+    const plan = await this.canonicalCodeIndexPlan(workspace.value, requestedPaths);
+    if (!plan.ok) return plan;
     const childArgs = {
       workspace_path: workspace.value.rootPath,
       workspace_id: workspace.value.workspaceId,
@@ -612,16 +682,249 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       vectors: this.codeIndexVectors,
       ...(requestedPaths.length === 0 ? {} : { paths: requestedPaths }),
       ...(maxFiles === undefined ? {} : { max_files: maxFiles }),
+      ...canonicalChildArgs(plan.value),
     };
-    if (!background) return this.callIndexWorker('code_index', childArgs, signal, budget);
-    if (!this.cancellableIndexJobs) return this.legacyBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
-    return this.cancellableBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, budget);
+    if (!background) {
+      const result = await this.callIndexWorker('code_index', childArgs, signal, budget);
+      return result.ok ? ok(mergeCanonicalIndexRecord(result.value, plan.value)) : result;
+    }
+    if (!this.cancellableIndexJobs) {
+      return this.legacyBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, plan.value, budget);
+    }
+    return this.cancellableBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, plan.value, budget);
+  }
+
+  /**
+   * Resolve what this `code_index` call may claim about its source (#210 §13).
+   *
+   * The resolver refuses a corrupt ref/manifest/overlay and a foreign
+   * repository; a missing ref is `absent` and a Goal whose base drifted is
+   * `goal_unadmitted`, and both keep indexing instead of failing. The fence is
+   * built from the same view the bytes come from: the manifest only when the
+   * checkout is exactly on it, or the admitted Goal's logical view. A view that
+   * the worktree no longer holds is never claimed: the request records `dirty`
+   * and fences the live bytes, so an unsynced overlay or a probe race degrades
+   * the binding instead of turning an ordinary index into `stale_index`.
+   */
+  private async canonicalCodeIndexPlan(
+    workspace: {
+      readonly workspaceId: string;
+      readonly rootPath: string;
+      readonly lifecycleKind?: WorkspaceLifecycleKind;
+      readonly goalId?: string;
+    },
+    requestedPaths: readonly string[],
+  ): Promise<Result<CanonicalIndexPlan>> {
+    const goalWorkspaceId = workspace.lifecycleKind === 'goal' && workspace.goalId !== undefined
+      ? workspace.workspaceId
+      : null;
+    const sourceProvider = this.options.codeIndexSourceProvider;
+    let source: { readonly canonicalRef: string; readonly expectedRepositoryIds: readonly string[] | null } | null = null;
+    if (sourceProvider !== undefined) {
+      try {
+        source = await sourceProvider({
+          id: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          realRootPath: workspace.rootPath,
+          ...(workspace.lifecycleKind === undefined ? {} : { lifecycleKind: workspace.lifecycleKind }),
+          ...(workspace.goalId === undefined ? {} : { goalId: workspace.goalId }),
+        });
+      } catch (error: unknown) {
+        return canonicalSourceInvalid(error);
+      }
+    }
+    if (source === null) return ok({ binding: 'absent', fence: 'none' });
+    let resolution: CanonicalSourceResolution;
+    try {
+      resolution = await resolveCanonicalSourceIdentity(
+        { refs: this.canonicalRefs, manifests: this.canonicalManifests, overlays: this.canonicalOverlays },
+        {
+          canonicalRef: source.canonicalRef,
+          expectedRepositoryIds: source.expectedRepositoryIds,
+          goal: goalWorkspaceId === null ? null : { goalWorkspaceId },
+        },
+      );
+    } catch (error: unknown) {
+      return canonicalSourceInvalid(error);
+    }
+    if (resolution.status === 'absent') return ok({ binding: 'absent', fence: 'none' });
+    try {
+      if (resolution.status === 'goal_unadmitted') {
+        // An unadmitted Goal cannot resolve its logical view (admission fails
+        // closed), so a scoped request hashes the live paths and only the
+        // overlay tombstones are declared; a full request declares them too.
+        const tombstones = goalWorkspaceId === null ? [] : await this.goalTombstones(goalWorkspaceId);
+        const fence = await this.buildCanonicalFence(workspace.rootPath, requestedPaths, null, tombstones);
+        return ok({
+          binding: 'goal_unadmitted',
+          bindingReason: resolution.reason,
+          fence: fence.fence,
+          ...fence.fields,
+        });
+      }
+      const identity = resolution.identity;
+      const manifest = await this.canonicalManifests.get(identity.manifest_id);
+      if (manifest === null) {
+        throw new Error(`canonical manifest ${identity.manifest_id} disappeared after resolution`);
+      }
+      if (goalWorkspaceId !== null) {
+        // Admission is verified again here by design: the view and the binding
+        // must describe the same ref, so a concurrent advance refuses the call.
+        const view = await resolveGoalLogicalView(this.canonicalRefs, this.canonicalOverlays, {
+          goalWorkspaceId,
+          canonicalRef: source.canonicalRef,
+          baseEntries: manifest.entries,
+        });
+        const tombstones = await this.goalTombstones(goalWorkspaceId);
+        const fence = await this.buildCanonicalFence(workspace.rootPath, requestedPaths, view, tombstones);
+        // A Goal's worktree may be dirty because the overlay records the
+        // changed bytes. When it does not — no entry yet for a change, an
+        // addition, or a tombstone that was never recorded — the logical view
+        // is not what this worktree holds, so claiming it would publish bytes
+        // the base revision never contained. The fence sees only view keys, so
+        // the status paths from the admission probe supply the additions.
+        const evidence = await this.workspaceEvidence(workspace.workspaceId);
+        if (fence.drifted || !this.goalViewCoversWorktree(evidence, view, tombstones)) {
+          return ok({
+            binding: 'dirty',
+            bindingReason: 'view_drift',
+            fence: fence.fence,
+            ...fence.fields,
+          });
+        }
+        if (!this.revisionManifestSupported) {
+          return ok({ binding: 'unsupported', fence: fence.fence, ...fence.fields });
+        }
+        return ok({ binding: 'bound', fence: fence.fence, ...fence.fields, sourceIdentity: identity });
+      }
+      const evidence = await this.workspaceEvidence(workspace.workspaceId);
+      const sameRevision = evidence?.workspaceHead === identity.commit_sha;
+      const view = sameRevision
+        ? new Map(manifest.entries.map((entry) => [entry.path, entry.contentHash] as const))
+        : null;
+      const fence = await this.buildCanonicalFence(
+        workspace.rootPath,
+        requestedPaths,
+        view,
+        evidence?.deletedPaths ?? [],
+      );
+      // Only a clean checkout exactly on the manifest commit contains the
+      // revision's bytes. A path that drifted from the manifest between the
+      // evidence probe and the fence disproves the same claim, so all three
+      // gate `bound`.
+      if (evidence?.dirtyState !== 'clean' || !sameRevision || fence.drifted) {
+        return ok({ binding: 'dirty', fence: fence.fence, ...fence.fields });
+      }
+      if (!this.revisionManifestSupported) {
+        return ok({ binding: 'unsupported', fence: fence.fence, ...fence.fields });
+      }
+      return ok({ binding: 'bound', fence: fence.fence, ...fence.fields, sourceIdentity: identity });
+    } catch (error: unknown) {
+      if (error instanceof CanonicalSourceExpectationError) {
+        return err(appError(
+          'INVALID_INPUT',
+          `Native Thai-RAG code_index path ${error.relativePath} exists in neither the workspace nor the canonical view`,
+          false,
+          { reason: 'canonical_source_unknown_path', path: error.relativePath },
+        ));
+      }
+      return canonicalSourceInvalid(error);
+    }
+  }
+
+  private async goalTombstones(goalWorkspaceId: string): Promise<readonly string[]> {
+    const overlay = await this.canonicalOverlays.read(goalWorkspaceId, { strict: true });
+    if (overlay === null) return [];
+    return overlay.entries
+      .filter((entry) => entry.contentHash === null)
+      .map((entry) => entry.path);
+  }
+
+  private async workspaceEvidence(workspaceId: string): Promise<WorkspaceSourceEvidenceIdentity | null> {
+    const provider = this.options.workspaceSourceIdentityProvider;
+    if (provider === undefined) return null;
+    try {
+      return await provider({ id: workspaceId, realRootPath: this.workspaceRoots.get(workspaceId) ?? '' });
+    } catch {
+      // No observation means `dirtyState` is unknown, which never binds a
+      // plain checkout; the call still indexes, just unanchored.
+      return null;
+    }
+  }
+
+  private async buildCanonicalFence(
+    rootPath: string,
+    requestedPaths: readonly string[],
+    view: ReadonlyMap<string, string> | null,
+    deletedPaths: readonly string[],
+  ): Promise<{
+    readonly fence: CanonicalIndexRecord['fence'];
+    readonly fields: Pick<CanonicalIndexPlan, 'expectedPaths' | 'deletedPaths'>;
+    /** The worktree no longer holds the path set the caller's view declared. */
+    readonly drifted: boolean;
+  }> {
+    // The fence flag is independent of the identity flag: a provider can
+    // consume `expected_paths` without recording a revision anchor (#210 §4).
+    // Drift is not a provider feature, though: it decides whether the caller
+    // may still claim the view, so the view is always hashed and the flag only
+    // gates what is sent.
+    const plan = await buildCanonicalSourceExpectations({
+      rootPath,
+      requestedPaths: requestedPaths.length === 0 ? null : requestedPaths,
+      view,
+      ...(deletedPaths.length === 0 ? {} : { deletedPaths }),
+    });
+    if (!this.expectedHashFenceSupported) {
+      return { fence: 'none', fields: {}, drifted: plan.driftedPaths.length > 0 };
+    }
+    const expectedPaths = Object.keys(plan.expectedPaths).length === 0 ? undefined : plan.expectedPaths;
+    const deleted = plan.deletedPaths.length === 0 ? undefined : plan.deletedPaths;
+    const fence = expectedPaths !== undefined || deleted !== undefined
+      ? 'fenced'
+      : requestedPaths.length > 0 || view !== null
+        ? 'unfenced'
+        : 'none';
+    return {
+      fence,
+      fields: {
+        ...(expectedPaths === undefined ? {} : { expectedPaths }),
+        ...(deleted === undefined ? {} : { deletedPaths: deleted }),
+      },
+      drifted: plan.driftedPaths.length > 0,
+    };
+  }
+
+  /**
+   * A Goal may legitimately be dirty because its overlay records the changed
+   * bytes, so `dirtyState` cannot be the binding gate. The fence only hashes
+   * the view's own keys, though, so an added path the overlay never recorded
+   * is invisible to it. The admission probe's status paths are the additions
+   * counterpart: bind only when the worktree was clean, or every changed path
+   * is described by the logical view or an overlay tombstone.
+   */
+  private goalViewCoversWorktree(
+    evidence: WorkspaceSourceEvidenceIdentity | null,
+    view: ReadonlyMap<string, string>,
+    tombstones: readonly string[],
+  ): boolean {
+    if (evidence?.dirtyState === 'clean') return true;
+    const changed = evidence?.changedPaths;
+    // An empty set on a dirty worktree is a legacy record, not proof.
+    if (changed === undefined || changed.length === 0) return false;
+    const declared = new Set(tombstones);
+    return changed.every((candidate) => view.has(candidate) || declared.has(candidate));
+  }
+
+  private mergeCanonicalJobResult(jobId: string, result: unknown): unknown {
+    const record = this.canonicalIndexRecords.get(jobId);
+    return record === undefined ? result : mergeCanonicalIndexRecord(result, record);
   }
 
   private async legacyBackgroundCodeIndex(
     workspaceId: string,
     childArgs: Readonly<Record<string, unknown>>,
     force: boolean,
+    plan: CanonicalIndexRecord,
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const job = await this.jobs.create(
@@ -630,25 +933,29 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       this.ownerId ?? '',
       force ? 'explicit_force_reindex' : 'explicit_request',
     );
+    this.canonicalIndexRecords.set(job.jobId, plan);
     const operation = this.enqueueWorker(async () => {
       const result = await this.retryStorageBusy(async () => normalizeWorkerCallResult(
         'code_index',
         await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget),
       ));
-      if (result.ok) await this.jobs.complete(job.jobId, result.value, this.ownerId ?? '');
+      if (result.ok) await this.jobs.complete(job.jobId, mergeCanonicalIndexRecord(result.value, plan), this.ownerId ?? '');
       else await this.jobs.fail(job.jobId, result.error.message, this.ownerId ?? '');
+      this.canonicalIndexRecords.delete(job.jobId);
       return result;
     });
     void operation.catch(async (error: unknown) => {
       await this.jobs.fail(job.jobId, errorMessage(error), this.ownerId ?? '').catch(() => undefined);
+      this.canonicalIndexRecords.delete(job.jobId);
     });
-    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspaceId });
+    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspaceId, ...canonicalRecordFields(plan) });
   }
 
   private async cancellableBackgroundCodeIndex(
     workspaceId: string,
     childArgs: Readonly<Record<string, unknown>>,
     force: boolean,
+    plan: CanonicalIndexRecord,
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const ownerId = this.ownerId ?? '';
@@ -658,22 +965,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ownerId,
       force ? 'explicit_force_reindex' : 'explicit_request',
     );
+    this.canonicalIndexRecords.set(job.jobId, plan);
     const started = await this.retryStorageBusy(
       () => this.callIndexWorker('code_index', { ...childArgs, background: true }, undefined, budget),
     );
     if (!started.ok) {
       await this.jobs.fail(job.jobId, started.error.message, ownerId);
+      this.canonicalIndexRecords.delete(job.jobId);
       return started;
     }
     const providerJobId = nestedString(started.value, 'job_id');
     if (providerJobId === undefined) {
       const message = 'Native Thai-RAG background index response omitted provider job_id';
       await this.jobs.fail(job.jobId, message, ownerId);
+      this.canonicalIndexRecords.delete(job.jobId);
       return err(appError('CONFLICT', message, true, { reason: 'missing-provider-job-id' }));
     }
     await this.jobs.bindProviderJob(job.jobId, providerJobId, ownerId);
     this.startIndexJobMonitor(job.jobId, providerJobId, workspaceId, ownerId);
-    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspaceId });
+    return ok({ job_id: job.jobId, status: 'running', workspace_id: workspaceId, ...canonicalRecordFields(plan) });
   }
 
   private async cancelIndex(args: Readonly<Record<string, unknown>>, budget?: ResultBudget): Promise<Result<unknown>> {
@@ -741,16 +1051,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
     const remoteStatus = nestedString(cancelled.value, 'status');
     if (remoteStatus === 'cancelled') {
-      const terminal = await this.jobs.cancel(jobId, nestedValue(cancelled.value, 'result') ?? cancelled.value, ownerId);
+      const terminal = await this.jobs.cancel(
+        jobId,
+        this.mergeCanonicalJobResult(jobId, nestedValue(cancelled.value, 'result') ?? cancelled.value),
+        ownerId,
+      );
       return terminal === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(terminal);
     }
     if (remoteStatus === 'done') {
-      const terminal = await this.jobs.complete(jobId, nestedValue(cancelled.value, 'result') ?? cancelled.value, ownerId);
+      const terminal = await this.jobs.complete(
+        jobId,
+        this.mergeCanonicalJobResult(jobId, nestedValue(cancelled.value, 'result') ?? cancelled.value),
+        ownerId,
+      );
       return terminal === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(terminal);
     }
     if (remoteStatus === 'error') {
       const message = nestedString(cancelled.value, 'error') ?? 'Native Thai-RAG provider reported an index error while cancellation was requested';
       const terminal = await this.jobs.fail(jobId, message, ownerId);
+      this.canonicalIndexRecords.delete(jobId);
       return terminal === null ? err(appError('FILE_NOT_FOUND', `Native Thai-RAG index job was not found: ${jobId}`)) : ok(terminal);
     }
     const next = await this.jobs.requestCancellation(jobId, ownerId);
@@ -876,7 +1195,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const providerJobId = nestedString(started.value, 'job_id');
     if (providerJobId === undefined) return undefined;
     const rebound = await this.jobs.bindProviderJob(jobId, providerJobId, ownerId);
-    return rebound === null ? undefined : providerJobId;
+    if (rebound === null) return undefined;
+    // The replacement sends no identity or fence, so the original anchor must
+    // not survive into its ledger result: merging it would claim revision M for
+    // bytes this call never fenced. Anchoring a restart is a later rollout step.
+    this.canonicalIndexRecords.delete(jobId);
+    return providerJobId;
   }
 
   private startIndexJobMonitor(jobId: string, providerJobId: string, workspaceId: string, ownerId: string): void {
@@ -886,6 +1210,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       })
       .finally(() => {
         if (this.indexJobMonitors.get(jobId) === monitor) this.indexJobMonitors.delete(jobId);
+        // The terminal paths above already merged this record into the job
+        // ledger; keeping it would leak one entry per completed index.
+        this.canonicalIndexRecords.delete(jobId);
       });
     this.indexJobMonitors.set(jobId, monitor);
   }
@@ -971,7 +1298,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         const errors = nestedValue(result, 'errors');
         const failedFiles = isRecord(errors) ? Object.keys(errors) : Array.isArray(errors) ? errors : [];
         if (resultStatus === 'cancelled') {
-          await this.jobs.cancel(jobId, result, ownerId);
+          await this.jobs.cancel(jobId, this.mergeCanonicalJobResult(jobId, result), ownerId);
           return;
         }
         if (failedFiles.length > 0 || (resultStatus !== undefined
@@ -986,11 +1313,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           await this.jobs.fail(jobId, `Native Thai-RAG background index failed: ${reason}`, ownerId);
           return;
         }
-        await this.jobs.complete(jobId, result, ownerId);
+        await this.jobs.complete(jobId, this.mergeCanonicalJobResult(jobId, result), ownerId);
         return;
       }
       if (remoteStatus === 'cancelled') {
-        await this.jobs.cancel(jobId, nestedValue(status.value, 'result') ?? status.value, ownerId);
+        await this.jobs.cancel(
+          jobId,
+          this.mergeCanonicalJobResult(jobId, nestedValue(status.value, 'result') ?? status.value),
+          ownerId,
+        );
         return;
       }
       if (remoteStatus === 'error') {
@@ -1015,13 +1346,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
   }
 
-  private resolveIndexWorkspace(workspaceValue: string): Result<{ readonly workspaceId: string; readonly rootPath: string }> {
+  private resolveIndexWorkspace(workspaceValue: string): Result<{
+    readonly workspaceId: string;
+    readonly rootPath: string;
+    readonly lifecycleKind?: WorkspaceLifecycleKind;
+    readonly goalId?: string;
+  }> {
     const parsed = parseCanonicalWorkspaceId(workspaceValue);
     if (parsed.ok) {
       const rootPath = this.workspaceRoots.get(parsed.value);
       return rootPath === undefined
         ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${parsed.value}`))
-        : ok({ workspaceId: parsed.value, rootPath });
+        : ok({ workspaceId: parsed.value, rootPath, ...this.workspaceMetadata.get(parsed.value) });
     }
 
     if (!path.isAbsolute(workspaceValue)) return parsed;
@@ -1033,7 +1369,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const rootPath = this.workspaceRoots.get(workspaceId);
     return rootPath === undefined
       ? err(appError('WORKSPACE_NOT_FOUND', `Thai-RAG workspace is not registered: ${workspaceId}`))
-      : ok({ workspaceId, rootPath });
+      : ok({ workspaceId, rootPath, ...this.workspaceMetadata.get(workspaceId) });
   }
 
   private refreshWorkspaceRoots(generation = this.lifecycleGeneration, requestedWorkspaceId?: string): Promise<Result<void>> {
@@ -1163,8 +1499,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
     this.workspaceRoots.clear();
     this.workspaceRootIds.clear();
+    this.workspaceMetadata.clear();
     for (const [id, root] of nextRoots) this.workspaceRoots.set(id, root);
     for (const [root, id] of nextRootIds) this.workspaceRootIds.set(root, id);
+    for (const workspace of workspaces) {
+      this.workspaceMetadata.set(workspace.id, {
+        ...(workspace.lifecycleKind === undefined ? {} : { lifecycleKind: workspace.lifecycleKind }),
+        ...(workspace.goalId === undefined ? {} : { goalId: workspace.goalId }),
+      });
+    }
     if (requestedWorkspaceId !== undefined && this.queuedAdmissionWorkspaceIds.size > 0) {
       // A verified workspace releases the admission slot without starting a
       // monitor, so its finally block will never drain the queue. Continue the
@@ -1397,11 +1740,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }
         this.workspaceRoots.clear();
         this.workspaceRootIds.clear();
+        this.workspaceMetadata.clear();
         for (const entry of workspaces) {
           const realRootPath = path.resolve(entry.realRootPath);
           this.workspaceRoots.set(entry.id, realRootPath);
           this.workspaceRootIds.set(realRootPath, entry.id);
           if (entry.rootPath !== undefined) this.workspaceRootIds.set(path.resolve(entry.rootPath), entry.id);
+          this.workspaceMetadata.set(entry.id, {
+            ...(entry.lifecycleKind === undefined ? {} : { lifecycleKind: entry.lifecycleKind }),
+            ...(entry.goalId === undefined ? {} : { goalId: entry.goalId }),
+          });
         }
         this.pendingReindexIds.delete(workspace.id);
         this.pendingReindexReasons.delete(workspace.id);
@@ -1985,6 +2333,62 @@ function embeddingCompatibility(contractVersion: string): {
     return { expectedEmbeddingProfile: compatibility.profile, expectedEmbeddingModel: compatibility.model, expectedPreprocessingVersion: compatibility.preprocessingVersion };
   }
   return { expectedEmbeddingProfile: compatibility.profile, expectedEmbeddingModel: compatibility.model };
+}
+
+function canonicalRecordFields(record: CanonicalIndexRecord): Record<string, unknown> {
+  return {
+    canonical_binding: record.binding,
+    canonical_fence: record.fence,
+    ...(record.bindingReason === undefined ? {} : { canonical_binding_reason: record.bindingReason }),
+  };
+}
+
+/**
+ * The provider's exact input fields (#210 §13). `canonical_binding` and
+ * `canonical_fence` stay Unified-side: the child refuses unknown fields.
+ */
+function canonicalChildArgs(plan: CanonicalIndexPlan): Record<string, unknown> {
+  return {
+    ...(plan.sourceIdentity === undefined ? {} : { source_identity: plan.sourceIdentity }),
+    ...(plan.expectedPaths === undefined ? {} : { expected_paths: plan.expectedPaths }),
+    ...(plan.deletedPaths === undefined ? {} : { deleted_paths: plan.deletedPaths }),
+  };
+}
+
+/**
+ * Add the binding record to whatever shape the child answered without
+ * replacing its envelope: the provider answers `{content, structuredContent}`,
+ * and callers read through `nestedValue`.
+ */
+function mergeCanonicalIndexRecord(value: unknown, record: CanonicalIndexRecord): unknown {
+  const fields = canonicalRecordFields(record);
+  if (!isRecord(value)) return value;
+  if (isRecord(value.structuredContent)) {
+    return { ...value, structuredContent: { ...value.structuredContent, ...fields } };
+  }
+  if (Array.isArray(value.content)) {
+    const [first, ...rest] = value.content;
+    if (isRecord(first) && typeof first.text === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(first.text);
+        if (isRecord(parsed)) {
+          return { ...value, content: [{ ...first, text: JSON.stringify({ ...parsed, ...fields }) }, ...rest] };
+        }
+      } catch {
+        // Not JSON: the binding still belongs on the envelope.
+      }
+    }
+  }
+  return { ...value, ...fields };
+}
+
+function canonicalSourceInvalid(error: unknown): Result<never> {
+  return err(appError(
+    'INTERNAL_ERROR',
+    `Native Thai-RAG canonical source is invalid: ${errorMessage(error)}`,
+    false,
+    { reason: 'canonical_source_invalid' },
+  ));
 }
 
 function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Result<unknown> {

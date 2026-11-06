@@ -98,6 +98,7 @@ import {
   DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
   NativeThaiRagProviderDriver,
   codeIndexVectorsFromEnv,
+  type NativeThaiRagWorkspace,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
@@ -380,6 +381,17 @@ export function createStdioMcpRuntime(
       || process.env.UNIFIED_MPC_THAI_RAG_PROVIDER_PATH?.trim()
       || path.join(os.homedir(), 'thai-rag-mcp'),
   );
+  // #210 §1: admission, Goal base pinning and the `code_index` identity port
+  // must all read the same base branch, so the policy is built before the
+  // provider driver that now needs it.
+  const mergePolicy = {
+    async getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined> {
+      return parseRepositoryMergePolicySetting(
+        settingsRepository.get(USER_SETTING_KEYS.repositoryMergePolicies),
+        repository,
+      );
+    },
+  };
   const thaiRagDriver = options.thaiRagDriver ?? new NativeThaiRagProviderDriver({
     dataRoot: dataPath,
     launchConfig: {
@@ -389,8 +401,15 @@ export function createStdioMcpRuntime(
       args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
       env: thaiRagProviderLaunchEnv(),
     },
-    workspacesProvider: async (): Promise<readonly { id: string; rootPath: string; realRootPath: string }[]> => (await rawWorkspaceRepository.list())
-      .map((entry) => ({ id: entry.id, rootPath: entry.rootPath, realRootPath: entry.realRootPath })),
+    canonicalRoot: path.join(dataPath, 'canonical'),
+    workspacesProvider: async (): Promise<readonly NativeThaiRagWorkspace[]> => (await rawWorkspaceRepository.list())
+      .map((entry) => ({
+        id: entry.id,
+        rootPath: entry.rootPath,
+        realRootPath: entry.realRootPath,
+        ...(entry.lifecycleKind === undefined ? {} : { lifecycleKind: entry.lifecycleKind }),
+        ...(entry.goalId === undefined ? {} : { goalId: entry.goalId }),
+      })),
     workspaceSourceIdentityProvider: async (workspace): Promise<WorkspaceSourceEvidenceIdentity | null> => {
       // Admission verification must be idempotent for the exact source the
       // provider already admitted (issue #422). Git identity is cheap to read
@@ -407,10 +426,40 @@ export function createStdioMcpRuntime(
           workspaceHead: source.head,
           dirtyFingerprint: source.dirtyFingerprint,
           stagedFingerprint: source.stagedFingerprint,
+          // #210 §13: a plain checkout binds only when the worktree is clean
+          // and exactly on the manifest commit; deletions are declared to the
+          // provider instead of being fenced as expectations.
+          dirtyState: source.statusEntries.length === 0 ? 'clean' : 'dirty',
+          deletedPaths: source.statusEntries
+            .filter((entry) => entry.kind === 'deleted')
+            .map((entry) => entry.path),
+          // The additions counterpart: the fence cannot see a Goal path the
+          // overlay never recorded, so the binding check needs the full set.
+          changedPaths: Array.from(new Set(source.statusEntries.map((entry) => entry.path))).sort(),
         };
       } catch {
         return null;
       }
+    },
+    // #210 §13: the driver owns no branch or merge-policy port, so resolve the
+    // exact ref where that state already lives. A checkout without a branch or
+    // origin returns null and indexes `absent`; a corrupt store throws and the
+    // driver refuses instead of dropping the claim.
+    codeIndexSourceProvider: async (workspace): Promise<{
+      readonly canonicalRef: string;
+      readonly expectedRepositoryIds: readonly string[] | null;
+    } | null> => {
+      const registered = rawWorkspaceRepository.getAny === undefined
+        ? await rawWorkspaceRepository.get(workspace.id)
+        : await rawWorkspaceRepository.getAny(workspace.id);
+      if (registered === null) return null;
+      const branchName = registered.branchName?.trim() ?? '';
+      if (branchName.length === 0) return null;
+      const baseBranch = await resolveGoalBaseBranch(registered.realRootPath, branchName, mergePolicy);
+      return {
+        canonicalRef: canonicalRefForBranch(baseBranch),
+        expectedRepositoryIds: await resolveGoalRepositoryIds(registered.realRootPath),
+      };
     },
     strictWorkerAuthorizedWorkspacesProvider: createStrictThaiRagGoalAdmissionProvider(rawWorkspaceRepository),
     strictWorkerRevocationSignalProvider: workspaceAuthorityWatcher.signal,
@@ -657,14 +706,6 @@ export function createStdioMcpRuntime(
     mergeReceiptRepository,
     mergeReconciliationRepository,
   );
-  const mergePolicy = {
-    async getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined> {
-      return parseRepositoryMergePolicySetting(
-        settingsRepository.get(USER_SETTING_KEYS.repositoryMergePolicies),
-        repository,
-      );
-    },
-  };
   const mergeVerificationStatus = createMergeVerificationStatusPort({
     attempts: mergeAttemptRepository,
     receipts: mergeReceiptRepository,

@@ -6,6 +6,29 @@ export interface WorkspaceSourceEvidenceIdentity {
   readonly workspaceHead: string;
   readonly dirtyFingerprint: string;
   readonly stagedFingerprint: string;
+  /**
+   * Worktree cleanliness at observation time (#210 §13). Optional so a
+   * `schemaVersion: 1` verification record written before this field still
+   * parses; a missing value reads as `unknown` and never decides freshness by
+   * itself. `dirtyState` is not inferable from `dirtyFingerprint`: the
+   * empty-string sentinel is an implementation detail, not a contract.
+   */
+  readonly dirtyState?: 'clean' | 'dirty' | 'unknown';
+  /**
+   * Tracked deletions observed in the worktree. They become `deleted_paths` on
+   * an index request, never `expected_paths`; admission freshness is already
+   * covered by `dirtyFingerprint`, so this is evidence, not a comparison key.
+   */
+  readonly deletedPaths?: readonly string[];
+  /**
+   * Every path the worktree status reported (added, modified, deleted,
+   * renamed, untracked) at observation time (#210 §13). The fence only hashes
+   * the view's own keys, so an addition the overlay never recorded is
+   * invisible there; a Goal binds only when every changed path is described by
+   * the logical view or a declared tombstone. Optional so a record written
+   * before this field still parses.
+   */
+  readonly changedPaths?: readonly string[];
 }
 
 export type WorkspaceEvidenceFreshness = 'fresh' | 'stale' | 'unknown' | 'not_reusable';
@@ -67,8 +90,23 @@ export function classifyWorkspaceSourceEvidence(
     && expected.workspaceHead === observed.workspaceHead
     && expected.dirtyFingerprint === observed.dirtyFingerprint
     && expected.stagedFingerprint === observed.stagedFingerprint
+    && sameKnownDirtyState(expected.dirtyState, observed.dirtyState)
     ? 'fresh'
     : 'stale';
+}
+
+/**
+ * `unknown` (including a record written before the field existed) never makes
+ * evidence stale on its own: the fingerprints still decide. Only two known,
+ * different cleanliness states are a real change.
+ */
+function sameKnownDirtyState(
+  expected: WorkspaceSourceEvidenceIdentity['dirtyState'],
+  observed: WorkspaceSourceEvidenceIdentity['dirtyState'],
+): boolean {
+  if (expected === undefined || observed === undefined) return true;
+  if (expected === 'unknown' || observed === 'unknown') return true;
+  return expected === observed;
 }
 
 export interface WorkspaceAdmissionObservation {

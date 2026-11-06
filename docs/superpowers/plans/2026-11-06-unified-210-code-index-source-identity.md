@@ -247,6 +247,30 @@ omitted from `expected_paths`, and the remaining tree leaves are fenced. A
 removal is a declaration, not a fence, so it neither hides an unexpected live
 file nor requires the skip rule.
 
+> **Implementation note (2026-11-07).** The provider only ever reads the live
+> byte, so the fence publishes the view hash only where the worktree still holds
+> it; a tracked path whose bytes disagree with the view is fenced live and
+> reported as drift. Declaring the view hash there made an ordinary dirty
+> checkout — and an admitted Goal whose overlay has no entry yet for a change —
+> fail the whole index as `stale_index`. The fence therefore carries
+> `driftedPaths`, and the adapter downgrades the binding to `dirty`
+> (`canonical_binding_reason: 'view_drift'` for a Goal) instead of claiming a
+> view the worktree no longer contains. The overlay writer is a later rollout
+> step; until it lands, a Goal with edits indexes unbound rather than failing.
+>
+> Two refinements are required so the identity claim stays true in every case
+> the fence cannot see on its own. First, a live path the view does not describe
+> is drift too: a scoped request naming a newly added file fences the live byte
+> but must not report the view as the source. Second, a full request's fence is
+> built from view keys, so an added file outside the overlay is invisible; the
+> admission probe therefore persists the worktree's `changedPaths` (the
+> additions counterpart to `deletedPaths`), and a Goal binds only when the
+> worktree was clean or every changed path is described by the logical view or
+> a tombstone. Drift is computed whether or not the child advertises
+> `expected_hash_fence`: the flag gates what is sent, never whether the caller
+> may claim the view, because a split-flag provider with no fence to build is
+> not proof of "no drift".
+
 Until the provider rule above is released, a scoped request sends no
 `expected_paths` either: a requested hidden, ignored, sensitive, minified,
 binary, oversized or symlinked path would otherwise turn an ordinary demand
@@ -315,8 +339,10 @@ Unified side:
   records `canonical_binding: 'goal_unadmitted'` with the reason; a scoped
   request uses live hashes and a full request sends no expectations;
 - the admitted Goal binds its base manifest, including when its worktree is
-  dirty because the overlay is non-empty; a tombstone becomes `deleted_paths`
-  and never `expected_paths`;
+  dirty because the overlay covers every changed path; a tombstone becomes
+  `deleted_paths` and never `expected_paths`; a changed path the overlay does
+  not describe (a modified file, a deletion without a tombstone, or an added
+  file) records `dirty`/`view_drift` and sends no `source_identity`;
 - a scoped request sends the effective hash per path; a dirty path uses the live
   content hash;
 - a tracked deletion in a dirty plain checkout is sent as `deleted_paths`,
@@ -335,13 +361,23 @@ Unified side:
 - the adapter takes the Goal branch only for `lifecycleKind === 'goal'` with a
   non-null `goalId`, and both workspace paths (ordinary and strict FD3) carry
   those fields; only a plain checkout with `dirtyState: 'clean'` may carry
-  `source_identity`, while an admitted Goal binds through its view regardless of
-  worktree dirtiness;
-- an existing `verification.json` record without `dirtyState`/`deletedPaths`
-  still parses (`unknown`/empty) and does not force a re-index;
+  `source_identity`, while an admitted Goal binds through its view whenever the
+  worktree still holds that view and every changed path is described by it
+  (worktree dirtiness alone does not unbind it); a view the fence reports as
+  drifted, or a changed path outside view and tombstones, records `dirty`
+  instead;
+- a provider that cannot consume expectations but can record revisions computes
+  drift anyway: a drifted Goal records `dirty`/`view_drift` and sends no
+  `source_identity`, while a covered Goal still binds;
+- an existing `verification.json` record without `dirtyState`/`deletedPaths`/
+  `changedPaths` still parses (`unknown`/empty) and does not force a re-index;
+  an empty change set on a dirty Goal never proves the view, so it stays
+  unbound;
 - the automatic admission pass stays unanchored: it sends no identity or fence
   and records no `canonical_binding`;
-- `stale_index` and `invalid_input` pass through unchanged with their payloads;
+- `stale_index` and `invalid_input` keep their provider code, status and retry
+  classification (including `providerReason`); the provider's `stale_paths` /
+  `unfenced_paths` detail fields are not forwarded to the caller;
 - the gate: flags absent → binding `'absent'` or `'unsupported'` as above and
   fence `'none'`; flags present → identity and fencing;
 - `canonical_binding` never appears in the child arguments;

@@ -1,5 +1,5 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import type { GcCycleReport, MaintenanceCycleReport } from '@unified-mpc/workspace';
+import type { GcCycleReport, MaintenanceCompactionReport, MaintenanceCycleReport } from '@unified-mpc/workspace';
 
 export interface IndexGcCommand {
   readonly kind: 'index-gc';
@@ -193,10 +193,28 @@ export function formatIndexMaintenance(report: MaintenanceCycleReport, dryRun: b
   if (report.status === 'refused') return `refused ${report.reason}: ${report.detail}`;
   if (report.status === 'skipped') return `skipped ${report.reason}`;
   const mode = dryRun ? 'dry-run' : 'applied';
+  const compaction = formatMaintenanceCompaction(report.compaction);
   return [
     `completed (${mode}) verification ${report.verification.status} manifests ${report.verification.manifests.length}`,
+    ...(compaction === null ? [] : [compaction]),
     formatIndexGc(report.gc, dryRun),
   ].join('\n');
+}
+
+function formatMaintenanceCompaction(report: MaintenanceCompactionReport): string | null {
+  switch (report.status) {
+    case 'not-requested':
+      return null;
+    case 'planned':
+      return `compaction planned (${report.reason})`;
+    case 'skipped':
+      return `compaction skipped (${report.reason}): ${report.detail}`;
+    case 'compacted': {
+      const busy = report.checkpointBusy ? ' checkpoint busy (WAL not truncated)' : '';
+      return `compaction compacted ${report.beforeBytes} -> ${report.afterBytes} bytes reclaimed ${report.reclaimedBytes}`
+        + ` freelist ${report.beforeFreelistBytes} -> ${report.afterFreelistBytes}${busy}`;
+    }
+  }
 }
 
 /** A refusal blocks the store; a skip and a completed pass are both success. */

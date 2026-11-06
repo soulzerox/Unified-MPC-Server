@@ -217,11 +217,13 @@ describe('formatIndexMaintenance', () => {
         quarantined: [],
         quarantinedArtifacts: [],
       },
+      compaction: { status: 'planned', reason: 'pressure-justified' },
       verification: HEALTHY_VERIFICATION,
       tookFence: true,
       tookAdmission: true,
     }, true)).toBe([
       'completed (dry-run) verification healthy manifests 1',
+      'compaction planned (pressure-justified)',
       'planned (dry-run) reachable 0 unreachable 1 artifact-unreachable 1',
       `unreachable ${CONTENT}`,
       `artifact-unreachable ${REPO} ${ARTIFACT_KEY}`,
@@ -239,14 +241,82 @@ describe('formatIndexMaintenance', () => {
         quarantined: [CONTENT],
         quarantinedArtifacts: [],
       },
+      compaction: {
+        status: 'compacted',
+        beforeBytes: 10_000,
+        afterBytes: 4_000,
+        reclaimedBytes: 6_000,
+        beforeFreelistBytes: 7_000,
+        afterFreelistBytes: 0,
+        checkpointBusy: false,
+        checkpointTruncated: true,
+        walBytesAfter: 0,
+      },
       verification: HEALTHY_VERIFICATION,
       tookFence: true,
       tookAdmission: true,
     }, false)).toBe([
       'completed (applied) verification healthy manifests 1',
+      'compaction compacted 10000 -> 4000 bytes reclaimed 6000 freelist 7000 -> 0',
       'applied quarantined 1 artifact-quarantined 0',
       `quarantined ${CONTENT}`,
     ].join('\n'));
+  });
+
+  it('omits the compaction line when no compaction was requested', () => {
+    expect(formatIndexMaintenance({
+      status: 'completed',
+      gc: {
+        status: 'planned',
+        reachable: [],
+        unreachable: [],
+        unreachableArtifacts: [],
+        quarantined: [],
+        quarantinedArtifacts: [],
+      },
+      compaction: { status: 'not-requested' },
+      verification: HEALTHY_VERIFICATION,
+      tookFence: true,
+      tookAdmission: true,
+    }, true)).toBe([
+      'completed (dry-run) verification healthy manifests 1',
+      'planned (dry-run) reachable 0 unreachable 0 artifact-unreachable 0',
+    ].join('\n'));
+  });
+
+  it('reports a reader-blocked compaction and a busy checkpoint without hiding it', () => {
+    const base = {
+      status: 'completed' as const,
+      gc: {
+        status: 'planned' as const,
+        reachable: [],
+        unreachable: [],
+        unreachableArtifacts: [],
+        quarantined: [],
+        quarantinedArtifacts: [],
+      },
+      verification: HEALTHY_VERIFICATION,
+      tookFence: true,
+      tookAdmission: true,
+    };
+    expect(formatIndexMaintenance({
+      ...base,
+      compaction: { status: 'skipped', reason: 'reader-pressure', detail: 'database is locked' },
+    }, false)).toContain('compaction skipped (reader-pressure): database is locked');
+    expect(formatIndexMaintenance({
+      ...base,
+      compaction: {
+        status: 'compacted',
+        beforeBytes: 10_000,
+        afterBytes: 10_000,
+        reclaimedBytes: 0,
+        beforeFreelistBytes: 7_000,
+        afterFreelistBytes: 0,
+        checkpointBusy: true,
+        checkpointTruncated: false,
+        walBytesAfter: 10_000,
+      },
+    }, false)).toContain('checkpoint busy (WAL not truncated)');
   });
 
   it('prints a skip as a successful verdict, not a failure', () => {
@@ -300,6 +370,7 @@ describe('indexMaintenanceExitCode', () => {
         quarantined: [],
         quarantinedArtifacts: [],
       },
+      compaction: { status: 'not-requested' },
       verification: HEALTHY_VERIFICATION,
       tookFence: true,
       tookAdmission: true,

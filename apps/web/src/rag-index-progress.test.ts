@@ -7,6 +7,7 @@ import { renderDashboardHtml } from './dashboard-html.js';
 import { ControlPlaneServer, parseRagIndexJobs, summarizeRagIndexJobs } from './web-server.js';
 
 const ws = '11111111-1111-4111-8111-111111111111';
+const upperWs = 'ABCDEF01-2345-4678-9ABC-DEF012345678';
 const example = {
   schemaVersion: 3,
   jobs: [
@@ -76,6 +77,12 @@ describe('headless-safe native Thai-RAG progress', () => {
           status: 'completed', startedAt: '2026-09-16T10:00:00Z', finishedAt: '2026-09-16T10:05:00Z',
         },
         {
+          // Uppercase workspace UUID: the store only accepts lowercase, so the
+          // dashboard must count it as legacy instead of attributing it.
+          jobId: 'idx_umcp_uppercaseuuid000', workspaceId: upperWs, ownerId: 'owner-a',
+          status: 'completed', startedAt: '2026-09-17T10:00:00Z', finishedAt: '2026-09-17T10:05:00Z',
+        },
+        {
           jobId: 'idx_umcp_running0000000', workspaceId: ws, ownerId: 'owner-a', status: 'running',
           startedAt: '2026-09-01T10:00:00Z',
         },
@@ -92,7 +99,7 @@ describe('headless-safe native Thai-RAG progress', () => {
       error: 'Provider crashed while embedding',
       finishedAt: '2026-10-01T10:05:00Z',
     });
-    expect(summary.legacyRowCount).toBe(3);
+    expect(summary.legacyRowCount).toBe(4);
 
     const long = summarizeRagIndexJobs({
       jobs: [{

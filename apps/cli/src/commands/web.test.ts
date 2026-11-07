@@ -102,6 +102,7 @@ describe('web CLI command', () => {
         const snapshot = await createCanonicalLifecycleProbe(root)();
 
         expect(snapshot.revisions).toMatchObject({
+          total: 1,
           revisions: [{
             manifestId,
             entryCount: 1,
@@ -115,6 +116,7 @@ describe('web CLI command', () => {
           lease: { status: 'free' },
           quarantine: {
             total: 1,
+            returned: 1,
             rows: [{
               target: { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey },
               graceMs: 1_000,
@@ -122,6 +124,51 @@ describe('web CLI command', () => {
             }],
           },
         });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('bounds revisions and quarantine rows while keeping the full counts', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-lifecycle-'));
+      try {
+        const canonicalRoot = path.join(root, 'canonical');
+        const manifests = new CanonicalManifestStore(canonicalRoot);
+        const keys: string[] = [];
+        const seeds: ReadonlyArray<readonly [string, string]> = [
+          ['a', '2026-11-01T00:00:00.000Z'],
+          ['b', '2026-11-02T00:00:00.000Z'],
+          ['c', '2026-11-03T00:00:00.000Z'],
+        ];
+        for (const [seed, createdAt] of seeds) {
+          const entries = [{ path: `${seed}.ts`, contentHash: seed.repeat(64) }];
+          const revisionId = 'rev:v1:' + seed.repeat(64);
+          await manifests.put({
+            manifestId: canonicalManifestId({ repositoryId: 'repo_abc123', revisionId, entries }),
+            repositoryId: 'repo_abc123',
+            revisionId,
+            commitSha: seed.repeat(40),
+            treeOid: seed.repeat(40),
+            targetRef: 'refs/remotes/origin/main',
+            entries,
+            createdAt,
+          });
+          keys.push('file:v1:' + seed.repeat(64));
+        }
+        await new ArtifactQuarantineStore(canonicalRoot).quarantine(
+          keys.map((artifactKey) => ({ kind: 'artifact-key' as const, repositoryId: 'repo_abc123', artifactKey })),
+          { now: new Date('2026-11-04T00:00:00.000Z'), graceMs: 1_000 },
+        );
+
+        const snapshot = await createCanonicalLifecycleProbe(root)({ limit: 2 });
+        const revisions = snapshot.revisions as { total: number; revisions: readonly unknown[] };
+        const gc = snapshot.gc as { quarantine: { total: number; returned: number; rows: readonly unknown[] } };
+
+        expect(revisions.total).toBe(3);
+        expect(revisions.revisions).toHaveLength(2);
+        expect(gc.quarantine.total).toBe(3);
+        expect(gc.quarantine.returned).toBe(2);
+        expect(gc.quarantine.rows).toHaveLength(2);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

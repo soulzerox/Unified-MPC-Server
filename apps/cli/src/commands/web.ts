@@ -17,6 +17,7 @@ import {
   workspaceSelectionReferences,
 } from '@unified-mpc/application';
 import {
+  CANONICAL_LIFECYCLE_MAX_LIMIT,
   ControlPlaneServer,
   type CanonicalLifecycleProbe,
   type CanonicalStatusProbe,
@@ -433,21 +434,42 @@ export function createCanonicalStatusProbe(dataPath: string): CanonicalStatusPro
  * quarantine row or judges reachability; a due row is reported as due, never as
  * garbage.
  */
+export const DEFAULT_CANONICAL_LIFECYCLE_LIMIT = 50;
+
 export function createCanonicalLifecycleProbe(dataPath: string): CanonicalLifecycleProbe {
   const canonicalRoot = path.join(dataPath, 'canonical');
-  return async () => ({
-    revisions: await canonicalRevisionList({
-      refs: new CanonicalRefStore(canonicalRoot),
-      manifests: new CanonicalManifestStore(canonicalRoot),
-      pins: new RevisionPinRegistry(canonicalRoot),
-      overlays: new GoalOverlayStore(canonicalRoot),
-      jobs: new IndexJobLedger(canonicalRoot),
-    }),
-    gc: await gcStatus(
-      { quarantine: new ArtifactQuarantineStore(canonicalRoot), lease: new GcLeaseStore(canonicalRoot) },
-      { now: new Date() },
-    ),
-  });
+  return async (options) => {
+    // Defense in depth: the route validates too, but an embedded caller must not
+    // be able to turn the card into an unbounded store read.
+    const requested = options?.limit ?? DEFAULT_CANONICAL_LIFECYCLE_LIMIT;
+    const limit = Number.isFinite(requested)
+      ? Math.min(Math.max(1, Math.trunc(requested)), CANONICAL_LIFECYCLE_MAX_LIMIT)
+      : DEFAULT_CANONICAL_LIFECYCLE_LIMIT;
+    const [revisions, gc] = await Promise.all([
+      canonicalRevisionList({
+        refs: new CanonicalRefStore(canonicalRoot),
+        manifests: new CanonicalManifestStore(canonicalRoot),
+        pins: new RevisionPinRegistry(canonicalRoot),
+        overlays: new GoalOverlayStore(canonicalRoot),
+        jobs: new IndexJobLedger(canonicalRoot),
+      }, { limit }),
+      gcStatus(
+        { quarantine: new ArtifactQuarantineStore(canonicalRoot), lease: new GcLeaseStore(canonicalRoot) },
+        { now: new Date() },
+      ),
+    ]);
+    return {
+      revisions,
+      gc: {
+        ...gc,
+        quarantine: {
+          ...gc.quarantine,
+          returned: Math.min(gc.quarantine.rows.length, limit),
+          rows: gc.quarantine.rows.slice(0, limit),
+        },
+      },
+    };
+  };
 }
 
 function createStorageDiagnosticsProbe(

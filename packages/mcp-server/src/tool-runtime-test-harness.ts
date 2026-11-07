@@ -220,7 +220,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     },
     canonicalRevisionList: async () => {
       calls.push('canonicalRevisionList');
-      return { revisions: [] };
+      return { revisions: [], total: 0 };
     },
     canonicalGcStatus: async () => {
       calls.push('canonicalGcStatus');

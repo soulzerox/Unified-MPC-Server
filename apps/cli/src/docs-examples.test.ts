@@ -276,6 +276,7 @@ function replayDependencies(calls: string[]): CliDependencies {
           overlayGoalIds: [],
           indexJobOperationIds: [],
         }],
+        total: 1,
       };
     },
     canonicalRevisionPin: async (input): Promise<CanonicalRevisionPinReport> => {

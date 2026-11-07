@@ -562,6 +562,9 @@ export function getClientScriptJs(): string {
           const revisions = payload && payload.revisions && Array.isArray(payload.revisions.revisions)
             ? payload.revisions.revisions
             : [];
+          const revisionTotal = payload && payload.revisions && Number.isFinite(payload.revisions.total)
+            ? payload.revisions.total
+            : revisions.length;
           const gc = payload && payload.gc && typeof payload.gc === 'object' ? payload.gc : null;
           if (!payload || payload.available !== true || gc === null) {
             container.textContent = 'Canonical store lifecycle detail not available';
@@ -574,7 +577,9 @@ export function getClientScriptJs(): string {
             line.textContent = text;
             container.appendChild(line);
           };
-          appendLine('revisions ' + String(revisions.length));
+          appendLine(revisionTotal === revisions.length
+            ? 'revisions ' + String(revisions.length)
+            : 'revisions ' + String(revisions.length) + ' of ' + String(revisionTotal));
           for (const revision of revisions) {
             const markers = [];
             if (Array.isArray(revision.refs) && revision.refs.length > 0) markers.push('refs=' + revision.refs.join(','));
@@ -596,9 +601,14 @@ export function getClientScriptJs(): string {
           appendLine(canonicalLifecycleLeaseLabel(gc.lease));
           const quarantine = gc.quarantine && typeof gc.quarantine === 'object' ? gc.quarantine : {};
           const rows = Array.isArray(quarantine.rows) ? quarantine.rows : [];
-          appendLine('quarantine ' + String(quarantine.total ?? rows.length)
+          const quarantineTotal = Number.isFinite(quarantine.total) ? quarantine.total : rows.length;
+          const quarantineReturned = Number.isFinite(quarantine.returned) ? quarantine.returned : rows.length;
+          appendLine('quarantine ' + String(quarantineTotal)
             + ' (due ' + String(quarantine.due ?? 0)
-            + ', in-grace ' + String(quarantine.inGrace ?? 0) + ')');
+            + ', in-grace ' + String(quarantine.inGrace ?? 0) + ')'
+            + (quarantineReturned < quarantineTotal
+              ? ' · showing ' + String(quarantineReturned) + ' of ' + String(quarantineTotal)
+              : ''));
           for (const row of rows) {
             appendLine('quarantine ' + canonicalLifecycleTargetLabel(row.target)
               + ' expires ' + String(row.expiresAt || 'unreadable')

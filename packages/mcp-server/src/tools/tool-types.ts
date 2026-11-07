@@ -302,7 +302,7 @@ export interface McpApplicationServices {
   /** Read-only canonical store projection (#210 §11); omitted when the runtime has no canonical store. */
   readonly canonicalIndexStatus?: () => Promise<CanonicalStatusReport>;
   /** Read-only canonical revision history (#210 §11); the exposing tool bounds the response. */
-  readonly canonicalRevisionList?: () => Promise<CanonicalRevisionListReport>;
+  readonly canonicalRevisionList?: (options?: { readonly limit?: number }) => Promise<CanonicalRevisionListReport>;
   /** Read-only canonical GC lease/quarantine projection (#210 §7). */
   readonly canonicalGcStatus?: () => Promise<GcStatusReport>;
   /** Read-only durable Thai-RAG index-job history (#210 §11); the exposing tool bounds the response. */

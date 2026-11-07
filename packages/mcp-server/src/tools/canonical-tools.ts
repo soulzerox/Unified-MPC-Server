@@ -74,12 +74,11 @@ export function canonicalTools(context: McpToolContext): McpToolDefinition[] {
         const list = context.services.canonicalRevisionList;
         if (list === undefined) return missingService();
         try {
-          const report = await list();
-          const limit = input.limit ?? DEFAULT_REVISION_LIST_LIMIT;
-          const revisions = report.revisions.slice(0, limit);
+          const report = await list({ limit: input.limit ?? DEFAULT_REVISION_LIST_LIMIT });
+          const revisions = report.revisions;
           return ok({
             scope: 'canonical-store',
-            total: report.revisions.length,
+            total: report.total,
             returned: revisions.length,
             revisions,
           });

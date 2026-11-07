@@ -128,6 +128,7 @@ const revisionReport: CanonicalRevisionListReport = {
     { ...revision, manifestId: 'man:v1:' + 'e'.repeat(64), createdAt: '2026-10-31T00:00:00.000Z' },
     { ...revision, manifestId: 'man:v1:' + 'f'.repeat(64), createdAt: '2026-10-30T00:00:00.000Z' },
   ],
+  total: 3,
 };
 
 function quarantineRow(digit: string, due: boolean): GcStatusReport['quarantine']['rows'][number] {
@@ -186,7 +187,14 @@ describe('canonical lifecycle tools', () => {
   });
 
   it('bounds the revision list and keeps the full count visible', async () => {
-    const tool = namedTool({ canonicalRevisionList: async () => revisionReport }, 'canonical_revision_list');
+    const seen: Array<{ readonly limit?: number } | undefined> = [];
+    const tool = namedTool({
+      canonicalRevisionList: async (options) => {
+        seen.push(options);
+        const limit = options?.limit ?? 50;
+        return { revisions: revisionReport.revisions.slice(0, limit), total: revisionReport.total };
+      },
+    }, 'canonical_revision_list');
 
     const bounded = await tool.execute({ limit: 1 }, new AbortController().signal);
     expect(bounded).toMatchObject({
@@ -201,6 +209,8 @@ describe('canonical lifecycle tools', () => {
 
     const defaulted = await tool.execute({}, new AbortController().signal);
     expect(defaulted).toMatchObject({ ok: true, value: { total: 3, returned: 3 } });
+    // The tool forwards its own bound instead of reading the whole store and slicing.
+    expect(seen).toEqual([{ limit: 1 }, { limit: 50 }]);
   });
 
   it('reports a missing service for both lifecycle reports', async () => {

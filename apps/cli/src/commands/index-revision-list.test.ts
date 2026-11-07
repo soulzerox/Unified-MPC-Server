@@ -38,11 +38,11 @@ describe('parseIndexRevisionListArgs', () => {
 
 describe('formatCanonicalRevisionList', () => {
   it('prints only the count for an empty store', () => {
-    expect(formatCanonicalRevisionList({ revisions: [] })).toBe('revisions 0');
+    expect(formatCanonicalRevisionList({ revisions: [], total: 0 })).toBe('revisions 0');
   });
 
   it('prints a summary line and no detail lines for an unreferenced revision', () => {
-    const report: CanonicalRevisionListReport = { revisions: [REVISION] };
+    const report: CanonicalRevisionListReport = { revisions: [REVISION], total: 1 };
     expect(formatCanonicalRevisionList(report).split('\n')).toEqual([
       'revisions 1',
       `  ${REVISION.manifestId} commit ${REVISION.commitSha} tree ${REVISION.treeOid} entries 695 created 2026-10-17T00:00:00.000Z`,
@@ -58,6 +58,7 @@ describe('formatCanonicalRevisionList', () => {
         overlayGoalIds: ['goal_a'],
         indexJobOperationIds: ['op_reindex'],
       }],
+      total: 1,
     };
     expect(formatCanonicalRevisionList(report).split('\n')).toEqual([
       'revisions 1',
@@ -67,5 +68,10 @@ describe('formatCanonicalRevisionList', () => {
       '    overlay-bases goal_a',
       '    index-jobs op_reindex',
     ]);
+  });
+
+  it('shows the full count when the report is truncated', () => {
+    const report: CanonicalRevisionListReport = { revisions: [REVISION], total: 4 };
+    expect(formatCanonicalRevisionList(report).split('\n')[0]).toBe('revisions 1 of 4');
   });
 });

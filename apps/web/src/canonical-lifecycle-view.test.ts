@@ -8,6 +8,7 @@ import { ControlPlaneServer, type CanonicalLifecycleProbe } from './web-server.j
 
 const snapshot = {
   revisions: {
+    total: 1,
     revisions: [{
       manifestId: 'man:v1:' + 'a'.repeat(64),
       repositoryId: 'repo_abc123',
@@ -30,6 +31,7 @@ const snapshot = {
       total: 1,
       due: 1,
       inGrace: 0,
+      returned: 1,
       rows: [{
         target: {
           kind: 'artifact-key',
@@ -81,6 +83,33 @@ describe('canonical store lifecycle projection', () => {
     });
   });
 
+  it('forwards a valid limit to the probe', async () => {
+    const seen: Array<{ readonly limit?: number } | undefined> = [];
+    await withServer(async (options) => {
+      seen.push(options);
+      return snapshot;
+    }, async (baseUrl) => {
+      const response = await fetch(baseUrl + '/api/canonical-lifecycle?limit=1');
+      expect(response.status).toBe(200);
+    });
+    expect(seen).toEqual([{ limit: 1 }]);
+  });
+
+  it('rejects an invalid limit before the store is touched', async () => {
+    let calls = 0;
+    await withServer(async () => {
+      calls += 1;
+      return snapshot;
+    }, async (baseUrl) => {
+      for (const value of ['0', '201', '-1', '1.0', '+1', 'abc', '']) {
+        const response = await fetch(baseUrl + '/api/canonical-lifecycle?limit=' + encodeURIComponent(value));
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: 'limit must be an integer from 1 to 200' });
+      }
+    });
+    expect(calls).toBe(0);
+  });
+
   it('reports unavailable when no probe is wired', async () => {
     await withServer(undefined, async (baseUrl) => {
       const response = await fetch(baseUrl + '/api/canonical-lifecycle');
@@ -115,6 +144,8 @@ describe('canonical store lifecycle projection', () => {
     expect(html).toContain('loadCanonicalLifecycle();');
     expect(html).not.toContain('setInterval(loadCanonicalLifecycle');
     expect(html).toContain("'revisions ' + String(revisions.length)");
+    expect(html).toContain("' of ' + String(revisionTotal)");
+    expect(html).toContain("' · showing ' + String(quarantineReturned) + ' of ' + String(quarantineTotal)");
     expect(html).toContain("'gc status: '");
     expect(html).toContain("'quarantine '");
     expect(html).toContain("'loaded ' + new Date().toLocaleTimeString()");

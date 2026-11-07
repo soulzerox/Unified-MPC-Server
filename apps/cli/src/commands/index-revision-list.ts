@@ -33,7 +33,8 @@ export function parseIndexRevisionListArgs(
  * an unreachable revision is visibly bare rather than described as active.
  */
 export function formatCanonicalRevisionList(report: CanonicalRevisionListReport): string {
-  const lines = [`revisions ${report.revisions.length}`];
+  const returned = report.revisions.length;
+  const lines = [returned === report.total ? `revisions ${report.total}` : `revisions ${returned} of ${report.total}`];
   for (const revision of report.revisions) {
     lines.push(
       `  ${revision.manifestId} commit ${revision.commitSha} tree ${revision.treeOid}`

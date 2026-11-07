@@ -24,10 +24,11 @@ export function sanitizeIndexJobError(error: string): string | undefined {
  * Project the CLI-owned durable index-job ledger into the MCP tool shape.
  *
  * This is the safety boundary: provider job ids, the raw provider `result`
- * payload, owner-process identity and `legacyData` are dropped here, and a
- * terminal error is sanitized/bounded. Absent counters stay absent instead of
- * becoming `0`, so the response never claims a measurement the row did not
- * record. `legacy-unavailable` rows are counted by the listing, never listed.
+ * payload, owner identity (owner ids embed the host pid), owner-process
+ * identity and `legacyData` are dropped here, and a terminal error is
+ * sanitized/bounded. Absent counters stay absent instead of becoming `0`, so
+ * the response never claims a measurement the row did not record.
+ * `legacy-unavailable` rows are counted by the listing, never listed.
  */
 export function projectIndexJobHistory(listing: ThaiRagIndexJobListing): RagIndexJobHistory {
   return {
@@ -40,7 +41,6 @@ export function projectIndexJobHistory(listing: ThaiRagIndexJobListing): RagInde
       return [{
         jobId: job.jobId,
         workspaceId: job.workspaceId,
-        ...(job.ownerId === undefined ? {} : { ownerId: job.ownerId }),
         ...(job.indexedFiles === undefined ? {} : { indexedFiles: job.indexedFiles }),
         ...(job.skippedFiles === undefined ? {} : { skippedFiles: job.skippedFiles }),
         ...(job.totalFiles === undefined ? {} : { totalFiles: job.totalFiles }),

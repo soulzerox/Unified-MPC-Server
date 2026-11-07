@@ -168,7 +168,7 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'rag_index_job_list',
-      description: 'Read the durable Thai-RAG index-job ledger without mutating it. Lists every active job plus the newest terminal jobs with the reuse/embedding counters the row actually recorded, miss reasons, reindex reason, timestamps and sanitized terminal failure text. Active rows are always listed; `limit` bounds terminal rows (default 20, max 200) and `matchingRowCount`/`returned` keep truncation visible. Pre-contract rows are counted as legacy-unavailable, never attributed. Optional `workspaceId` must be a canonical registration UUID. Distinct from rag_index_status (one live provider job) and canonical_index_status (canonical store health). Never exposes provider job ids, provider result payloads, owner process identity or raw ledger paths.',
+      description: 'Read the durable Thai-RAG index-job ledger without mutating it. Lists every active job plus the newest terminal jobs with the reuse/embedding counters the row actually recorded, miss reasons, reindex reason, timestamps and sanitized terminal failure text. Active rows are always listed; `limit` bounds terminal rows (default 20, max 200) and `matchingRowCount`/`returned` keep truncation visible. Pre-contract rows are counted as legacy-unavailable, never attributed. Optional `workspaceId` must be a canonical registration UUID. Distinct from rag_index_status (one live provider job) and canonical_index_status (canonical store health). Never exposes provider job ids, provider result payloads, owner ids, owner process identity or raw ledger paths.',
       ...readOnly,
       inputSchema: ragIndexJobListSchema,
       handler: async (input) => {

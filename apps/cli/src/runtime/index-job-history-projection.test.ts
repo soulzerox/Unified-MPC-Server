@@ -19,7 +19,7 @@ describe('index job history projection', () => {
     const projected = projectIndexJobHistory(listing([{
       jobId: 'idx_umcp_a',
       workspaceId,
-      ownerId: 'owner-a',
+      ownerId: 'unified-mpc:4242',
       ownerProcessIdentity: 'pid:1234',
       providerJobId: 'provider-secret',
       status: 'running',
@@ -43,7 +43,6 @@ describe('index job history projection', () => {
     expect(projected.jobs).toEqual([{
       jobId: 'idx_umcp_a',
       workspaceId,
-      ownerId: 'owner-a',
       status: 'running',
       force: false,
       reindexReason: 'startup_verification',
@@ -64,6 +63,7 @@ describe('index job history projection', () => {
     expect(serialized).not.toContain('provider-secret');
     expect(serialized).not.toContain('/private/location');
     expect(serialized).not.toContain('pid:1234');
+    expect(serialized).not.toContain('unified-mpc:4242');
   });
 
   it('keeps absent counters absent instead of claiming zero', () => {

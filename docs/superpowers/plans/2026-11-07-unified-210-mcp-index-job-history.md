@@ -23,15 +23,16 @@ Read-only, bounded projection of `ThaiRagIndexJobStore.listForOperator`:
 
 - optional `workspaceId` (canonical registration UUID) and `limit` (1–200,
   default 20 for terminal rows; active rows are always listed);
-- per row: job id, workspace, owner, status, force, reindex reason, timestamps,
-  the reuse/embedding counters the row actually recorded, miss reasons and a
+- per row: job id, workspace, status, force, reindex reason, timestamps, the
+  reuse/embedding counters the row actually recorded, miss reasons and a
   sanitized terminal `error`;
 - `totalRowCount`, `matchingRowCount`, `legacyRowCount` and `returned`, so a
   truncated listing stays visible; legacy rows are counted, never attributed.
 
 Deliberately absent: provider job ids, the raw provider `result` payload,
-owner-process identity, and `legacyData`. A ledger read failure returns fixed
-text; a runtime without the ledger fails closed with `missingService()`.
+owner ids (they embed the host pid), owner-process identity, and `legacyData`.
+A ledger read failure returns fixed text; a runtime without the ledger fails
+closed with `missingService()`.
 
 ### 2. Service port
 

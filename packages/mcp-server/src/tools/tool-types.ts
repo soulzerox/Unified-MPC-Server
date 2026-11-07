@@ -238,13 +238,13 @@ export type RagIndexJobHistoryStatus = 'running' | 'cancelling' | 'cancelled' | 
  * One durable provider index-job row as the MCP operator surface may expose it.
  *
  * Deliberately absent from this projection: the provider job id, the raw
- * provider `result` payload, owner-process identity and `legacyData`. Those
- * stay in the CLI's `--json` output and never reach a tool response.
+ * provider `result` payload, owner identity (owner ids embed the host pid),
+ * owner-process identity and `legacyData`. Those stay in the CLI's `--json`
+ * output and never reach a tool response.
  */
 export interface RagIndexJobHistoryRow {
   readonly jobId: string;
   readonly workspaceId: string;
-  readonly ownerId?: string;
   readonly indexedFiles?: number;
   readonly skippedFiles?: number;
   readonly totalFiles?: number;

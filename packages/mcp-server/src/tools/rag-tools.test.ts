@@ -253,7 +253,6 @@ describe('durable index-job history', () => {
           jobs: [{
             jobId: 'idx_umcp_a',
             workspaceId: canonicalWorkspace,
-            ownerId: 'owner-a',
             status: 'running',
             force: false,
             reindexReason: 'startup_verification',

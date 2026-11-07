@@ -128,6 +128,7 @@ export const restoreCheckpointSchema = z.object({
 }).strict();
 
 export const workspaceListSchema = z.object({}).strict();
+export const canonicalIndexStatusSchema = z.object({}).strict();
 export const workspaceActiveListSchema = z.object({}).strict();
 export const workspaceSelectionSchema = z.object({ workspaceId: workspaceIdSchema }).strict();
 export const workspaceRegisterSchema = z.object({

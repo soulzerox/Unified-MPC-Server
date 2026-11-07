@@ -48,13 +48,13 @@ function coreToolNames(registry: ToolRegistry): string[] {
 }
 
 describe('core tool readiness', () => {
-  it('tracks one representative contract for every core tool in the complete 274-tool inventory', () => {
+  it('tracks one representative contract for every core tool in the complete 276-tool inventory', () => {
     const registry = coreRegistry();
-    expect(registry.listAll()).toHaveLength(274);
+    expect(registry.listAll()).toHaveLength(276);
     const advertisedUpgradeCount = UPGRADE_TOOL_CATALOG.filter((entry) => entry.deliveryState !== 'feature_disabled' && entry.deliveryState !== 'planned').length;
     expect(registry.list()).toHaveLength(coreToolNames(registry).length + advertisedUpgradeCount);
     expect(UPGRADE_TOOL_CATALOG).toHaveLength(138);
-    expect(coreToolNames(registry)).toHaveLength(136);
+    expect(coreToolNames(registry)).toHaveLength(138);
     expect(Object.keys(CORE_TOOL_SMOKE_INPUTS).sort()).toEqual(coreToolNames(registry));
   });
 

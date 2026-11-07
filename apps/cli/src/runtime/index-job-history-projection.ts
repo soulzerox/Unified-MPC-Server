@@ -62,20 +62,29 @@ function scanQuotes(text: string): QuoteScan {
   return { positions, terminators };
 }
 
+/**
+ * A widened span that begins with a safe URL but carries another quote is
+ * several adjacent quoted tokens, not one path. Leaving it unclaimed lets the
+ * scan redact the inner token instead of copying the whole span as a URL.
+ */
+function isAdjacentUrlSpan(content: string): boolean {
+  return SAFE_URL.test(content) && /["']/.test(content);
+}
+
 function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content: string; end: number } | undefined {
   const quote = text[start];
   if (quote !== "'" && quote !== '"') return undefined;
   const terminator = firstIndexAfter(scan.terminators[quote], start);
   if (terminator !== undefined) {
-    return { content: text.slice(start + 1, terminator), end: terminator + 1 };
+    const content = text.slice(start + 1, terminator);
+    if (isAdjacentUrlSpan(content)) return undefined;
+    return { content, end: terminator + 1 };
   }
   const positions = scan.positions[quote];
   const last = positions[positions.length - 1];
   if (last !== undefined && last > start) {
     const content = text.slice(start + 1, last);
-    // A widened span that begins with a safe URL is adjacent quoted tokens,
-    // not one path; leave the opener so the scan redacts the inner token.
-    if (SAFE_URL.test(content) && /["']/.test(content)) return undefined;
+    if (isAdjacentUrlSpan(content)) return undefined;
     return { content, end: last + 1 };
   }
   // No same quote follows. A local path token directly after the opener still

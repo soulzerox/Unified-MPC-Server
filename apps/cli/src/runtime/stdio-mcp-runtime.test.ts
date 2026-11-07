@@ -264,6 +264,110 @@ describe('stdio MCP runtime', () => {
     }
   });
 
+  it('rebases a checkpointed Goal Workspace only with the exact lease and observed admission generation', async () => {
+    const fixture = await canonicalGoalFixture('guarded-rebase-project');
+    try {
+      const resolved = await fixture.runtime.services.goalRunWorkspace?.resolveRunWorkspace(fixture.runtime.actor, {
+        workspaceId: fixture.projectId, goalKey: 'guarded-rebase',
+      });
+      expect(resolved?.ok).toBe(true);
+      if (resolved === undefined || !resolved.ok) return;
+      const acquired = await fixture.runtime.services.goals?.runGoal(fixture.runtime.actor, {
+        workspaceId: resolved.value.workspaceId,
+        goalKey: 'guarded-rebase',
+        objective: 'Verify the guarded rebase surface.',
+        plan: { steps: [] },
+        leaseSeconds: 600,
+      });
+      expect(acquired).toMatchObject({ ok: true, value: { acquired: true, leaseGeneration: 1 } });
+      if (acquired === undefined || !acquired.ok || acquired.value.leaseToken === undefined) return;
+      const admitted = await fixture.runtime.services.goalRunWorkspace?.admitRunWorkspace(fixture.runtime.actor, {
+        workspaceId: resolved.value.workspaceId,
+        goalId: acquired.value.goalId,
+        leaseGeneration: acquired.value.leaseGeneration,
+        leaseExpiresAt: acquired.value.leaseExpiresAt ?? '',
+      });
+      expect(admitted).toMatchObject({ ok: true, value: { admissionGeneration: 1 } });
+      if (admitted === undefined || !admitted.ok) return;
+
+      const request = {
+        workspaceId: resolved.value.workspaceId,
+        goalId: acquired.value.goalId,
+        leaseToken: acquired.value.leaseToken,
+        leaseGeneration: acquired.value.leaseGeneration,
+        expectedAdmissionGeneration: admitted.value.admissionGeneration,
+      };
+      const beforeCheckpoint = await fixture.runtime.services.goalRunWorkspace?.rebaseRunWorkspace(fixture.runtime.actor, request);
+      expect(beforeCheckpoint).toMatchObject({
+        ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'durable_checkpoint_missing' },
+      });
+
+      const checkpointed = await fixture.runtime.services.goals?.checkpointGoal(fixture.runtime.actor, {
+        goalId: acquired.value.goalId,
+        leaseToken: acquired.value.leaseToken,
+        expectedRevision: acquired.value.revision,
+        currentPhase: 'guarded-rebase',
+        summary: 'Checkpoint before the base advances.',
+        stepUpdates: [],
+        nextAction: 'Rebase when the base advances.',
+        blockers: [],
+        evidence: [],
+        activeTaskIds: [],
+      });
+      expect(checkpointed).toMatchObject({ ok: true });
+
+      const rejected = await fixture.runtime.services.goalRunWorkspace?.rebaseRunWorkspace(fixture.runtime.actor, {
+        ...request,
+        leaseToken: 'not-the-current-lease',
+      });
+      expect(rejected).toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+
+      const wrongGeneration = await fixture.runtime.services.goalRunWorkspace?.rebaseRunWorkspace(fixture.runtime.actor, {
+        ...request,
+        expectedAdmissionGeneration: request.expectedAdmissionGeneration + 1,
+      });
+      expect(wrongGeneration).toMatchObject({
+        ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'admission_generation_mismatch' },
+      });
+
+      const gitAt = (cwd: string, ...args: string[]): string =>
+        execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+      await writeFile(path.join(fixture.rootPath, 'advanced.txt'), 'advance\n');
+      gitAt(fixture.rootPath, 'add', 'advanced.txt');
+      gitAt(fixture.rootPath, 'commit', '-qm', 'advance main');
+      gitAt(fixture.rootPath, 'push', '-q', 'origin', fixture.branch);
+      const advancedSha = gitAt(fixture.rootPath, 'rev-parse', 'HEAD');
+
+      const rebased = await fixture.runtime.services.goalRunWorkspace?.rebaseRunWorkspace(fixture.runtime.actor, request);
+      expect(rebased).toMatchObject({
+        ok: true,
+        value: {
+          status: 'REBASED',
+          oldBaseSha: fixture.baseSha,
+          newBaseSha: advancedSha,
+          newHead: advancedSha,
+          canonicalAdmission: { status: 'skipped', reason: 'commit_not_live' },
+        },
+      });
+      if (rebased === undefined || !rebased.ok || rebased.value.status !== 'REBASED') return;
+      expect(rebased.value.newHead).not.toBe(rebased.value.oldHead);
+
+      const workspaces = new SqliteWorkspaceRepository(fixture.db);
+      const updated = await workspaces.get(resolved.value.workspaceId);
+      expect(updated?.baseRevision).toBe(advancedSha);
+      const receipt = await workspaces.getAdmissionReceipt(resolved.value.workspaceId);
+      expect(receipt?.invalidatedAt).toBeDefined();
+
+      const replay = await fixture.runtime.services.goalRunWorkspace?.rebaseRunWorkspace(fixture.runtime.actor, request);
+      expect(replay).toMatchObject({
+        ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'admission_receipt_invalidated' },
+      });
+    } finally {
+      await fixture.runtime.close();
+      fixture.db.close();
+    }
+  });
+
   it('admits a Goal whose repository has no origin without pinning the shared ref', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-no-origin-data-'));
     const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-goal-no-origin-source-'));

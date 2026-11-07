@@ -2757,9 +2757,10 @@ function commandExecutionRequiresWorkspaceIdentityFence(toolName: string, input:
   return readTrimmedString(input.executable) !== undefined;
 }
 const ACTIVE_PROJECT_SELECTION_TOOLS = new Set(['workspace_activate', 'workspace_deactivate', 'workspace_set_primary']);
-// Admission recovery is not a workspace file mutation. Its service independently
-// verifies the exact live owner lease before refreshing the writer/admission receipt.
-const GOAL_ADMISSION_RECOVERY_TOOLS = new Set(['retry_goal_workspace_admission']);
+// Admission recovery and guarded rebase are not workspace file mutations. Their
+// service independently verifies the exact live owner lease before refreshing
+// the writer/admission receipt or moving the private Goal branch.
+const GOAL_ADMISSION_RECOVERY_TOOLS = new Set(['retry_goal_workspace_admission', 'rebase_goal_workspace']);
 export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
   'write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file',
   'restore_deleted_file', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec',

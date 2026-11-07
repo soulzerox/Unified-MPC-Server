@@ -92,7 +92,7 @@ import {
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import { CanonicalManifestStore, CanonicalRefStore, GoalOverlayStore, SecretPolicy, WorkspacePathGuard, WorkspaceService, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
-import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
+import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type Result, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
   DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
@@ -873,6 +873,39 @@ export function createStdioMcpRuntime(
       },
     },
   });
+
+  /**
+   * Shared proof for every operation that acts on a live Goal Workspace under
+   * the durable goal lease. Same MCP session identity is not ownership proof:
+   * the token hash, generation, owner client/session and expiry must all match.
+   */
+  const requireGoalLeaseProof = async (
+    runActor: { readonly clientId: string; readonly sessionId?: string },
+    request: {
+      readonly workspaceId: string;
+      readonly goalId: string;
+      readonly leaseToken: string;
+      readonly leaseGeneration: number;
+    },
+    rejectionMessage: string,
+  ): Promise<Result<{ readonly leaseExpiresAt: string }>> => {
+    const goal = await goalRepository.getById(request.goalId);
+    const actualDigest = createHash('sha256').update(request.leaseToken).digest();
+    const expectedDigest = Buffer.from(goal?.leaseTokenHash ?? '', 'hex');
+    if (goal === null
+      || goal.status !== 'active'
+      || goal.workspaceId !== request.workspaceId
+      || goal.leaseGeneration !== request.leaseGeneration
+      || goal.leaseOwnerClientId !== runActor.clientId
+      || goal.leaseOwnerSessionId !== (runActor.sessionId?.trim() || runActor.clientId)
+      || goal.leaseExpiresAt === undefined
+      || Date.parse(goal.leaseExpiresAt) <= Date.now()
+      || expectedDigest.length !== actualDigest.length
+      || !timingSafeEqual(expectedDigest, actualDigest)) {
+      return err(appError('PERMISSION_DENIED', rejectionMessage));
+    }
+    return ok({ leaseExpiresAt: goal.leaseExpiresAt });
+  };
   const goalRunWorkspace: NonNullable<McpApplicationServices['goalRunWorkspace']> = {
     async resolveRunWorkspace(runActor, request) {
       const parent = await workspaceRepository.get(request.workspaceId);
@@ -972,21 +1005,13 @@ export function createStdioMcpRuntime(
       return ok({ admissionGeneration: bootstrapped.admission.admissionGeneration });
     },
     async recoverRunWorkspace(runActor, request) {
-      const goal = await goalRepository.getById(request.goalId);
-      const actualDigest = createHash('sha256').update(request.leaseToken).digest();
-      const expectedDigest = Buffer.from(goal?.leaseTokenHash ?? '', 'hex');
-      if (goal === null
-        || goal.status !== 'active'
-        || goal.workspaceId !== request.workspaceId
-        || goal.leaseGeneration !== request.leaseGeneration
-        || goal.leaseOwnerClientId !== runActor.clientId
-        || goal.leaseOwnerSessionId !== (runActor.sessionId?.trim() || runActor.clientId)
-        || goal.leaseExpiresAt === undefined
-        || Date.parse(goal.leaseExpiresAt) <= Date.now()
-        || expectedDigest.length !== actualDigest.length
-        || !timingSafeEqual(expectedDigest, actualDigest)) {
-        return err(appError('PERMISSION_DENIED', 'Stale or invalid goal lease proof; admission retry rejected'));
-      }
+      const proof = await requireGoalLeaseProof(
+        runActor,
+        request,
+        'Stale or invalid goal lease proof; admission retry rejected',
+      );
+      if (!proof.ok) return proof;
+      const leaseExpiresAt = proof.value.leaseExpiresAt;
       const stagedRecovery = request.stagedRecovery;
       const unstagedRecovery = request.unstagedRecovery;
       if (stagedRecovery === undefined && unstagedRecovery === undefined) {
@@ -994,7 +1019,7 @@ export function createStdioMcpRuntime(
           workspaceId: request.workspaceId,
           goalId: request.goalId,
           leaseGeneration: request.leaseGeneration,
-          leaseExpiresAt: goal.leaseExpiresAt ?? '',
+          leaseExpiresAt,
         });
       }
       if (stagedRecovery !== undefined && unstagedRecovery !== undefined) {
@@ -1013,7 +1038,7 @@ export function createStdioMcpRuntime(
         request.goalId,
         ownerId,
         request.leaseGeneration,
-        goal.leaseExpiresAt ?? '',
+        leaseExpiresAt,
       );
       if (!writer.ok) return writer;
 
@@ -1130,6 +1155,104 @@ export function createStdioMcpRuntime(
           `${recoveryKind === 'staged' ? 'Staged' : 'Unstaged'} admission recovery receipt could not be verified after capture`, true));
       }
       return ok({ admissionGeneration: recoveredGeneration });
+    },
+    async rebaseRunWorkspace(runActor, request) {
+      const proof = await requireGoalLeaseProof(
+        runActor,
+        request,
+        'Stale or invalid goal lease proof; guarded rebase rejected',
+      );
+      if (!proof.ok) return proof;
+      const goal = await goalRepository.getById(request.goalId);
+      const checkpoint = goal?.checkpoints.at(-1);
+      if (goal === null || checkpoint === undefined) {
+        return ok({
+          status: 'RECOVERY_REQUIRED' as const,
+          reason: 'durable_checkpoint_missing',
+        });
+      }
+      const goalWorkspace = await workspaceRepository.get(request.workspaceId);
+      if (goalWorkspace === null || goalWorkspace.lifecycleKind !== 'goal'
+        || goalWorkspace.goalId !== request.goalId) {
+        return err(appError('WORKSPACE_ADMISSION_STALE', 'Guarded rebase requires the exact owned Goal Workspace', true));
+      }
+      const ownerId = `${runActor.clientId}:${runActor.sessionId ?? 'sessionless'}`;
+      const writer = await goalWorkspaceService.synchronizeWriterLease(
+        request.goalId,
+        ownerId,
+        request.leaseGeneration,
+        proof.value.leaseExpiresAt,
+      );
+      if (!writer.ok) return writer;
+      const lease = { leaseId: writer.value.leaseId, generation: writer.value.generation };
+
+      const observed = await goalWorkspaceTruth.readAdmission(request.workspaceId);
+      if (observed.workspaceKind !== 'git' || observed.workspaceHead === undefined) {
+        return ok({
+          status: 'RECOVERY_REQUIRED' as const,
+          reason: 'workspace_head_unavailable',
+        });
+      }
+      const existing = await rawWorkspaceRepository.getAdmissionReceipt(request.workspaceId);
+      if (existing === null) {
+        return ok({
+          status: 'RECOVERY_REQUIRED' as const,
+          reason: 'admission_receipt_missing',
+        });
+      }
+      if (existing.invalidatedAt !== undefined) {
+        return ok({
+          status: 'RECOVERY_REQUIRED' as const,
+          reason: 'admission_receipt_invalidated',
+        });
+      }
+      if (existing.admissionGeneration !== request.expectedAdmissionGeneration) {
+        return ok({
+          status: 'RECOVERY_REQUIRED' as const,
+          reason: 'admission_generation_mismatch',
+        });
+      }
+
+      // The live admission pass never records checkpoint evidence, while the
+      // guarded rebase requires it. Bind the exact durable checkpoint and the
+      // observed HEAD into the receipt the rebase consumes; the rebase then
+      // re-validates every field before moving any history.
+      const recorded = await goalWorkspaceService.recordCheckpoint(request.goalId, checkpoint.id, lease);
+      if (!recorded.ok) return recorded;
+      let admissionGeneration = existing.admissionGeneration;
+      const alreadyBound = existing.checkpointId === checkpoint.id
+        && existing.checkpointRevision === checkpoint.revision
+        && existing.expectedWorkspaceHead === observed.workspaceHead;
+      if (!alreadyBound) {
+        const runtime = options.runtimeAdmissionIdentity;
+        if (runtime === undefined) {
+          return ok({
+            status: 'RECOVERY_REQUIRED' as const,
+            reason: 'runtime_admission_identity_missing',
+          });
+        }
+        const captured = await goalWorkspaceService.captureAdmission({
+          workspaceId: request.workspaceId,
+          checkpointId: checkpoint.id,
+          checkpointRevision: checkpoint.revision,
+          checkpointHead: observed.workspaceHead,
+          workflowVersion: 1,
+          runtime,
+        });
+        if (!captured.ok) {
+          return ok({
+            status: 'RECOVERY_REQUIRED' as const,
+            reason: 'admission_capture_conflict',
+          });
+        }
+        admissionGeneration = captured.value.admissionGeneration;
+      }
+
+      return goalWorkspaceService.rebaseStaleBase({
+        goalId: request.goalId,
+        expectedAdmissionGeneration: admissionGeneration,
+        lease,
+      });
     },
   };
 

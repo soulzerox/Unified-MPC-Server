@@ -70,6 +70,19 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       async resolveRunWorkspace() { calls.push('goalRunWorkspace.resolveRunWorkspace'); return ok({ workspaceId: 'workspace-1' }); },
       async admitRunWorkspace() { calls.push('goalRunWorkspace.admitRunWorkspace'); return ok({ admissionGeneration: 1 }); },
       async recoverRunWorkspace() { calls.push('goalRunWorkspace.recoverRunWorkspace'); return ok({ admissionGeneration: 1 }); },
+      async rebaseRunWorkspace() {
+        calls.push('goalRunWorkspace.rebaseRunWorkspace');
+        return ok({
+          status: 'REBASED' as const,
+          operationId: 'rebase-1',
+          oldHead: 'a'.repeat(40),
+          newHead: 'b'.repeat(40),
+          oldBaseSha: 'c'.repeat(40),
+          newBaseSha: 'd'.repeat(40),
+          checkpointId: 'checkpoint-1',
+          recoveryRef: 'refs/unified-mpc/recovery/rebase/rebase-1',
+        });
+      },
     },
     goalWorktrees: serviceProxy('goalWorktrees', calls, () => ({
       integrationBase: 'origin/main',

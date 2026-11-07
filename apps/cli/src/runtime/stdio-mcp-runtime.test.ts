@@ -120,6 +120,7 @@ describe('stdio MCP runtime', () => {
     projectId: string,
     repositoryIdOverride?: string,
     branch = 'main',
+    options: { readonly strictRoots?: boolean } = {},
   ): Promise<{
     readonly dataPath: string;
     readonly rootPath: string;
@@ -172,6 +173,7 @@ describe('stdio MCP runtime', () => {
       targetVerified: true,
     });
     const runtime = createStdioMcpRuntime(dataPath, project, false, {
+      ...(options.strictRoots === true ? { strictAllowedRoots: [await realpath(rootPath)] } : {}),
       runtimeAdmissionIdentity: {
         runtimeDeploymentId: `deploy-${projectId}`,
         runtimeGeneration: '25700000-0000-4000-8000-000000000001',
@@ -264,8 +266,8 @@ describe('stdio MCP runtime', () => {
     }
   });
 
-  it('rebases a checkpointed Goal Workspace only with the exact lease and observed admission generation', async () => {
-    const fixture = await canonicalGoalFixture('guarded-rebase-project');
+  it.each([false, true])('rebases a checkpointed Goal Workspace only with the exact lease and observed admission generation (strictRoots=%s)', async (strictRoots) => {
+    const fixture = await canonicalGoalFixture('guarded-rebase-project', undefined, 'main', { strictRoots });
     try {
       const resolved = await fixture.runtime.services.goalRunWorkspace?.resolveRunWorkspace(fixture.runtime.actor, {
         workspaceId: fixture.projectId, goalKey: 'guarded-rebase',

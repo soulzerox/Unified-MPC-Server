@@ -1,9 +1,20 @@
 import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { WorkspaceAdmissionReceipt, WorkspaceBaseRebaseReceipt } from '@unified-mpc/domain';
 import { isHostPathWithin, isPosixMountRoot, resolveHostPath, type Workspace, type WorkspaceRepository, type WorkspaceWriterLease } from '@unified-mpc/workspace';
 
 export class StrictWorkspaceRepository implements WorkspaceRepository {
   private readonly allowed = new Set<string>();
+
+  // Durable admission and base-rebase receipts are optional repository
+  // capabilities. Re-expose them only when the wrapped repository has them, and
+  // confine every read/write to an allowed workspace so strict-root mode keeps
+  // the same fail-closed surface as the other forwarded methods.
+  public readonly getAdmissionReceipt?: NonNullable<WorkspaceRepository['getAdmissionReceipt']>;
+  public readonly compareAndSwapAdmissionReceipt?: NonNullable<WorkspaceRepository['compareAndSwapAdmissionReceipt']>;
+  public readonly invalidateAdmissionReceipt?: NonNullable<WorkspaceRepository['invalidateAdmissionReceipt']>;
+  public readonly getBaseRebaseReceipt?: NonNullable<WorkspaceRepository['getBaseRebaseReceipt']>;
+  public readonly compareAndSwapBaseRebaseReceipt?: NonNullable<WorkspaceRepository['compareAndSwapBaseRebaseReceipt']>;
 
   public constructor(
     private readonly inner: WorkspaceRepository,
@@ -13,6 +24,43 @@ export class StrictWorkspaceRepository implements WorkspaceRepository {
     for (const root of allowedCanonicalRoots) {
       const normalized = normalize(root, this.platform);
       if (normalized !== null) this.allowed.add(normalized);
+    }
+    const source = this.inner;
+    if (source.getAdmissionReceipt !== undefined) {
+      this.getAdmissionReceipt = async (workspaceId): Promise<WorkspaceAdmissionReceipt | null> => {
+        if (await this.getAny(workspaceId) === null) return null;
+        return source.getAdmissionReceipt!(workspaceId);
+      };
+    }
+    if (source.compareAndSwapAdmissionReceipt !== undefined) {
+      this.compareAndSwapAdmissionReceipt = async (workspaceId, expectedAdmissionGeneration, writeLeaseGeneration, receipt): Promise<boolean> => {
+        if (await this.getAny(workspaceId) === null) return false;
+        return source.compareAndSwapAdmissionReceipt!(workspaceId, expectedAdmissionGeneration, writeLeaseGeneration, receipt);
+      };
+    }
+    if (source.invalidateAdmissionReceipt !== undefined) {
+      this.invalidateAdmissionReceipt = async (workspaceId, expectedAdmissionGeneration, reason, invalidatedAt): Promise<boolean> => {
+        if (await this.getAny(workspaceId) === null) return false;
+        return source.invalidateAdmissionReceipt!(workspaceId, expectedAdmissionGeneration, reason, invalidatedAt);
+      };
+    }
+    if (source.getBaseRebaseReceipt !== undefined) {
+      this.getBaseRebaseReceipt = async (workspaceId): Promise<WorkspaceBaseRebaseReceipt | null> => {
+        if (await this.getAny(workspaceId) === null) return null;
+        return source.getBaseRebaseReceipt!(workspaceId);
+      };
+    }
+    if (source.compareAndSwapBaseRebaseReceipt !== undefined) {
+      this.compareAndSwapBaseRebaseReceipt = async (workspaceId, expectedReceiptRevision, expectedAdmissionGeneration, writeLeaseGeneration, receipt): Promise<boolean> => {
+        if (await this.getAny(workspaceId) === null) return false;
+        return source.compareAndSwapBaseRebaseReceipt!(
+          workspaceId,
+          expectedReceiptRevision,
+          expectedAdmissionGeneration,
+          writeLeaseGeneration,
+          receipt,
+        );
+      };
     }
   }
 

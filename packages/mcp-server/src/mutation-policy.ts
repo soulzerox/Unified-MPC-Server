@@ -105,6 +105,7 @@ export function inspectMutationOperation(
     case 'rag_code_blast_radius':
     case 'rag_index_status':
     case 'rag_get_event':
+    case 'canonical_index_status':
       return read('structured read-only operation');
     case 'tool_batch':
       return read('batch dispatcher applies mutation policy independently to every child call');

@@ -201,6 +201,23 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         return 0;
       },
     },
+    canonicalIndexStatus: async () => {
+      calls.push('canonicalIndexStatus');
+      return {
+        status: 'healthy',
+        refs: [],
+        overlays: [],
+        jobs: [],
+        manifestCount: 0,
+        pinCount: 0,
+        overlayCount: 0,
+        quarantinedCount: 0,
+        activeJobCount: 0,
+        danglingRefs: [],
+        missingOverlayBases: [],
+        orphanedPins: [],
+      };
+    },
     mergePolicy: {
       async getByRepository() {
         calls.push('mergePolicy.getByRepository');

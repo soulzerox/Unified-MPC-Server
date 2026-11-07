@@ -2,6 +2,7 @@ import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type
 import type { CapabilityService, EventLogBackendOptions, ShellHeavyAdmissionPort } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
+  CanonicalStatusReport,
   HeavyJobQueueStore,
   ResourceAdmissionController,
   ResourceAdmissionLease,
@@ -249,6 +250,8 @@ export interface McpApplicationServices {
   readonly heavyJobQueue?: HeavyJobQueueStore;
   /** Runtime-local fair-order projection (#145 step 3); omitted when the runtime has no shell admission queue. */
   readonly heavyJobFairness?: Pick<ShellHeavyAdmissionPort, 'fairnessSnapshot'>;
+  /** Read-only canonical store projection (#210 §11); omitted when the runtime has no canonical store. */
+  readonly canonicalIndexStatus?: () => Promise<CanonicalStatusReport>;
   readonly mergePolicy?: {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };

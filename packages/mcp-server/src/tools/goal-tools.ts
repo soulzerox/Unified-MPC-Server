@@ -4,6 +4,7 @@ import {
   MAX_GOAL_LEASE_SECONDS,
   MIN_GOAL_LEASE_SECONDS,
   type GoalSnapshot,
+  type GoalCanonicalAdmissionOutcome,
   type ListGoalsResult,
 } from '@unified-mpc/application';
 import { ok } from '@unified-mpc/domain';
@@ -157,6 +158,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
         const goals = context.services.goals;
         if (goals === undefined) return missingService();
         let runWorkspaceId = input.workspaceId;
+        let canonicalAdmission: GoalCanonicalAdmissionOutcome | undefined;
         const goalRunWorkspace = context.services.goalRunWorkspace;
         if (goalRunWorkspace !== undefined) {
           const resolved = await goalRunWorkspace.resolveRunWorkspace(context.actor, {
@@ -165,6 +167,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
           });
           if (!resolved.ok) return resolved;
           runWorkspaceId = resolved.value.workspaceId;
+          canonicalAdmission = resolved.value.canonicalAdmission;
         }
         const result = await goals.runGoal(context.actor, {
           workspaceId: runWorkspaceId,
@@ -180,6 +183,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
           if (result.value.leaseExpiresAt === undefined) {
             return ok({ ...result.value, outcome: 'admission_required' as const, workspaceId: runWorkspaceId,
               admissionRequired: true, admissionError: { code: 'CONFLICT', message: 'Acquired durable goal omitted lease expiry' },
+              ...(canonicalAdmission === undefined ? {} : { canonicalAdmission }),
               nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const });
           }
           const admitted = await goalRunWorkspace.admitRunWorkspace(context.actor, {
@@ -201,6 +205,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
                 code: admitted.error.code,
                 message: admitted.error.message,
               },
+              ...(canonicalAdmission === undefined ? {} : { canonicalAdmission }),
               nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease' as const,
             });
           }
@@ -230,6 +235,7 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
         return ok({
           ...result.value,
           workspaceId: runWorkspaceId,
+          ...(canonicalAdmission === undefined ? {} : { canonicalAdmission }),
           ...(admissionGeneration === undefined ? {} : { admissionGeneration }),
           ...(!result.value.acquired && result.value.retryAfterSeconds !== undefined && result.value.retryAfterSeconds <= 60
             ? {

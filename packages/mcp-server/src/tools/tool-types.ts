@@ -23,6 +23,7 @@ import type {
   GoalWorktreeReconciliationPort,
   GoalContinuationService,
   GoalMutationFenceService,
+  GoalCanonicalAdmissionOutcome,
   GoalWorkspaceGuardedRebaseResult,
   MoveFileRequest,
   ProcessService,
@@ -77,7 +78,14 @@ export interface GoalRunWorkspacePort {
   resolveRunWorkspace(actor: FileActor, request: {
     readonly workspaceId: string;
     readonly goalKey: string;
-  }): Promise<Result<{ readonly workspaceId: string }>>;
+  }): Promise<Result<{
+    readonly workspaceId: string;
+    /**
+     * Present only when this call created the Goal Workspace, because a reused
+     * workspace runs no canonical pin. Surfaces a refused/skipped pin (#210 §11).
+     */
+    readonly canonicalAdmission?: GoalCanonicalAdmissionOutcome;
+  }>>;
   admitRunWorkspace(actor: FileActor, request: {
     readonly workspaceId: string;
     readonly goalId: string;

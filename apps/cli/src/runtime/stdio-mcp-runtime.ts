@@ -836,10 +836,14 @@ export function createStdioMcpRuntime(
         // repository the live manifest it names must belong to (#210 §1).
         const repositoryIds = await resolveGoalRepositoryIds(input.worktreePath);
         if (repositoryIds === null) {
+          const detail = `no origin remote in ${input.worktreePath}`;
+          process.stderr.write(
+            `Unified-MPC Goal canonical pin skipped goal=${input.goalWorkspaceId} reason=repository_unknown detail=${detail}\n`,
+          );
           return {
             status: 'skipped',
             reason: 'repository_unknown',
-            detail: `no origin remote in ${input.worktreePath}`,
+            detail,
           };
         }
         const outcome = await pinGoalBaseAtCommit(goalCanonicalRefs, goalCanonicalOverlays, {
@@ -850,11 +854,16 @@ export function createStdioMcpRuntime(
           manifests: goalCanonicalManifests,
           expectedRepositoryIds: repositoryIds,
         });
-        // A skip is expected without canonical data; a failure is not, and no
-        // client may be watching the create result that carries it.
+        // A skip is expected without canonical data or on a feature base; a
+        // repository mismatch is not, and no client may be watching the create
+        // result that also carries it (#210 §11).
         if (outcome.status === 'failed') {
           process.stderr.write(
             `Unified-MPC Goal canonical pin failed goal=${input.goalWorkspaceId} reason=${outcome.reason}\n`,
+          );
+        } else if (outcome.status === 'skipped' && outcome.reason === 'repository_mismatch') {
+          process.stderr.write(
+            `Unified-MPC Goal canonical pin skipped goal=${input.goalWorkspaceId} reason=${outcome.reason} detail=${outcome.detail}\n`,
           );
         }
         return outcome;
@@ -969,7 +978,13 @@ export function createStdioMcpRuntime(
         ...(baseRevision === undefined ? {} : { baseRevision }),
         ...(runActor.sessionId === undefined ? {} : { ownerSessionId: runActor.sessionId }),
       });
-      if (created.ok) return ok({ workspaceId: created.value.workspace.id });
+      if (created.ok) {
+        const canonicalAdmission = created.value.canonicalAdmission;
+        return ok({
+          workspaceId: created.value.workspace.id,
+          ...(canonicalAdmission === undefined ? {} : { canonicalAdmission }),
+        });
+      }
 
       const raced = (await workspaceRepository.list())
         .find((entry) => entry.lifecycleKind === 'goal'

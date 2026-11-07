@@ -103,7 +103,10 @@ describe('durable goal MCP tools', () => {
         goalRunWorkspace: {
           async resolveRunWorkspace(_actor: unknown, request: { workspaceId: string; goalKey: string }) {
             orchestration.push(`resolve:${request.workspaceId}:${request.goalKey}`);
-            return ok({ workspaceId: 'goal-workspace-1' });
+            return ok({
+              workspaceId: 'goal-workspace-1',
+              canonicalAdmission: { status: 'skipped', reason: 'repository_mismatch', detail: 'origin maps to another repository' },
+            });
           },
           async admitRunWorkspace(_actor: unknown, request: {
             workspaceId: string;
@@ -162,6 +165,7 @@ describe('durable goal MCP tools', () => {
         goalId: 'goal-1',
         workspaceId: 'goal-workspace-1',
         admissionGeneration: 4,
+        canonicalAdmission: { status: 'skipped', reason: 'repository_mismatch', detail: 'origin maps to another repository' },
       },
     });
   });
@@ -172,7 +176,12 @@ describe('durable goal MCP tools', () => {
       contextEconomy: new ContextEconomyRuntime(),
       services: {
         goalRunWorkspace: {
-          async resolveRunWorkspace() { return ok({ workspaceId: 'goal-workspace-1' }); },
+          async resolveRunWorkspace() {
+            return ok({
+              workspaceId: 'goal-workspace-1',
+              canonicalAdmission: { status: 'skipped', reason: 'repository_unknown', detail: 'no origin remote' },
+            });
+          },
           async admitRunWorkspace() { return err(appError('CONFLICT', 'writer admission temporarily unavailable', true)); },
         },
         goals: {
@@ -201,6 +210,7 @@ describe('durable goal MCP tools', () => {
         workspaceId: 'goal-workspace-1',
         admissionRequired: true,
         nextRequiredAction: 'retry_goal_workspace_admission_with_current_lease',
+        canonicalAdmission: { status: 'skipped', reason: 'repository_unknown', detail: 'no origin remote' },
       },
     });
   });

@@ -144,6 +144,12 @@ export type GoalWorkspaceGuardedRebaseResult =
       readonly newBaseSha: string;
       readonly checkpointId: string;
       readonly recoveryRef: string;
+      /**
+       * Best-effort canonical overlay re-pin at the rebased base (#210 rollout
+       * step 4). Absent when the runtime has no admission port; a skip is
+       * ordinary and never downgrades an already-completed rebase.
+       */
+      readonly canonicalAdmission?: GoalCanonicalAdmissionOutcome;
     }
   | {
       readonly status: 'RECOVERY_REQUIRED';
@@ -907,6 +913,16 @@ export class GoalWorkspaceService {
       });
     }
 
+    // The rebase is durable now, so the re-pin is a best-effort follow-up: the
+    // live canonical ref may not have advanced to the new base yet, and a skip
+    // (or a store failure) must never turn a completed rebase into a failure.
+    const canonicalAdmission = await this.pinCanonicalBase(
+      workspace.id,
+      decision.newBaseSha,
+      workspace.realRootPath,
+      movingBase.branch,
+    );
+
     return ok({
       status: 'REBASED',
       operationId,
@@ -916,6 +932,7 @@ export class GoalWorkspaceService {
       newBaseSha: decision.newBaseSha,
       checkpointId: decision.checkpointId,
       recoveryRef,
+      ...(canonicalAdmission === undefined ? {} : { canonicalAdmission }),
     });
   }
 

@@ -735,7 +735,7 @@ failed. The record survives provider restarts, so a failure is still readable
 after the live provider job is gone.
 
 ```bash
-$ unified-mpc index job list --limit 3
+$ unified-mpc index job list --limit 2
 jobs 42
 shown 3
   idx_umcp_14d6e4aacbc64c5d running workspace 9628fc78-f52f-428e-b358-bbfb66037150 owner unified-mpc:3260190 provider idx_d1668d26 reason explicit_request started 2026-11-07T06:29:44.560Z progress 2026-11-07T06:32:43.594Z

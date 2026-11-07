@@ -8,6 +8,7 @@ import {
 import { canonicalGcStatusSchema, canonicalIndexStatusSchema, canonicalRevisionListSchema } from './schemas.js';
 
 const DEFAULT_REVISION_LIST_LIMIT = 50;
+const DEFAULT_GC_ROW_LIMIT = 50;
 
 /**
  * Read-only canonical index observability (#210 §7/§11).
@@ -40,15 +41,23 @@ export function canonicalTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'canonical_gc_status',
-      description: 'Read the canonical GC fence and quarantine without mutating them. Reports the health verdict (healthy|degraded), the GC lease as free|held|released|corrupt with owner, generation and expiry, and every quarantine row with its target, grace deadline and due flag. A due row is reported as due, never as garbage; the reachability verdict belongs to `index gc expire --dry-run`. Distinct from canonical_index_status, which reports store-wide blockers. Never takes the lease, releases a row or deletes an artifact.',
+      description: 'Read the canonical GC fence and quarantine without mutating them. Reports the health verdict (healthy|degraded), the GC lease as free|held|released|corrupt with owner, generation and expiry, and each quarantine row with its target, grace deadline and due flag. Rows are bounded: `limit` defaults to 50 (max 200) and `returned` reports how many rows this response carries while total/due/inGrace stay full-store counts, so a truncated answer is visible instead of silent. A due row is reported as due, never as garbage; the reachability verdict belongs to `index gc expire --dry-run`. Distinct from canonical_index_status, which reports store-wide blockers. Never takes the lease, releases a row or deletes an artifact.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: canonicalGcStatusSchema,
-      handler: async () => {
+      handler: async (input) => {
         const status = context.services.canonicalGcStatus;
         if (status === undefined) return missingService();
         try {
-          return ok({ scope: 'canonical-store', ...(await status()) });
+          const report = await status();
+          const limit = input.limit ?? DEFAULT_GC_ROW_LIMIT;
+          const rows = report.quarantine.rows.slice(0, limit);
+          return ok({
+            scope: 'canonical-store',
+            ...report,
+            returned: rows.length,
+            quarantine: { ...report.quarantine, rows },
+          });
         } catch {
           // A store error can name a local path; keep the response fixed.
           return err(appError('INTERNAL_ERROR', 'Canonical GC status could not be read', true));

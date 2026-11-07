@@ -129,7 +129,9 @@ export const restoreCheckpointSchema = z.object({
 
 export const workspaceListSchema = z.object({}).strict();
 export const canonicalIndexStatusSchema = z.object({}).strict();
-export const canonicalGcStatusSchema = z.object({}).strict();
+export const canonicalGcStatusSchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+}).strict();
 export const canonicalRevisionListSchema = z.object({
   limit: z.number().int().min(1).max(200).optional(),
 }).strict();

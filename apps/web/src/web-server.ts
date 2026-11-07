@@ -651,10 +651,12 @@ export class ControlPlaneServer {
       // error is copied out, because it can name a local path.
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Content-Type', 'application/json');
-      const rawLimit = url.searchParams.get('limit');
-      // Only a plain decimal in range is accepted; `0`, `+1`, `1.0`, `201` and
-      // repeated parameters are rejected before the store is touched.
-      if (rawLimit !== null && (!/^[1-9][0-9]{0,2}$/.test(rawLimit) || Number(rawLimit) > CANONICAL_LIFECYCLE_MAX_LIMIT)) {
+      const rawLimits = url.searchParams.getAll('limit');
+      const rawLimit = rawLimits[0] ?? null;
+      // Only one plain decimal in range is accepted; `0`, `+1`, `1.0`, `201`
+      // and repeated parameters are rejected before the store is touched.
+      if (rawLimits.length > 1
+        || (rawLimit !== null && (!/^[1-9][0-9]{0,2}$/.test(rawLimit) || Number(rawLimit) > CANONICAL_LIFECYCLE_MAX_LIMIT))) {
         sendJsonError(res, 400, `limit must be an integer from 1 to ${CANONICAL_LIFECYCLE_MAX_LIMIT}`);
         return;
       }

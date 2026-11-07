@@ -15,6 +15,7 @@ import {
   createCanonicalStatusProbe,
   createGoalControl,
   createWebGoalRuntimeProjection,
+  resolveCanonicalLifecycleLimit,
   runWeb,
   parseWebArgs,
 } from './web.js';
@@ -76,6 +77,21 @@ describe('web CLI command', () => {
   });
 
   describe('canonical lifecycle probe', () => {
+    it('resolves the requested limit to a bounded integer', () => {
+      // Omitted, non-finite and non-numeric input all fall back to the default.
+      expect(resolveCanonicalLifecycleLimit(undefined)).toBe(50);
+      expect(resolveCanonicalLifecycleLimit(Number.NaN)).toBe(50);
+      expect(resolveCanonicalLifecycleLimit(Number.POSITIVE_INFINITY)).toBe(50);
+      // The window is clamped to at least one row and at most the route cap.
+      expect(resolveCanonicalLifecycleLimit(0)).toBe(1);
+      expect(resolveCanonicalLifecycleLimit(-5)).toBe(1);
+      expect(resolveCanonicalLifecycleLimit(2)).toBe(2);
+      expect(resolveCanonicalLifecycleLimit(12.9)).toBe(12);
+      expect(resolveCanonicalLifecycleLimit(200)).toBe(200);
+      expect(resolveCanonicalLifecycleLimit(201)).toBe(200);
+      expect(resolveCanonicalLifecycleLimit(10_000)).toBe(200);
+    });
+
     it('projects revision history and GC status from the canonical store rooted at the data path', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-lifecycle-'));
       try {

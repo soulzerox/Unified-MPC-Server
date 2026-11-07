@@ -106,6 +106,12 @@ describe('canonical store lifecycle projection', () => {
         expect(response.status).toBe(400);
         expect(await response.json()).toEqual({ error: 'limit must be an integer from 1 to 200' });
       }
+      // Repeated parameters are ambiguous; the first value is not trusted.
+      for (const query of ['limit=1&limit=201', 'limit=5&limit=5']) {
+        const response = await fetch(baseUrl + '/api/canonical-lifecycle?' + query);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: 'limit must be an integer from 1 to 200' });
+      }
     });
     expect(calls).toBe(0);
   });

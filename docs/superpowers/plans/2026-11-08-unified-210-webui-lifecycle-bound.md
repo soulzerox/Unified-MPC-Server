@@ -49,10 +49,11 @@ renders as an attributed job in the dashboard and as a legacy row in the store.
 
 ### 3. MCP parity
 
-- `canonical_revision_list` forwards `limit` to the service port and uses
-  `report.total` for its `total` field, so the bounded service and the tool
-  agree. `McpApplicationServices.canonicalRevisionList` and both CLI adapters
-  (in-process and stdio runtime) forward the option.
+- `canonical_revision_list` forwards `limit` to the service port, slices the
+  returned revisions again (a port that ignores the option must not widen the
+  response), and uses `report.total` for its `total` field, so the bounded
+  service and the tool agree. `McpApplicationServices.canonicalRevisionList`
+  and both CLI adapters (in-process and stdio runtime) forward the option.
 
 ### 4. Uppercase-UUID legacy parity
 

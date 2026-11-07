@@ -436,15 +436,20 @@ export function createCanonicalStatusProbe(dataPath: string): CanonicalStatusPro
  */
 export const DEFAULT_CANONICAL_LIFECYCLE_LIMIT = 50;
 
+/**
+ * Defense in depth: the route validates too, but an embedded caller must not be
+ * able to turn the card into an unbounded store read. Omitted, non-finite and
+ * fractional values all resolve to a bounded integer inside 1..MAX.
+ */
+export function resolveCanonicalLifecycleLimit(requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_CANONICAL_LIFECYCLE_LIMIT;
+  return Math.min(Math.max(1, Math.trunc(requested)), CANONICAL_LIFECYCLE_MAX_LIMIT);
+}
+
 export function createCanonicalLifecycleProbe(dataPath: string): CanonicalLifecycleProbe {
   const canonicalRoot = path.join(dataPath, 'canonical');
   return async (options) => {
-    // Defense in depth: the route validates too, but an embedded caller must not
-    // be able to turn the card into an unbounded store read.
-    const requested = options?.limit ?? DEFAULT_CANONICAL_LIFECYCLE_LIMIT;
-    const limit = Number.isFinite(requested)
-      ? Math.min(Math.max(1, Math.trunc(requested)), CANONICAL_LIFECYCLE_MAX_LIMIT)
-      : DEFAULT_CANONICAL_LIFECYCLE_LIMIT;
+    const limit = resolveCanonicalLifecycleLimit(options?.limit);
     const [revisions, gc] = await Promise.all([
       canonicalRevisionList({
         refs: new CanonicalRefStore(canonicalRoot),

@@ -213,6 +213,18 @@ describe('canonical lifecycle tools', () => {
     expect(seen).toEqual([{ limit: 1 }, { limit: 50 }]);
   });
 
+  it('stays bounded when a service implementation ignores the requested limit', async () => {
+    const tool = namedTool({
+      // A port implementation that ignores `limit` must not widen the response.
+      canonicalRevisionList: async () => revisionReport,
+    }, 'canonical_revision_list');
+
+    const result = await tool.execute({ limit: 1 }, new AbortController().signal);
+    expect(result).toMatchObject({ ok: true, value: { total: 3, returned: 1 } });
+    const value = (result as { value: { revisions: readonly unknown[] } }).value;
+    expect(value.revisions).toHaveLength(1);
+  });
+
   it('reports a missing service for both lifecycle reports', async () => {
     for (const name of ['canonical_gc_status', 'canonical_revision_list']) {
       const result = await namedTool({}, name).execute({}, new AbortController().signal);

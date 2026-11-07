@@ -703,4 +703,26 @@ describe('operator index-job listing (#210 §11)', () => {
     const store = new ThaiRagIndexJobStore(dataRoot);
     await expect(store.listForOperator()).rejects.toThrow();
   });
+
+  it('fails closed on an unrecognized schema or unparseable row instead of reporting an empty ledger', async () => {
+    const documents: readonly unknown[] = [
+      {},
+      { schemaVersion: 4, jobs: [] },
+      { schemaVersion: 3, jobs: [{ status: 'running' }] },
+    ];
+    for (const document of documents) {
+      const dataRoot = await root();
+      const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+      await mkdir(path.dirname(filePath), { recursive: true });
+      const persisted = JSON.stringify(document);
+      await writeFile(filePath, persisted);
+
+      const store = new ThaiRagIndexJobStore(dataRoot);
+      await expect(store.listForOperator()).rejects.toThrow(/not a recognized schema|unparseable job row/);
+      // A read must not touch the file, and a subsequent write must not replace
+      // a ledger this process cannot understand with a fresh empty one.
+      await expect(store.create('11111111-1111-4111-8111-111111111111', false, 'owner-a')).rejects.toThrow();
+      await expect(readFile(filePath, 'utf8')).resolves.toBe(persisted);
+    }
+  });
 });

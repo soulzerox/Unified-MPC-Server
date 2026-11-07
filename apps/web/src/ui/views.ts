@@ -59,6 +59,16 @@ export function renderDashboardViewsHtml(): string {
           </div>
         </div>
 
+        <div class="card" id="canonical-status-card">
+          <div class="card-header">
+            <h2>Canonical Index Store</h2>
+            <button class="btn btn-secondary btn-sm" id="canonical-status-refresh-btn" type="button">Refresh</button>
+          </div>
+          <div id="canonical-status" aria-live="polite" style="font-size: 12px; color: var(--text-secondary);">
+            Reading canonical store status...
+          </div>
+        </div>
+
         <div class="card" id="servers-card">
           <div class="card-header">
             <h2>Installed MCP Servers</h2>

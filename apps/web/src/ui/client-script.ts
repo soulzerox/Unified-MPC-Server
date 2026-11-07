@@ -458,6 +458,71 @@ export function getClientScriptJs(): string {
         }
       }
 
+      let canonicalStatusInFlight = false;
+      async function loadCanonicalStatus() {
+        if (canonicalStatusInFlight) return;
+        const container = document.getElementById('canonical-status');
+        if (!container) return;
+        canonicalStatusInFlight = true;
+        try {
+          const response = await fetchWithTimeout('/api/canonical-status');
+          if (!response.ok) throw new Error('Canonical store status unavailable');
+          const payload = await readJsonWithTimeout(response);
+          container.replaceChildren();
+          if (!payload.available || !payload.status || typeof payload.status !== 'object') {
+            container.textContent = 'Canonical store status not available';
+            return;
+          }
+          const status = payload.status;
+          const summary = document.createElement('div');
+          summary.className = 'mono';
+          summary.textContent = String(status.status || 'unknown')
+            + ' · manifests ' + String(status.manifestCount ?? 0)
+            + ' · pins ' + String(status.pinCount ?? 0)
+            + ' · overlays ' + String(status.overlayCount ?? 0)
+            + ' · quarantined ' + String(status.quarantinedCount ?? 0)
+            + ' · active jobs ' + String(status.activeJobCount ?? 0);
+          container.appendChild(summary);
+          const appendLine = (text) => {
+            const line = document.createElement('div');
+            line.className = 'mono';
+            line.style.cssText = 'margin-top: 6px;';
+            line.textContent = text;
+            container.appendChild(line);
+          };
+          for (const ref of Array.isArray(status.refs) ? status.refs : []) {
+            appendLine('ref ' + String(ref.ref || 'unknown')
+              + ' → ' + String(ref.commitSha || 'unknown').slice(0, 12)
+              + ' tree ' + (ref.treeOid ? String(ref.treeOid).slice(0, 12) : 'missing')
+              + ' manifest ' + (ref.manifestId ? String(ref.manifestId) : 'missing')
+              + (ref.manifestExists === false ? ' (manifest-missing)' : '')
+              + ' entries ' + String(ref.manifestEntryCount ?? '?')
+              + (ref.pinned ? ' pinned' : ''));
+          }
+          for (const overlay of Array.isArray(status.overlays) ? status.overlays : []) {
+            const base = overlay.baseManifestExists === false
+              ? 'missing'
+              : overlay.baseMatchesLiveRef ? 'live' : 'drifted';
+            appendLine('overlay ' + String(overlay.goalWorkspaceId || 'unknown')
+              + ' base=' + base
+              + ' modified=' + String(overlay.modifiedCount ?? 0)
+              + ' added=' + String(overlay.addedCount ?? 0)
+              + ' deleted=' + String(overlay.deletedCount ?? 0));
+          }
+          for (const job of Array.isArray(status.jobs) ? status.jobs : []) {
+            appendLine('job ' + String(job.operationId || 'unknown') + ' ' + String(job.status || 'unknown')
+              + ' manifest=' + (job.manifestExists ? 'present' : 'missing'));
+          }
+          appendLine('blockers dangling-refs=' + String(Array.isArray(status.danglingRefs) ? status.danglingRefs.length : 0)
+            + ' missing-overlay-bases=' + String(Array.isArray(status.missingOverlayBases) ? status.missingOverlayBases.length : 0)
+            + ' orphaned-pins=' + String(Array.isArray(status.orphanedPins) ? status.orphanedPins.length : 0));
+        } catch {
+          container.textContent = 'Unable to read canonical store status';
+        } finally {
+          canonicalStatusInFlight = false;
+        }
+      }
+
       async function loadRuntimeDiagnostics() {
         try {
           const res = await fetchWithTimeout('/api/runtime-diagnostics');
@@ -2111,6 +2176,7 @@ export function getClientScriptJs(): string {
         loadRuntimeDiagnostics();
       });
       document.getElementById('rag-index-refresh-btn')?.addEventListener('click', loadRagIndexJobs);
+      document.getElementById('canonical-status-refresh-btn')?.addEventListener('click', loadCanonicalStatus);
       document.getElementById('refresh-servers-btn')?.addEventListener('click', loadInventory);
       document.getElementById('servers-view-refresh-btn')?.addEventListener('click', loadInventory);
       document.getElementById('refresh-skills-btn')?.addEventListener('click', loadInventory);
@@ -2151,6 +2217,7 @@ export function getClientScriptJs(): string {
       logEvent('INFO', 'Bootstrapping Obsidian Telemetry SPA runtime');
       loadStatus();
       loadRagIndexJobs();
+      loadCanonicalStatus();
       loadWorkspaces();
       loadCleanupEvaluations();
       loadInventory();
@@ -2162,6 +2229,7 @@ export function getClientScriptJs(): string {
 
       setInterval(loadStatus, 5000);
       setInterval(loadRagIndexJobs, 5000);
+      setInterval(loadCanonicalStatus, 15000);
       setInterval(loadGatewayStatus, 5000);
       setInterval(loadRuntimeDiagnostics, 5000);
       setInterval(fetchServerLogs, 6000);

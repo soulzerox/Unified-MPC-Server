@@ -1,5 +1,6 @@
 export {
   ControlPlaneServer,
+  type CanonicalStatusProbe,
   type ControlPlaneServerOptions,
   type GoalControlPort,
   type GoalRuntimeReadPort,

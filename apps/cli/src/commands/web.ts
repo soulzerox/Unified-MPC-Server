@@ -18,6 +18,7 @@ import {
 } from '@unified-mpc/application';
 import {
   ControlPlaneServer,
+  type CanonicalStatusProbe,
   type ControlPlaneServerOptions,
   type GoalControlPort,
   type GoalRuntimeReadPort,
@@ -45,7 +46,19 @@ import {
   SqliteSettingsRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
-import { WorkspaceService, isMachineRootPath, isProjectWorkspace, workspaceLifecycleKind } from '@unified-mpc/workspace';
+import {
+  ArtifactQuarantineStore,
+  CanonicalManifestStore,
+  CanonicalRefStore,
+  GoalOverlayStore,
+  IndexJobLedger,
+  RevisionPinRegistry,
+  WorkspaceService,
+  canonicalStatus,
+  isMachineRootPath,
+  isProjectWorkspace,
+  workspaceLifecycleKind,
+} from '@unified-mpc/workspace';
 import { EXTENSIONS_SETTINGS_KEY, IdeSyncService, ensureExtensionsSettingsMigrated, parseExtensionsSettings, type ManagedPolicyRepairReport } from '@unified-mpc/extensions';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -187,6 +200,8 @@ export async function runWeb(
       goalRuntimeSnapshots,
     );
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
+    const canonicalStatusProbe = serverOptions?.canonicalStatusProbe
+      ?? createCanonicalStatusProbe(dataPath);
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
@@ -195,6 +210,7 @@ export async function runWeb(
       secretStore,
       storageDiagnosticsProbe: serverOptions?.storageDiagnosticsProbe
         ?? createStorageDiagnosticsProbe(dataPath, database, settings, secretStore),
+      canonicalStatusProbe,
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       goalControl: serverOptions?.goalControl ?? goalControl,
       goalRuntimeRead,
@@ -378,6 +394,26 @@ const STORAGE_DIAGNOSTIC_SECRET_KEYS = [
   'cloudflare_tunnel_token',
   'cloudflare_api_token',
 ] as const;
+
+/**
+ * Read-only canonical store projection for the dashboard (§11).
+ *
+ * The CLI owns the canonical stores; the control plane only projects the
+ * report. Rooted at `<dataPath>/canonical`, the same layout `index status`
+ * reads, so the dashboard and the CLI can never disagree about which store
+ * they describe.
+ */
+export function createCanonicalStatusProbe(dataPath: string): CanonicalStatusProbe {
+  const canonicalRoot = path.join(dataPath, 'canonical');
+  return async () => canonicalStatus({
+    refs: new CanonicalRefStore(canonicalRoot),
+    manifests: new CanonicalManifestStore(canonicalRoot),
+    pins: new RevisionPinRegistry(canonicalRoot),
+    overlays: new GoalOverlayStore(canonicalRoot),
+    quarantine: new ArtifactQuarantineStore(canonicalRoot),
+    jobs: new IndexJobLedger(canonicalRoot),
+  });
+}
 
 function createStorageDiagnosticsProbe(
   dataPath: string,

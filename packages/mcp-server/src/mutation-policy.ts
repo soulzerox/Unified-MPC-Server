@@ -104,6 +104,7 @@ export function inspectMutationOperation(
     case 'rag_code_context':
     case 'rag_code_blast_radius':
     case 'rag_index_status':
+    case 'rag_index_job_list':
     case 'rag_get_event':
     case 'canonical_index_status':
     case 'canonical_gc_status':

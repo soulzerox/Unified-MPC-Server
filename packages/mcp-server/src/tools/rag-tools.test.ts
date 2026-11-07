@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResultBudget } from '@unified-mpc/domain';
 import { ragTools } from './rag-tools.js';
+import type { McpToolContext, McpToolDefinition } from './tool-types.js';
 
 const budget: ResultBudget = { maxItems: 2, maxTextBytes: 128, maxStructuredBytes: 128, maxBinaryBytes: 128, maxBase64Bytes: 128 };
 const signal = new AbortController().signal;
@@ -22,6 +23,7 @@ const inputs: Readonly<Record<string, unknown>> = {
   },
   rag_code_index: { workspaceId: 'workspace-1' },
   rag_index_status: { workspaceId: 'workspace-1', jobId: 'job-1' },
+  rag_index_job_list: { limit: 5 },
   rag_cancel_index: { workspaceId: 'workspace-1', jobId: 'job-1' },
   rag_resolve_constraint: { workspaceId: 'workspace-1', turnId: 'event-1', resolution: 'condition retired' },
   rag_get_event: { workspaceId: 'workspace-1', turnId: 'event-1' },
@@ -76,13 +78,17 @@ describe('native RAG tool budgets', () => {
       },
     } as never);
 
-    for (const tool of tools) {
+    // `rag_index_job_list` reads the CLI-owned durable ledger through its own
+    // service port; it is not a native provider producer and records no call.
+    const producers = tools.filter((tool) => tool.name !== 'rag_index_job_list');
+    expect(producers).toHaveLength(tools.length - 1);
+    for (const tool of producers) {
       const parsed = tool.parse(inputs[tool.name]);
       expect(parsed.ok, tool.name).toBe(true);
       await tool.execute(inputs[tool.name], signal, undefined, budget);
     }
 
-    expect(calls).toHaveLength(tools.length);
+    expect(calls).toHaveLength(producers.length);
     expect(calls.every((call) => call.signal === signal && call.budget === budget)).toBe(true);
   });
 });
@@ -215,5 +221,116 @@ describe('native RAG vector and index repair', () => {
     expect(seen.map((call) => call.tool)).toEqual(['code_reconcile', 'code_reconcile']);
     expect(seen[0].args).toEqual({ dry_run: true });
     expect(seen[1].args).toEqual({ dry_run: false });
+  });
+});
+
+const canonicalWorkspace = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+function jobContext(services: McpToolContext['services']): McpToolContext {
+  return {
+    actor: { clientId: 'test', clientName: 'test' },
+    contextEconomy: {} as McpToolContext['contextEconomy'],
+    services,
+  } as McpToolContext;
+}
+
+function jobTool(services: McpToolContext['services']): McpToolDefinition {
+  const tool = ragTools(jobContext(services)).find((candidate) => candidate.name === 'rag_index_job_list');
+  if (tool === undefined) throw new Error('rag_index_job_list is not registered');
+  return tool;
+}
+
+describe('durable index-job history', () => {
+  it('projects the ledger as a bounded, read-only snapshot with the default limit', async () => {
+    const seen: Array<{ workspaceId?: string; limit?: number }> = [];
+    const tool = jobTool({
+      ragIndexJobList: async (input) => {
+        seen.push(input);
+        return {
+          totalRowCount: 5,
+          matchingRowCount: 4,
+          legacyRowCount: 1,
+          jobs: [{
+            jobId: 'idx_umcp_a',
+            workspaceId: canonicalWorkspace,
+            ownerId: 'owner-a',
+            status: 'running',
+            force: false,
+            reindexReason: 'startup_verification',
+            startedAt: '2026-11-01T00:00:00.000Z',
+            indexedFiles: 3,
+            skippedFiles: 2,
+            totalFiles: 5,
+            cacheHitChunks: 8,
+            cacheMissReasons: { artifact_missing: 2 },
+          }],
+        };
+      },
+    });
+    expect(tool.permission).toBe('READ');
+    expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true });
+
+    const result = await tool.execute({}, signal);
+    expect(seen).toEqual([{ limit: 20 }]);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        scope: 'index-jobs',
+        totalRowCount: 5,
+        matchingRowCount: 4,
+        legacyRowCount: 1,
+        returned: 1,
+        jobs: [{
+          jobId: 'idx_umcp_a',
+          workspaceId: canonicalWorkspace,
+          status: 'running',
+          indexedFiles: 3,
+          cacheHitChunks: 8,
+          cacheMissReasons: { artifact_missing: 2 },
+        }],
+      },
+    });
+  });
+
+  it('forwards an explicit workspace filter and terminal bound', async () => {
+    const seen: Array<{ workspaceId?: string; limit?: number }> = [];
+    const tool = jobTool({
+      ragIndexJobList: async (input) => {
+        seen.push(input);
+        return { totalRowCount: 0, matchingRowCount: 0, legacyRowCount: 0, jobs: [] };
+      },
+    });
+
+    const result = await tool.execute({ workspaceId: canonicalWorkspace, limit: 5 }, signal);
+    expect(seen).toEqual([{ workspaceId: canonicalWorkspace, limit: 5 }]);
+    expect(result).toMatchObject({ ok: true, value: { returned: 0, jobs: [] } });
+  });
+
+  it('rejects a non-canonical workspace filter and out-of-range bounds', () => {
+    const tool = jobTool({});
+    expect(tool.parse({ workspaceId: canonicalWorkspace }).ok).toBe(true);
+    expect(tool.parse({ workspaceId: canonicalWorkspace.toUpperCase() }).ok).toBe(false);
+    expect(tool.parse({ limit: 0 }).ok).toBe(false);
+    expect(tool.parse({ limit: 201 }).ok).toBe(false);
+    expect(tool.parse({ unexpected: true }).ok).toBe(false);
+  });
+
+  it('fails closed without a service and keeps a ledger failure fixed', async () => {
+    const missing = await jobTool({}).execute({}, signal);
+    expect(missing).toMatchObject({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'MCP application service is unavailable' },
+    });
+
+    const failed = await jobTool({
+      ragIndexJobList: async () => {
+        throw new Error('cannot read /home/operator/private/thai-rag/index-jobs.json');
+      },
+    }).execute({}, signal);
+    expect(failed).toMatchObject({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'Index job ledger could not be read' },
+    });
+    expect(JSON.stringify(failed)).not.toContain('/home/operator');
   });
 });

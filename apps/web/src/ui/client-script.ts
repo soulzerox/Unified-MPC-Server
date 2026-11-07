@@ -523,6 +523,95 @@ export function getClientScriptJs(): string {
         }
       }
 
+      let canonicalLifecycleInFlight = false;
+      function canonicalLifecycleTargetLabel(target) {
+        if (typeof target === 'string') return target;
+        if (target && typeof target === 'object') {
+          return String(target.repositoryId || 'unknown') + '/' + String(target.artifactKey || 'unknown');
+        }
+        return 'unknown';
+      }
+
+      function canonicalLifecycleLeaseLabel(lease) {
+        const record = lease && typeof lease === 'object' ? lease : {};
+        const status = String(record.status || 'unknown');
+        if (status === 'held') {
+          return 'lease held by ' + String(record.ownerId || 'unknown')
+            + ' generation ' + String(record.generation ?? '?')
+            + ' expires ' + String(record.expiresAt || 'unknown')
+            + (record.expired === true ? ' (expired)' : '');
+        }
+        if (status === 'released') {
+          return 'lease released by ' + String(record.ownerId || 'unknown')
+            + ' generation ' + String(record.generation ?? '?')
+            + ' at ' + String(record.releasedAt || 'unknown');
+        }
+        return 'lease ' + status;
+      }
+
+      async function loadCanonicalLifecycle() {
+        if (canonicalLifecycleInFlight) return;
+        const container = document.getElementById('canonical-lifecycle');
+        if (!container) return;
+        canonicalLifecycleInFlight = true;
+        try {
+          const response = await fetchWithTimeout('/api/canonical-lifecycle');
+          if (!response.ok) throw new Error('Canonical store lifecycle detail unavailable');
+          const payload = await readJsonWithTimeout(response);
+          container.replaceChildren();
+          const revisions = payload && payload.revisions && Array.isArray(payload.revisions.revisions)
+            ? payload.revisions.revisions
+            : [];
+          const gc = payload && payload.gc && typeof payload.gc === 'object' ? payload.gc : null;
+          if (!payload || payload.available !== true || gc === null) {
+            container.textContent = 'Canonical store lifecycle detail not available';
+            return;
+          }
+          const appendLine = (text) => {
+            const line = document.createElement('div');
+            line.className = 'mono';
+            line.style.cssText = 'margin-top: 6px;';
+            line.textContent = text;
+            container.appendChild(line);
+          };
+          appendLine('revisions ' + String(revisions.length));
+          for (const revision of revisions) {
+            const markers = [];
+            if (Array.isArray(revision.refs) && revision.refs.length > 0) markers.push('refs=' + revision.refs.join(','));
+            if (Array.isArray(revision.pins) && revision.pins.length > 0) markers.push('pins=' + revision.pins.join(','));
+            if (Array.isArray(revision.overlayGoalIds) && revision.overlayGoalIds.length > 0) {
+              markers.push('overlays=' + String(revision.overlayGoalIds.length));
+            }
+            if (Array.isArray(revision.indexJobOperationIds) && revision.indexJobOperationIds.length > 0) {
+              markers.push('index-jobs=' + String(revision.indexJobOperationIds.length));
+            }
+            appendLine('revision ' + String(revision.manifestId || 'unknown')
+              + ' commit ' + String(revision.commitSha || 'unknown').slice(0, 12)
+              + ' tree ' + String(revision.treeOid || 'unknown').slice(0, 12)
+              + ' entries ' + String(revision.entryCount ?? '?')
+              + ' created ' + String(revision.createdAt || 'unknown')
+              + (markers.length > 0 ? ' · ' + markers.join(' · ') : ''));
+          }
+          appendLine('gc status: ' + String(gc.status || 'unknown'));
+          appendLine(canonicalLifecycleLeaseLabel(gc.lease));
+          const quarantine = gc.quarantine && typeof gc.quarantine === 'object' ? gc.quarantine : {};
+          const rows = Array.isArray(quarantine.rows) ? quarantine.rows : [];
+          appendLine('quarantine ' + String(quarantine.total ?? rows.length)
+            + ' (due ' + String(quarantine.due ?? 0)
+            + ', in-grace ' + String(quarantine.inGrace ?? 0) + ')');
+          for (const row of rows) {
+            appendLine('quarantine ' + canonicalLifecycleTargetLabel(row.target)
+              + ' expires ' + String(row.expiresAt || 'unreadable')
+              + (row.due === true ? ' (due)' : ' (in-grace)'));
+          }
+          appendLine('loaded ' + new Date().toLocaleTimeString());
+        } catch {
+          container.textContent = 'Unable to read canonical revision history';
+        } finally {
+          canonicalLifecycleInFlight = false;
+        }
+      }
+
       async function loadRuntimeDiagnostics() {
         try {
           const res = await fetchWithTimeout('/api/runtime-diagnostics');
@@ -2177,6 +2266,7 @@ export function getClientScriptJs(): string {
       });
       document.getElementById('rag-index-refresh-btn')?.addEventListener('click', loadRagIndexJobs);
       document.getElementById('canonical-status-refresh-btn')?.addEventListener('click', loadCanonicalStatus);
+      document.getElementById('canonical-lifecycle-refresh-btn')?.addEventListener('click', loadCanonicalLifecycle);
       document.getElementById('refresh-servers-btn')?.addEventListener('click', loadInventory);
       document.getElementById('servers-view-refresh-btn')?.addEventListener('click', loadInventory);
       document.getElementById('refresh-skills-btn')?.addEventListener('click', loadInventory);
@@ -2218,6 +2308,7 @@ export function getClientScriptJs(): string {
       loadStatus();
       loadRagIndexJobs();
       loadCanonicalStatus();
+      loadCanonicalLifecycle();
       loadWorkspaces();
       loadCleanupEvaluations();
       loadInventory();

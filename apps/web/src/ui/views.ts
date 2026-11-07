@@ -69,6 +69,16 @@ export function renderDashboardViewsHtml(): string {
           </div>
         </div>
 
+        <div class="card" id="canonical-lifecycle-card">
+          <div class="card-header">
+            <h2>Canonical Revisions &amp; GC</h2>
+            <button class="btn btn-secondary btn-sm" id="canonical-lifecycle-refresh-btn" type="button">Refresh</button>
+          </div>
+          <div id="canonical-lifecycle" aria-live="polite" style="font-size: 12px; color: var(--text-secondary);">
+            Reading canonical revision history...
+          </div>
+        </div>
+
         <div class="card" id="servers-card">
           <div class="card-header">
             <h2>Installed MCP Servers</h2>

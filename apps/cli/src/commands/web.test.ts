@@ -7,10 +7,11 @@ import { appError, canonicalManifestId, err, type GoalRecord, type WorkspaceAdmi
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
-import { CanonicalManifestStore } from '@unified-mpc/workspace';
+import { CanonicalManifestStore, ArtifactQuarantineStore } from '@unified-mpc/workspace';
 import { ControlPlaneServer } from '@unified-mpc/web';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createCanonicalLifecycleProbe,
   createCanonicalStatusProbe,
   createGoalControl,
   createWebGoalRuntimeProjection,
@@ -67,6 +68,59 @@ describe('web CLI command', () => {
           pinCount: 0,
           overlayCount: 0,
           activeJobCount: 0,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('canonical lifecycle probe', () => {
+    it('projects revision history and GC status from the canonical store rooted at the data path', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-lifecycle-'));
+      try {
+        const entries = [{ path: 'a.ts', contentHash: '1'.repeat(64) }];
+        const revisionId = 'rev:v1:' + 'a'.repeat(64);
+        const manifestId = canonicalManifestId({ repositoryId: 'repo_abc123', revisionId, entries });
+        const canonicalRoot = path.join(root, 'canonical');
+        await new CanonicalManifestStore(canonicalRoot).put({
+          manifestId,
+          repositoryId: 'repo_abc123',
+          revisionId,
+          commitSha: 'c'.repeat(40),
+          treeOid: 'd'.repeat(40),
+          targetRef: 'refs/remotes/origin/main',
+          entries,
+          createdAt: '2026-11-01T00:00:00.000Z',
+        });
+        const artifactKey = 'file:v1:' + 'e'.repeat(64);
+        await new ArtifactQuarantineStore(canonicalRoot).quarantine(
+          [{ kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey }],
+          { now: new Date('2026-11-02T00:00:00.000Z'), graceMs: 1_000 },
+        );
+
+        const snapshot = await createCanonicalLifecycleProbe(root)();
+
+        expect(snapshot.revisions).toMatchObject({
+          revisions: [{
+            manifestId,
+            entryCount: 1,
+            refs: [],
+            overlayGoalIds: [],
+            indexJobOperationIds: [],
+          }],
+        });
+        expect(snapshot.gc).toMatchObject({
+          status: 'healthy',
+          lease: { status: 'free' },
+          quarantine: {
+            total: 1,
+            rows: [{
+              target: { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey },
+              graceMs: 1_000,
+              due: true,
+            }],
+          },
         });
       } finally {
         await rm(root, { recursive: true, force: true });

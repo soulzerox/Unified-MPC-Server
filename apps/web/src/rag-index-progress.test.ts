@@ -11,7 +11,7 @@ const example = {
   schemaVersion: 3,
   jobs: [
     {
-      jobId: 'idx_umcp_1234567890abcdef', workspaceId: ws, status: 'running', force: false,
+      jobId: 'idx_umcp_1234567890abcdef', workspaceId: ws, ownerId: 'owner-a', status: 'running', force: false,
       indexedFiles: 3, skippedFiles: 2, totalFiles: 5,
       cacheHitFiles: 2, cacheHitChunks: 8,
       cacheMissFiles: 1, cacheMissChunks: 2,
@@ -22,11 +22,14 @@ const example = {
       result: { workspace: '/private/location' },
     },
     {
-      jobId: 'idx_umcp_bbbbbbbbbbbbbbbb', workspaceId: ws, status: 'completed',
+      jobId: 'idx_umcp_bbbbbbbbbbbbbbbb', workspaceId: ws, ownerId: 'owner-a', status: 'completed',
       indexedFiles: 4, skippedFiles: 1, totalFiles: 5,
       startedAt: '2026-09-30T15:00:00Z', finishedAt: '2026-09-30T16:00:00Z',
     },
-    { jobId: 'untrusted-job', workspaceId: ws, status: 'running', startedAt: '2026-10-01T16:00:00Z' },
+    {
+      jobId: 'untrusted-job', workspaceId: ws, ownerId: 'owner-a', status: 'running',
+      startedAt: '2026-10-01T16:00:00Z',
+    },
   ],
 };
 
@@ -56,16 +59,31 @@ describe('headless-safe native Thai-RAG progress', () => {
       schemaVersion: 3,
       jobs: [
         {
-          jobId: 'idx_umcp_failed00000000', workspaceId: ws, status: 'failed',
+          jobId: 'idx_umcp_failed00000000', workspaceId: ws, ownerId: 'owner-a', status: 'failed',
           startedAt: '2026-10-01T10:00:00Z', finishedAt: '2026-10-01T10:05:00Z',
           error: '  Provider\n\tcrashed\u0007  while embedding  ',
         },
         { jobId: 'legacy-row', workspaceId: 'legacy-unavailable', status: 'legacy-unavailable', legacyData: {} },
         {
-          jobId: 'idx_umcp_running0000000', workspaceId: ws, status: 'running',
+          // Un-migrated v1/v2 row: canonical workspace and status but no owner,
+          // which the store's parseJob already classifies as legacy.
+          jobId: 'idx_umcp_unmigrated00000', workspaceId: ws, status: 'completed',
+          startedAt: '2026-09-15T10:00:00Z', finishedAt: '2026-09-15T10:05:00Z',
+        },
+        {
+          // Pre-contract row whose workspace is a path, not a canonical UUID.
+          jobId: 'idx_umcp_pathworkspace00', workspaceId: '/home/operator/repo', ownerId: 'owner-a',
+          status: 'completed', startedAt: '2026-09-16T10:00:00Z', finishedAt: '2026-09-16T10:05:00Z',
+        },
+        {
+          jobId: 'idx_umcp_running0000000', workspaceId: ws, ownerId: 'owner-a', status: 'running',
           startedAt: '2026-09-01T10:00:00Z',
         },
-        { jobId: 'untrusted', workspaceId: '../../etc', status: 'running', startedAt: '2026-10-02T10:00:00Z' },
+        {
+          // Not legacy: attributable row whose job id is not renderable.
+          jobId: 'untrusted', workspaceId: ws, ownerId: 'owner-a', status: 'running',
+          startedAt: '2026-10-02T10:00:00Z',
+        },
       ],
     });
     expect(summary.jobs.map((job) => job.jobId)).toEqual(['idx_umcp_running0000000', 'idx_umcp_failed00000000']);
@@ -74,11 +92,11 @@ describe('headless-safe native Thai-RAG progress', () => {
       error: 'Provider crashed while embedding',
       finishedAt: '2026-10-01T10:05:00Z',
     });
-    expect(summary.legacyRowCount).toBe(1);
+    expect(summary.legacyRowCount).toBe(3);
 
     const long = summarizeRagIndexJobs({
       jobs: [{
-        jobId: 'idx_umcp_longerror00000', workspaceId: ws, status: 'failed',
+        jobId: 'idx_umcp_longerror00000', workspaceId: ws, ownerId: 'owner-a', status: 'failed',
         startedAt: '2026-10-01T10:00:00Z', error: 'x'.repeat(500),
       }],
     });

@@ -149,6 +149,12 @@ export interface StorageDiagnosticsSnapshot {
 
 export type StorageDiagnosticsProbe = () => Promise<StorageDiagnosticsSnapshot>;
 
+/**
+ * Read-only canonical store projection supplied by the CLI, which owns the
+ * canonical stores. The web server never reads those stores directly.
+ */
+export type CanonicalStatusProbe = () => Promise<unknown>;
+
 export type GatewayPersistenceLoadState = 'never_configured' | 'loaded' | 'partial' | 'load_failed';
 export interface GatewayPersistenceStatus {
   readonly state: GatewayPersistenceLoadState;
@@ -198,6 +204,7 @@ export interface ControlPlaneServerOptions {
   readonly mcpIdentityProbe?: McpIdentityProbe;
   readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
   readonly storageDiagnosticsProbe?: StorageDiagnosticsProbe;
+  readonly canonicalStatusProbe?: CanonicalStatusProbe;
   /** Test-only override for persisted Gateway restore retry cadence. */
   readonly gatewayRestoreRetryBaseMs?: number;
   /** Test-only override for persisted Gateway restore retry ceiling. */
@@ -302,6 +309,7 @@ export class ControlPlaneServer {
   private readonly mcpIdentityProbe: McpIdentityProbe;
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly storageDiagnosticsProbe: StorageDiagnosticsProbe | undefined;
+  private readonly canonicalStatusProbe: CanonicalStatusProbe | undefined;
   private readonly gatewayRestoreRetryBaseMs: number;
   private readonly gatewayRestoreRetryMaxMs: number;
   private readonly gatewayRestoreStallMs: number;
@@ -359,6 +367,7 @@ export class ControlPlaneServer {
     this.mcpIdentityProbe = options.mcpIdentityProbe ?? probeMcpRuntimeIdentity;
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.storageDiagnosticsProbe = options.storageDiagnosticsProbe;
+    this.canonicalStatusProbe = options.canonicalStatusProbe;
     this.gatewayRestoreRetryBaseMs = options.gatewayRestoreRetryBaseMs ?? 1_000;
     this.gatewayRestoreRetryMaxMs = options.gatewayRestoreRetryMaxMs ?? 30_000;
     this.gatewayRestoreStallMs = options.gatewayRestoreStallMs ?? DEFAULT_GATEWAY_RESTORE_STALL_MS;
@@ -581,6 +590,36 @@ export class ControlPlaneServer {
       }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ available, jobs, legacyRowCount }));
+      return;
+    }
+
+    if (pathname === '/api/canonical-status' && req.method === 'GET') {
+      // The CLI owns the canonical stores; the control plane only projects the
+      // read-only report it supplies. A missing or failed probe degrades the
+      // card, never the dashboard.
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      if (this.canonicalStatusProbe === undefined) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'canonical-store',
+          error: 'Canonical store status unavailable',
+        }));
+        return;
+      }
+      try {
+        const status = await this.canonicalStatusProbe();
+        res.statusCode = 200;
+        res.end(JSON.stringify({ available: true, scope: 'canonical-store', status }));
+      } catch {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'canonical-store',
+          error: 'Canonical store status unavailable',
+        }));
+      }
       return;
     }
 
@@ -2166,15 +2205,22 @@ export function summarizeRagIndexJobs(value: unknown): WebRagIndexJobSummary {
   for (const row of value.jobs) {
     if (row === null || typeof row !== 'object') continue;
     const job = row as Record<string, unknown>;
-    if (job.status === 'legacy-unavailable' || job.workspaceId === 'legacy-unavailable') {
+    const jobId = typeof job.jobId === 'string' ? job.jobId.trim() : '';
+    const ownerId = typeof job.ownerId === 'string' ? job.ownerId.trim() : '';
+    const workspaceId = typeof job.workspaceId === 'string' ? job.workspaceId : '';
+    const status = String(job.status);
+    const canonicalWorkspace = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspaceId);
+    const knownStatus = ['running', 'cancelling', 'completed', 'cancelled', 'failed', 'interrupted'].includes(status);
+    // Mirror ThaiRagIndexJobStore.parseJob: a row without an owner, a canonical
+    // workspace or a known status is pre-contract even before the store has
+    // rewritten it with the legacy marker. Untrusted rows without a job id are
+    // dropped, never counted.
+    if (jobId.length > 0 && (ownerId.length === 0 || !canonicalWorkspace || !knownStatus)) {
       legacyRowCount += 1;
       continue;
     }
-    if (typeof job.jobId !== 'string' || !/^idx_umcp_[a-z0-9]{8,32}$/i.test(job.jobId)
-      || typeof job.workspaceId !== 'string'
-      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.workspaceId)
-      || typeof job.startedAt !== 'string' || !Number.isFinite(Date.parse(job.startedAt))
-      || !['running', 'cancelling', 'completed', 'cancelled', 'failed', 'interrupted'].includes(String(job.status))) continue;
+    if (!/^idx_umcp_[a-z0-9]{8,32}$/i.test(jobId) || !canonicalWorkspace || !knownStatus
+      || typeof job.startedAt !== 'string' || !Number.isFinite(Date.parse(job.startedAt))) continue;
     const counter = (value: unknown): number | undefined =>
       typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 100_000_000 ? value : undefined;
     const indexedFiles = counter(job.indexedFiles);
@@ -2227,7 +2273,6 @@ export function summarizeRagIndexJobs(value: unknown): WebRagIndexJobSummary {
     const completed = indexedFiles !== undefined && skippedFiles !== undefined ? indexedFiles + skippedFiles : undefined;
     const countsValid = completed !== undefined && totalFiles !== undefined && completed <= totalFiles;
     const pendingFiles = countsValid ? totalFiles - completed : undefined;
-    const status = String(job.status);
     const stage: WebRagIndexProgress['stage'] =
       status === 'completed' ? 'completed'
         : status === 'cancelled' ? 'cancelled'
@@ -2235,8 +2280,8 @@ export function summarizeRagIndexJobs(value: unknown): WebRagIndexJobSummary {
             : !countsValid || totalFiles === 0 ? 'scanning'
               : completed === totalFiles ? 'finalizing' : 'indexing';
     jobs.push({
-      jobId: job.jobId,
-      workspaceId: job.workspaceId,
+      jobId,
+      workspaceId,
       status,
       ...(force === undefined ? {} : { force }),
       ...(pendingFiles === undefined ? {} : { pendingFiles }),

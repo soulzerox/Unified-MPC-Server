@@ -3,13 +3,20 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { appError, err, type GoalRecord, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
+import { appError, canonicalManifestId, err, type GoalRecord, type WorkspaceAdmissionReceipt } from '@unified-mpc/domain';
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
+import { CanonicalManifestStore } from '@unified-mpc/workspace';
 import { ControlPlaneServer } from '@unified-mpc/web';
 import { describe, expect, it, vi } from 'vitest';
-import { createGoalControl, createWebGoalRuntimeProjection, runWeb, parseWebArgs } from './web.js';
+import {
+  createCanonicalStatusProbe,
+  createGoalControl,
+  createWebGoalRuntimeProjection,
+  runWeb,
+  parseWebArgs,
+} from './web.js';
 
 describe('web CLI command', () => {
   describe('parseWebArgs', () => {
@@ -34,6 +41,36 @@ describe('web CLI command', () => {
         },
       });
       expect(parseWebArgs(['--host', '0.0.0.0'])).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    });
+  });
+
+  describe('canonical status probe', () => {
+    it('projects the canonical store rooted at the data path', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-status-'));
+      try {
+        const entries = [{ path: 'a.ts', contentHash: '1'.repeat(64) }];
+        const revisionId = 'rev:v1:' + 'a'.repeat(64);
+        await new CanonicalManifestStore(path.join(root, 'canonical')).put({
+          manifestId: canonicalManifestId({ repositoryId: 'repo_abc123', revisionId, entries }),
+          repositoryId: 'repo_abc123',
+          revisionId,
+          commitSha: 'c'.repeat(40),
+          treeOid: 'd'.repeat(40),
+          targetRef: 'refs/remotes/origin/main',
+          entries,
+          createdAt: '2026-11-01T00:00:00.000Z',
+        });
+        const report = await createCanonicalStatusProbe(root)();
+        expect(report).toMatchObject({
+          status: 'healthy',
+          manifestCount: 1,
+          pinCount: 0,
+          overlayCount: 0,
+          activeJobCount: 0,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
   });
 

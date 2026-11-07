@@ -566,18 +566,21 @@ export class ControlPlaneServer {
       // the existing owner-written job ledger; no provider call or reindexing.
       let available = false;
       let jobs: readonly WebRagIndexProgress[] = [];
+      let legacyRowCount = 0;
       try {
         const ledger = path.join(this.dataDir, 'thai-rag', 'index-jobs.json');
         const metadata = await stat(ledger);
         if (metadata.isFile() && metadata.size <= 2 * 1024 * 1024) {
-          jobs = parseRagIndexJobs(JSON.parse(await readFile(ledger, 'utf8')));
+          const summary = summarizeRagIndexJobs(JSON.parse(await readFile(ledger, 'utf8')));
+          jobs = summary.jobs;
+          legacyRowCount = summary.legacyRowCount;
           available = true;
         }
       } catch {
         // Missing/unavailable ledger must not make dashboard status unhealthy.
       }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ available, jobs }));
+      res.end(JSON.stringify({ available, jobs, legacyRowCount }));
       return;
     }
 
@@ -2135,18 +2138,38 @@ export interface WebRagIndexProgress {
   readonly newEmbeddedChunks?: number;
   readonly cacheMissReasons?: Readonly<Record<string, number>>;
   readonly reindexReason?: 'startup_verification' | 'alias_created_or_repaired' | 'workspace_relinked' | 'explicit_request' | 'explicit_force_reindex';
+  /** Sanitized terminal failure text; absent when the row recorded none. */
+  readonly error?: string;
   readonly progressPercent?: number;
   readonly stage: 'scanning' | 'indexing' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
   readonly startedAt: string;
   readonly finishedAt?: string;
 }
 
+/** Browser-safe projection of the owner-written job ledger. */
+export interface WebRagIndexJobSummary {
+  readonly jobs: readonly WebRagIndexProgress[];
+  /** Pre-contract rows: counted, never attributed to a workspace. */
+  readonly legacyRowCount: number;
+}
+
 export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[] {
-  if (value === null || typeof value !== 'object' || !('jobs' in value) || !Array.isArray(value.jobs)) return [];
+  return summarizeRagIndexJobs(value).jobs;
+}
+
+export function summarizeRagIndexJobs(value: unknown): WebRagIndexJobSummary {
+  if (value === null || typeof value !== 'object' || !('jobs' in value) || !Array.isArray(value.jobs)) {
+    return { jobs: [], legacyRowCount: 0 };
+  }
   const jobs: WebRagIndexProgress[] = [];
-  for (const row of value.jobs.slice(-200)) {
+  let legacyRowCount = 0;
+  for (const row of value.jobs) {
     if (row === null || typeof row !== 'object') continue;
     const job = row as Record<string, unknown>;
+    if (job.status === 'legacy-unavailable' || job.workspaceId === 'legacy-unavailable') {
+      legacyRowCount += 1;
+      continue;
+    }
     if (typeof job.jobId !== 'string' || !/^idx_umcp_[a-z0-9]{8,32}$/i.test(job.jobId)
       || typeof job.workspaceId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.workspaceId)
@@ -2189,6 +2212,7 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
     ].includes(rawReindexReason)
       ? rawReindexReason as WebRagIndexProgress['reindexReason']
       : undefined;
+    const error = typeof job.error === 'string' ? normalizeWebIndexError(job.error) : undefined;
     const cacheFields = [
       cacheHitFiles, cacheHitChunks, cacheMissFiles, cacheMissChunks,
       newEmbeddedFiles, newEmbeddedChunks,
@@ -2229,6 +2253,7 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
         cacheMissReasons: cacheMissReasons!,
       } : {}),
       ...(reindexReason === undefined ? {} : { reindexReason }),
+      ...(error === undefined ? {} : { error }),
       ...(countsValid && totalFiles > 0 ? { progressPercent: Math.floor(100 * completed / totalFiles) } : {}),
       stage,
       startedAt: job.startedAt,
@@ -2239,7 +2264,21 @@ export function parseRagIndexJobs(value: unknown): readonly WebRagIndexProgress[
   const history = jobs.filter((job) => job.status !== 'running' && job.status !== 'cancelling');
   active.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   history.sort((a, b) => (b.finishedAt ?? b.startedAt).localeCompare(a.finishedAt ?? a.startedAt));
-  return [...active.slice(0, 8), ...history.slice(0, 3)];
+  return { jobs: [...active.slice(0, 8), ...history.slice(0, 3)], legacyRowCount };
+}
+
+function normalizeWebIndexError(value: string): string | undefined {
+  // The dashboard renders this inline, so collapse control characters and
+  // whitespace and bound the length; the full text stays in the ledger.
+  const normalized = [...value]
+    .map((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 0x20 || code === 0x7f || character.trim().length === 0 ? ' ' : character;
+    })
+    .join('')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+  return normalized.length === 0 ? undefined : normalized.slice(0, 400);
 }
 
 function parseGoalRuntimeEventCursor(

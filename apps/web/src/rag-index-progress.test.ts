@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { GatewayService } from '@unified-mpc/cf-gateway';
 import { renderDashboardHtml } from './dashboard-html.js';
-import { ControlPlaneServer, parseRagIndexJobs } from './web-server.js';
+import { ControlPlaneServer, parseRagIndexJobs, summarizeRagIndexJobs } from './web-server.js';
 
 const ws = '11111111-1111-4111-8111-111111111111';
 const example = {
@@ -51,6 +51,40 @@ describe('headless-safe native Thai-RAG progress', () => {
     });
   });
 
+  it('sanitizes terminal failure text, keeps active rows first and counts legacy rows', () => {
+    const summary = summarizeRagIndexJobs({
+      schemaVersion: 3,
+      jobs: [
+        {
+          jobId: 'idx_umcp_failed00000000', workspaceId: ws, status: 'failed',
+          startedAt: '2026-10-01T10:00:00Z', finishedAt: '2026-10-01T10:05:00Z',
+          error: '  Provider\n\tcrashed\u0007  while embedding  ',
+        },
+        { jobId: 'legacy-row', workspaceId: 'legacy-unavailable', status: 'legacy-unavailable', legacyData: {} },
+        {
+          jobId: 'idx_umcp_running0000000', workspaceId: ws, status: 'running',
+          startedAt: '2026-09-01T10:00:00Z',
+        },
+        { jobId: 'untrusted', workspaceId: '../../etc', status: 'running', startedAt: '2026-10-02T10:00:00Z' },
+      ],
+    });
+    expect(summary.jobs.map((job) => job.jobId)).toEqual(['idx_umcp_running0000000', 'idx_umcp_failed00000000']);
+    expect(summary.jobs[1]).toMatchObject({
+      stage: 'failed',
+      error: 'Provider crashed while embedding',
+      finishedAt: '2026-10-01T10:05:00Z',
+    });
+    expect(summary.legacyRowCount).toBe(1);
+
+    const long = summarizeRagIndexJobs({
+      jobs: [{
+        jobId: 'idx_umcp_longerror00000', workspaceId: ws, status: 'failed',
+        startedAt: '2026-10-01T10:00:00Z', error: 'x'.repeat(500),
+      }],
+    });
+    expect(long.jobs[0]?.error).toHaveLength(400);
+  });
+
   it('serves an owner-written ledger through the existing localhost read-only API', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'rag-progress-web-'));
     const folder = path.join(root, 'thai-rag');
@@ -66,9 +100,10 @@ describe('headless-safe native Thai-RAG progress', () => {
       const response = await fetch('http://127.0.0.1:' + server.port + '/api/rag-index-jobs');
       expect(response.status).toBe(200);
       expect(response.headers.get('cache-control')).toBe('no-store');
-      const data = await response.json() as { available: boolean; jobs: unknown[] };
+      const data = await response.json() as { available: boolean; jobs: unknown[]; legacyRowCount: number };
       expect(data.available).toBe(true);
       expect(data.jobs).toHaveLength(2);
+      expect(data.legacyRowCount).toBe(0);
       expect(JSON.stringify(data)).not.toContain('/private/location');
       expect(JSON.stringify(data)).not.toContain('secret-provider');
     } finally {
@@ -90,6 +125,8 @@ describe('headless-safe native Thai-RAG progress', () => {
     expect(html).toContain('jobId=');
     expect(html).toContain('force=');
     expect(html).toContain('pending ');
+    expect(html).toContain("' · Error: '");
+    expect(html).toContain('legacy index job row(s) cannot be attributed');
     expect(html).not.toContain(" + ' reused)'");
   });
 });

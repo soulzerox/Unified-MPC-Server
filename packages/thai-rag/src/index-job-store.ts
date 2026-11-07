@@ -178,15 +178,28 @@ export class ThaiRagIndexJobStore {
     if (this.loaded) return;
     try {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'));
-      if (isRecord(parsed) && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2 || parsed.schemaVersion === 3) && Array.isArray(parsed.jobs)) {
-        this.migrated = parsed.schemaVersion !== 3;
-        for (const value of parsed.jobs) {
-          const parsedJob = parseJob(value, this.now);
-          if (parsedJob !== null) {
-            this.jobs.set(parsedJob.job.jobId, parsedJob.job);
-            this.migrated ||= parsedJob.migrated;
-          }
+      if (!isRecord(parsed)
+        || (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3)
+        || !Array.isArray(parsed.jobs)) {
+        // A ledger written by a newer runtime or damaged on disk must fail
+        // closed. Treating it as empty would let the next write replace real
+        // job history with a fresh file this process cannot fully understand.
+        throw new Error(`Thai-RAG index job ledger ${this.filePath} is not a recognized schema; refusing to read or rewrite it`);
+      }
+      const rows: Array<{ readonly job: ThaiRagIndexJob; readonly migrated: boolean }> = [];
+      for (const value of parsed.jobs) {
+        const parsedJob = parseJob(value, this.now);
+        if (parsedJob === null) {
+          throw new Error(`Thai-RAG index job ledger ${this.filePath} contains an unparseable job row; refusing to read or rewrite it`);
         }
+        rows.push(parsedJob);
+      }
+      // Commit only after the whole document parsed, so a failure cannot leave
+      // a partially loaded ledger behind for the next caller.
+      this.migrated = parsed.schemaVersion !== 3;
+      for (const { job, migrated } of rows) {
+        this.jobs.set(job.jobId, job);
+        this.migrated ||= migrated;
       }
     } catch (error: unknown) {
       if (!isNodeError(error) || error.code !== 'ENOENT') throw error;

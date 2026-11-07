@@ -379,7 +379,10 @@ export function getClientScriptJs(): string {
             return;
           }
           const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
-          if (jobs.length === 0) {
+          const legacy = Number.isSafeInteger(payload.legacyRowCount) && payload.legacyRowCount > 0
+            ? payload.legacyRowCount
+            : 0;
+          if (jobs.length === 0 && legacy === 0) {
             container.textContent = 'No native index jobs';
             return;
           }
@@ -424,8 +427,11 @@ export function getClientScriptJs(): string {
             const missReasons = job.cacheMissReasons && typeof job.cacheMissReasons === 'object'
               ? Object.entries(job.cacheMissReasons).map(([reason, count]) => reason + '=' + String(count)).join(', ')
               : '';
+            const errorDescription = typeof job.error === 'string' && job.error.length > 0
+              ? ' · Error: ' + job.error
+              : '';
             description.textContent = baseDescription + cacheDescription + pendingDescription + reasonDescription
-              + (missReasons ? ' · Cache misses: ' + missReasons : '');
+              + (missReasons ? ' · Cache misses: ' + missReasons : '') + errorDescription;
             item.appendChild(description);
             const progress = document.createElement('progress');
             progress.max = total !== null && total > 0 ? total : 1;
@@ -438,6 +444,12 @@ export function getClientScriptJs(): string {
             progress.setAttribute('aria-label', heading.textContent + ' index progress');
             item.appendChild(progress);
             container.appendChild(item);
+          }
+          if (legacy > 0) {
+            const note = document.createElement('div');
+            note.style.cssText = 'padding-top: 10px; color: var(--text-secondary);';
+            note.textContent = String(legacy) + ' legacy index job row(s) cannot be attributed to a workspace';
+            container.appendChild(note);
           }
         } catch {
           container.textContent = 'Unable to read native index progress';

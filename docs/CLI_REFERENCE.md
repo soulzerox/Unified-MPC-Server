@@ -744,7 +744,8 @@ shown 3
     miss-reasons artifact_missing=25
   idx_umcp_0005cb500f3b41bf failed workspace f4460793-d046-4dcc-b02f-5fadce80283a owner unified-mpc:3260190 reason alias_created_or_repaired started 2026-11-07T03:02:15.640Z finished 2026-11-07T03:02:15.933Z
     error Native Thai-RAG code_index failed: Workspace path /home/alpha/repos/Unified-MPC-Server/.unified-mpc/worktrees/goal-7bfa903721ebe914ef858ee71ad4afcdcb3852d7 is not a directory.
-legacy-unavailable 0
+  idx_umcp_7f21ba0d4c9e3311 completed workspace 9628fc78-f52f-428e-b358-bbfb66037150 owner unified-mpc:3260190 reason startup_verification started 2026-11-07T02:40:03.120Z finished 2026-11-07T02:52:47.008Z
+    files indexed=0 skipped=700 total=700
 ```
 
 - `jobs` counts the rows the filter matched. `shown` appears only when the

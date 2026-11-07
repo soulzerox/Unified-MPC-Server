@@ -4,7 +4,19 @@ import { formatCanonicalStatus, indexStatusExitCode, parseIndexStatusArgs } from
 
 const HEALTHY: CanonicalStatusReport = {
   status: 'healthy',
-  refs: [{ ref: 'refs/remotes/origin/main', manifestId: 'man:v1:abc', commitSha: 'c'.repeat(40) }],
+  refs: [{
+    ref: 'refs/remotes/origin/main',
+    manifestId: 'man:v1:abc',
+    commitSha: 'c'.repeat(40),
+    treeOid: 'd'.repeat(40),
+    manifestCreatedAt: '2026-10-17T00:00:00.000Z',
+    manifestEntryCount: 2,
+    manifestExists: true,
+    pinned: false,
+    pinReasons: [],
+  }],
+  overlays: [],
+  jobs: [],
   manifestCount: 1,
   pinCount: 0,
   overlayCount: 0,
@@ -33,7 +45,7 @@ describe('formatCanonicalStatus', () => {
     expect(formatCanonicalStatus(HEALTHY).split('\n')).toEqual([
       'canonical store: healthy',
       'refs 1',
-      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)}`,
+      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)} tree ${'d'.repeat(40)} entries 2`,
       'manifests 1',
       'pins 0',
       'overlays 0',
@@ -56,6 +68,77 @@ describe('formatCanonicalStatus', () => {
     expect(report).toHaveLength(10);
   });
 
+  it('distinguishes pin retention, overlay drift and job manifest liveness', () => {
+    const report = formatCanonicalStatus({
+      ...HEALTHY,
+      refs: [{ ...HEALTHY.refs[0], pinned: true, pinReasons: ['rollback', 'user-pin'] }],
+      overlays: [{
+        goalWorkspaceId: 'goal_a',
+        baseManifestId: 'man:v1:base',
+        baseCommitSha: 'a'.repeat(40),
+        baseTreeOid: 'b'.repeat(40),
+        baseManifestExists: true,
+        baseMatchesLiveRef: false,
+        modifiedCount: 1,
+        addedCount: 2,
+        deletedCount: 3,
+        updatedAt: '2026-10-17T00:00:00.000Z',
+      }],
+      jobs: [{
+        operationId: 'op_1',
+        manifestId: 'man:v1:gone',
+        status: 'active',
+        openedAt: '2026-10-17T00:00:00.000Z',
+        updatedAt: '2026-10-17T00:01:00.000Z',
+        manifestExists: false,
+      }],
+      overlayCount: 1,
+      activeJobCount: 1,
+    }).split('\n');
+    expect(report).toContain(
+      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)} tree ${'d'.repeat(40)} entries 2 pinned rollback,user-pin`,
+    );
+    expect(report).toContain(
+      `  goal goal_a base man:v1:base commit ${'a'.repeat(40)} entries modified=1 added=2 deleted=3 base=drifted updated 2026-10-17T00:00:00.000Z`,
+    );
+    expect(report).toContain('  op_1 man:v1:gone active opened 2026-10-17T00:00:00.000Z manifest=missing');
+  });
+
+  it('names a dangling ref and a missing overlay base without inventing identity', () => {
+    const report = formatCanonicalStatus({
+      ...HEALTHY,
+      status: 'degraded',
+      refs: [{
+        ...HEALTHY.refs[0],
+        manifestExists: false,
+        treeOid: null,
+        manifestCreatedAt: null,
+        manifestEntryCount: null,
+      }],
+      overlays: [{
+        goalWorkspaceId: 'goal_a',
+        baseManifestId: 'man:v1:base',
+        baseCommitSha: 'a'.repeat(40),
+        baseTreeOid: 'b'.repeat(40),
+        baseManifestExists: false,
+        baseMatchesLiveRef: false,
+        modifiedCount: 0,
+        addedCount: 0,
+        deletedCount: 0,
+        updatedAt: '2026-10-17T00:00:00.000Z',
+      }],
+      overlayCount: 1,
+      danglingRefs: [{ ref: 'refs/remotes/origin/main', manifestId: 'man:v1:abc' }],
+      missingOverlayBases: ['goal_a'],
+    }).split('\n');
+    expect(report).toContain(
+      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)} manifest-missing`,
+    );
+    expect(report).toContain(
+      `  goal goal_a base man:v1:base commit ${'a'.repeat(40)} entries modified=0 added=0 deleted=0 base=missing updated 2026-10-17T00:00:00.000Z`,
+    );
+  });
+
   it('names every blocking id in a degraded store', () => {
     const report = formatCanonicalStatus({
       ...HEALTHY,
@@ -67,7 +150,7 @@ describe('formatCanonicalStatus', () => {
     expect(report).toEqual([
       'canonical store: degraded',
       'refs 1',
-      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)}`,
+      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)} tree ${'d'.repeat(40)} entries 2`,
       'manifests 1',
       'pins 0',
       'overlays 0',

@@ -674,21 +674,25 @@ quarantine 2 (due 1, in-grace 1)
 ### `unified-mpc index status [--json]`
 
 Read-only snapshot of the canonical store: the health verdict, every active ref
-with its manifest id and commit, the store counts, and every blocking id. The
-verdict comes from the store's own consistency check, so a dangling ref, a Goal
-overlay whose pinned base manifest is gone, or a pin whose manifest is missing
-is reported as `degraded` rather than guessed at.
+with its revision, tree and manifest identity, every Goal overlay with its
+pinned base and drift state, every unsettled index job with its manifest
+liveness, the store counts, and every blocking id. The verdict comes from the
+store's own consistency check, so a dangling ref, a Goal overlay whose pinned
+base manifest is gone, or a pin whose manifest is missing is reported as
+`degraded` rather than guessed at.
 
 ```bash
 $ unified-mpc index status
 canonical store: healthy
 refs 1
-  refs/remotes/origin/main man:v1:3c9f1e7a5d2b commit 4d1c0a1f8b25
-manifests 1
-pins 0
-overlays 0
+  refs/remotes/origin/main man:v1:3c9f1e7a5d2b commit 4d1c0a1f8b25 tree 9a2b8c7d6e5f entries 412 pinned rollback
+manifests 7
+pins 1
+overlays 1
+  goal goal_01J9ZQ base man:v1:3c9f1e7a5d2b commit 4d1c0a1f8b25 entries modified=2 added=1 deleted=0 base=live updated 2026-11-07T09:30:00.000Z
 quarantined 0
-active-jobs 0
+active-jobs 1
+  op_reindex man:v1:3c9f1e7a5d2b active opened 2026-11-07T09:31:00.000Z manifest=present
 dangling-refs 0
 missing-overlay-bases 0
 orphaned-pins 0
@@ -697,6 +701,20 @@ orphaned-pins 0
 - Counts are always printed; the offending ids (`dangling-refs`,
   `missing-overlay-bases`, `orphaned-pins`) are listed under their count only
   when present.
+- A ref line keeps revision (`commit`), tree (`tree`) and manifest
+  (`manifestId`, `entries`) identity apart, and names the pin reasons retaining
+  that manifest. A dangling ref prints `manifest-missing` instead of a guessed
+  tree.
+- An overlay line identifies the Goal and its pinned base, counts overlay
+  entries by kind, and reports `base=live`, `base=drifted` or `base=missing`.
+  `drifted` means the base no longer matches the live ref — the same condition
+  Goal admission refuses. It is reported, not counted as `degraded`, because
+  whether drift must block a long-running Goal is a product decision.
+- An index-job line reports whether the manifest the job pins is still stored
+  (`manifest=present` or `manifest=missing`).
+- Reused versus newly embedded chunks, renamed paths, failures and
+  incompatibility/rebuild reasons are provider-owned (§13) and are
+  deliberately absent: status never fabricates a semantic counter.
 - A quarantine ledger that cannot be read exits `1` with the error instead of
   printing fabricated counts: `quarantined 0` must never stand in for
   "unreadable ledger".

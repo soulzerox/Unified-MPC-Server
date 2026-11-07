@@ -84,13 +84,43 @@ describe('canonical status projection (#210 U26)', () => {
       const report = await canonicalStatus({ refs, manifests, pins, overlays, quarantine, jobs });
       expect(report).toMatchObject({
         status: 'healthy',
-        refs: [{ ref: REF, manifestId }],
         manifestCount: 1,
         pinCount: 1,
         overlayCount: 1,
         quarantinedCount: 1,
         activeJobCount: 1,
       });
+      expect(report.refs).toEqual([{
+        ref: REF,
+        manifestId,
+        commitSha: 'c'.repeat(40),
+        treeOid: computeTreeOid(entries),
+        manifestCreatedAt: '2026-10-17T00:00:00.000Z',
+        manifestEntryCount: 1,
+        manifestExists: true,
+        pinned: true,
+        pinReasons: ['rollback'],
+      }]);
+      expect(report.overlays).toEqual([{
+        goalWorkspaceId: 'goal_a',
+        baseManifestId: manifestId,
+        baseCommitSha: 'c'.repeat(40),
+        baseTreeOid: computeTreeOid(entries),
+        baseManifestExists: true,
+        baseMatchesLiveRef: true,
+        modifiedCount: 0,
+        addedCount: 0,
+        deletedCount: 0,
+        updatedAt: expect.any(String),
+      }]);
+      expect(report.jobs).toEqual([{
+        operationId: 'op_reindex',
+        manifestId,
+        status: 'pending',
+        openedAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+        manifestExists: true,
+      }]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -137,6 +167,10 @@ describe('canonical status projection (#210 U26)', () => {
       expect(report.danglingRefs).toEqual([{ ref: REF, manifestId }]);
       expect(report.orphanedPins).toEqual([manifestId]);
       expect(report.missingOverlayBases).toEqual(['goal_a']);
+      expect(report.refs).toEqual([expect.objectContaining({ ref: REF, manifestId, manifestExists: false })]);
+      expect(report.overlays).toEqual([
+        expect.objectContaining({ goalWorkspaceId: 'goal_a', baseManifestExists: false, baseMatchesLiveRef: false }),
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -163,6 +197,109 @@ describe('canonical status projection (#210 U26)', () => {
       expect(report.quarantinedCount).toBe(2);
       expect(report.activeJobCount).toBe(1);
       expect(report.manifestCount).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an overlay base that drifted from the live ref without degrading', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'canon-status-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const manifests = new CanonicalManifestStore(dir);
+      const pins = new RevisionPinRegistry(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const quarantine = new ArtifactQuarantineStore(dir);
+      const jobs = new IndexJobLedger(dir);
+
+      const baseEntries = [{ path: 'live.ts', contentHash: H('1') }];
+      const baseTree = computeTreeOid(baseEntries);
+      const baseRevision = canonicalRevisionId({
+        repositoryId: REPO, commitSha: '1'.repeat(40), treeOid: baseTree, targetRef: REF, parents: [],
+      });
+      const baseManifest = canonicalManifestId({ repositoryId: REPO, revisionId: baseRevision, entries: baseEntries });
+      await manifests.put({
+        manifestId: baseManifest, repositoryId: REPO, revisionId: baseRevision,
+        commitSha: '1'.repeat(40), treeOid: baseTree, targetRef: REF,
+        entries: baseEntries, createdAt: '2026-10-17T00:00:00.000Z',
+      });
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { commitSha: '1'.repeat(40), treeOid: baseTree, manifestId: baseManifest },
+        targetVerified: true,
+      });
+      await attachGoalBasePin(refs, overlays, {
+        goalWorkspaceId: 'goal_a',
+        canonicalRef: REF,
+        expectedBase: { commitSha: '1'.repeat(40), treeOid: baseTree, manifestId: baseManifest },
+      });
+      await overlays.upsert('goal_a', { path: 'dirty.ts', kind: 'modified', contentHash: H('2') });
+      await overlays.upsert('goal_a', { path: 'new.ts', kind: 'added', contentHash: H('3') });
+      await overlays.upsert('goal_a', { path: 'gone.ts', kind: 'deleted', contentHash: null });
+
+      const nextEntries = [{ path: 'live.ts', contentHash: H('4') }];
+      const nextTree = computeTreeOid(nextEntries);
+      const nextRevision = canonicalRevisionId({
+        repositoryId: REPO, commitSha: '2'.repeat(40), treeOid: nextTree, targetRef: REF, parents: [],
+      });
+      const nextManifest = canonicalManifestId({ repositoryId: REPO, revisionId: nextRevision, entries: nextEntries });
+      await manifests.put({
+        manifestId: nextManifest, repositoryId: REPO, revisionId: nextRevision,
+        commitSha: '2'.repeat(40), treeOid: nextTree, targetRef: REF,
+        entries: nextEntries, createdAt: '2026-10-18T00:00:00.000Z',
+      });
+      await refs.promote(REF, {
+        expectedCurrent: { commitSha: '1'.repeat(40), treeOid: baseTree, manifestId: baseManifest },
+        target: { commitSha: '2'.repeat(40), treeOid: nextTree, manifestId: nextManifest },
+        targetVerified: true,
+      });
+
+      const report = await canonicalStatus({ refs, manifests, pins, overlays, quarantine, jobs });
+      expect(report.status).toBe('healthy');
+      expect(report.refs).toEqual([expect.objectContaining({ manifestId: nextManifest, manifestExists: true })]);
+      expect(report.overlays).toEqual([{
+        goalWorkspaceId: 'goal_a',
+        baseManifestId: baseManifest,
+        baseCommitSha: '1'.repeat(40),
+        baseTreeOid: baseTree,
+        baseManifestExists: true,
+        baseMatchesLiveRef: false,
+        modifiedCount: 1,
+        addedCount: 1,
+        deletedCount: 1,
+        updatedAt: expect.any(String),
+      }]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an unsettled job whose manifest is no longer stored', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'canon-status-'));
+    try {
+      const jobs = new IndexJobLedger(dir);
+      const missingManifest = `man:v1:${'a'.repeat(64)}`;
+      await jobs.open('op_orphan', missingManifest, NOW);
+
+      const report = await canonicalStatus({
+        refs: new CanonicalRefStore(dir),
+        manifests: new CanonicalManifestStore(dir),
+        pins: new RevisionPinRegistry(dir),
+        overlays: new GoalOverlayStore(dir),
+        quarantine: new ArtifactQuarantineStore(dir),
+        jobs,
+      });
+      // The store's own verdict ignores jobs; the projection must still expose
+      // that the ledger roots at a manifest no longer stored.
+      expect(report.status).toBe('healthy');
+      expect(report.jobs).toEqual([{
+        operationId: 'op_orphan',
+        manifestId: missingManifest,
+        status: 'pending',
+        openedAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+        manifestExists: false,
+      }]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

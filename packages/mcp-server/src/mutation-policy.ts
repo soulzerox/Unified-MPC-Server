@@ -106,6 +106,8 @@ export function inspectMutationOperation(
     case 'rag_index_status':
     case 'rag_get_event':
     case 'canonical_index_status':
+    case 'canonical_gc_status':
+    case 'canonical_revision_list':
       return read('structured read-only operation');
     case 'tool_batch':
       return read('batch dispatcher applies mutation policy independently to every child call');

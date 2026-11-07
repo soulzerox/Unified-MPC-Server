@@ -92,7 +92,7 @@ import {
   SqliteWorkspaceRepository,
   assertStorageIdentitySafe,
 } from '@unified-mpc/storage';
-import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GoalOverlayStore, IndexJobLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, canonicalStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
+import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GcLeaseStore, GoalOverlayStore, IndexJobLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, canonicalRevisionList, canonicalStatus, gcStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type Result, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
@@ -1456,6 +1456,25 @@ export function createStdioMcpRuntime(
         quarantine: new ArtifactQuarantineStore(canonicalRoot),
         jobs: new IndexJobLedger(canonicalRoot),
       });
+    },
+    canonicalRevisionList: async () => {
+      assertStorageIdentitySafe(dataPath);
+      const canonicalRoot = path.join(dataPath, 'canonical');
+      return canonicalRevisionList({
+        refs: new CanonicalRefStore(canonicalRoot),
+        manifests: new CanonicalManifestStore(canonicalRoot),
+        pins: new RevisionPinRegistry(canonicalRoot),
+        overlays: new GoalOverlayStore(canonicalRoot),
+        jobs: new IndexJobLedger(canonicalRoot),
+      });
+    },
+    canonicalGcStatus: async () => {
+      assertStorageIdentitySafe(dataPath);
+      const canonicalRoot = path.join(dataPath, 'canonical');
+      return gcStatus(
+        { quarantine: new ArtifactQuarantineStore(canonicalRoot), lease: new GcLeaseStore(canonicalRoot) },
+        { now: new Date() },
+      );
     },
     mergePolicy,
     mergeVerificationRun,

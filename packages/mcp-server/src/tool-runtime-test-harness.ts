@@ -218,6 +218,18 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         orphanedPins: [],
       };
     },
+    canonicalRevisionList: async () => {
+      calls.push('canonicalRevisionList');
+      return { revisions: [] };
+    },
+    canonicalGcStatus: async () => {
+      calls.push('canonicalGcStatus');
+      return {
+        status: 'healthy' as const,
+        lease: { status: 'free' as const },
+        quarantine: { total: 0, due: 0, inGrace: 0, rows: [] },
+      };
+    },
     mergePolicy: {
       async getByRepository() {
         calls.push('mergePolicy.getByRepository');

@@ -2,7 +2,9 @@ import { err, ok, type InvocationAuthorization, type MergeEvidenceDecision, type
 import type { CapabilityService, EventLogBackendOptions, ShellHeavyAdmissionPort } from '@unified-mpc/capabilities';
 import type { ExtensionsService, InstallerService } from '@unified-mpc/extensions';
 import type {
+  CanonicalRevisionListReport,
   CanonicalStatusReport,
+  GcStatusReport,
   HeavyJobQueueStore,
   ResourceAdmissionController,
   ResourceAdmissionLease,
@@ -252,6 +254,10 @@ export interface McpApplicationServices {
   readonly heavyJobFairness?: Pick<ShellHeavyAdmissionPort, 'fairnessSnapshot'>;
   /** Read-only canonical store projection (#210 §11); omitted when the runtime has no canonical store. */
   readonly canonicalIndexStatus?: () => Promise<CanonicalStatusReport>;
+  /** Read-only canonical revision history (#210 §11); the exposing tool bounds the response. */
+  readonly canonicalRevisionList?: () => Promise<CanonicalRevisionListReport>;
+  /** Read-only canonical GC lease/quarantine projection (#210 §7). */
+  readonly canonicalGcStatus?: () => Promise<GcStatusReport>;
   readonly mergePolicy?: {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };

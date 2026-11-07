@@ -130,20 +130,24 @@ const revisionReport: CanonicalRevisionListReport = {
   ],
 };
 
+function quarantineRow(digit: string, due: boolean): GcStatusReport['quarantine']['rows'][number] {
+  return {
+    target: { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey: 'file:v1:' + digit.repeat(64) },
+    quarantinedAt: '2026-11-01T00:00:00.000Z',
+    graceMs: 60_000,
+    expiresAt: '2026-11-01T00:01:00.000Z',
+    due,
+  };
+}
+
 const gcReport: GcStatusReport = {
   status: 'healthy',
   lease: { status: 'free' },
   quarantine: {
-    total: 1,
-    due: 1,
-    inGrace: 0,
-    rows: [{
-      target: { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey: 'file:v1:' + '9'.repeat(64) },
-      quarantinedAt: '2026-11-01T00:00:00.000Z',
-      graceMs: 60_000,
-      expiresAt: '2026-11-01T00:01:00.000Z',
-      due: true,
-    }],
+    total: 3,
+    due: 2,
+    inGrace: 1,
+    rows: [quarantineRow('9', true), quarantineRow('8', true), quarantineRow('7', false)],
   },
 };
 
@@ -154,19 +158,29 @@ function namedTool(services: McpToolContext['services'], name: string): McpToolD
 }
 
 describe('canonical lifecycle tools', () => {
-  it('projects the GC lease and quarantine as a read-only scoped snapshot', async () => {
+  it('projects the GC lease and bounds the quarantine rows', async () => {
     const tool = namedTool({ canonicalGcStatus: async () => gcReport }, 'canonical_gc_status');
     expect(tool.permission).toBe('READ');
     expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true });
 
-    const result = await tool.execute({}, new AbortController().signal);
-    expect(result).toMatchObject({
+    const bounded = await tool.execute({ limit: 1 }, new AbortController().signal);
+    expect(bounded).toMatchObject({
       ok: true,
       value: {
         scope: 'canonical-store',
         status: 'healthy',
         lease: { status: 'free' },
-        quarantine: { total: 1, due: 1, inGrace: 0, rows: [{ due: true }] },
+        returned: 1,
+        quarantine: { total: 3, due: 2, inGrace: 1, rows: [{ due: true }] },
+      },
+    });
+
+    const defaulted = await tool.execute({}, new AbortController().signal);
+    expect(defaulted).toMatchObject({
+      ok: true,
+      value: {
+        returned: 3,
+        quarantine: { total: 3, due: 2, inGrace: 1, rows: [{ due: true }, { due: true }, { due: false }] },
       },
     });
   });

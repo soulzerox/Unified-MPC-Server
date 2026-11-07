@@ -63,6 +63,7 @@ import {
 import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
+  ThaiRagIndexJobStore,
   ThaiRagProviderCoordinator,
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
   type ThaiRagProviderDriver,
@@ -116,6 +117,7 @@ import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApi
 import { canonicalRefForBranch, createCanonicalMergeAdvance } from './canonical-merge-advance.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
+import { projectIndexJobHistory } from './index-job-history-projection.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
 import {
   createShellHeavyAdmissionPort,
@@ -1475,6 +1477,15 @@ export function createStdioMcpRuntime(
         { quarantine: new ArtifactQuarantineStore(canonicalRoot), lease: new GcLeaseStore(canonicalRoot) },
         { now: new Date() },
       );
+    },
+    ragIndexJobList: async (input) => {
+      assertStorageIdentitySafe(dataPath);
+      // Read-only: a live runtime owner may be writing progress right now, so
+      // the operator listing must not migrate, reap or persist a snapshot.
+      return projectIndexJobHistory(await new ThaiRagIndexJobStore(dataPath).listForOperator({
+        ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      }));
     },
     mergePolicy,
     mergeVerificationRun,

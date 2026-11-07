@@ -230,6 +230,10 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         quarantine: { total: 0, due: 0, inGrace: 0, rows: [] },
       };
     },
+    ragIndexJobList: async () => {
+      calls.push('ragIndexJobList');
+      return { jobs: [], totalRowCount: 0, matchingRowCount: 0, legacyRowCount: 0 };
+    },
     mergePolicy: {
       async getByRepository() {
         calls.push('mergePolicy.getByRepository');

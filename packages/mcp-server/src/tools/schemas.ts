@@ -746,6 +746,17 @@ export const ragIndexStatusSchema = z.object({
 
 export const ragCancelIndexSchema = ragIndexStatusSchema;
 
+/** Canonical registration UUID only; a mistyped filter must not silently match nothing. */
+const canonicalWorkspaceFilterSchema = z.string().trim().regex(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  'Workspace filter must be the canonical Unified workspace UUID issued by workspace registration',
+);
+
+export const ragIndexJobListSchema = z.object({
+  workspaceId: canonicalWorkspaceFilterSchema.optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+}).strict();
+
 export const mergePolicyGetSchema = z.object({
   repository: z.string().trim().min(1).max(512),
 }).strict();

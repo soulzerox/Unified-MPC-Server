@@ -1,3 +1,4 @@
+import { appError, err, ok } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import {
   ragAdoptLegacyIndexSchema,
@@ -9,6 +10,7 @@ import {
   ragCodeSearchSchema,
   ragForgetSchema,
   ragGetEventSchema,
+  ragIndexJobListSchema,
   ragIndexStatusSchema,
   ragMemoryReconcileSchema,
   ragPreEditContextSchema,
@@ -27,6 +29,8 @@ const safeWrite = {
   permission: 'WRITE' as const,
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 };
+
+const DEFAULT_INDEX_JOB_LIST_LIMIT = 20;
 
 export function ragTools(context: McpToolContext): McpToolDefinition[] {
   return [
@@ -161,6 +165,33 @@ export function ragTools(context: McpToolContext): McpToolDefinition[] {
       handler: async (input, signal, _authorization, budget) => context.nativeRagCall === undefined
         ? missingService()
         : context.nativeRagCall(input.workspaceId, 'index_status', { job_id: input.jobId }, signal, budget),
+    }),
+    defineTool({
+      name: 'rag_index_job_list',
+      description: 'Read the durable Thai-RAG index-job ledger without mutating it. Lists every active job plus the newest terminal jobs with the reuse/embedding counters the row actually recorded, miss reasons, reindex reason, timestamps and sanitized terminal failure text. Active rows are always listed; `limit` bounds terminal rows (default 20, max 200) and `matchingRowCount`/`returned` keep truncation visible. Pre-contract rows are counted as legacy-unavailable, never attributed. Optional `workspaceId` must be a canonical registration UUID. Distinct from rag_index_status (one live provider job) and canonical_index_status (canonical store health). Never exposes provider job ids, provider result payloads, owner ids, owner process identity or raw ledger paths.',
+      ...readOnly,
+      inputSchema: ragIndexJobListSchema,
+      handler: async (input) => {
+        const list = context.services?.ragIndexJobList;
+        if (list === undefined) return missingService();
+        try {
+          const listing = await list({
+            ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+            limit: input.limit ?? DEFAULT_INDEX_JOB_LIST_LIMIT,
+          });
+          return ok({
+            scope: 'index-jobs',
+            totalRowCount: listing.totalRowCount,
+            matchingRowCount: listing.matchingRowCount,
+            legacyRowCount: listing.legacyRowCount,
+            returned: listing.jobs.length,
+            jobs: listing.jobs,
+          });
+        } catch {
+          // A ledger error can name a local path; keep the response fixed.
+          return err(appError('INTERNAL_ERROR', 'Index job ledger could not be read', true));
+        }
+      },
     }),
     defineTool({
       name: 'rag_cancel_index',

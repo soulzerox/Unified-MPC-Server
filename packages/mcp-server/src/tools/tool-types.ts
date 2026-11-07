@@ -232,6 +232,53 @@ export interface MergeVerificationStatusPort {
   }): Promise<MergeVerificationStatusView>;
 }
 
+export type RagIndexJobHistoryStatus = 'running' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'interrupted';
+
+/**
+ * One durable provider index-job row as the MCP operator surface may expose it.
+ *
+ * Deliberately absent from this projection: the provider job id, the raw
+ * provider `result` payload, owner identity (owner ids embed the host pid),
+ * owner-process identity and `legacyData`. Those stay in the CLI's `--json`
+ * output and never reach a tool response.
+ */
+export interface RagIndexJobHistoryRow {
+  readonly jobId: string;
+  readonly workspaceId: string;
+  readonly indexedFiles?: number;
+  readonly skippedFiles?: number;
+  readonly totalFiles?: number;
+  readonly cacheHitFiles?: number;
+  readonly cacheHitChunks?: number;
+  readonly cacheMissFiles?: number;
+  readonly cacheMissChunks?: number;
+  readonly newEmbeddedFiles?: number;
+  readonly newEmbeddedChunks?: number;
+  readonly cacheMissReasons?: Readonly<Record<string, number>>;
+  readonly status: RagIndexJobHistoryStatus;
+  readonly force: boolean;
+  readonly reindexReason?: string;
+  readonly startedAt: string;
+  readonly progressAt?: string;
+  readonly finishedAt?: string;
+  /** Sanitized terminal failure text; the runtime collapses control chars and bounds it. */
+  readonly error?: string;
+}
+
+export interface RagIndexJobHistoryQuery {
+  /** Restrict the listing to one canonical registration UUID. */
+  readonly workspaceId?: string;
+  /** Bound on terminal rows; active rows are always listed. */
+  readonly limit?: number;
+}
+
+export interface RagIndexJobHistory {
+  readonly jobs: readonly RagIndexJobHistoryRow[];
+  readonly totalRowCount: number;
+  readonly matchingRowCount: number;
+  readonly legacyRowCount: number;
+}
+
 export interface McpApplicationServices {
   /** Host platform selected by the composition root; tests may inject a deterministic profile. */
   readonly platform?: NodeJS.Platform;
@@ -258,6 +305,8 @@ export interface McpApplicationServices {
   readonly canonicalRevisionList?: () => Promise<CanonicalRevisionListReport>;
   /** Read-only canonical GC lease/quarantine projection (#210 §7). */
   readonly canonicalGcStatus?: () => Promise<GcStatusReport>;
+  /** Read-only durable Thai-RAG index-job history (#210 §11); the exposing tool bounds the response. */
+  readonly ragIndexJobList?: (input: RagIndexJobHistoryQuery) => Promise<RagIndexJobHistory>;
   readonly mergePolicy?: {
     getByRepository(repository: string): Promise<RepositoryMergePolicy | undefined>;
   };

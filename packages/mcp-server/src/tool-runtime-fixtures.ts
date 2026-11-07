@@ -50,7 +50,7 @@ const unavailable = (
 ): ToolRuntimeFixture => ({ input, evidence: { kind: 'truthful_unavailable', unavailableStatus } });
 
 /**
- * Safe parse-valid inputs and expected delivery evidence for the 110 core tools.
+ * Safe parse-valid inputs and expected delivery evidence for the core tools.
  * These are non-production fixtures: they use controlled workspace IDs, dry-run
  * inputs where available, and never point at a real user path.
  */
@@ -150,6 +150,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   }, 'thaiRag.call:adopt_legacy_index'),
   rag_code_index: service({ workspaceId, force: false, background: false }, 'thaiRag.call:code_index'),
   rag_index_status: service({ workspaceId, jobId: 'job-1' }, 'thaiRag.call:index_status'),
+  rag_index_job_list: service({ limit: 5 }, 'ragIndexJobList'),
   rag_cancel_index: service({ workspaceId, jobId: 'job-1' }, 'thaiRag.call:cancel_index'),
   rag_resolve_constraint: service({ workspaceId, turnId: 'event-1', resolution: 'condition retired', evidence: 'gen 1' }, 'thaiRag.call:resolve_event'),
   rag_get_event: service({ workspaceId, turnId: 'event-1' }, 'thaiRag.call:get_event'),

@@ -401,6 +401,11 @@ describe('stdio MCP runtime', () => {
       });
       expect(result?.ok).toBe(true);
       if (result === undefined || !result.ok) return;
+      expect(result.value.canonicalAdmission).toMatchObject({
+        status: 'skipped',
+        reason: 'repository_unknown',
+        detail: expect.stringContaining('no origin remote in '),
+      });
       expect(await new GoalOverlayStore(canonicalRoot).read(result.value.workspaceId)).toBeNull();
     } finally {
       await runtime.close();

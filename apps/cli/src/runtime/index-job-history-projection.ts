@@ -5,10 +5,14 @@ const PATH_PLACEHOLDER = '<path>';
 const JOB_ID_PLACEHOLDER = '<job-id>';
 
 /**
- * A quoted segment is a path when it carries a separator. Exact Git refs and
- * non-file URLs are diagnostics the operator surface deliberately keeps.
+ * A quoted segment is a path when it carries a separator. The opening quote must
+ * follow a token boundary so an apostrophe inside a word cannot start a match,
+ * and the content may contain the same quote character as long as it is not
+ * followed by a boundary; that keeps `O'Brien` inside one quoted path. Exact
+ * Git refs and non-file URLs are diagnostics the operator surface deliberately
+ * keeps.
  */
-const QUOTED_WITH_SEPARATOR = /(['"])([^'"]*[\\/][^'"]*)\1/g;
+const QUOTED_WITH_SEPARATOR = /(^|[\s(="'`[{,;:])(['"])([^]*?[\\/][^]*?)\2(?=\s|$|[.,;:)\]])/g;
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
 const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 
@@ -16,13 +20,15 @@ const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 const FILE_URI = /\bfile:\/\/[^\s"'`<>|,;)]*/gi;
 const WINDOWS_DRIVE = /\b[A-Za-z]:[\\/][^\s"'`<>|,;)]*/g;
 const WINDOWS_UNC = /\\\\[^\s"'`<>|,;)]*/g;
-const POSIX_ABSOLUTE = /(^|[\s(="'`[{,;])\/(?!\/)[^\s"'`<>|,;)]*/g;
+const POSIX_ABSOLUTE = /(^|[\s(="'`[{,;:])(?:\/(?!\/)|~\/)[^\s"'`<>|,;)]*/g;
 
 /** Provider and local job ids share the `idx_` prefix. */
 const JOB_ID = /\bidx_[A-Za-z0-9_-]+/g;
 
-function redactQuotedPath(match: string, quote: string, content: string): string {
-  return GIT_REF.test(content) || SAFE_URL.test(content) ? match : `${quote}${PATH_PLACEHOLDER}${quote}`;
+function redactQuotedPath(match: string, prefix: string, quote: string, content: string): string {
+  return GIT_REF.test(content) || SAFE_URL.test(content)
+    ? match
+    : `${prefix}${quote}${PATH_PLACEHOLDER}${quote}`;
 }
 
 /**
@@ -31,8 +37,9 @@ function redactQuotedPath(match: string, quote: string, content: string): string
  * The durable ledger keeps diagnostic detail, but §11's tool contract promises
  * that a response never carries owner identity: absolute local paths (quoted
  * paths with spaces, file URIs, Windows drive/UNC paths and POSIX absolute
- * tokens) and `idx_...` job-id tokens are replaced with placeholders before
- * control characters are collapsed and the 400-character bound is applied.
+ * tokens) and `idx_...` job-id tokens are replaced with placeholders after
+ * control characters and whitespace are collapsed and before the
+ * 400-character bound is applied.
  *
  * Over-redaction is preferred to leakage: a lost diagnostic word is acceptable,
  * a returned host path or provider job id is not. URLs and Git refs survive

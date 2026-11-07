@@ -126,6 +126,21 @@ describe('index job history projection', () => {
       .toBe('cancel failed for <job-id>');
   });
 
+  it('hardens quoted and colon-adjacent path forms (#210 review follow-up)', () => {
+    expect(sanitizeIndexJobError("open '/home/O'Brien/x.ts' failed"))
+      .toBe("open '<path>' failed");
+    expect(sanitizeIndexJobError("can't open '/home/alpha/a.ts'"))
+      .toBe("can't open '<path>'");
+    expect(sanitizeIndexJobError('open path:/home/alpha/x failed'))
+      .toBe('open path:<path> failed');
+    expect(sanitizeIndexJobError('open file:/home/alpha/x failed'))
+      .toBe('open file:<path> failed');
+    expect(sanitizeIndexJobError("open '~/secret/a b.ts' failed"))
+      .toBe("open '<path>' failed");
+    expect(sanitizeIndexJobError('open ~/secret/a.ts now'))
+      .toBe('open <path> now');
+  });
+
   it('projects a failed row without its host path or provider job id', () => {
     const projected = projectIndexJobHistory(listing([{
       jobId: 'idx_umcp_failed',

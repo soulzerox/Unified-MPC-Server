@@ -6,6 +6,7 @@ import type { DoctorReport } from '@unified-mpc/application';
 import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
 import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, CanonicalStoreRepairReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, LogicalSpaceReport, MaintenanceCycleReport, RevisionPruneReport } from '@unified-mpc/workspace';
+import type { ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
 import {
   parseCliArgs,
   runCli,
@@ -84,6 +85,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index gc(?:\s|$)/, kind: 'index-gc', dispatch: 'indexGc' },
   { pattern: /^unified-mpc index maintenance(?:\s|$)/, kind: 'index-maintenance', dispatch: 'indexMaintenance' },
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
+  { pattern: /^unified-mpc index job list(?:\s|$)/, kind: 'index-job-list', dispatch: 'indexJobList' },
   { pattern: /^unified-mpc index space(?:\s|$)/, kind: 'index-space', dispatch: 'canonicalLogicalSpace' },
 ];
 
@@ -230,6 +232,10 @@ function replayDependencies(calls: string[]): CliDependencies {
         missingOverlayBases: [],
         orphanedPins: [],
       };
+    },
+    indexJobList: async (): Promise<ThaiRagIndexJobListing> => {
+      calls.push('indexJobList');
+      return { jobs: [], totalRowCount: 0, matchingRowCount: 0, legacyRowCount: 0 };
     },
     canonicalLogicalSpace: async (): Promise<LogicalSpaceReport> => {
       calls.push('canonicalLogicalSpace');

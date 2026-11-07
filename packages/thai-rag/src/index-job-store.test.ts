@@ -589,3 +589,118 @@ describe('stuck index job reap (issue #202)', () => {
     await expect(store.get(running.jobId, 'owner-a', WS)).resolves.toMatchObject({ status: 'completed', result: { indexed: 999 } });
   });
 });
+
+describe('operator index-job listing (#210 §11)', () => {
+  const WS_A = '11111111-1111-4111-8111-111111111111';
+  const WS_B = '22222222-2222-4222-8222-222222222222';
+
+  it('puts every active row first and bounds only the terminal history', async () => {
+    const dataRoot = await root();
+    let clock = Date.parse('2026-11-01T00:00:00.000Z');
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date(clock));
+    const active = await store.create(WS_A, false, 'owner-a');
+    const completed: string[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      clock += 1_000;
+      const job = await store.create(WS_A, false, 'owner-a');
+      await store.complete(job.jobId, { indexed: index }, 'owner-a');
+      completed.push(job.jobId);
+    }
+
+    const bounded = await store.listForOperator();
+    expect(bounded.jobs).toHaveLength(21);
+    expect(bounded.jobs[0]).toMatchObject({ jobId: active.jobId, status: 'running' });
+    expect(bounded.jobs.slice(1).map((job) => job.jobId)).toEqual([...completed].reverse().slice(0, 20));
+    expect(bounded.matchingRowCount).toBe(26);
+    expect(bounded.totalRowCount).toBe(26);
+    expect(bounded.legacyRowCount).toBe(0);
+
+    // A smaller bound still cannot hide the live job.
+    const tight = await store.listForOperator({ limit: 3 });
+    expect(tight.jobs.map((job) => job.jobId)).toEqual([active.jobId, ...completed.slice(-3).reverse()]);
+    expect(tight.matchingRowCount).toBe(26);
+  });
+
+  it('filters by workspace and counts unattributable legacy rows instead of listing them', async () => {
+    const dataRoot = await root();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify({ schemaVersion: 3, jobs: [
+      {
+        jobId: 'idx_umcp_ws_a',
+        workspaceId: WS_A,
+        ownerId: 'owner-a',
+        status: 'completed',
+        force: false,
+        startedAt: '2026-11-01T00:00:00.000Z',
+        finishedAt: '2026-11-01T00:00:10.000Z',
+      },
+      {
+        jobId: 'idx_umcp_ws_b',
+        workspaceId: WS_B,
+        ownerId: 'owner-a',
+        status: 'failed',
+        force: false,
+        startedAt: '2026-11-01T00:01:00.000Z',
+        finishedAt: '2026-11-01T00:01:10.000Z',
+        error: 'provider exploded',
+      },
+      { jobId: 'legacy-arbitrary-id', workspaceId: 'legacy-workspace-name', status: 'completed', force: false },
+    ] }));
+
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    const scoped = await store.listForOperator({ workspaceId: WS_A });
+    expect(scoped.jobs.map((job) => job.jobId)).toEqual(['idx_umcp_ws_a']);
+    expect(scoped.matchingRowCount).toBe(1);
+    expect(scoped.totalRowCount).toBe(3);
+    expect(scoped.legacyRowCount).toBe(1);
+
+    const all = await store.listForOperator();
+    expect(all.jobs.map((job) => job.jobId)).toEqual(['idx_umcp_ws_b', 'idx_umcp_ws_a']);
+    expect(all.legacyRowCount).toBe(1);
+  });
+
+  it('reads without migrating, reaping, creating or rewriting the ledger', async () => {
+    const dataRoot = await root();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    const persisted = JSON.stringify({ schemaVersion: 2, jobs: [{
+      jobId: 'idx_umcp_running',
+      workspaceId: WS_A,
+      ownerId: 'owner-a',
+      status: 'running',
+      force: false,
+      startedAt: '2026-11-01T00:00:00.000Z',
+      progressAt: '2026-11-01T00:00:00.000Z',
+    }] });
+    await writeFile(filePath, persisted);
+
+    // Far past the stuck-job window: the runtime reaps on admission, but a
+    // second process must not rewrite a ledger it does not own.
+    const store = new ThaiRagIndexJobStore(dataRoot, () => new Date('2026-11-01T05:00:00.000Z'), {
+      stuckJobTimeoutMs: 60_000,
+    });
+    const listing = await store.listForOperator();
+    expect(listing.jobs).toEqual([expect.objectContaining({ jobId: 'idx_umcp_running', status: 'running' })]);
+    expect(await readFile(filePath, 'utf8')).toBe(persisted);
+
+    const emptyRoot = await root();
+    const missing = new ThaiRagIndexJobStore(emptyRoot);
+    await expect(missing.listForOperator()).resolves.toEqual({
+      jobs: [],
+      totalRowCount: 0,
+      matchingRowCount: 0,
+      legacyRowCount: 0,
+    });
+    await expect(readFile(path.join(emptyRoot, 'thai-rag', 'index-jobs.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses to report a ledger it cannot parse instead of printing an empty history', async () => {
+    const dataRoot = await root();
+    const filePath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, '{ not json');
+    const store = new ThaiRagIndexJobStore(dataRoot);
+    await expect(store.listForOperator()).rejects.toThrow();
+  });
+});

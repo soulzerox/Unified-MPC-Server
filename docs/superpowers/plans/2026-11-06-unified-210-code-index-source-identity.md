@@ -100,9 +100,10 @@ or picks among refs.
   `admitted: true` binds the returned `baseManifestId`. `admitted: false` is
   **not** a store error and must not block indexing: Goal creation deliberately
   succeeds with no pin when the base was not the live canonical ref
-  (`no_canonical_ref`, `commit_not_live`, `repository_mismatch`), and
-  `rebaseStaleBase` advances `baseRevision` without re-pinning the overlay.
-  Neither case has a re-pin path in this slice, so the request proceeds unbound
+  (`no_canonical_ref`, `commit_not_live`, `repository_mismatch`). Since rollout
+  step 4, `rebaseStaleBase` advances `baseRevision` and re-pins the overlay at
+  the new base when that commit is live; a creation-time skip still has no
+  re-pin path. In both unadmitted cases the request proceeds unbound
   (expectations only once §3's skip rule is released), sends no
   `source_identity`, and records `canonical_binding: 'goal_unadmitted'` plus
   the admission reason. Only a genuinely missing overlay is `goal_unadmitted`;
@@ -447,8 +448,15 @@ Provider side (follow-up in thai-rag-mcp):
 3. This repo: resolver, workspace plumbing (`lifecycleKind`/`goalId`,
    `dirtyState`), adapter wiring, tests. No expectations are sent until step 2 is
    released; then scoped expectations, then full expectations.
-4. Goal re-pin on `rebaseStaleBase` so an advanced base can bind again; until
-   then a drifted Goal indexes unbound and records `goal_unadmitted`.
+4. *(landed 2026-11-07)* Goal re-pin on `rebaseStaleBase` so an advanced base
+   can bind again: after the completion receipt is durable, the service
+   re-pins the overlay at the new base commit through the existing admission
+   port and reports `pinned` / `skipped` / `failed` on `REBASED`. A skip is
+   ordinary — the live canonical ref may not have advanced to the new base
+   yet — and a store failure never downgrades a completed rebase. The guarded
+   rebase itself is not yet exposed as an MCP operation, so the re-pin becomes
+   observable when that surface lands; a drifted Goal still indexes unbound and
+   records `goal_unadmitted` until then.
 5. *(landed 2026-11-07)* Route `startWorkspaceAdmissionIndex` through the same
    resolver, so automatic admission generations are anchored too. The trial and
    the delta send the identity and fence, the completed local job records

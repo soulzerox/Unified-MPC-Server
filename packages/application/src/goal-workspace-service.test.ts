@@ -101,6 +101,7 @@ interface GuardedRebaseHarnessOptions {
   readonly failStartedReceiptCas?: boolean;
   readonly rebaseResult?: Result<GitGuardedRebaseResult>;
   readonly expireLeaseAfterRebase?: boolean;
+  readonly canonicalAdmission?: GoalCanonicalAdmissionPort;
 }
 
 interface GuardedRebaseHarness {
@@ -204,7 +205,10 @@ function guardedRebaseHarness(options: GuardedRebaseHarnessOptions = {}): Guarde
   });
   return {
     repository,
-    service: new GoalWorkspaceService(repository, git, { now: () => new Date('2026-09-23T00:30:00.000Z') }),
+    service: new GoalWorkspaceService(repository, git, {
+      now: () => new Date('2026-09-23T00:30:00.000Z'),
+      ...(options.canonicalAdmission === undefined ? {} : { canonicalAdmission: options.canonicalAdmission }),
+    }),
     head, oldBase, newBase, newHead, lease, admission, receipts, invalidationReasons,
     guardedRebaseCalls: () => guardedRebaseCalls,
   };
@@ -785,6 +789,108 @@ describe('GoalWorkspaceService', () => {
     expect(harness.receipts[1]).toMatchObject({
       resultHead: harness.newHead, failureReason: 'workspace_metadata_update_failed',
     });
+  });
+
+  it('re-pins the canonical Goal base at the rebased base and reports the pin outcome', async () => {
+    const pinned: Array<{ goalWorkspaceId: string; commitSha: string; worktreePath: string; baseBranch: string }> = [];
+    const harness = guardedRebaseHarness({
+      canonicalAdmission: {
+        pinBaseAtCommit: async (input) => {
+          pinned.push(input);
+          return { status: 'pinned', baseManifestId: 'manifest-new-base' };
+        },
+        releaseBase: async (): Promise<void> => undefined,
+      },
+    });
+    const result = await harness.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: harness.lease.leaseId, generation: harness.lease.generation },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        status: 'REBASED', newBaseSha: harness.newBase,
+        canonicalAdmission: { status: 'pinned', baseManifestId: 'manifest-new-base' },
+      },
+    });
+    expect(pinned).toEqual([{
+      goalWorkspaceId: 'goal-workspace-1',
+      commitSha: harness.newBase,
+      worktreePath: '/goal',
+      baseBranch: 'main',
+    }]);
+    expect(harness.receipts.map((receipt) => receipt.status)).toEqual(['started', 'completed']);
+  });
+
+  it('keeps a completed rebase when the canonical re-pin is skipped or fails', async () => {
+    const skipped = guardedRebaseHarness({
+      canonicalAdmission: {
+        pinBaseAtCommit: async () => ({ status: 'skipped', reason: 'commit_not_live' }),
+        releaseBase: async (): Promise<void> => undefined,
+      },
+    });
+    const skippedResult = await skipped.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: skipped.lease.leaseId, generation: skipped.lease.generation },
+    });
+
+    expect(skippedResult).toMatchObject({
+      ok: true,
+      value: { status: 'REBASED', canonicalAdmission: { status: 'skipped', reason: 'commit_not_live' } },
+    });
+    expect(skipped.receipts.map((receipt) => receipt.status)).toEqual(['started', 'completed']);
+
+    const failed = guardedRebaseHarness({
+      canonicalAdmission: {
+        pinBaseAtCommit: async (): Promise<never> => { throw new Error('store unavailable'); },
+        releaseBase: async (): Promise<void> => undefined,
+      },
+    });
+    const failedResult = await failed.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: failed.lease.leaseId, generation: failed.lease.generation },
+    });
+
+    expect(failedResult).toMatchObject({
+      ok: true,
+      value: { status: 'REBASED', canonicalAdmission: { status: 'failed', reason: 'store unavailable' } },
+    });
+    expect(failed.receipts.map((receipt) => receipt.status)).toEqual(['started', 'completed']);
+  });
+
+  it('does not re-pin when the rebase requires recovery or the runtime has no port', async () => {
+    let calls = 0;
+    const recovering = guardedRebaseHarness({
+      expireLeaseAfterRebase: true,
+      canonicalAdmission: {
+        pinBaseAtCommit: async () => {
+          calls += 1;
+          return { status: 'pinned', baseManifestId: 'unexpected' };
+        },
+        releaseBase: async (): Promise<void> => undefined,
+      },
+    });
+    const recovered = await recovering.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: recovering.lease.leaseId, generation: recovering.lease.generation },
+    });
+
+    expect(recovered).toMatchObject({
+      ok: true, value: { status: 'RECOVERY_REQUIRED', reason: 'workspace_metadata_update_failed' },
+    });
+    expect(calls).toBe(0);
+
+    const withoutPort = guardedRebaseHarness();
+    const result = await withoutPort.service.rebaseStaleBase({
+      goalId: 'goal-1', expectedAdmissionGeneration: 4,
+      lease: { leaseId: withoutPort.lease.leaseId, generation: withoutPort.lease.generation },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.status).toBe('REBASED');
+    expect('canonicalAdmission' in result.value).toBe(false);
   });
 
   it('creates a durable Goal Workspace from an explicit base revision and branch', async () => {

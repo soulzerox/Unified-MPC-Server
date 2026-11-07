@@ -24,7 +24,7 @@ const QUOTE_CLOSES_BEFORE = new Set([' ', '\t', '\n', '\r', '.', ',', ';', ':', 
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
 const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 /** A truncated quoted path still starts with a local absolute token. */
-const PATH_START = /^(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
+const PATH_START = /^(?:(?:file|path):\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
 
 type QuoteCharacter = "'" | '"';
 
@@ -72,7 +72,11 @@ function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content
   const positions = scan.positions[quote];
   const last = positions[positions.length - 1];
   if (last !== undefined && last > start) {
-    return { content: text.slice(start + 1, last), end: last + 1 };
+    const content = text.slice(start + 1, last);
+    // A widened span that begins with a safe URL is adjacent quoted tokens,
+    // not one path; leave the opener so the scan redacts the inner token.
+    if (SAFE_URL.test(content) && /["']/.test(content)) return undefined;
+    return { content, end: last + 1 };
   }
   // No same quote follows. A local path token directly after the opener still
   // means the quoted path was truncated, so redact the remainder.
@@ -95,8 +99,8 @@ function redactQuotedPaths(text: string): string {
     }
     const span = quotedPathSpan(text, index, scan);
     if (span === undefined) {
-      // No same quote or path token follows, so this one is literal. Keep
-      // scanning: the rest can still hold a quoted path with the other quote.
+      // This opener starts no single path span, so treat it as literal. Keep
+      // scanning: a later quote can still open a redactable path.
       output += quote;
       index += 1;
       continue;

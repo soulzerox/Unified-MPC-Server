@@ -103,6 +103,51 @@ describe('index job history projection', () => {
     expect(projected.jobs[0]).toMatchObject({ status: 'failed', error: 'Provider crashed while embedding' });
   });
 
+  it('redacts host paths and job-id tokens from terminal failure text', () => {
+    expect(sanitizeIndexJobError("ENOENT: no such file or directory, open '/home/alpha/Unified MPC/src/a.ts'"))
+      .toBe("ENOENT: no such file or directory, open '<path>'");
+    expect(sanitizeIndexJobError("cannot read 'file:///home/alpha/a b.ts'"))
+      .toBe("cannot read '<path>'");
+    expect(sanitizeIndexJobError('cannot read file:///home/alpha/secret.ts now'))
+      .toBe('cannot read <path> now');
+    expect(sanitizeIndexJobError('spawn C:\\Users\\alpha\\code ENOENT'))
+      .toBe('spawn <path> ENOENT');
+    expect(sanitizeIndexJobError('open \\\\server\\share\\a.ts failed'))
+      .toBe('open <path> failed');
+    expect(sanitizeIndexJobError('cannot open /home/alpha/secret.ts for reading'))
+      .toBe('cannot open <path> for reading');
+    expect(sanitizeIndexJobError('fetch https://example.com/a/b failed'))
+      .toBe('fetch https://example.com/a/b failed');
+    expect(sanitizeIndexJobError("failed at 'https://example.com/a/b'"))
+      .toBe("failed at 'https://example.com/a/b'");
+    expect(sanitizeIndexJobError("tracking 'refs/remotes/origin/main' is stale"))
+      .toBe("tracking 'refs/remotes/origin/main' is stale");
+    expect(sanitizeIndexJobError('cancel failed for idx_e92d1940'))
+      .toBe('cancel failed for <job-id>');
+  });
+
+  it('projects a failed row without its host path or provider job id', () => {
+    const projected = projectIndexJobHistory(listing([{
+      jobId: 'idx_umcp_failed',
+      workspaceId,
+      status: 'failed',
+      force: false,
+      startedAt: '2026-11-01T00:00:00.000Z',
+      finishedAt: '2026-11-01T00:05:00.000Z',
+      error: "Native Thai-RAG index_status failed: open '/home/alpha/My Repos/a.ts' (job idx_e92d1940)",
+    }]));
+
+    expect(projected.jobs[0]).toMatchObject({
+      jobId: 'idx_umcp_failed',
+      status: 'failed',
+      error: "Native Thai-RAG index_status failed: open '<path>' (job <job-id>)",
+    });
+    const serialized = JSON.stringify(projected);
+    expect(serialized).not.toContain('/home/alpha');
+    expect(serialized).not.toContain('idx_e92d1940');
+    expect(serialized).toContain('idx_umcp_failed');
+  });
+
   it('never lists a legacy-unavailable row and keeps the listing counts', () => {
     const projected = projectIndexJobHistory(listing([
       { jobId: 'legacy-row', workspaceId: 'legacy-unavailable', status: 'legacy-unavailable', force: false },

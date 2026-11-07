@@ -9,19 +9,22 @@ const JOB_ID_PLACEHOLDER = '<job-id>';
  * follow a token boundary (a backslash escape counts) so an apostrophe inside a
  * word cannot start a match. The segment ends at the next same quote that is
  * followed by a token terminator or the end of the text; when no terminator
- * follows any same quote, the first same quote still closes it, so a suffix or
- * possessive after a path cannot leak the tail. An internal quote keeps
- * `O'Brien` inside one quoted path. That closing boundary is deliberately wider
- * than the token stops used below (`}` and `!` count), because a quoted path
- * usually arrives inside a JSON snippet or a sentence. A quote with no same
- * quote after it is literal text: the scan continues, so an unmatched
- * apostrophe cannot hide the next quoted path. Exact Git refs and non-file URLs
- * are diagnostics the operator surface deliberately keeps.
+ * follows any same quote, the last same quote still closes it, so an internal
+ * apostrophe plus a suffix or possessive after a path cannot leak the tail. An
+ * internal quote keeps `O'Brien` inside one quoted path. That closing boundary
+ * is deliberately wider than the token stops used below (`}` and `!` count),
+ * because a quoted path usually arrives inside a JSON snippet or a sentence. An
+ * opener with no same quote after it is literal text and the scan continues,
+ * unless a local path token follows it after optional whitespace; that
+ * truncated path is redacted through the end of the text. Exact Git refs and
+ * non-file URLs are diagnostics the operator surface deliberately keeps.
  */
 const QUOTE_OPENS_AFTER = new Set([' ', '\t', '\n', '\r', '(', '=', '"', "'", '`', '[', '{', ',', ';', ':', '\\']);
 const QUOTE_CLOSES_BEFORE = new Set([' ', '\t', '\n', '\r', '.', ',', ';', ':', ')', ']', '}', '>', '!', '?', '|']);
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
 const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
+/** A truncated quoted path still starts with a local absolute token. */
+const PATH_START = /^(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
 
 type QuoteCharacter = "'" | '"';
 
@@ -62,10 +65,19 @@ function scanQuotes(text: string): QuoteScan {
 function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content: string; end: number } | undefined {
   const quote = text[start];
   if (quote !== "'" && quote !== '"') return undefined;
-  const cursor = firstIndexAfter(scan.terminators[quote], start)
-    ?? firstIndexAfter(scan.positions[quote], start);
-  if (cursor === undefined) return undefined;
-  return { content: text.slice(start + 1, cursor), end: cursor + 1 };
+  const terminator = firstIndexAfter(scan.terminators[quote], start);
+  if (terminator !== undefined) {
+    return { content: text.slice(start + 1, terminator), end: terminator + 1 };
+  }
+  const positions = scan.positions[quote];
+  const last = positions[positions.length - 1];
+  if (last !== undefined && last > start) {
+    return { content: text.slice(start + 1, last), end: last + 1 };
+  }
+  // No same quote follows. A local path token directly after the opener still
+  // means the quoted path was truncated, so redact the remainder.
+  const remainder = text.slice(start + 1);
+  return PATH_START.test(remainder.trimStart()) ? { content: remainder, end: text.length } : undefined;
 }
 
 function redactQuotedPaths(text: string): string {
@@ -83,8 +95,8 @@ function redactQuotedPaths(text: string): string {
     }
     const span = quotedPathSpan(text, index, scan);
     if (span === undefined) {
-      // No same quote follows, so this one is literal. Keep scanning: the rest
-      // of the text can still hold a quoted path with the other quote.
+      // No same quote or path token follows, so this one is literal. Keep
+      // scanning: the rest can still hold a quoted path with the other quote.
       output += quote;
       index += 1;
       continue;

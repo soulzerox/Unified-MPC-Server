@@ -161,6 +161,17 @@ describe('index job history projection', () => {
       .toBe('open \\"<path>" failed');
   });
 
+  it('redacts the residual malformed-quote forms from the #687 review', () => {
+    expect(sanitizeIndexJobError("open '/home/O'Brien Repo/a.ts's copy"))
+      .toBe("open '<path>'s copy");
+    expect(sanitizeIndexJobError("open '/home/My Repo/a.ts"))
+      .toBe("open '<path>'");
+    expect(sanitizeIndexJobError("open ' /home/My Repo/a.ts"))
+      .toBe("open '<path>'");
+    expect(sanitizeIndexJobError("open 'C:\\Users\\My Name\\x.ts"))
+      .toBe("open '<path>'");
+  });
+
   it('never spans two adjacent quoted tokens', () => {
     expect(sanitizeIndexJobError("see 'note' at 'https://example.com/a/b'"))
       .toBe("see 'note' at 'https://example.com/a/b'");

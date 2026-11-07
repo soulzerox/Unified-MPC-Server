@@ -101,9 +101,11 @@ or picks among refs.
   **not** a store error and must not block indexing: Goal creation deliberately
   succeeds with no pin when the base was not the live canonical ref
   (`no_canonical_ref`, `commit_not_live`, `repository_mismatch`). Since rollout
-  step 4, `rebaseStaleBase` advances `baseRevision` and re-pins the overlay at
-  the new base when that commit is live; a creation-time skip still has no
-  re-pin path. In both unadmitted cases the request proceeds unbound
+  step 4, a durably completed `rebaseStaleBase` advances `baseRevision` and
+  re-pins the overlay at the new base when that commit is live. The guarded
+  rebase is not yet exposed as an MCP operation, though, so a creation-time
+  skip still has no automatic re-pin path: it binds again only after such a
+  rebase runs. In both unadmitted cases the request proceeds unbound
   (expectations only once §3's skip rule is released), sends no
   `source_identity`, and records `canonical_binding: 'goal_unadmitted'` plus
   the admission reason. Only a genuinely missing overlay is `goal_unadmitted`;
@@ -476,8 +478,9 @@ Provider side (follow-up in thai-rag-mcp):
   new verification fields are optional so existing `schemaVersion: 1` records
   keep parsing.
 - No change to GC, admission, leases or the maintenance cycle.
-- No Goal overlay re-pin on `rebaseStaleBase` in this slice; an unadmitted Goal
-  indexes unbound (`goal_unadmitted`) until that follow-up lands.
+- No automatic Goal overlay re-pin outside a guarded rebase; a creation-time
+  skip keeps indexing unbound (`goal_unadmitted`) until a `rebaseStaleBase`
+  re-pins it at a live base.
 - No WebUI projection here; §11 owns that.
 
 Refs #210.

@@ -1089,7 +1089,7 @@ describe('CLI execution dispatcher', () => {
     const output: string[] = [];
     const code = await runCli(['index', 'revision', 'list'], {
       ...baseDependencies,
-      canonicalRevisionList: async () => ({ revisions: [revision] }),
+      canonicalRevisionList: async () => ({ revisions: [revision], total: 1 }),
       write: (text) => output.push(text),
     });
     expect(code).toBe(0);
@@ -1102,7 +1102,7 @@ describe('CLI execution dispatcher', () => {
     const empty: string[] = [];
     const emptyCode = await runCli(['index', 'revision', 'list'], {
       ...baseDependencies,
-      canonicalRevisionList: async () => ({ revisions: [] }),
+      canonicalRevisionList: async () => ({ revisions: [], total: 0 }),
       write: (text) => empty.push(text),
     });
     expect(emptyCode).toBe(0);
@@ -1111,11 +1111,11 @@ describe('CLI execution dispatcher', () => {
     const json: string[] = [];
     const jsonCode = await runCli(['index', 'revision', 'list', '--json'], {
       ...baseDependencies,
-      canonicalRevisionList: async () => ({ revisions: [revision] }),
+      canonicalRevisionList: async () => ({ revisions: [revision], total: 1 }),
       write: (text) => json.push(text),
     });
     expect(jsonCode).toBe(0);
-    expect(JSON.parse(json[0] ?? '{}')).toEqual({ revisions: [revision] });
+    expect(JSON.parse(json[0] ?? '{}')).toEqual({ revisions: [revision], total: 1 });
 
     const errors: string[] = [];
     const unavailable = await runCli(['index', 'revision', 'list'], {

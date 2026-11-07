@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,6 +62,7 @@ describe('canonical revision list projection (#210 §7)', () => {
         jobs: new IndexJobLedger(dir),
       });
       expect(report.revisions).toEqual([]);
+      expect(report.total).toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -154,6 +155,40 @@ describe('canonical revision list projection (#210 §7)', () => {
 
       const expected = [first.manifestId, second.manifestId].sort();
       expect(report.revisions.map((revision) => revision.manifestId)).toEqual(expected);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds the window before pin reads and keeps the full total', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'canon-revisions-'));
+    try {
+      const manifests = new CanonicalManifestStore(dir);
+      const pins = new RevisionPinRegistry(dir);
+      const oldest = manifestFixture('e', '2026-10-14T00:00:00.000Z');
+      const middle = manifestFixture('f', '2026-10-15T00:00:00.000Z');
+      const newest = manifestFixture('a', '2026-10-16T00:00:00.000Z');
+      for (const fixture of [oldest, middle, newest]) await putManifest(manifests, fixture);
+      const listSpy = vi.spyOn(pins, 'list');
+
+      const report = await canonicalRevisionList({
+        refs: new CanonicalRefStore(dir),
+        manifests,
+        pins,
+        overlays: new GoalOverlayStore(dir),
+        jobs: new IndexJobLedger(dir),
+      }, { limit: 2 });
+
+      expect(report.total).toBe(3);
+      expect(report.revisions.map((revision) => revision.manifestId)).toEqual([
+        newest.manifestId,
+        middle.manifestId,
+      ]);
+      // The pruned manifest is never read: the limit applies before pin I/O.
+      expect(listSpy.mock.calls.map(([manifestId]) => manifestId)).toEqual([
+        newest.manifestId,
+        middle.manifestId,
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

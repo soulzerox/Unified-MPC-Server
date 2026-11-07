@@ -166,7 +166,13 @@ export interface CanonicalLifecycleSnapshot {
   readonly gc: unknown;
 }
 
-export type CanonicalLifecycleProbe = () => Promise<CanonicalLifecycleSnapshot>;
+/** The WebUI lifecycle card is bounded; `?limit=` may not exceed this. */
+export const CANONICAL_LIFECYCLE_MAX_LIMIT = 200;
+
+export type CanonicalLifecycleProbe = (options?: {
+  /** Bound on revisions and quarantine rows; the probe applies its own default/cap. */
+  readonly limit?: number;
+}) => Promise<CanonicalLifecycleSnapshot>;
 
 export type GatewayPersistenceLoadState = 'never_configured' | 'loaded' | 'partial' | 'load_failed';
 export interface GatewayPersistenceStatus {
@@ -645,6 +651,15 @@ export class ControlPlaneServer {
       // error is copied out, because it can name a local path.
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Content-Type', 'application/json');
+      const rawLimits = url.searchParams.getAll('limit');
+      const rawLimit = rawLimits[0] ?? null;
+      // Only one plain decimal in range is accepted; `0`, `+1`, `1.0`, `201`
+      // and repeated parameters are rejected before the store is touched.
+      if (rawLimits.length > 1
+        || (rawLimit !== null && (!/^[1-9][0-9]{0,2}$/.test(rawLimit) || Number(rawLimit) > CANONICAL_LIFECYCLE_MAX_LIMIT))) {
+        sendJsonError(res, 400, `limit must be an integer from 1 to ${CANONICAL_LIFECYCLE_MAX_LIMIT}`);
+        return;
+      }
       if (this.canonicalLifecycleProbe === undefined) {
         res.statusCode = 503;
         res.end(JSON.stringify({
@@ -655,7 +670,7 @@ export class ControlPlaneServer {
         return;
       }
       try {
-        const snapshot = await this.canonicalLifecycleProbe();
+        const snapshot = await this.canonicalLifecycleProbe(rawLimit === null ? {} : { limit: Number(rawLimit) });
         res.statusCode = 200;
         res.end(JSON.stringify({
           available: true,
@@ -2260,7 +2275,7 @@ export function summarizeRagIndexJobs(value: unknown): WebRagIndexJobSummary {
     const ownerId = typeof job.ownerId === 'string' ? job.ownerId.trim() : '';
     const workspaceId = typeof job.workspaceId === 'string' ? job.workspaceId : '';
     const status = String(job.status);
-    const canonicalWorkspace = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspaceId);
+    const canonicalWorkspace = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(workspaceId);
     const knownStatus = ['running', 'cancelling', 'completed', 'cancelled', 'failed', 'interrupted'].includes(status);
     // Mirror ThaiRagIndexJobStore.parseJob: a row without an owner, a canonical
     // workspace or a known status is pre-contract even before the store has

@@ -1459,7 +1459,7 @@ export function createStdioMcpRuntime(
         jobs: new IndexJobLedger(canonicalRoot),
       });
     },
-    canonicalRevisionList: async () => {
+    canonicalRevisionList: async (options) => {
       assertStorageIdentitySafe(dataPath);
       const canonicalRoot = path.join(dataPath, 'canonical');
       return canonicalRevisionList({
@@ -1468,7 +1468,7 @@ export function createStdioMcpRuntime(
         pins: new RevisionPinRegistry(canonicalRoot),
         overlays: new GoalOverlayStore(canonicalRoot),
         jobs: new IndexJobLedger(canonicalRoot),
-      });
+      }, options);
     },
     canonicalGcStatus: async () => {
       assertStorageIdentitySafe(dataPath);

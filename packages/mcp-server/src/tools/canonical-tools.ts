@@ -74,12 +74,15 @@ export function canonicalTools(context: McpToolContext): McpToolDefinition[] {
         const list = context.services.canonicalRevisionList;
         if (list === undefined) return missingService();
         try {
-          const report = await list();
           const limit = input.limit ?? DEFAULT_REVISION_LIST_LIMIT;
+          const report = await list({ limit });
+          // The service is asked to apply the bound, but a port implementation
+          // that ignores it must not turn the advertised response into the whole
+          // store, so the tool slices again. `total` still reports the store count.
           const revisions = report.revisions.slice(0, limit);
           return ok({
             scope: 'canonical-store',
-            total: report.revisions.length,
+            total: report.total,
             returned: revisions.length,
             revisions,
           });

@@ -28,8 +28,18 @@ export interface CanonicalRevisionSummary {
   readonly indexJobOperationIds: readonly string[];
 }
 
+export interface CanonicalRevisionListOptions {
+  /**
+   * Keep at most this many revisions after sorting. Omitted means every stored
+   * manifest. Pin reads are performed only for the retained window.
+   */
+  readonly limit?: number;
+}
+
 export interface CanonicalRevisionListReport {
   readonly revisions: readonly CanonicalRevisionSummary[];
+  /** Full manifest count before `limit` was applied, so truncation is visible. */
+  readonly total: number;
 }
 
 function push<T>(map: Map<string, T[]>, key: string, value: T): void {
@@ -54,11 +64,14 @@ function sorted(map: Map<string, string[]>, key: string): string[] {
  *
  * Newest manifest first by `createdAt`, with the manifest id as a deterministic
  * tiebreak so two manifests written in the same millisecond still list in a
- * stable order. A manifest whose file cannot be parsed is not listed; the store
+ * stable order. The sort happens before any pin read, and `limit` slices before
+ * the pin reads, so a bounded projection never pays I/O for a manifest it will
+ * not return. A manifest whose file cannot be parsed is not listed; the store
  * skipping it is the same behaviour `listAll()` already has.
  */
 export async function canonicalRevisionList(
   deps: CanonicalRevisionListDeps,
+  options: CanonicalRevisionListOptions = {},
 ): Promise<CanonicalRevisionListReport> {
   const [manifests, refStates, overlayIds, jobs] = await Promise.all([
     deps.manifests.listAll(),
@@ -66,6 +79,15 @@ export async function canonicalRevisionList(
     deps.overlays.listIds(),
     deps.jobs.list(),
   ]);
+
+  const ordered = [...manifests].sort((left, right) => {
+    if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? 1 : -1;
+    return left.manifestId < right.manifestId ? -1 : left.manifestId > right.manifestId ? 1 : 0;
+  });
+  const limit = options.limit !== undefined && Number.isFinite(options.limit)
+    ? Math.max(0, Math.trunc(options.limit))
+    : undefined;
+  const retained = limit === undefined ? ordered : ordered.slice(0, limit);
 
   const refsByManifest = new Map<string, string[]>();
   for (const { ref, state } of refStates) push(refsByManifest, state.manifestId, ref);
@@ -81,7 +103,7 @@ export async function canonicalRevisionList(
   for (const job of jobs) push(jobsByManifest, job.manifestId, job.operationId);
 
   const revisions: CanonicalRevisionSummary[] = [];
-  for (const manifest of manifests) {
+  for (const manifest of retained) {
     const pins = await deps.pins.list(manifest.manifestId);
     revisions.push({
       manifestId: manifest.manifestId,
@@ -99,9 +121,5 @@ export async function canonicalRevisionList(
     });
   }
 
-  revisions.sort((left, right) => {
-    if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? 1 : -1;
-    return left.manifestId < right.manifestId ? -1 : left.manifestId > right.manifestId ? 1 : 0;
-  });
-  return { revisions };
+  return { revisions, total: ordered.length };
 }

@@ -263,7 +263,7 @@ export interface CliDependencies {
     readonly limit?: number;
   }): Promise<ThaiRagIndexJobListing>;
   canonicalLogicalSpace?(): Promise<LogicalSpaceReport>;
-  canonicalRevisionList?(): Promise<CanonicalRevisionListReport>;
+  canonicalRevisionList?(options?: { readonly limit?: number }): Promise<CanonicalRevisionListReport>;
   canonicalRevisionPin?(input: {
     readonly action: 'pin' | 'unpin';
     readonly manifestId: string;
@@ -1197,7 +1197,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       // operator surface must not migrate, reap or persist a snapshot.
       return new ThaiRagIndexJobStore(dataPath).listForOperator(input);
     },
-    canonicalRevisionList: async (): Promise<CanonicalRevisionListReport> => {
+    canonicalRevisionList: async (options): Promise<CanonicalRevisionListReport> => {
       const dataPath = resolveDataPathFromShared();
       assertStorageIdentitySafe(dataPath);
       const root = path.join(dataPath, 'canonical');
@@ -1207,7 +1207,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         jobs: new IndexJobLedger(root),
-      });
+      }, options);
     },
     canonicalLogicalSpace: async (): Promise<LogicalSpaceReport> => {
       const dataPath = resolveDataPathFromShared();

@@ -15,6 +15,7 @@ import {
   createCanonicalStatusProbe,
   createGoalControl,
   createWebGoalRuntimeProjection,
+  resolveCanonicalLifecycleLimit,
   runWeb,
   parseWebArgs,
 } from './web.js';
@@ -76,6 +77,21 @@ describe('web CLI command', () => {
   });
 
   describe('canonical lifecycle probe', () => {
+    it('resolves the requested limit to a bounded integer', () => {
+      // Omitted, non-finite and non-numeric input all fall back to the default.
+      expect(resolveCanonicalLifecycleLimit(undefined)).toBe(50);
+      expect(resolveCanonicalLifecycleLimit(Number.NaN)).toBe(50);
+      expect(resolveCanonicalLifecycleLimit(Number.POSITIVE_INFINITY)).toBe(50);
+      // The window is clamped to at least one row and at most the route cap.
+      expect(resolveCanonicalLifecycleLimit(0)).toBe(1);
+      expect(resolveCanonicalLifecycleLimit(-5)).toBe(1);
+      expect(resolveCanonicalLifecycleLimit(2)).toBe(2);
+      expect(resolveCanonicalLifecycleLimit(12.9)).toBe(12);
+      expect(resolveCanonicalLifecycleLimit(200)).toBe(200);
+      expect(resolveCanonicalLifecycleLimit(201)).toBe(200);
+      expect(resolveCanonicalLifecycleLimit(10_000)).toBe(200);
+    });
+
     it('projects revision history and GC status from the canonical store rooted at the data path', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-lifecycle-'));
       try {
@@ -102,6 +118,7 @@ describe('web CLI command', () => {
         const snapshot = await createCanonicalLifecycleProbe(root)();
 
         expect(snapshot.revisions).toMatchObject({
+          total: 1,
           revisions: [{
             manifestId,
             entryCount: 1,
@@ -115,6 +132,7 @@ describe('web CLI command', () => {
           lease: { status: 'free' },
           quarantine: {
             total: 1,
+            returned: 1,
             rows: [{
               target: { kind: 'artifact-key', repositoryId: 'repo_abc123', artifactKey },
               graceMs: 1_000,
@@ -122,6 +140,51 @@ describe('web CLI command', () => {
             }],
           },
         });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('bounds revisions and quarantine rows while keeping the full counts', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-lifecycle-'));
+      try {
+        const canonicalRoot = path.join(root, 'canonical');
+        const manifests = new CanonicalManifestStore(canonicalRoot);
+        const keys: string[] = [];
+        const seeds: ReadonlyArray<readonly [string, string]> = [
+          ['a', '2026-11-01T00:00:00.000Z'],
+          ['b', '2026-11-02T00:00:00.000Z'],
+          ['c', '2026-11-03T00:00:00.000Z'],
+        ];
+        for (const [seed, createdAt] of seeds) {
+          const entries = [{ path: `${seed}.ts`, contentHash: seed.repeat(64) }];
+          const revisionId = 'rev:v1:' + seed.repeat(64);
+          await manifests.put({
+            manifestId: canonicalManifestId({ repositoryId: 'repo_abc123', revisionId, entries }),
+            repositoryId: 'repo_abc123',
+            revisionId,
+            commitSha: seed.repeat(40),
+            treeOid: seed.repeat(40),
+            targetRef: 'refs/remotes/origin/main',
+            entries,
+            createdAt,
+          });
+          keys.push('file:v1:' + seed.repeat(64));
+        }
+        await new ArtifactQuarantineStore(canonicalRoot).quarantine(
+          keys.map((artifactKey) => ({ kind: 'artifact-key' as const, repositoryId: 'repo_abc123', artifactKey })),
+          { now: new Date('2026-11-04T00:00:00.000Z'), graceMs: 1_000 },
+        );
+
+        const snapshot = await createCanonicalLifecycleProbe(root)({ limit: 2 });
+        const revisions = snapshot.revisions as { total: number; revisions: readonly unknown[] };
+        const gc = snapshot.gc as { quarantine: { total: number; returned: number; rows: readonly unknown[] } };
+
+        expect(revisions.total).toBe(3);
+        expect(revisions.revisions).toHaveLength(2);
+        expect(gc.quarantine.total).toBe(3);
+        expect(gc.quarantine.returned).toBe(2);
+        expect(gc.quarantine.rows).toHaveLength(2);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

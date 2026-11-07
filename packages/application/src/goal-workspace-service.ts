@@ -298,6 +298,12 @@ export class GoalWorkspaceService {
       || (workspace.branchName !== undefined && snapshot.branch !== workspace.branchName)) {
       return err(appError('CONFLICT', 'Workspace HEAD, base, or branch changed since the admission checkpoint', true));
     }
+    // `observeWorkspace` echoes the observation ref (the workspace base SHA) as
+    // `baseRef`. The durable receipt must instead keep the workspace base
+    // *policy* ref when it moves (for example origin/main), so later truth
+    // reads, admission recovery, and the guarded rebase compare like for like.
+    // The exact observed commit stays in resolvedBaseSha.
+    const admissionBaseRef = workspace.baseRef ?? snapshot.baseRef;
     if (this.repository.getAdmissionReceipt === undefined || this.repository.compareAndSwapAdmissionReceipt === undefined) {
       return err(appError('CONFLICT', 'Durable admission receipt storage is unavailable', true));
     }
@@ -317,7 +323,7 @@ export class GoalWorkspaceService {
       ...(snapshot.branch === null ? {} : { branchName: snapshot.branch }),
       expectedWorkspaceHead: request.checkpointHead,
       observedWorkspaceHead: snapshot.head,
-      ...(snapshot.baseRef === undefined ? {} : { baseRef: snapshot.baseRef }),
+      ...(admissionBaseRef === undefined ? {} : { baseRef: admissionBaseRef }),
       ...(isCommitSha(workspace.baseRevision) ? { expectedBaseSha: workspace.baseRevision } : {}),
       resolvedBaseSha: snapshot.baseSha,
       ...(snapshot.remoteGoalRef === undefined ? {} : { remoteGoalRef: snapshot.remoteGoalRef }),

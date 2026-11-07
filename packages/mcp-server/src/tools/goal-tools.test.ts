@@ -19,7 +19,7 @@ describe('durable goal MCP tools', () => {
   it('publishes typed schemas and safe permission annotations', () => {
     const context = { actor, contextEconomy: new ContextEconomyRuntime(), services: {} } as McpToolContext;
     const byName = new Map(goalTools(context).map((entry) => [entry.name, entry]));
-    expect([...byName.keys()]).toEqual(['run_goal', 'retry_goal_workspace_admission', 'get_goal', 'checkpoint_goal', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'reconcile_goal_worktrees', 'list_goals']);
+    expect([...byName.keys()]).toEqual(['run_goal', 'retry_goal_workspace_admission', 'rebase_goal_workspace', 'get_goal', 'checkpoint_goal', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'reconcile_goal_worktrees', 'list_goals']);
     expect(byName.get('reconcile_goal_worktrees')).toMatchObject({
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -30,6 +30,19 @@ describe('durable goal MCP tools', () => {
     expect(byName.get('reconcile_goal_worktrees')?.parse({ workspaceId: 'workspace-1', apply: true })).toMatchObject({ ok: false });
     expect(byName.get('run_goal')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
     expect(byName.get('retry_goal_workspace_admission')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false } });
+    expect(byName.get('rebase_goal_workspace')).toMatchObject({ permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: true } });
+    expect(byName.get('rebase_goal_workspace')?.description).toContain('BASE_STALE');
+    expect(byName.get('rebase_goal_workspace')?.description).toContain('durable goal checkpoint');
+    expect(byName.get('rebase_goal_workspace')?.parse({
+      workspaceId: 'workspace-1', goalId: 'goal-1', leaseToken: 'lease-token', leaseGeneration: 1, expectedAdmissionGeneration: 2,
+    })).toMatchObject({ ok: true });
+    expect(byName.get('rebase_goal_workspace')?.parse({
+      workspaceId: 'workspace-1', goalId: 'goal-1', leaseToken: 'lease-token', leaseGeneration: 1,
+    })).toMatchObject({ ok: false });
+    expect(byName.get('rebase_goal_workspace')?.parse({
+      workspaceId: 'workspace-1', goalId: 'goal-1', leaseToken: 'lease-token', leaseGeneration: 1,
+      expectedAdmissionGeneration: 2, force: true,
+    })).toMatchObject({ ok: false });
     expect(byName.get('get_goal')).toMatchObject({ permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false } });
     expect(byName.get('list_goals')).toMatchObject({ permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false } });
     expect(byName.get('list_goals')?.description).toContain('Returns a summary row per goal by default');
@@ -217,6 +230,60 @@ describe('durable goal MCP tools', () => {
       workspaceId: 'goal-workspace-1', goalId: 'goal-1',
       leaseToken: 'current-token', leaseGeneration: 8,
     });
+  });
+
+  it('forwards an explicit guarded rebase and flattens both safe outcomes', async () => {
+    const requests: unknown[] = [];
+    let outcome: 'REBASED' | 'RECOVERY_REQUIRED' = 'REBASED';
+    const registry = new ToolRegistry({
+      goalRunWorkspace: {
+        async rebaseRunWorkspace(_actor: unknown, request: unknown): Promise<unknown> {
+          requests.push(request);
+          return outcome === 'REBASED'
+            ? ok({
+                status: 'REBASED',
+                operationId: 'rebase-1',
+                oldHead: 'a'.repeat(40),
+                newHead: 'b'.repeat(40),
+                oldBaseSha: 'c'.repeat(40),
+                newBaseSha: 'd'.repeat(40),
+                checkpointId: 'checkpoint-1',
+                recoveryRef: 'refs/unified-mpc/recovery/rebase/rebase-1',
+                canonicalAdmission: { status: 'skipped', reason: 'commit_not_live' },
+              })
+            : ok({ status: 'RECOVERY_REQUIRED', reason: 'dirty_workspace' });
+        },
+      },
+    } as unknown as McpToolContext['services'], actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ readonly workspaceId: string; readonly rootPath: string }> => ({ workspaceId: 'parent-project', rootPath: 'E:\\parent' }),
+    });
+    const request = {
+      workspaceId: 'goal-workspace-1',
+      goalId: 'goal-1',
+      leaseToken: 'current-token',
+      leaseGeneration: 8,
+      expectedAdmissionGeneration: 3,
+    };
+
+    const rebased = await registry.invoke('rebase_goal_workspace', request);
+    expect(rebased.isError).not.toBe(true);
+    expect(rebased.structuredContent).toMatchObject({
+      outcome: 'rebased',
+      status: 'REBASED',
+      workspaceId: 'goal-workspace-1',
+      goalId: 'goal-1',
+      canonicalAdmission: { status: 'skipped', reason: 'commit_not_live' },
+    });
+
+    outcome = 'RECOVERY_REQUIRED';
+    const refused = await registry.invoke('rebase_goal_workspace', request);
+    expect(refused.isError).not.toBe(true);
+    expect(refused.structuredContent).toMatchObject({
+      outcome: 'recovery_required',
+      status: 'RECOVERY_REQUIRED',
+      reason: 'dirty_workspace',
+    });
+    expect(requests).toEqual([request, request]);
   });
 
   it('passes an exact bounded staged-recovery proof without weakening lease ownership', async () => {

@@ -544,6 +544,56 @@ describe('GoalWorkspaceService', () => {
     expect(stored).toEqual(result.ok ? result.value : null);
   });
 
+  it('keeps the moving base policy ref on an admission receipt while resolving the exact base commit', async () => {
+    const repository = new MemoryWorkspaceRepository();
+    const head = 'a'.repeat(40);
+    const base = 'b'.repeat(40);
+    repository.workspaces.push({
+      id: 'goal-workspace-1', displayName: 'Goal', rootPath: '/goal', realRootPath: '/goal', createdAt: '2026-09-23T00:00:00.000Z',
+      lifecycleKind: 'goal', goalId: 'goal-1', parentWorkspaceId: 'project-1', goalWorkspaceKind: 'git_worktree',
+      baseRef: 'origin/main', baseRevision: base, branchName: 'codex/goal-1', checkpointId: 'checkpoint-1',
+      writerLease: { leaseId: 'lease-1', ownerId: 'owner-1', generation: 3, expiresAt: '2026-09-23T01:00:00.000Z' },
+    });
+    let stored: WorkspaceAdmissionReceipt | null = null;
+    repository.getAdmissionReceipt = async (): Promise<WorkspaceAdmissionReceipt | null> => stored;
+    repository.compareAndSwapAdmissionReceipt = async (_id, expectedGeneration, _leaseGeneration, receipt): Promise<boolean> => {
+      if ((stored?.admissionGeneration ?? 0) !== expectedGeneration) return false;
+      stored = receipt;
+      return true;
+    };
+    let observedBaseRef: string | undefined;
+    const git = new FakeGitPort();
+    git.observeWorkspace = async (_cwd, options): Promise<Result<GitWorkspaceSnapshot>> => {
+      observedBaseRef = options?.baseRef;
+      return {
+        ok: true,
+        value: {
+          repositoryIdentity: 'repo-1', gitCommonDirIdentity: 'common-1', worktreeIdentity: 'worktree-1',
+          branch: 'codex/goal-1', head, statusEntries: [], stagedFingerprint: 'staged-1', dirtyFingerprint: 'dirty-1',
+          baseRef: base, baseSha: base, mergeBaseSha: base,
+        },
+      };
+    };
+    const service = new GoalWorkspaceService(repository, git, { now: (): Date => new Date('2026-09-23T00:30:00.000Z') });
+
+    const result = await service.captureAdmission({
+      workspaceId: 'goal-workspace-1', checkpointId: 'checkpoint-1', checkpointRevision: 7, checkpointHead: head,
+      workflowVersion: 1,
+      runtime: {
+        runtimeDeploymentId: 'deploy-1', runtimeGeneration: 'generation-1', runtimeBuildVersion: '4.61.0+0123456789ab',
+        runtimeBuildCommit: '0123456789abcdef0123456789abcdef01234567', runtimeBuildDirty: false,
+        runtimeProtocolGeneration: 1, runtimeStartedAt: '2026-09-23T00:00:00.000Z',
+      },
+    });
+
+    expect(observedBaseRef).toBe(base);
+    expect(result).toMatchObject({
+      ok: true,
+      value: { admissionGeneration: 1, baseRef: 'origin/main', resolvedBaseSha: base, expectedBaseSha: base, checkpointRevision: 7 },
+    });
+    expect(stored).toEqual(result.ok ? result.value : null);
+  });
+
   it('refuses an admission receipt when the workspace head no longer matches its checkpoint', async () => {
     const repository = new MemoryWorkspaceRepository();
     repository.workspaces.push({

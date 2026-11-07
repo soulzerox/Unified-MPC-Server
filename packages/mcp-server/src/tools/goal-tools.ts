@@ -72,6 +72,14 @@ const retryGoalAdmissionSchema = z.object({
   message: 'Use stagedRecovery or unstagedRecovery, not both',
 });
 
+const rebaseGoalWorkspaceSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  goalId,
+  leaseToken,
+  leaseGeneration: z.number().int().min(1),
+  expectedAdmissionGeneration: z.number().int().min(1),
+}).strict();
+
 const getGoalSchema = z.union([
   z.object({ goalId }).strict(),
   z.object({ workspaceId: z.string().min(1).max(128), goalKey }).strict(),
@@ -298,6 +306,31 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
           goalId: input.goalId,
           leaseGeneration: input.leaseGeneration,
           admissionGeneration: recovered.value.admissionGeneration,
+        });
+      },
+    }),
+    defineTool({
+      name: 'rebase_goal_workspace',
+      description: 'Explicitly remediate a BASE_STALE Goal Workspace admission by rebasing its private Goal branch onto the advanced base. Requires the exact still-valid owner lease token and generation plus the admission generation the caller observed before the base moved. The runtime rebinds the admission receipt to the latest durable goal checkpoint at the exact observed HEAD, then lets the Goal Workspace service decide. Dirty worktrees, published branches, pinned bases, missing or stale checkpoints, a moved writer lease, rewritten base history, a moved remote Goal branch, and every conflict return outcome=recovery_required with the exact reason and move no history. A completed rebase invalidates the prior admission and best-effort re-pins the canonical base; a skipped re-pin never downgrades the rebase. Use checkpoint_goal first when no durable checkpoint exists. This tool does not rotate the lease, create a goal, merge, or mutate source files directly.',
+      permission: 'WRITE',
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: rebaseGoalWorkspaceSchema,
+      handler: async (input) => {
+        const workspace = context.services.goalRunWorkspace;
+        if (workspace === undefined) return missingService();
+        const rebased = await workspace.rebaseRunWorkspace(context.actor, {
+          workspaceId: input.workspaceId,
+          goalId: input.goalId,
+          leaseToken: input.leaseToken,
+          leaseGeneration: input.leaseGeneration,
+          expectedAdmissionGeneration: input.expectedAdmissionGeneration,
+        });
+        if (!rebased.ok) return rebased;
+        return ok({
+          workspaceId: input.workspaceId,
+          goalId: input.goalId,
+          outcome: rebased.value.status === 'REBASED' ? 'rebased' as const : 'recovery_required' as const,
+          ...rebased.value,
         });
       },
     }),

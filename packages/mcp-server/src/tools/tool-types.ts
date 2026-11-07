@@ -23,6 +23,7 @@ import type {
   GoalWorktreeReconciliationPort,
   GoalContinuationService,
   GoalMutationFenceService,
+  GoalWorkspaceGuardedRebaseResult,
   MoveFileRequest,
   ProcessService,
   ProjectService,
@@ -102,6 +103,19 @@ export interface GoalRunWorkspacePort {
       readonly expectedUnstagedDiffSha256: string;
     };
   }): Promise<Result<{ readonly admissionGeneration: number }>>;
+  /**
+   * Explicit guarded base rebase for a BASE_STALE Goal Workspace (#210 §4).
+   * The caller proves durable goal ownership with the exact lease; the
+   * runtime refreshes the checkpoint-bound admission receipt and lets the
+   * Goal Workspace service decide whether the rebase is safe.
+   */
+  rebaseRunWorkspace(actor: FileActor, request: {
+    readonly workspaceId: string;
+    readonly goalId: string;
+    readonly leaseToken: string;
+    readonly leaseGeneration: number;
+    readonly expectedAdmissionGeneration: number;
+  }): Promise<Result<GoalWorkspaceGuardedRebaseResult>>;
 }
 
 export interface McpRuntimeTiming {

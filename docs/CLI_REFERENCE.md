@@ -725,6 +725,54 @@ orphaned-pins 0
 - `--json` prints the unprojected `CanonicalStatusReport` instead of the
   operator lines.
 
+### `unified-mpc index job list [--json] [--workspace <id>] [--limit <n>]`
+
+Read-only view of Unified's durable Thai-RAG index-job ledger. `index status`
+reports canonical store state (refs, overlays, retention); this reports the
+builds that actually produced an index: how much was reused from the embedding
+cache, how much was newly embedded, which files were skipped and why a job
+failed. The record survives provider restarts, so a failure is still readable
+after the live provider job is gone.
+
+```bash
+$ unified-mpc index job list --limit 3
+jobs 42
+shown 3
+  idx_umcp_14d6e4aacbc64c5d running workspace 9628fc78-f52f-428e-b358-bbfb66037150 owner unified-mpc:3260190 provider idx_d1668d26 reason explicit_request started 2026-11-07T06:29:44.560Z progress 2026-11-07T06:32:43.594Z
+    files indexed=120 skipped=4 total=700
+    cache hit-files=95 hit-chunks=880 miss-files=25 miss-chunks=190 new-files=25 new-chunks=190
+    miss-reasons artifact_missing=25
+  idx_umcp_0005cb500f3b41bf failed workspace f4460793-d046-4dcc-b02f-5fadce80283a owner unified-mpc:3260190 reason alias_created_or_repaired started 2026-11-07T03:02:15.640Z finished 2026-11-07T03:02:15.933Z
+    error Native Thai-RAG code_index failed: Workspace path /home/alpha/repos/Unified-MPC-Server/.unified-mpc/worktrees/goal-7bfa903721ebe914ef858ee71ad4afcdcb3852d7 is not a directory.
+legacy-unavailable 0
+```
+
+- `jobs` counts the rows the filter matched. `shown` appears only when the
+  bounded listing is shorter than that, so a short history never looks
+  truncated. `legacy-unavailable` appears only when rows written before the
+  canonical contract exist; they are counted, never attributed to a workspace
+  or described with metrics they do not carry.
+- Every active row is listed regardless of `--limit`; only terminal history is
+  bounded (default `20`, maximum `200`), newest first.
+- `--workspace` accepts only the canonical workspace UUID issued by
+  registration. A name or path is a usage error rather than a filter that
+  silently matches nothing.
+- Counters are printed only when the row recorded them: absent is not `0`.
+  `running` is the persisted status and `progress` is the last owner-verified
+  write, so a stale timestamp is the honest liveness signal. The raw provider
+  completion payload is not rendered; `--json` prints the whole
+  `ThaiRagIndexJobListing` including `result`.
+- The listing never migrates, reaps or rewrites the ledger. A CLI read runs in
+  a different process from the runtime owner, so persisting a snapshot there
+  could clobber progress the live owner recorded after the read; reaping still
+  happens on the runtime's next admission check.
+- A failed job is history, not a store failure: exit `0` for any readable
+  ledger, `1` when the ledger cannot be read (a corrupt ledger never prints an
+  empty history), `2` for usage errors.
+- Renamed/deleted path classification and semantic artifact identity remain
+  provider-owned (§13). `index revision advance` reports the revision delta;
+  this command reports only counters Unified itself recorded.
+
 ### `unified-mpc index space [--json]`
 
 Read-only logical counterpart to `storage metrics`: it counts what the canonical

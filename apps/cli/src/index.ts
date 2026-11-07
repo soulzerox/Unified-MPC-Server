@@ -49,6 +49,7 @@ import {
   type Workspace,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
+import { ThaiRagIndexJobStore, type ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
 import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
@@ -104,6 +105,12 @@ import {
   parseIndexStatusArgs,
   type IndexStatusCommand,
 } from './commands/index-status.js';
+import {
+  formatIndexJobList,
+  indexJobListExitCode,
+  parseIndexJobListArgs,
+  type IndexJobListCommand,
+} from './commands/index-job-list.js';
 import {
   formatCanonicalRevisionList,
   parseIndexRevisionListArgs,
@@ -213,6 +220,7 @@ export type CliCommand =
   | IndexGcExpireCommand
   | IndexGcStatusCommand
   | IndexStatusCommand
+  | IndexJobListCommand
   | IndexSpaceCommand
   | PublishCredentialCommand
   | WebCommand
@@ -250,6 +258,10 @@ export interface CliDependencies {
     readonly repositoryId?: string;
   }): Promise<GitRevisionAdvanceResult>;
   canonicalStatus?(): Promise<CanonicalStatusReport>;
+  indexJobList?(input: {
+    readonly workspaceId?: string;
+    readonly limit?: number;
+  }): Promise<ThaiRagIndexJobListing>;
   canonicalLogicalSpace?(): Promise<LogicalSpaceReport>;
   canonicalRevisionList?(): Promise<CanonicalRevisionListReport>;
   canonicalRevisionPin?(input: {
@@ -305,6 +317,10 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'storage') return parseStorageArgs(args.slice(1));
   if (args[0] === 'index') {
     if (args[1] === 'status') return parseIndexStatusArgs(args.slice(1));
+    if (args[1] === 'job') {
+      if (args[2] === 'list') return parseIndexJobListArgs(args.slice(1));
+      return err(appError('INVALID_INPUT', 'Usage: unified-mpc index job list [--json] [--workspace <id>] [--limit <n>]'));
+    }
     if (args[1] === 'maintenance') return parseIndexMaintenanceArgs(args.slice(1));
     if (args[1] === 'repair') return parseIndexRepairArgs(args.slice(1));
     if (args[1] === 'space') return parseIndexSpaceArgs(args.slice(1));
@@ -363,6 +379,7 @@ Commands:
   index gc status [--json]               Report the GC lease and quarantine deadlines
   index maintenance --dry-run|--apply    Plan or run one bounded maintenance cycle (--json for the report)
   index status [--json]                  Report canonical store health, refs and blocking state
+  index job list [--json]                List durable index jobs with reuse, embedding and failure detail
   index space [--json]                   Report logical canonical-space counts, never physical bytes
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
@@ -598,6 +615,23 @@ Commands:
         const report = await dependencies.canonicalStatus();
         write(parsed.value.json ? JSON.stringify(report, null, 2) : formatCanonicalStatus(report));
         return indexStatusExitCode(report);
+      } catch (error) {
+        writeError(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    }
+    case 'index-job-list': {
+      if (dependencies.indexJobList === undefined) {
+        writeError('Index job ledger is not available');
+        return 1;
+      }
+      try {
+        const listing = await dependencies.indexJobList({
+          ...(parsed.value.workspaceId === undefined ? {} : { workspaceId: parsed.value.workspaceId }),
+          ...(parsed.value.limit === undefined ? {} : { limit: parsed.value.limit }),
+        });
+        write(parsed.value.json ? JSON.stringify(listing, null, 2) : formatIndexJobList(listing));
+        return indexJobListExitCode();
       } catch (error) {
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
@@ -1155,6 +1189,13 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         quarantine: new ArtifactQuarantineStore(root),
         jobs: new IndexJobLedger(root),
       });
+    },
+    indexJobList: async (input): Promise<ThaiRagIndexJobListing> => {
+      const dataPath = resolveDataPathFromShared();
+      assertStorageIdentitySafe(dataPath);
+      // Read-only: the runtime owner may be writing progress right now, so the
+      // operator surface must not migrate, reap or persist a snapshot.
+      return new ThaiRagIndexJobStore(dataPath).listForOperator(input);
     },
     canonicalRevisionList: async (): Promise<CanonicalRevisionListReport> => {
       const dataPath = resolveDataPathFromShared();

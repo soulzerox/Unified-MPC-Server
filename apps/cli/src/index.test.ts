@@ -925,6 +925,74 @@ describe('CLI execution dispatcher', () => {
     expect(thrown).toEqual(['STORAGE_IDENTITY_DRIFT: recovery required']);
   });
 
+  it('lists durable index jobs with the recorded counters and forwards the filter', async () => {
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const listing = {
+      jobs: [{
+        jobId: 'idx_umcp_live',
+        workspaceId,
+        ownerId: 'unified-mpc:42',
+        status: 'running' as const,
+        force: false,
+        reindexReason: 'explicit_request' as const,
+        startedAt: '2026-11-07T06:29:44.560Z',
+        progressAt: '2026-11-07T06:32:43.594Z',
+        indexedFiles: 120,
+        skippedFiles: 4,
+        totalFiles: 700,
+      }],
+      totalRowCount: 1,
+      matchingRowCount: 1,
+      legacyRowCount: 0,
+    };
+    const seen: Array<{ workspaceId?: string; limit?: number }> = [];
+    const output: string[] = [];
+    const code = await runCli(['index', 'job', 'list', '--workspace', workspaceId, '--limit', '5'], {
+      ...baseDependencies,
+      indexJobList: async (input) => {
+        seen.push(input);
+        return listing;
+      },
+      write: (text) => output.push(text),
+    });
+    expect(code).toBe(0);
+    expect(seen).toEqual([{ workspaceId, limit: 5 }]);
+    expect(output[0]?.split('\n')).toEqual([
+      'jobs 1',
+      `  idx_umcp_live running workspace ${workspaceId} owner unified-mpc:42`
+        + ' reason explicit_request started 2026-11-07T06:29:44.560Z progress 2026-11-07T06:32:43.594Z',
+      '    files indexed=120 skipped=4 total=700',
+    ]);
+
+    const json: string[] = [];
+    const jsonCode = await runCli(['index', 'job', 'list', '--json'], {
+      ...baseDependencies,
+      indexJobList: async () => listing,
+      write: (text) => json.push(text),
+    });
+    expect(jsonCode).toBe(0);
+    expect(JSON.parse(json[0] ?? '{}')).toEqual(listing);
+  });
+
+  it('fails the index job list command when the ledger is unavailable or unreadable', async () => {
+    const errors: string[] = [];
+    const unavailable = await runCli(['index', 'job', 'list'], {
+      ...baseDependencies,
+      writeError: (text) => errors.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(errors).toEqual(['Index job ledger is not available']);
+
+    const thrown: string[] = [];
+    const thrownCode = await runCli(['index', 'job', 'list'], {
+      ...baseDependencies,
+      indexJobList: async () => { throw new Error('Thai-RAG index job ledger is unreadable'); },
+      writeError: (text) => thrown.push(text),
+    });
+    expect(thrownCode).toBe(1);
+    expect(thrown).toEqual(['Thai-RAG index job ledger is unreadable']);
+  });
+
   it('reports logical canonical-space counts without claiming physical bytes', async () => {
     const report = {
       status: 'measured' as const,

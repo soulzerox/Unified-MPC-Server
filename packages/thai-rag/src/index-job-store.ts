@@ -72,6 +72,34 @@ export interface ThaiRagIndexJobProgress {
   readonly cacheMissReasons?: Readonly<Record<string, number>>;
 }
 
+export interface ThaiRagIndexJobListingOptions {
+  /** Restrict the listing to rows recorded for one canonical workspace UUID. */
+  readonly workspaceId?: string;
+  /**
+   * Maximum number of terminal rows to include. Active rows are always
+   * included because a running job is current state, not history. Defaults to
+   * 20 and is clamped to `1..200`.
+   */
+  readonly limit?: number;
+}
+
+/**
+ * Read-only operator view of the durable index-job ledger.
+ *
+ * `jobs` is bounded: every active row, then the newest terminal rows up to the
+ * limit. `matchingRowCount` is the number of attributable rows the filter
+ * matched before that bound, so a caller can tell a short history apart from a
+ * truncated one. `legacyRowCount` counts rows written before the canonical
+ * contract: they carry no owner, workspace or counters and are never described
+ * as if they did.
+ */
+export interface ThaiRagIndexJobListing {
+  readonly jobs: readonly ThaiRagIndexJob[];
+  readonly totalRowCount: number;
+  readonly matchingRowCount: number;
+  readonly legacyRowCount: number;
+}
+
 export interface ThaiRagIndexJobStoreOptions {
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly processIdentityProbe?: PosixProcessIdentityProbe;
@@ -85,10 +113,15 @@ export interface ThaiRagIndexJobStoreOptions {
 }
 
 export const DEFAULT_STUCK_INDEX_JOB_TIMEOUT_MS = 10 * 60_000;
+/** Default bound on terminal rows in one operator listing. */
+export const DEFAULT_OPERATOR_INDEX_JOB_LIMIT = 20;
+/** Hard bound on terminal rows in one operator listing. */
+export const MAX_OPERATOR_INDEX_JOB_LIMIT = TERMINAL_JOB_RETENTION;
 
 export class ThaiRagIndexJobStore {
   private readonly filePath: string;
   private jobs = new Map<string, ThaiRagIndexJob>();
+  private loaded = false;
   private initialized = false;
   private migrated = false;
   private readonly isProcessAlive: (pid: number) => boolean;
@@ -114,23 +147,10 @@ export class ThaiRagIndexJobStore {
 
   public async initialize(ownerId?: string): Promise<void> {
     if (this.initialized) return;
+    // A mutating/admission path must own the directory before it can persist.
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    try {
-      const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'));
-      if (isRecord(parsed) && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2 || parsed.schemaVersion === 3) && Array.isArray(parsed.jobs)) {
-        this.migrated = parsed.schemaVersion !== 3;
-        for (const value of parsed.jobs) {
-          const parsedJob = parseJob(value, this.now);
-          if (parsedJob !== null) {
-            this.jobs.set(parsedJob.job.jobId, parsedJob.job);
-            this.migrated ||= parsedJob.migrated;
-          }
-        }
-        if (this.migrated) await this.persist();
-      }
-    } catch (error: unknown) {
-      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
-    }
+    await this.load();
+    if (this.migrated) await this.persist();
 
     const finishedAt = this.now().toISOString();
     let changed = false;
@@ -144,6 +164,34 @@ export class ThaiRagIndexJobStore {
     this.initialized = true;
     if (await this.reapStuckJobs()) changed = true;
     if (changed) await this.persist();
+  }
+
+  /**
+   * Hydrate the ledger from disk without creating, migrating or rewriting it.
+   *
+   * The operator listing runs in a different process from the runtime owner, so
+   * it must never persist: a snapshot written by a short-lived reader would
+   * clobber progress the live owner recorded after that snapshot was read.
+   * Only `initialize` (the write/admission path) may migrate or reap.
+   */
+  private async load(): Promise<void> {
+    if (this.loaded) return;
+    try {
+      const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'));
+      if (isRecord(parsed) && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2 || parsed.schemaVersion === 3) && Array.isArray(parsed.jobs)) {
+        this.migrated = parsed.schemaVersion !== 3;
+        for (const value of parsed.jobs) {
+          const parsedJob = parseJob(value, this.now);
+          if (parsedJob !== null) {
+            this.jobs.set(parsedJob.job.jobId, parsedJob.job);
+            this.migrated ||= parsedJob.migrated;
+          }
+        }
+      }
+    } catch (error: unknown) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    }
+    this.loaded = true;
   }
 
   public async create(
@@ -308,6 +356,37 @@ export class ThaiRagIndexJobStore {
     return [...this.jobs.values()].filter((job) => ACTIVE_JOB_STATUSES.has(job.status) && job.ownerId === ownerId);
   }
 
+  /**
+   * Read-only, owner-agnostic listing for an operator surface (#210 §11).
+   *
+   * This is deliberately not an ownership bypass: job execution and workspace
+   * admission keep using `active(ownerId)` / `get(jobId, ownerId, workspaceId)`,
+   * which refuse a foreign owner's live row. An operator reading the same data
+   * root is describing the ledger, not acting as its owner, and a read must not
+   * migrate, reap or persist anything.
+   */
+  public async listForOperator(options: ThaiRagIndexJobListingOptions = {}): Promise<ThaiRagIndexJobListing> {
+    await this.load();
+    const limit = normalizeOperatorJobLimit(options.limit);
+    const rows = [...this.jobs.values()];
+    const legacyRowCount = rows.filter((job) => job.status === 'legacy-unavailable').length;
+    const matching = rows.filter((job) => job.status !== 'legacy-unavailable'
+      && (options.workspaceId === undefined || job.workspaceId === options.workspaceId));
+    const active = matching
+      .filter((job) => ACTIVE_JOB_STATUSES.has(job.status))
+      .sort(compareJobsByStartedDesc);
+    const terminal = matching
+      .filter((job) => !ACTIVE_JOB_STATUSES.has(job.status))
+      .sort(compareJobsByFinishedDesc)
+      .slice(0, limit);
+    return {
+      jobs: [...active, ...terminal],
+      totalRowCount: rows.length,
+      matchingRowCount: matching.length,
+      legacyRowCount,
+    };
+  }
+
   private async reapStuckJobs(): Promise<boolean> {
     const now = this.now().getTime();
     let changed = false;
@@ -404,6 +483,21 @@ export class ThaiRagIndexJobStore {
 
 function terminalOrder(job: ThaiRagIndexJob): string {
   return job.finishedAt ?? job.startedAt;
+}
+
+function compareJobsByStartedDesc(left: ThaiRagIndexJob, right: ThaiRagIndexJob): number {
+  const order = right.startedAt.localeCompare(left.startedAt);
+  return order !== 0 ? order : right.jobId.localeCompare(left.jobId);
+}
+
+function compareJobsByFinishedDesc(left: ThaiRagIndexJob, right: ThaiRagIndexJob): number {
+  const order = terminalOrder(right).localeCompare(terminalOrder(left));
+  return order !== 0 ? order : right.jobId.localeCompare(left.jobId);
+}
+
+function normalizeOperatorJobLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isSafeInteger(value) || value <= 0) return DEFAULT_OPERATOR_INDEX_JOB_LIMIT;
+  return Math.min(value, MAX_OPERATOR_INDEX_JOB_LIMIT);
 }
 
 function parseJob(value: unknown, now: () => Date): { readonly job: ThaiRagIndexJob; readonly migrated: boolean } | null {

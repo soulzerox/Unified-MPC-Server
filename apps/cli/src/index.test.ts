@@ -838,7 +838,19 @@ describe('CLI execution dispatcher', () => {
   it('reports canonical store status and exits non-zero when degraded', async () => {
     const report = {
       status: 'healthy' as const,
-      refs: [{ ref: 'refs/remotes/origin/main', manifestId: 'man:v1:abc', commitSha: 'c'.repeat(40) }],
+      refs: [{
+        ref: 'refs/remotes/origin/main',
+        manifestId: 'man:v1:abc',
+        commitSha: 'c'.repeat(40),
+        treeOid: 'd'.repeat(40),
+        manifestCreatedAt: '2026-10-17T00:00:00.000Z',
+        manifestEntryCount: 1,
+        manifestExists: true,
+        pinned: false,
+        pinReasons: [],
+      }],
+      overlays: [],
+      jobs: [],
       manifestCount: 1,
       pinCount: 0,
       overlayCount: 0,
@@ -863,7 +875,7 @@ describe('CLI execution dispatcher', () => {
     expect(output[0]?.split('\n')).toEqual([
       'canonical store: healthy',
       'refs 1',
-      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)}`,
+      `  refs/remotes/origin/main man:v1:abc commit ${'c'.repeat(40)} tree ${'d'.repeat(40)} entries 1`,
       'manifests 1',
       'pins 0',
       'overlays 0',

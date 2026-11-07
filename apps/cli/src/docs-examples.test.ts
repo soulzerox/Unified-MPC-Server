@@ -208,7 +208,19 @@ function replayDependencies(calls: string[]): CliDependencies {
       calls.push('canonicalStatus');
       return {
         status: 'healthy',
-        refs: [{ ref: 'refs/remotes/origin/main', manifestId: 'man:v1:documented', commitSha: '0'.repeat(40) }],
+        refs: [{
+          ref: 'refs/remotes/origin/main',
+          manifestId: 'man:v1:documented',
+          commitSha: '0'.repeat(40),
+          treeOid: '0'.repeat(40),
+          manifestCreatedAt: '1970-01-01T00:00:00.000Z',
+          manifestEntryCount: 0,
+          manifestExists: true,
+          pinned: false,
+          pinReasons: [],
+        }],
+        overlays: [],
+        jobs: [],
         manifestCount: 1,
         pinCount: 0,
         overlayCount: 0,

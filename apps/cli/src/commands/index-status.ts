@@ -24,9 +24,15 @@ export function parseIndexStatusArgs(args: readonly string[]): Result<IndexStatu
  * Render the canonical store status projection (#210 §7/§11).
  *
  * Counts are always printed so an operator can see the shape of the store even
- * when it is healthy; offending ids are printed only when present, because an
- * empty section is noise. The verdict is the store's own consistency check
- * (dangling refs, missing overlay bases, orphaned pins), never a guess.
+ * when it is healthy; detail lines are printed per stored row, and offending
+ * ids are printed only when present, because an empty section is noise. The
+ * verdict is the store's own consistency check (dangling refs, missing overlay
+ * bases, orphaned pins), never a guess.
+ *
+ * A ref keeps its revision, tree and manifest identity apart on one line. An
+ * overlay reports its base as `live`, `drifted` or `missing`; `drifted` is the
+ * same condition Goal admission refuses, reported here without changing the
+ * store verdict. A job reports whether the manifest it pins still exists.
  */
 export function formatCanonicalStatus(report: CanonicalStatusReport): string {
   const lines = [
@@ -34,16 +40,42 @@ export function formatCanonicalStatus(report: CanonicalStatusReport): string {
     `refs ${report.refs.length}`,
   ];
   for (const ref of report.refs) {
-    lines.push(`  ${ref.ref} ${ref.manifestId} commit ${ref.commitSha}`);
+    if (!ref.manifestExists) {
+      lines.push(`  ${ref.ref} ${ref.manifestId} commit ${ref.commitSha} manifest-missing`);
+      continue;
+    }
+    const pin = ref.pinned ? ` pinned ${ref.pinReasons.join(',') || '-'}` : '';
+    lines.push(
+      `  ${ref.ref} ${ref.manifestId} commit ${ref.commitSha} tree ${ref.treeOid}`
+        + ` entries ${ref.manifestEntryCount}${pin}`,
+    );
   }
   lines.push(
     `manifests ${report.manifestCount}`,
     `pins ${report.pinCount}`,
     `overlays ${report.overlayCount}`,
+  );
+  for (const overlay of report.overlays) {
+    const base = !overlay.baseManifestExists
+      ? 'missing'
+      : overlay.baseMatchesLiveRef ? 'live' : 'drifted';
+    lines.push(
+      `  goal ${overlay.goalWorkspaceId} base ${overlay.baseManifestId} commit ${overlay.baseCommitSha}`
+        + ` entries modified=${overlay.modifiedCount} added=${overlay.addedCount} deleted=${overlay.deletedCount}`
+        + ` base=${base} updated ${overlay.updatedAt}`,
+    );
+  }
+  lines.push(
     `quarantined ${report.quarantinedCount}`,
     `active-jobs ${report.activeJobCount}`,
-    `dangling-refs ${report.danglingRefs.length}`,
   );
+  for (const job of report.jobs) {
+    lines.push(
+      `  ${job.operationId} ${job.manifestId} ${job.status} opened ${job.openedAt}`
+        + ` manifest=${job.manifestExists ? 'present' : 'missing'}`,
+    );
+  }
+  lines.push(`dangling-refs ${report.danglingRefs.length}`);
   for (const dangling of report.danglingRefs) {
     lines.push(`  ${dangling.ref} ${dangling.manifestId}`);
   }

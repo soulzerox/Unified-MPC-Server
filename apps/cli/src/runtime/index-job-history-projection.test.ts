@@ -126,6 +126,44 @@ describe('index job history projection', () => {
       .toBe('cancel failed for <job-id>');
   });
 
+  it('hardens quoted and colon-adjacent path forms (#210 review follow-up)', () => {
+    expect(sanitizeIndexJobError("open '/home/O'Brien/x.ts' failed"))
+      .toBe("open '<path>' failed");
+    expect(sanitizeIndexJobError("can't open '/home/alpha/a.ts'"))
+      .toBe("can't open '<path>'");
+    expect(sanitizeIndexJobError('open path:/home/alpha/x failed'))
+      .toBe('open path:<path> failed');
+    expect(sanitizeIndexJobError('open file:/home/alpha/x failed'))
+      .toBe('open file:<path> failed');
+    expect(sanitizeIndexJobError("open '~/secret/a b.ts' failed"))
+      .toBe("open '<path>' failed");
+    expect(sanitizeIndexJobError('open ~/secret/a.ts now'))
+      .toBe('open <path> now');
+  });
+
+  it('redacts a quoted path that closes before punctuation', () => {
+    expect(sanitizeIndexJobError("open 'C:\\Users\\John Doe\\x.ts'}"))
+      .toBe("open '<path>'}");
+    expect(sanitizeIndexJobError('{"file":"/home/alpha/My Repo/a.ts"}'))
+      .toBe('{"file":"<path>"}');
+    expect(sanitizeIndexJobError("open 'src/My File.ts'!"))
+      .toBe("open '<path>'!");
+  });
+
+  it('never spans two adjacent quoted tokens', () => {
+    expect(sanitizeIndexJobError("see 'note' at 'https://example.com/a/b'"))
+      .toBe("see 'note' at 'https://example.com/a/b'");
+    expect(sanitizeIndexJobError("stale 'main' at 'refs/heads/main'"))
+      .toBe("stale 'main' at 'refs/heads/main'");
+  });
+
+  it('stays linear on quote-dense text without a closing quote', () => {
+    const dense = "'word ".repeat(200_000);
+    const startedAt = performance.now();
+    expect(sanitizeIndexJobError(dense)).toBeDefined();
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it('projects a failed row without its host path or provider job id', () => {
     const projected = projectIndexJobHistory(listing([{
       jobId: 'idx_umcp_failed',

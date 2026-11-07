@@ -6,32 +6,70 @@ const JOB_ID_PLACEHOLDER = '<job-id>';
 
 /**
  * A quoted segment is a path when it carries a separator. The opening quote must
- * follow a token boundary so an apostrophe inside a word cannot start a match,
- * the segment ends at the next same quote that is followed by a token
- * terminator or the end of the text, and an internal quote keeps `O'Brien`
- * inside one quoted path. That closing boundary is deliberately wider than the
- * token stops used below (`}` and `!` count), because a quoted path usually
- * arrives inside a JSON snippet or a sentence. Exact Git refs and non-file URLs
+ * follow a token boundary (a backslash escape counts) so an apostrophe inside a
+ * word cannot start a match. The segment ends at the next same quote that is
+ * followed by a token terminator or the end of the text; when no terminator
+ * follows any same quote, the first same quote still closes it, so a suffix or
+ * possessive after a path cannot leak the tail. An internal quote keeps
+ * `O'Brien` inside one quoted path. That closing boundary is deliberately wider
+ * than the token stops used below (`}` and `!` count), because a quoted path
+ * usually arrives inside a JSON snippet or a sentence. A quote with no same
+ * quote after it is literal text: the scan continues, so an unmatched
+ * apostrophe cannot hide the next quoted path. Exact Git refs and non-file URLs
  * are diagnostics the operator surface deliberately keeps.
  */
-const QUOTE_OPENS_AFTER = new Set([' ', '\t', '\n', '\r', '(', '=', '"', "'", '`', '[', '{', ',', ';', ':']);
+const QUOTE_OPENS_AFTER = new Set([' ', '\t', '\n', '\r', '(', '=', '"', "'", '`', '[', '{', ',', ';', ':', '\\']);
 const QUOTE_CLOSES_BEFORE = new Set([' ', '\t', '\n', '\r', '.', ',', ';', ':', ')', ']', '}', '>', '!', '?', '|']);
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
 const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 
-function quotedPathSpan(text: string, start: number): { content: string; end: number } | undefined {
-  const quote = text[start];
-  for (let cursor = start + 1; cursor < text.length; cursor += 1) {
-    if (text[cursor] !== quote) continue;
-    const next = text[cursor + 1];
-    if (next === undefined || QUOTE_CLOSES_BEFORE.has(next)) {
-      return { content: text.slice(start + 1, cursor), end: cursor + 1 };
-    }
+type QuoteCharacter = "'" | '"';
+
+interface QuoteScan {
+  readonly positions: Readonly<Record<QuoteCharacter, readonly number[]>>;
+  readonly terminators: Readonly<Record<QuoteCharacter, readonly number[]>>;
+}
+
+/** Index of the first entry strictly greater than `index`, if any. */
+function firstIndexAfter(positions: readonly number[], index: number): number | undefined {
+  let low = 0;
+  let high = positions.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (positions[middle]! <= index) low = middle + 1;
+    else high = middle;
   }
-  return undefined;
+  return positions[low];
+}
+
+/**
+ * Precompute quote positions once so continuing past an unmatched quote stays
+ * near-linear instead of rescanning the remaining text for every quote.
+ */
+function scanQuotes(text: string): QuoteScan {
+  const positions: Record<QuoteCharacter, number[]> = { "'": [], '"': [] };
+  const terminators: Record<QuoteCharacter, number[]> = { "'": [], '"': [] };
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (character !== "'" && character !== '"') continue;
+    positions[character].push(index);
+    const next = text[index + 1];
+    if (next === undefined || QUOTE_CLOSES_BEFORE.has(next)) terminators[character].push(index);
+  }
+  return { positions, terminators };
+}
+
+function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content: string; end: number } | undefined {
+  const quote = text[start];
+  if (quote !== "'" && quote !== '"') return undefined;
+  const cursor = firstIndexAfter(scan.terminators[quote], start)
+    ?? firstIndexAfter(scan.positions[quote], start);
+  if (cursor === undefined) return undefined;
+  return { content: text.slice(start + 1, cursor), end: cursor + 1 };
 }
 
 function redactQuotedPaths(text: string): string {
+  const scan = scanQuotes(text);
   let output = '';
   let index = 0;
   while (index < text.length) {
@@ -43,12 +81,13 @@ function redactQuotedPaths(text: string): string {
       index += 1;
       continue;
     }
-    const span = quotedPathSpan(text, index);
+    const span = quotedPathSpan(text, index, scan);
     if (span === undefined) {
-      // No later quote can pair either once one scan runs off the end, so the
-      // remainder cannot contain a quoted path and stays untouched.
-      output += text.slice(index);
-      break;
+      // No same quote follows, so this one is literal. Keep scanning: the rest
+      // of the text can still hold a quoted path with the other quote.
+      output += quote;
+      index += 1;
+      continue;
     }
     const isPath = /[\\/]/.test(span.content) && !GIT_REF.test(span.content) && !SAFE_URL.test(span.content);
     output += isPath ? `${quote}${PATH_PLACEHOLDER}${quote}` : text.slice(index, span.end);

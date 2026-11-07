@@ -150,6 +150,17 @@ describe('index job history projection', () => {
       .toBe("open '<path>'!");
   });
 
+  it('never leaks a path tail when a quote pair is malformed (#210 review follow-up)', () => {
+    expect(sanitizeIndexJobError(`open ' {"file": "/home/My Repo/a.ts"}`))
+      .toBe(`open ' {"file": "<path>"}`);
+    expect(sanitizeIndexJobError('open "/home/My Repo/a.ts"-cache'))
+      .toBe('open "<path>"-cache');
+    expect(sanitizeIndexJobError("open '/home/My Repo/a.ts's copy"))
+      .toBe("open '<path>'s copy");
+    expect(sanitizeIndexJobError('open \\"/home/My Repo/a.ts\\" failed'))
+      .toBe('open \\"<path>" failed');
+  });
+
   it('never spans two adjacent quoted tokens', () => {
     expect(sanitizeIndexJobError("see 'note' at 'https://example.com/a/b'"))
       .toBe("see 'note' at 'https://example.com/a/b'");

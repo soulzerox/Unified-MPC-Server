@@ -24,7 +24,7 @@ const QUOTE_CLOSES_BEFORE = new Set([' ', '\t', '\n', '\r', '.', ',', ';', ':', 
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
 const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 /** A truncated quoted path still starts with a local absolute token. */
-const PATH_START = /^(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
+const PATH_START = /^(?:(?:file|path):\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
 
 type QuoteCharacter = "'" | '"';
 
@@ -62,17 +62,30 @@ function scanQuotes(text: string): QuoteScan {
   return { positions, terminators };
 }
 
+/**
+ * A widened span that begins with a safe URL but carries another quote is
+ * several adjacent quoted tokens, not one path. Leaving it unclaimed lets the
+ * scan redact the inner token instead of copying the whole span as a URL.
+ */
+function isAdjacentUrlSpan(content: string): boolean {
+  return SAFE_URL.test(content) && /["']/.test(content);
+}
+
 function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content: string; end: number } | undefined {
   const quote = text[start];
   if (quote !== "'" && quote !== '"') return undefined;
   const terminator = firstIndexAfter(scan.terminators[quote], start);
   if (terminator !== undefined) {
-    return { content: text.slice(start + 1, terminator), end: terminator + 1 };
+    const content = text.slice(start + 1, terminator);
+    if (isAdjacentUrlSpan(content)) return undefined;
+    return { content, end: terminator + 1 };
   }
   const positions = scan.positions[quote];
   const last = positions[positions.length - 1];
   if (last !== undefined && last > start) {
-    return { content: text.slice(start + 1, last), end: last + 1 };
+    const content = text.slice(start + 1, last);
+    if (isAdjacentUrlSpan(content)) return undefined;
+    return { content, end: last + 1 };
   }
   // No same quote follows. A local path token directly after the opener still
   // means the quoted path was truncated, so redact the remainder.
@@ -95,8 +108,8 @@ function redactQuotedPaths(text: string): string {
     }
     const span = quotedPathSpan(text, index, scan);
     if (span === undefined) {
-      // No same quote or path token follows, so this one is literal. Keep
-      // scanning: the rest can still hold a quoted path with the other quote.
+      // This opener starts no single path span, so treat it as literal. Keep
+      // scanning: a later quote can still open a redactable path.
       output += quote;
       index += 1;
       continue;

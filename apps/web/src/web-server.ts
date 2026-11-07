@@ -155,6 +155,19 @@ export type StorageDiagnosticsProbe = () => Promise<StorageDiagnosticsSnapshot>;
  */
 export type CanonicalStatusProbe = () => Promise<unknown>;
 
+/**
+ * Read-only canonical revision history plus GC lease/quarantine snapshot,
+ * supplied by the CLI. `revisions` is the `index revision list` report and `gc`
+ * is the `index gc status` report; the web server never reads those stores
+ * directly.
+ */
+export interface CanonicalLifecycleSnapshot {
+  readonly revisions: unknown;
+  readonly gc: unknown;
+}
+
+export type CanonicalLifecycleProbe = () => Promise<CanonicalLifecycleSnapshot>;
+
 export type GatewayPersistenceLoadState = 'never_configured' | 'loaded' | 'partial' | 'load_failed';
 export interface GatewayPersistenceStatus {
   readonly state: GatewayPersistenceLoadState;
@@ -205,6 +218,7 @@ export interface ControlPlaneServerOptions {
   readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
   readonly storageDiagnosticsProbe?: StorageDiagnosticsProbe;
   readonly canonicalStatusProbe?: CanonicalStatusProbe;
+  readonly canonicalLifecycleProbe?: CanonicalLifecycleProbe;
   /** Test-only override for persisted Gateway restore retry cadence. */
   readonly gatewayRestoreRetryBaseMs?: number;
   /** Test-only override for persisted Gateway restore retry ceiling. */
@@ -310,6 +324,7 @@ export class ControlPlaneServer {
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly storageDiagnosticsProbe: StorageDiagnosticsProbe | undefined;
   private readonly canonicalStatusProbe: CanonicalStatusProbe | undefined;
+  private readonly canonicalLifecycleProbe: CanonicalLifecycleProbe | undefined;
   private readonly gatewayRestoreRetryBaseMs: number;
   private readonly gatewayRestoreRetryMaxMs: number;
   private readonly gatewayRestoreStallMs: number;
@@ -368,6 +383,7 @@ export class ControlPlaneServer {
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.storageDiagnosticsProbe = options.storageDiagnosticsProbe;
     this.canonicalStatusProbe = options.canonicalStatusProbe;
+    this.canonicalLifecycleProbe = options.canonicalLifecycleProbe;
     this.gatewayRestoreRetryBaseMs = options.gatewayRestoreRetryBaseMs ?? 1_000;
     this.gatewayRestoreRetryMaxMs = options.gatewayRestoreRetryMaxMs ?? 30_000;
     this.gatewayRestoreStallMs = options.gatewayRestoreStallMs ?? DEFAULT_GATEWAY_RESTORE_STALL_MS;
@@ -618,6 +634,41 @@ export class ControlPlaneServer {
           available: false,
           scope: 'canonical-store',
           error: 'Canonical store status unavailable',
+        }));
+      }
+      return;
+    }
+
+    if (pathname === '/api/canonical-lifecycle' && req.method === 'GET') {
+      // Same contract as `/api/canonical-status`: the CLI owns the store, and a
+      // missing or failed probe degrades this card only. Nothing from the thrown
+      // error is copied out, because it can name a local path.
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/json');
+      if (this.canonicalLifecycleProbe === undefined) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'canonical-store',
+          error: 'Canonical store lifecycle detail unavailable',
+        }));
+        return;
+      }
+      try {
+        const snapshot = await this.canonicalLifecycleProbe();
+        res.statusCode = 200;
+        res.end(JSON.stringify({
+          available: true,
+          scope: 'canonical-store',
+          revisions: snapshot.revisions,
+          gc: snapshot.gc,
+        }));
+      } catch {
+        res.statusCode = 503;
+        res.end(JSON.stringify({
+          available: false,
+          scope: 'canonical-store',
+          error: 'Canonical store lifecycle detail unavailable',
         }));
       }
       return;

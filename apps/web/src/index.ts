@@ -1,5 +1,7 @@
 export {
   ControlPlaneServer,
+  type CanonicalLifecycleProbe,
+  type CanonicalLifecycleSnapshot,
   type CanonicalStatusProbe,
   type ControlPlaneServerOptions,
   type GoalControlPort,

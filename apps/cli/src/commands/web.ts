@@ -18,6 +18,7 @@ import {
 } from '@unified-mpc/application';
 import {
   ControlPlaneServer,
+  type CanonicalLifecycleProbe,
   type CanonicalStatusProbe,
   type ControlPlaneServerOptions,
   type GoalControlPort,
@@ -50,11 +51,14 @@ import {
   ArtifactQuarantineStore,
   CanonicalManifestStore,
   CanonicalRefStore,
+  GcLeaseStore,
   GoalOverlayStore,
   IndexJobLedger,
   RevisionPinRegistry,
   WorkspaceService,
+  canonicalRevisionList,
   canonicalStatus,
+  gcStatus,
   isMachineRootPath,
   isProjectWorkspace,
   workspaceLifecycleKind,
@@ -202,6 +206,8 @@ export async function runWeb(
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const canonicalStatusProbe = serverOptions?.canonicalStatusProbe
       ?? createCanonicalStatusProbe(dataPath);
+    const canonicalLifecycleProbe = serverOptions?.canonicalLifecycleProbe
+      ?? createCanonicalLifecycleProbe(dataPath);
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
@@ -211,6 +217,7 @@ export async function runWeb(
       storageDiagnosticsProbe: serverOptions?.storageDiagnosticsProbe
         ?? createStorageDiagnosticsProbe(dataPath, database, settings, secretStore),
       canonicalStatusProbe,
+      canonicalLifecycleProbe,
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       goalControl: serverOptions?.goalControl ?? goalControl,
       goalRuntimeRead,
@@ -412,6 +419,34 @@ export function createCanonicalStatusProbe(dataPath: string): CanonicalStatusPro
     overlays: new GoalOverlayStore(canonicalRoot),
     quarantine: new ArtifactQuarantineStore(canonicalRoot),
     jobs: new IndexJobLedger(canonicalRoot),
+  });
+}
+
+/**
+ * Read-only canonical revision history and GC snapshot for the dashboard
+ * (#210 §7).
+ *
+ * Same roots as `createCanonicalStatusProbe`, so the card and `index revision
+ * list` / `index gc status` describe one store. `runWeb` already refuses to
+ * start when `assertStorageIdentitySafe` throws, so this probe cannot run
+ * against a drifted identity. Nothing here takes the GC lease, releases a
+ * quarantine row or judges reachability; a due row is reported as due, never as
+ * garbage.
+ */
+export function createCanonicalLifecycleProbe(dataPath: string): CanonicalLifecycleProbe {
+  const canonicalRoot = path.join(dataPath, 'canonical');
+  return async () => ({
+    revisions: await canonicalRevisionList({
+      refs: new CanonicalRefStore(canonicalRoot),
+      manifests: new CanonicalManifestStore(canonicalRoot),
+      pins: new RevisionPinRegistry(canonicalRoot),
+      overlays: new GoalOverlayStore(canonicalRoot),
+      jobs: new IndexJobLedger(canonicalRoot),
+    }),
+    gc: await gcStatus(
+      { quarantine: new ArtifactQuarantineStore(canonicalRoot), lease: new GcLeaseStore(canonicalRoot) },
+      { now: new Date() },
+    ),
   });
 }
 

@@ -128,7 +128,12 @@ export async function canonicalStatus(deps: CanonicalStatusDeps): Promise<Canoni
   const refs: CanonicalRefPointer[] = [];
   for (const { ref, state } of sortedRefs) {
     const manifest = manifestById.get(state.manifestId);
-    const pinRows = await deps.pins.list(state.manifestId);
+    // A ref record only type-checks its manifest id, so a corrupt file can
+    // name an unusable id. Pin lookup validates the id and throws; a dangling
+    // ref already has no manifest row to retain, so skip the lookup and let
+    // the degraded report (orphaned pins) describe the corruption instead of
+    // aborting the whole projection.
+    const pinRows = manifest === undefined ? [] : await deps.pins.list(state.manifestId);
     refs.push({
       ref,
       manifestId: state.manifestId,

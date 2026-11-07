@@ -274,6 +274,40 @@ describe('canonical status projection (#210 U26)', () => {
     }
   });
 
+  it('reports a malformed ref manifest id as dangling instead of throwing', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'canon-status-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      await refs.promote(REF, {
+        expectedCurrent: null, current: null,
+        target: { commitSha: 'c'.repeat(40), treeOid: 'd'.repeat(40), manifestId: 'not-a-manifest' },
+        targetVerified: true,
+      });
+
+      const report = await canonicalStatus({
+        refs,
+        manifests: new CanonicalManifestStore(dir),
+        pins: new RevisionPinRegistry(dir),
+        overlays: new GoalOverlayStore(dir),
+        quarantine: new ArtifactQuarantineStore(dir),
+        jobs: new IndexJobLedger(dir),
+      });
+      expect(report.status).toBe('degraded');
+      expect(report.danglingRefs).toEqual([{ ref: REF, manifestId: 'not-a-manifest' }]);
+      expect(report.refs).toEqual([expect.objectContaining({
+        ref: REF,
+        manifestId: 'not-a-manifest',
+        manifestExists: false,
+        treeOid: null,
+        manifestEntryCount: null,
+        pinned: false,
+        pinReasons: [],
+      })]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports an unsettled job whose manifest is no longer stored', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'canon-status-'));
     try {

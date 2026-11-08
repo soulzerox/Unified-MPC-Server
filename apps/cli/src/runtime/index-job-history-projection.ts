@@ -29,7 +29,7 @@ const SAFE_URL = /^(?!(?:file|path):)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 /** A prefix may stay literal only when it is one URL token: scheme, no whitespace or backslash. */
 const SAFE_URL_TOKEN = /^(?!(?:file|path):)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`<>|\\]+$/i;
 /** A truncated quoted path still starts with a local absolute token. */
-const PATH_START = /^(?:(?:file|path):\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
+const PATH_START = /^(?:(?:file|path):\/|[A-Za-z]:[\\/]|\\\\|\/\/|~[\\/]|\/(?!\/))/i;
 
 type QuoteCharacter = "'" | '"';
 

@@ -214,6 +214,8 @@ describe('index job history projection', () => {
       .toBe('open <path> failed');
     expect(sanitizeIndexJobError('open //HOST/Share/File failed'))
       .toBe('open <path> failed');
+    expect(sanitizeIndexJobError("open '//server/My Share/a.ts"))
+      .toBe("open '<path>'");
     expect(sanitizeIndexJobError('fetch https://example.com/a/b?x=1 failed'))
       .toBe('fetch https://example.com/a/b?x=1 failed');
   });

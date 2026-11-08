@@ -18,11 +18,15 @@ const JOB_ID_PLACEHOLDER = '<job-id>';
  * unless a local path token follows it after optional whitespace; that
  * truncated path is redacted through the end of the text. Exact Git refs and
  * non-file URLs are diagnostics the operator surface deliberately keeps.
+ * A safe URL followed by another quote and a local path is split so the URL
+ * stays readable while the path tail is redacted.
  */
 const QUOTE_OPENS_AFTER = new Set([' ', '\t', '\n', '\r', '(', '=', '"', "'", '`', '[', '{', ',', ';', ':', '\\']);
 const QUOTE_CLOSES_BEFORE = new Set([' ', '\t', '\n', '\r', '.', ',', ';', ':', ')', ']', '}', '>', '!', '?', '|']);
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
 const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
+/** A prefix may stay literal only when it is one URL token: scheme, no whitespace or backslash. */
+const SAFE_URL_TOKEN = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`<>|\\]+$/i;
 /** A truncated quoted path still starts with a local absolute token. */
 const PATH_START = /^(?:(?:file|path):\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
 
@@ -71,12 +75,36 @@ function isAdjacentUrlSpan(content: string): boolean {
   return SAFE_URL.test(content) && /["']/.test(content);
 }
 
-function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content: string; end: number } | undefined {
+/**
+ * When the URL is followed by a quote and a local path, the tail is a real
+ * host path that shares the URL's closing quote. Split it so the URL stays
+ * literal while the path is redacted rather than partially consumed by the
+ * unquoted POSIX pass. Only one safe URL token may stay literal: any other
+ * prefix is host text, so the whole span is redacted instead of copying a
+ * path tail up to the inner quote.
+ */
+function splitUrlPathSpan(
+  text: string,
+  start: number,
+  end: number,
+  content: string
+): { content: string; end: number; prefix?: string; redactAsPath?: boolean } | undefined {
+  const inner = content.search(/["']/);
+  if (inner < 0) return undefined;
+  const tail = content.slice(inner + 1);
+  if (!PATH_START.test(tail.trimStart())) return undefined;
+  if (!SAFE_URL_TOKEN.test(content.slice(0, inner))) return { content, end, redactAsPath: true };
+  return { content: tail, end, prefix: text.slice(start, start + inner + 2) };
+}
+
+function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content: string; end: number; prefix?: string; redactAsPath?: boolean } | undefined {
   const quote = text[start];
   if (quote !== "'" && quote !== '"') return undefined;
   const terminator = firstIndexAfter(scan.terminators[quote], start);
   if (terminator !== undefined) {
     const content = text.slice(start + 1, terminator);
+    const split = splitUrlPathSpan(text, start, terminator + 1, content);
+    if (split !== undefined) return split;
     if (isAdjacentUrlSpan(content)) return undefined;
     return { content, end: terminator + 1 };
   }
@@ -84,6 +112,8 @@ function quotedPathSpan(text: string, start: number, scan: QuoteScan): { content
   const last = positions[positions.length - 1];
   if (last !== undefined && last > start) {
     const content = text.slice(start + 1, last);
+    const split = splitUrlPathSpan(text, start, last + 1, content);
+    if (split !== undefined) return split;
     if (isAdjacentUrlSpan(content)) return undefined;
     return { content, end: last + 1 };
   }
@@ -114,8 +144,13 @@ function redactQuotedPaths(text: string): string {
       index += 1;
       continue;
     }
-    const isPath = /[\\/]/.test(span.content) && !GIT_REF.test(span.content) && !SAFE_URL.test(span.content);
-    output += isPath ? `${quote}${PATH_PLACEHOLDER}${quote}` : text.slice(index, span.end);
+    const isPath = span.redactAsPath === true
+      || (/[\\/]/.test(span.content) && !GIT_REF.test(span.content) && !SAFE_URL.test(span.content));
+    if (isPath && span.prefix !== undefined) {
+      output += `${span.prefix}${PATH_PLACEHOLDER}${quote}`;
+    } else {
+      output += isPath ? `${quote}${PATH_PLACEHOLDER}${quote}` : text.slice(index, span.end);
+    }
     index = span.end;
   }
   return output;

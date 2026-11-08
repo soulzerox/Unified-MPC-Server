@@ -183,6 +183,28 @@ describe('index job history projection', () => {
       .toBe("open '<path>'");
   });
 
+  it('splits a safe URL from a path that shares one quote (#689 review follow-up)', () => {
+    expect(sanitizeIndexJobError("open 'https://example.com/x'/home/My Repo/a.ts'"))
+      .toBe("open 'https://example.com/x'<path>'");
+    expect(sanitizeIndexJobError('open "https://example.com/x"/home/My Repo/a.ts"'))
+      .toBe('open "https://example.com/x"<path>"');
+    expect(sanitizeIndexJobError("open 'https://example.com/x\"/home/My Repo/a.ts\"'"))
+      .toBe("open 'https://example.com/x\"<path>'");
+  });
+
+  it('redacts the whole span when the inner-quote prefix is not one URL token (#690 review)', () => {
+    expect(sanitizeIndexJobError("open '/home/My Repo/a.ts'/etc/secret'"))
+      .toBe("open '<path>'");
+    expect(sanitizeIndexJobError("open '/home/My Repo'/secrets/a.ts'"))
+      .toBe("open '<path>'");
+    expect(sanitizeIndexJobError('open "/home/My Repo/a.ts"/etc/secret"'))
+      .toBe('open "<path>"');
+    expect(sanitizeIndexJobError("open 'C:\\Users\\My Name\\a.ts'/etc/secret'"))
+      .toBe("open '<path>'");
+    expect(sanitizeIndexJobError("open 'https://example.com/x y'/home/My Repo/a.ts'"))
+      .toBe("open '<path>'");
+  });
+
   it('never spans two adjacent quoted tokens', () => {
     expect(sanitizeIndexJobError("see 'note' at 'https://example.com/a/b'"))
       .toBe("see 'note' at 'https://example.com/a/b'");

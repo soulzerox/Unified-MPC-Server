@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 import test from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,14 @@ import {
 } from './local-verify.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Repository gate tests normally run inside the merge profile's `test:merge-gate`
+ * step. This one is intentionally standalone: it rebuilds the CLI and starts the
+ * web control plane, so it is minutes long and needs built `dist` output the
+ * merge gate does not have at that point.
+ */
+const STANDALONE_SCRIPT_TESTS = new Set(['gateway-persistence-restart.test.mjs']);
 
 const STEP = (name, status = 'passed') => ({
   name,
@@ -137,6 +146,28 @@ test('every workspace project with a test script runs in the merge profile', () 
     [...gated].filter((packageName) => !withTests.includes(packageName)).sort(),
     [],
     'STEP_DEFINITIONS runs a test script for a project that no longer defines one',
+  );
+});
+
+test('every repository gate test runs in the merge-gate step unless declared standalone', () => {
+  const mergeGate = profileSteps('merge').find((step) => step.name === 'test:merge-gate');
+  assert.ok(mergeGate, 'the merge profile defines the merge-gate step');
+  const listed = new Set(
+    mergeGate.command
+      .filter((argument) => argument.startsWith('scripts/') && argument.endsWith('.test.mjs'))
+      .map((argument) => path.basename(argument)),
+  );
+  const onDisk = new Set(readdirSync(path.join(ROOT, 'scripts')).filter((name) => name.endsWith('.test.mjs')));
+
+  assert.deepEqual(
+    [...onDisk].filter((name) => !listed.has(name) && !STANDALONE_SCRIPT_TESTS.has(name)).sort(),
+    [],
+    'a scripts/*.test.mjs gate test must be listed in the test:merge-gate step or declared standalone',
+  );
+  assert.deepEqual(
+    [...new Set([...listed, ...STANDALONE_SCRIPT_TESTS])].filter((name) => !onDisk.has(name)).sort(),
+    [],
+    'the merge-gate step or the standalone list names a test file that does not exist',
   );
 });
 

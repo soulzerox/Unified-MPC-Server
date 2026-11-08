@@ -802,6 +802,7 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(started.ok).toBe(true);
     expect(connectedConfig?.cwd).toBe(path.join(dataRoot, 'thai-rag', 'sources'));
     expect(connectedConfig?.env?.THAI_RAG_CACHE_DIR).toBe(path.join(dataRoot, 'thai-rag', 'runtime'));
+    expect(connectedConfig?.env?.THAI_RAG_CONTROL_MODE).toBe('unified_native');
     await driver.stop();
   });
 

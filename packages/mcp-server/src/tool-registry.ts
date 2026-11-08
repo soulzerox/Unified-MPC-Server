@@ -1738,9 +1738,6 @@ export class ToolRegistry {
 
     const result = await thaiRag.call(providerTool, providerArgs, signal, budget);
     if (!result.ok) {
-      if (tool === 'forget' && result.error.details?.reason === 'memory_not_found') {
-        return err(appError('FILE_NOT_FOUND', result.error.message, result.error.recoverable, result.error.details));
-      }
       return result;
     }
     if ((tool === 'index_status' || tool === 'cancel_index') && isRecord(result.value) && typeof result.value.workspaceId === 'string' && result.value.workspaceId !== workspaceId) {

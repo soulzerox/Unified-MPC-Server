@@ -3040,8 +3040,8 @@ function jsonTextResponse(payload: Record<string, unknown>): unknown {
   return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
 }
 
-function structuredFailure(code: string): unknown {
-  return { structuredContent: { data: { status: 'error', errors: [{ code, message: code, details: {} }] } } };
+function structuredFailure(code: string, retryable = false): unknown {
+  return { structuredContent: { data: { status: 'error', errors: [{ code, message: code, details: retryable ? { retryable: true } : {} }] } } };
 }
 
 function success(result: string, data?: Record<string, unknown>): unknown {
@@ -4257,6 +4257,22 @@ describe('canonical code_index source identity (#210 §13)', () => {
   it.each([
     ['stale_index', 'CONFLICT'],
     ['invalid_input', 'INVALID_INPUT'],
+    ['workspace_scope_required', 'INVALID_INPUT'],
+    ['scope_denied', 'PERMISSION_DENIED'],
+    ['permission_denied', 'PERMISSION_DENIED'],
+    ['workspace_not_found', 'FILE_NOT_FOUND'],
+    ['file_not_found', 'FILE_NOT_FOUND'],
+    ['index_job_not_found', 'FILE_NOT_FOUND'],
+    ['memory_not_found', 'FILE_NOT_FOUND'],
+    ['storage_unavailable', 'CONFLICT'],
+    ['lexical_retrieval_unavailable', 'CONFLICT'],
+    ['vector_retrieval_degraded', 'CONFLICT'],
+    ['memory_reconciliation_pending', 'CONFLICT'],
+    ['embedding_unavailable', 'CONFLICT'],
+    ['incompatible_index', 'CONFLICT'],
+    ['indexing_conflict', 'CONFLICT'],
+    ['cancellation', 'CONFLICT'],
+    ['internal_failure', 'CONFLICT'],
   ])('maps a %s refusal onto the documented Unified error', async (providerCode, mappedCode) => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();
@@ -4282,7 +4298,84 @@ describe('canonical code_index source identity (#210 §13)', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.code).toBe(mappedCode);
+    // Known codes keep the classification they had before the vocabulary became
+    // open: every one of them stayed recoverable. Without this the table would
+    // still pass if the flag were accidentally inverted for all mapped codes.
+    expect(result.error.recoverable).toBe(true);
     expect(result.error.details).toMatchObject({ reason: providerCode, providerStatus: 'error' });
+    await driver.stop();
+  });
+
+  it.each([
+    ['some_future_state', false, false],
+    ['some_future_state', true, true],
+    // A code that names an Object.prototype member must be as unknown as any
+    // other: inheriting `constructor` from a lookup table would hand appError a
+    // function instead of an error code.
+    ['constructor', false, false],
+    ['__proto__', false, false],
+    ['toString', false, false],
+  ])('treats an unmapped provider code %s (retryable=%s) as recoverable only when the envelope says so', async (providerCode, providerRetryable, expectRecoverable) => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      // Contract v1 keeps ErrorCode open for addition, so a code this build has
+      // never seen is a normal event, not a bug. Only details.retryable may call
+      // it retryable; guessing CONFLICT+recoverable would turn a terminal
+      // provider state into a retry loop.
+      onCodeIndex: (args) => (args.max_files !== undefined || args.background === true
+        ? success('code_index', { status: 'ok', indexed: 0 })
+        : structuredFailure(providerCode, providerRetryable)),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('CONFLICT');
+    expect(result.error.recoverable).toBe(expectRecoverable);
+    expect(result.error.details).toMatchObject({ reason: providerCode, unmappedProviderCode: 1 });
+    expect(result.error.details?.retryable).toBe(providerRetryable ? 1 : undefined);
+    await driver.stop();
+  });
+
+  it('keeps an unmapped provider code terminal when the admission trial is what fails', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await seedSource(dataRoot, [{ path: 'src/a.ts', contentHash: HELLO_HASH }]);
+    const calls: CapturedCall[] = [];
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls,
+      // Admission is what starts indexing, and its wrapper rebuilds the failure
+      // with a workspace-scoped message. That rebuild must not restore the
+      // retryable default the driver just removed.
+      onCodeIndex: (args) => (args.max_files !== undefined
+        ? structuredFailure('some_future_state')
+        : success('code_index', { status: 'ok', indexed: 0 })),
+    });
+    await startCanonicalDriver(driver, dataRoot);
+
+    const result = await driver.call('code_index', {
+      workspace_id: workspaceId,
+      workspace_path: workspaceRoot,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe('CONFLICT');
+    expect(result.error.recoverable).toBe(false);
+    expect(result.error.details).toMatchObject({ reason: 'some_future_state', unmappedProviderCode: 1 });
     await driver.stop();
   });
 

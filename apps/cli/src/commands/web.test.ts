@@ -16,6 +16,7 @@ import {
   createGoalControl,
   createWebGoalRuntimeProjection,
   resolveCanonicalLifecycleLimit,
+  resolveCanonicalStatusLimit,
   runWeb,
   parseWebArgs,
 } from './web.js';
@@ -67,12 +68,31 @@ describe('web CLI command', () => {
           status: 'healthy',
           manifestCount: 1,
           pinCount: 0,
+          refCount: 0,
           overlayCount: 0,
           activeJobCount: 0,
+          danglingRefCount: 0,
+          missingOverlayBaseCount: 0,
+          orphanedPinCount: 0,
         });
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    });
+
+    it('resolves the requested window to a bounded integer', () => {
+      // Omitted, non-finite and non-numeric input all fall back to the default.
+      expect(resolveCanonicalStatusLimit(undefined)).toBe(50);
+      expect(resolveCanonicalStatusLimit(Number.NaN)).toBe(50);
+      expect(resolveCanonicalStatusLimit(Number.POSITIVE_INFINITY)).toBe(50);
+      // The window is clamped to at least one row and at most the route cap.
+      expect(resolveCanonicalStatusLimit(0)).toBe(1);
+      expect(resolveCanonicalStatusLimit(-5)).toBe(1);
+      expect(resolveCanonicalStatusLimit(2)).toBe(2);
+      expect(resolveCanonicalStatusLimit(12.9)).toBe(12);
+      expect(resolveCanonicalStatusLimit(200)).toBe(200);
+      expect(resolveCanonicalStatusLimit(201)).toBe(200);
+      expect(resolveCanonicalStatusLimit(10_000)).toBe(200);
     });
   });
 

@@ -1,6 +1,7 @@
 export {
   ControlPlaneServer,
   CANONICAL_LIFECYCLE_MAX_LIMIT,
+  CANONICAL_STATUS_MAX_LIMIT,
   type CanonicalLifecycleProbe,
   type CanonicalLifecycleSnapshot,
   type CanonicalStatusProbe,

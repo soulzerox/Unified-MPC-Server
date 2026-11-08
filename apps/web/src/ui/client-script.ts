@@ -474,14 +474,20 @@ export function getClientScriptJs(): string {
             return;
           }
           const status = payload.status;
+          const refs = Array.isArray(status.refs) ? status.refs : [];
+          const overlays = Array.isArray(status.overlays) ? status.overlays : [];
+          const jobs = Array.isArray(status.jobs) ? status.jobs : [];
+          const refCount = Number.isFinite(status.refCount) ? status.refCount : refs.length;
+          const overlayCount = Number.isFinite(status.overlayCount) ? status.overlayCount : overlays.length;
+          const jobCount = Number.isFinite(status.activeJobCount) ? status.activeJobCount : jobs.length;
           const summary = document.createElement('div');
           summary.className = 'mono';
           summary.textContent = String(status.status || 'unknown')
             + ' · manifests ' + String(status.manifestCount ?? 0)
             + ' · pins ' + String(status.pinCount ?? 0)
-            + ' · overlays ' + String(status.overlayCount ?? 0)
+            + ' · overlays ' + String(overlayCount)
             + ' · quarantined ' + String(status.quarantinedCount ?? 0)
-            + ' · active jobs ' + String(status.activeJobCount ?? 0);
+            + ' · active jobs ' + String(jobCount);
           container.appendChild(summary);
           const appendLine = (text) => {
             const line = document.createElement('div');
@@ -490,7 +496,12 @@ export function getClientScriptJs(): string {
             line.textContent = text;
             container.appendChild(line);
           };
-          for (const ref of Array.isArray(status.refs) ? status.refs : []) {
+          // The card cannot scroll, so it names the window instead of silently
+          // dropping rows: "refs 50 of 900".
+          appendLine('refs ' + String(refs.length) + ' of ' + String(refCount)
+            + ' · overlays ' + String(overlays.length) + ' of ' + String(overlayCount)
+            + ' · jobs ' + String(jobs.length) + ' of ' + String(jobCount));
+          for (const ref of refs) {
             appendLine('ref ' + String(ref.ref || 'unknown')
               + ' → ' + String(ref.commitSha || 'unknown').slice(0, 12)
               + ' tree ' + (ref.treeOid ? String(ref.treeOid).slice(0, 12) : 'missing')
@@ -499,7 +510,7 @@ export function getClientScriptJs(): string {
               + ' entries ' + String(ref.manifestEntryCount ?? '?')
               + (ref.pinned ? ' pinned' : ''));
           }
-          for (const overlay of Array.isArray(status.overlays) ? status.overlays : []) {
+          for (const overlay of overlays) {
             const base = overlay.baseManifestExists === false
               ? 'missing'
               : overlay.baseMatchesLiveRef ? 'live' : 'drifted';
@@ -509,13 +520,24 @@ export function getClientScriptJs(): string {
               + ' added=' + String(overlay.addedCount ?? 0)
               + ' deleted=' + String(overlay.deletedCount ?? 0));
           }
-          for (const job of Array.isArray(status.jobs) ? status.jobs : []) {
+          for (const job of jobs) {
             appendLine('job ' + String(job.operationId || 'unknown') + ' ' + String(job.status || 'unknown')
               + ' manifest=' + (job.manifestExists ? 'present' : 'missing'));
           }
-          appendLine('blockers dangling-refs=' + String(Array.isArray(status.danglingRefs) ? status.danglingRefs.length : 0)
-            + ' missing-overlay-bases=' + String(Array.isArray(status.missingOverlayBases) ? status.missingOverlayBases.length : 0)
-            + ' orphaned-pins=' + String(Array.isArray(status.orphanedPins) ? status.orphanedPins.length : 0));
+          // Blocker counts come from the full-store counts, never from the
+          // windowed rows, so a truncation cannot look like a clean store.
+          const danglingRefCount = Number.isFinite(status.danglingRefCount)
+            ? status.danglingRefCount
+            : (Array.isArray(status.danglingRefs) ? status.danglingRefs.length : 0);
+          const missingOverlayBaseCount = Number.isFinite(status.missingOverlayBaseCount)
+            ? status.missingOverlayBaseCount
+            : (Array.isArray(status.missingOverlayBases) ? status.missingOverlayBases.length : 0);
+          const orphanedPinCount = Number.isFinite(status.orphanedPinCount)
+            ? status.orphanedPinCount
+            : (Array.isArray(status.orphanedPins) ? status.orphanedPins.length : 0);
+          appendLine('blockers dangling-refs=' + String(danglingRefCount)
+            + ' missing-overlay-bases=' + String(missingOverlayBaseCount)
+            + ' orphaned-pins=' + String(orphanedPinCount));
         } catch {
           container.textContent = 'Unable to read canonical store status';
         } finally {

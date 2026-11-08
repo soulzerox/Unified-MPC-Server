@@ -853,12 +853,16 @@ describe('CLI execution dispatcher', () => {
       jobs: [],
       manifestCount: 1,
       pinCount: 0,
+      refCount: 1,
       overlayCount: 0,
       quarantinedCount: 0,
       activeJobCount: 0,
       danglingRefs: [],
       missingOverlayBases: [],
       orphanedPins: [],
+      danglingRefCount: 0,
+      missingOverlayBaseCount: 0,
+      orphanedPinCount: 0,
     };
     const output: string[] = [];
     const seen: string[] = [];

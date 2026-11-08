@@ -300,7 +300,7 @@ export interface McpApplicationServices {
   /** Runtime-local fair-order projection (#145 step 3); omitted when the runtime has no shell admission queue. */
   readonly heavyJobFairness?: Pick<ShellHeavyAdmissionPort, 'fairnessSnapshot'>;
   /** Read-only canonical store projection (#210 §11); omitted when the runtime has no canonical store. */
-  readonly canonicalIndexStatus?: () => Promise<CanonicalStatusReport>;
+  readonly canonicalIndexStatus?: (options?: { readonly limit?: number }) => Promise<CanonicalStatusReport>;
   /** Read-only canonical revision history (#210 §11); the exposing tool requests `limit` and also bounds the response itself. */
   readonly canonicalRevisionList?: (options?: { readonly limit?: number }) => Promise<CanonicalRevisionListReport>;
   /** Read-only canonical GC lease/quarantine projection (#210 §7). */

@@ -78,12 +78,16 @@ export interface CanonicalStatusReport {
   readonly jobs: readonly CanonicalJobStatus[];
   readonly manifestCount: number;
   readonly pinCount: number;
+  readonly refCount: number;
   readonly overlayCount: number;
   readonly quarantinedCount: number;
   readonly activeJobCount: number;
   readonly danglingRefs: readonly { readonly ref: string; readonly manifestId: string }[];
   readonly missingOverlayBases: readonly string[];
   readonly orphanedPins: readonly string[];
+  readonly danglingRefCount: number;
+  readonly missingOverlayBaseCount: number;
+  readonly orphanedPinCount: number;
 }
 
 /**
@@ -188,11 +192,43 @@ export async function canonicalStatus(deps: CanonicalStatusDeps): Promise<Canoni
     jobs: jobRows,
     manifestCount: manifests.length,
     pinCount: pinned.length,
+    refCount: refStates.length,
     overlayCount: overlayIds.length,
     quarantinedCount: quarantined.length,
     activeJobCount: jobs.length,
     danglingRefs: [...verify.danglingRefs],
     missingOverlayBases: [...verify.missingOverlays],
     orphanedPins: [...verify.orphanedPins],
+    danglingRefCount: verify.danglingRefs.length,
+    missingOverlayBaseCount: verify.missingOverlays.length,
+    orphanedPinCount: verify.orphanedPins.length,
+  };
+}
+
+/**
+ * Bound the row projections of a status report without changing any full-store
+ * count or the health verdict.
+ *
+ * MCP responses and the dashboard card cannot scroll, so a large ref, overlay,
+ * job or blocker collection must be windowed. The counts stay full so a
+ * truncated answer is visible instead of silent. The store read itself is not
+ * bounded: `canonicalStatus()` must still verify the whole store to answer
+ * `healthy|degraded`, so this bounds the response, not the I/O.
+ */
+export function boundCanonicalStatusReport(
+  report: CanonicalStatusReport,
+  limit: number,
+): CanonicalStatusReport {
+  const bound = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 0;
+  return {
+    ...report,
+    refs: report.refs.slice(0, bound),
+    overlays: report.overlays.slice(0, bound),
+    jobs: [...report.jobs]
+      .sort((a, b) => (a.openedAt < b.openedAt ? -1 : a.openedAt > b.openedAt ? 1 : a.operationId < b.operationId ? -1 : a.operationId > b.operationId ? 1 : 0))
+      .slice(0, bound),
+    danglingRefs: report.danglingRefs.slice(0, bound),
+    missingOverlayBases: report.missingOverlayBases.slice(0, bound),
+    orphanedPins: report.orphanedPins.slice(0, bound),
   };
 }

@@ -10,7 +10,7 @@ import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { attachGoalBasePin } from './goal-base-pin.js';
 import { ArtifactQuarantineStore } from './artifact-quarantine.js';
 import { IndexJobLedger } from './index-job-ledger.js';
-import { canonicalStatus } from './canonical-status.js';
+import { canonicalStatus, boundCanonicalStatusReport, type CanonicalStatusReport } from './canonical-status.js';
 
 const REPO = 'repo_abc123';
 const REF = 'refs/remotes/origin/main';
@@ -34,9 +34,13 @@ describe('canonical status projection (#210 U26)', () => {
         refs: [],
         manifestCount: 0,
         pinCount: 0,
+        refCount: 0,
         overlayCount: 0,
         quarantinedCount: 0,
         activeJobCount: 0,
+        danglingRefCount: 0,
+        missingOverlayBaseCount: 0,
+        orphanedPinCount: 0,
       });
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -167,6 +171,9 @@ describe('canonical status projection (#210 U26)', () => {
       expect(report.danglingRefs).toEqual([{ ref: REF, manifestId }]);
       expect(report.orphanedPins).toEqual([manifestId]);
       expect(report.missingOverlayBases).toEqual(['goal_a']);
+      expect(report.danglingRefCount).toBe(1);
+      expect(report.orphanedPinCount).toBe(1);
+      expect(report.missingOverlayBaseCount).toBe(1);
       expect(report.refs).toEqual([expect.objectContaining({ ref: REF, manifestId, manifestExists: false })]);
       expect(report.overlays).toEqual([
         expect.objectContaining({ goalWorkspaceId: 'goal_a', baseManifestExists: false, baseMatchesLiveRef: false }),
@@ -337,5 +344,103 @@ describe('canonical status projection (#210 U26)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('boundCanonicalStatusReport (#210 status bound)', () => {
+  const manifestId = `man:v1:${'a'.repeat(64)}`;
+  const refRow = (ref: string): CanonicalStatusReport['refs'][number] => ({
+    ref,
+    manifestId,
+    commitSha: 'b'.repeat(40),
+    treeOid: 'c'.repeat(40),
+    manifestCreatedAt: '2026-11-01T00:00:00.000Z',
+    manifestEntryCount: 1,
+    manifestExists: true,
+    pinned: false,
+    pinReasons: [],
+  });
+  const overlayRow = (goalWorkspaceId: string): CanonicalStatusReport['overlays'][number] => ({
+    goalWorkspaceId,
+    baseManifestId: manifestId,
+    baseCommitSha: 'b'.repeat(40),
+    baseTreeOid: 'c'.repeat(40),
+    baseManifestExists: true,
+    baseMatchesLiveRef: true,
+    modifiedCount: 0,
+    addedCount: 0,
+    deletedCount: 0,
+    updatedAt: '2026-11-01T00:00:00.000Z',
+  });
+  const jobRow = (operationId: string, openedAt: string): CanonicalStatusReport['jobs'][number] => ({
+    operationId,
+    manifestId,
+    status: 'pending',
+    openedAt,
+    updatedAt: openedAt,
+    manifestExists: true,
+  });
+
+  const wide: CanonicalStatusReport = {
+    status: 'degraded',
+    refs: [refRow('refs/remotes/origin/main'), refRow('refs/remotes/origin/next'), refRow('refs/remotes/origin/dev')],
+    overlays: [overlayRow('goal_a'), overlayRow('goal_b')],
+    jobs: [jobRow('op_c', '2026-11-03T00:00:00.000Z'), jobRow('op_b', '2026-11-02T00:00:00.000Z'), jobRow('op_a', '2026-11-01T00:00:00.000Z')],
+    manifestCount: 4,
+    pinCount: 2,
+    refCount: 3,
+    overlayCount: 2,
+    quarantinedCount: 1,
+    activeJobCount: 3,
+    danglingRefs: [{ ref: 'refs/remotes/origin/gone', manifestId }, { ref: 'refs/remotes/origin/lost', manifestId }],
+    missingOverlayBases: ['goal_x', 'goal_y'],
+    orphanedPins: [manifestId, `man:v1:${'d'.repeat(64)}`],
+    danglingRefCount: 2,
+    missingOverlayBaseCount: 2,
+    orphanedPinCount: 2,
+  };
+
+  it('windows every row collection while keeping full-store counts and the verdict', () => {
+    const bounded = boundCanonicalStatusReport(wide, 1);
+    expect(bounded.status).toBe('degraded');
+    expect(bounded.refs).toHaveLength(1);
+    expect(bounded.overlays).toHaveLength(1);
+    expect(bounded.jobs).toHaveLength(1);
+    expect(bounded.danglingRefs).toHaveLength(1);
+    expect(bounded.missingOverlayBases).toHaveLength(1);
+    expect(bounded.orphanedPins).toHaveLength(1);
+    // Every count still describes the whole store, so truncation is visible.
+    expect(bounded).toMatchObject({
+      manifestCount: 4,
+      pinCount: 2,
+      refCount: 3,
+      overlayCount: 2,
+      quarantinedCount: 1,
+      activeJobCount: 3,
+      danglingRefCount: 2,
+      missingOverlayBaseCount: 2,
+      orphanedPinCount: 2,
+    });
+    // The input report is not mutated.
+    expect(wide.refs).toHaveLength(3);
+    expect(wide.jobs).toHaveLength(3);
+  });
+
+  it('windows jobs in a deterministic opened-at then operation-id order', () => {
+    expect(boundCanonicalStatusReport(wide, 2).jobs.map((job) => job.operationId)).toEqual(['op_a', 'op_b']);
+    const sameInstant = {
+      ...wide,
+      jobs: [jobRow('op_z', '2026-11-01T00:00:00.000Z'), jobRow('op_y', '2026-11-01T00:00:00.000Z')],
+    };
+    expect(boundCanonicalStatusReport(sameInstant, 2).jobs.map((job) => job.operationId)).toEqual(['op_y', 'op_z']);
+  });
+
+  it('treats an omitted, non-finite, fractional or negative limit as a bounded window', () => {
+    expect(boundCanonicalStatusReport(wide, Number.NaN).refs).toHaveLength(0);
+    expect(boundCanonicalStatusReport(wide, Number.POSITIVE_INFINITY).refs).toHaveLength(0);
+    expect(boundCanonicalStatusReport(wide, -5).refs).toHaveLength(0);
+    expect(boundCanonicalStatusReport(wide, 0).refs).toHaveLength(0);
+    expect(boundCanonicalStatusReport(wide, 1.9).refs).toHaveLength(1);
+    expect(boundCanonicalStatusReport(wide, 10).refs).toHaveLength(3);
   });
 });

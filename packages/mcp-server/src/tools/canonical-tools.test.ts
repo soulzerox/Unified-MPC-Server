@@ -38,12 +38,16 @@ const report: CanonicalStatusReport = {
   }],
   manifestCount: 2,
   pinCount: 1,
+  refCount: 1,
   overlayCount: 1,
   quarantinedCount: 0,
   activeJobCount: 1,
   danglingRefs: [],
   missingOverlayBases: [],
   orphanedPins: [],
+  danglingRefCount: 0,
+  missingOverlayBaseCount: 0,
+  orphanedPinCount: 0,
 };
 
 function context(services: McpToolContext['services']): McpToolContext {
@@ -91,6 +95,62 @@ describe('canonicalTools', () => {
       ok: false,
       error: { code: 'INTERNAL_ERROR', message: 'MCP application service is unavailable' },
     });
+  });
+
+  it('bounds every row collection and keeps the full-store counts', async () => {
+    const seen: Array<{ readonly limit?: number } | undefined> = [];
+    const wide: CanonicalStatusReport = {
+      ...report,
+      refs: [
+        report.refs[0],
+        { ...report.refs[0], ref: 'refs/remotes/origin/next' },
+        { ...report.refs[0], ref: 'refs/remotes/origin/dev' },
+      ],
+      overlays: [report.overlays[0], { ...report.overlays[0], goalWorkspaceId: 'goal-2' }],
+      jobs: [
+        report.jobs[0],
+        { ...report.jobs[0], operationId: 'op-2', openedAt: '2026-11-04T00:00:00.000Z' },
+      ],
+      danglingRefs: [{ ref: 'refs/remotes/origin/gone', manifestId: report.refs[0].manifestId }],
+      missingOverlayBases: ['goal-3'],
+      orphanedPins: [report.refs[0].manifestId],
+      refCount: 3,
+      overlayCount: 2,
+      activeJobCount: 2,
+      danglingRefCount: 1,
+      missingOverlayBaseCount: 1,
+      orphanedPinCount: 1,
+    };
+    const tool = statusTool({
+      canonicalIndexStatus: async (options) => {
+        seen.push(options);
+        return wide;
+      },
+    });
+
+    const bounded = await tool.execute({ limit: 1 }, new AbortController().signal);
+    expect(bounded).toMatchObject({
+      ok: true,
+      value: {
+        scope: 'canonical-store',
+        status: 'degraded',
+        refCount: 3,
+        overlayCount: 2,
+        activeJobCount: 2,
+        danglingRefCount: 1,
+        missingOverlayBaseCount: 1,
+        orphanedPinCount: 1,
+      },
+    });
+    const value = (bounded as { value: Record<string, readonly unknown[]> }).value;
+    for (const key of ['refs', 'overlays', 'jobs', 'danglingRefs', 'missingOverlayBases', 'orphanedPins']) {
+      expect(value[key]).toHaveLength(1);
+    }
+
+    // The advertised default is 50, and the tool forwards its own bound.
+    const defaulted = await tool.execute({}, new AbortController().signal);
+    expect(defaulted).toMatchObject({ ok: true, value: { refCount: 3 } });
+    expect(seen).toEqual([{ limit: 1 }, { limit: 50 }]);
   });
 
   it('keeps a store failure fixed instead of copying a local path into the response', async () => {

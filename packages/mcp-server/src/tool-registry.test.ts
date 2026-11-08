@@ -312,7 +312,9 @@ describe('MCP tool registry', () => {
       thaiRag: {
         async call(): Promise<ReturnType<typeof err>> {
           const reason = reasons[callIndex++] ?? 'memory_reconciliation_pending';
-          const code = reason === 'scope_denied' ? 'PERMISSION_DENIED' : 'CONFLICT';
+          const code = reason === 'scope_denied'
+            ? 'PERMISSION_DENIED'
+            : reason === 'memory_not_found' ? 'FILE_NOT_FOUND' : 'CONFLICT';
           return err(appError(code, reason, true, {
             reason,
             providerStatus: reason === 'memory_reconciliation_pending' ? 'degraded' : 'error',

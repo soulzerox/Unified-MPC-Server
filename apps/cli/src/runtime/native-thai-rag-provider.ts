@@ -1704,7 +1704,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           if (!trial.ok) {
             await this.jobs.fail(job.jobId, trial.error.message, ownerId);
             await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
-            return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${trial.error.message}`, true));
+            // The trial error already carries the provider's classification.
+            // Rebuilding it with a hard-coded `true` advertised an unmapped
+            // terminal code as retryable on the path that starts indexing.
+            return err(appError(
+              'CONFLICT',
+              `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${trial.error.message}`,
+              trial.error.recoverable,
+              trial.error.details,
+            ));
           }
         }
         if (this.cancellableIndexJobs) {
@@ -1763,7 +1771,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
           return indexed.ok
             ? ok(undefined)
-            : err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`, true));
+            : err(appError(
+              'CONFLICT',
+              `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${indexed.error.message}`,
+              indexed.error.recoverable,
+              indexed.error.details,
+            ));
         }
         this.workspaceRoots.clear();
         this.workspaceRootIds.clear();
@@ -2510,33 +2523,36 @@ type UnifiedProviderErrorCode = 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NO
  * therefore terminal rather than a retryable `CONFLICT` — retrying something
  * understood only as "some error" is how a permanent failure becomes a loop.
  */
-const PROVIDER_ERROR_CODE_MAP: Readonly<Record<string, UnifiedProviderErrorCode>> = {
-  invalid_input: 'INVALID_INPUT',
-  workspace_scope_required: 'INVALID_INPUT',
-  scope_denied: 'PERMISSION_DENIED',
-  permission_denied: 'PERMISSION_DENIED',
-  workspace_not_found: 'FILE_NOT_FOUND',
-  file_not_found: 'FILE_NOT_FOUND',
-  index_job_not_found: 'FILE_NOT_FOUND',
-  memory_not_found: 'FILE_NOT_FOUND',
-  storage_unavailable: 'CONFLICT',
-  lexical_retrieval_unavailable: 'CONFLICT',
-  vector_retrieval_degraded: 'CONFLICT',
-  memory_reconciliation_pending: 'CONFLICT',
-  embedding_unavailable: 'CONFLICT',
-  stale_index: 'CONFLICT',
-  incompatible_index: 'CONFLICT',
-  indexing_conflict: 'CONFLICT',
-  cancellation: 'CONFLICT',
-  internal_failure: 'CONFLICT',
-};
+const PROVIDER_ERROR_CODE_MAP: ReadonlyMap<string, UnifiedProviderErrorCode> = new Map<string, UnifiedProviderErrorCode>([
+  ['invalid_input', 'INVALID_INPUT'],
+  ['workspace_scope_required', 'INVALID_INPUT'],
+  ['scope_denied', 'PERMISSION_DENIED'],
+  ['permission_denied', 'PERMISSION_DENIED'],
+  ['workspace_not_found', 'FILE_NOT_FOUND'],
+  ['file_not_found', 'FILE_NOT_FOUND'],
+  ['index_job_not_found', 'FILE_NOT_FOUND'],
+  ['memory_not_found', 'FILE_NOT_FOUND'],
+  ['storage_unavailable', 'CONFLICT'],
+  ['lexical_retrieval_unavailable', 'CONFLICT'],
+  ['vector_retrieval_degraded', 'CONFLICT'],
+  ['memory_reconciliation_pending', 'CONFLICT'],
+  ['embedding_unavailable', 'CONFLICT'],
+  ['stale_index', 'CONFLICT'],
+  ['incompatible_index', 'CONFLICT'],
+  ['indexing_conflict', 'CONFLICT'],
+  ['cancellation', 'CONFLICT'],
+  ['internal_failure', 'CONFLICT'],
+]);
 
 function isKnownProviderErrorCode(code: string): boolean {
-  return Object.hasOwn(PROVIDER_ERROR_CODE_MAP, code);
+  return PROVIDER_ERROR_CODE_MAP.has(code);
 }
 
 function mapProviderErrorCode(code: string): UnifiedProviderErrorCode {
-  return PROVIDER_ERROR_CODE_MAP[code] ?? 'CONFLICT';
+  // A Map lookup, not an object index: `constructor`, `__proto__` and
+  // `toString` are absent from a Map, while an object literal would inherit
+  // them and hand `appError` a non-string code for an unknown provider value.
+  return PROVIDER_ERROR_CODE_MAP.get(code) ?? 'CONFLICT';
 }
 
 function toolResultText(value: unknown): string | undefined {

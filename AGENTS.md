@@ -79,6 +79,14 @@ verification. It records the merge under
 force-pushes are rejected and only squash merges are allowed, with no GitHub
 status check and no required GitHub approval.
 
+Husky writes a shim for every Git hook name, including hooks this repository
+does not define, and `git rev-parse --git-path hooks` resolves to `.husky/_`.
+An unused `pre-push` shim therefore looks like a configured hook: the guarded
+push refuses with `push-pre-push-hook` in a fresh worktree. The `prepare`
+script now runs `node scripts/prune-unused-husky-hooks.mjs` after `husky`, which
+deletes shims without a matching `.husky/<hook>` file. Run that script by hand
+if a hook directory predates the change.
+
 ## Authoritative CI Watcher Policy
 
 When a GitHub Actions workflow must be monitored until completion, use one authoritative long-running background/durable watcher for the exact workflow run instead of repeated ad-hoc polling.

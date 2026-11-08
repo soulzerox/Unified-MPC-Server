@@ -64,7 +64,7 @@ export const STEP_DEFINITIONS = [
   { name: 'lint', profiles: ['targeted', 'merge'], command: [PNPM, ...PNPM_PREFIX, 'lint'] },
   // The merge gate's own tests run before the expensive build: a broken guard
   // must fail fast, and these suites need no workspace output.
-  { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs', 'scripts/user-services.test.mjs'] },
+  { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs', 'scripts/user-services.test.mjs', 'scripts/prune-unused-husky-hooks.test.mjs'] },
   { name: 'build', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, 'build'] },
   testStep('@unified-mpc/audit'),
   testStep('@unified-mpc/domain'),

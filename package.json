@@ -20,7 +20,7 @@
     "cli": "node apps/cli/dist/index.js",
     "docs:tools": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs",
     "docs:tools:check": "corepack pnpm --filter @unified-mpc/mcp-server build && node scripts/generate-tool-catalog.mjs --check",
-    "prepare": "husky",
+    "prepare": "husky && node scripts/prune-unused-husky-hooks.mjs",
     "runtime:smoke": "node scripts/smoke-mcp-http-runtime.mjs",
     "release:materialize": "bash scripts/materialize-runtime-release.sh",
     "verify:local": "node scripts/local-verify.mjs --profile merge",

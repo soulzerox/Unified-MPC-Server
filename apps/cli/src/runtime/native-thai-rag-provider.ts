@@ -375,6 +375,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       env: {
         ...(this.options.launchConfig.env ?? {}),
         THAI_RAG_CACHE_DIR: path.join(options.providerRoot, 'runtime'),
+        // This driver is the native adapter: it owns source truth through the
+        // canonical workspace, so the worker must report unified_native rather
+        // than the standalone default (contract gaps 1-2).
+        THAI_RAG_CONTROL_MODE: 'unified_native',
       },
     };
     const described = await this.sessions.describe(SERVER_NAME, this.launchConfig, signal);

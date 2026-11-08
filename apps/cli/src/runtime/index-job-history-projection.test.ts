@@ -183,6 +183,15 @@ describe('index job history projection', () => {
       .toBe("open '<path>'");
   });
 
+  it('splits a safe URL from a path that shares one quote (#689 review follow-up)', () => {
+    expect(sanitizeIndexJobError("open 'https://example.com/x'/home/My Repo/a.ts'"))
+      .toBe("open 'https://example.com/x'<path>'");
+    expect(sanitizeIndexJobError('open "https://example.com/x"/home/My Repo/a.ts"'))
+      .toBe('open "https://example.com/x"<path>"');
+    expect(sanitizeIndexJobError("open 'https://example.com/x\"/home/My Repo/a.ts\"'"))
+      .toBe("open 'https://example.com/x\"<path>'");
+  });
+
   it('never spans two adjacent quoted tokens', () => {
     expect(sanitizeIndexJobError("see 'note' at 'https://example.com/a/b'"))
       .toBe("see 'note' at 'https://example.com/a/b'");

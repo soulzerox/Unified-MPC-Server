@@ -205,6 +205,21 @@ describe('index job history projection', () => {
       .toBe("open '<path>'");
   });
 
+  it('redacts path:// URIs and protocol-relative shares (#691 review follow-up)', () => {
+    expect(sanitizeIndexJobError("open 'path://home/My Repo/a.ts' failed"))
+      .toBe("open '<path>' failed");
+    expect(sanitizeIndexJobError('open path://home/alpha/a.ts failed'))
+      .toBe('open path:<path> failed');
+    expect(sanitizeIndexJobError('open //server/share/a.ts failed'))
+      .toBe('open <path> failed');
+    expect(sanitizeIndexJobError('open //HOST/Share/File failed'))
+      .toBe('open <path> failed');
+    expect(sanitizeIndexJobError("open '//server/My Share/a.ts"))
+      .toBe("open '<path>'");
+    expect(sanitizeIndexJobError('fetch https://example.com/a/b?x=1 failed'))
+      .toBe('fetch https://example.com/a/b?x=1 failed');
+  });
+
   it('never spans two adjacent quoted tokens', () => {
     expect(sanitizeIndexJobError("see 'note' at 'https://example.com/a/b'"))
       .toBe("see 'note' at 'https://example.com/a/b'");

@@ -625,6 +625,39 @@ describe('native provider cancel for a provider-owned job (issue #445)', () => {
       expect(counts().cancels).toBe(1);
     } finally { await driver.stop(); }
   });
+
+  it('keeps not-found when the provider names the lost job with its dedicated code', async () => {
+    // This is the only path where the provider error code reaches the caller
+    // unmapped: the forwarded cancellation returns the worker error verbatim,
+    // so a code missing from mapProviderErrorCode reads as a retryable
+    // CONFLICT instead of not-found.
+    const { driver, counts } = await fixture(async () => completed(), {
+      onCancel: () => ({
+        content: [{ type: 'text', text: 'cancel_index' }],
+        structuredContent: {
+          result: 'cancel_index',
+          data: {
+            status: 'unavailable',
+            errors: [{
+              code: 'index_job_not_found',
+              message: 'index job is unknown',
+              details: { reason: 'provider_restart_or_retention_expiry', core_code: 'index_job_not_found' },
+            }],
+          },
+        },
+      }),
+    });
+    try {
+      const cancelled = await driver.call('cancel_index', {
+        workspace_id: workspaceId, job_id: 'idx_deadbeef',
+      });
+      expect(cancelled.ok).toBe(false);
+      const error = (cancelled as { ok: false; error: { code: string; message: string } }).error;
+      expect(error.code).toBe('FILE_NOT_FOUND');
+      expect(error.message).toContain('index job is unknown');
+      expect(counts().cancels).toBe(1);
+    } finally { await driver.stop(); }
+  });
 });
 
 describe('native provider read for a provider-owned job (issue #445)', () => {
@@ -702,7 +735,10 @@ describe('native provider read for a provider-owned job (issue #445)', () => {
     } finally { await driver.stop(); }
   });
 
-  it('keeps not-found when the provider names the lost job with its dedicated code', async () => {
+  // The read path already converts a lost job through isLostProviderIndexJob,
+  // so this pins the envelope shape rather than the code map: the dedicated
+  // code must not be mistaken for provider progress.
+  it('reads a dedicated-code error envelope as not-found instead of provider progress', async () => {
     const { driver } = await fixture(async (_poll, providerJobId) => providerJobId === 'idx_provider_same'
       ? completed()
       : {

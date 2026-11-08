@@ -7,7 +7,7 @@ import { appError, canonicalManifestId, err, type GoalRecord, type WorkspaceAdmi
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
-import { CanonicalManifestStore, ArtifactQuarantineStore } from '@unified-mpc/workspace';
+import { CanonicalManifestStore, CanonicalRefStore, ArtifactQuarantineStore, IndexJobLedger } from '@unified-mpc/workspace';
 import { ControlPlaneServer } from '@unified-mpc/web';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -93,6 +93,56 @@ describe('web CLI command', () => {
       expect(resolveCanonicalStatusLimit(200)).toBe(200);
       expect(resolveCanonicalStatusLimit(201)).toBe(200);
       expect(resolveCanonicalStatusLimit(10_000)).toBe(200);
+    });
+
+    it('bounds the probe rows and keeps the full-store counts', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-canonical-status-'));
+      try {
+        const canonicalRoot = path.join(root, 'canonical');
+        const manifests = new CanonicalManifestStore(canonicalRoot);
+        const refs = new CanonicalRefStore(canonicalRoot);
+        const entries = [{ path: 'a.ts', contentHash: '1'.repeat(64) }];
+        const revisionId = 'rev:v1:' + 'a'.repeat(64);
+        const manifestId = canonicalManifestId({ repositoryId: 'repo_abc123', revisionId, entries });
+        await manifests.put({
+          manifestId,
+          repositoryId: 'repo_abc123',
+          revisionId,
+          commitSha: 'c'.repeat(40),
+          treeOid: 'd'.repeat(40),
+          targetRef: 'refs/remotes/origin/main',
+          entries,
+          createdAt: '2026-11-01T00:00:00.000Z',
+        });
+        for (const ref of ['refs/remotes/origin/main', 'refs/remotes/origin/next']) {
+          await refs.promote(ref, {
+            expectedCurrent: null,
+            current: null,
+            target: { commitSha: 'c'.repeat(40), treeOid: 'd'.repeat(40), manifestId },
+            targetVerified: true,
+          });
+        }
+        const jobs = new IndexJobLedger(canonicalRoot);
+        await jobs.open('op_1', manifestId, new Date('2026-11-01T00:00:00.000Z'));
+        await jobs.open('op_2', manifestId, new Date('2026-11-02T00:00:00.000Z'));
+
+        // The probe must apply the shared bound itself: the route already
+        // forwards a window, but no store may widen the card past it.
+        const bounded = await createCanonicalStatusProbe(root)({ limit: 1 });
+        expect(bounded).toMatchObject({ refCount: 2, activeJobCount: 2, manifestCount: 1 });
+        const boundedRows = bounded as { refs: readonly unknown[]; jobs: readonly unknown[] };
+        expect(boundedRows.refs).toHaveLength(1);
+        expect(boundedRows.jobs).toHaveLength(1);
+
+        // An omitted window resolves to the advertised default, which still
+        // carries every row of this store.
+        const defaulted = await createCanonicalStatusProbe(root)();
+        const defaultedRows = defaulted as { refs: readonly unknown[]; jobs: readonly unknown[] };
+        expect(defaultedRows.refs).toHaveLength(2);
+        expect(defaultedRows.jobs).toHaveLength(2);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
   });
 

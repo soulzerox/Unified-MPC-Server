@@ -99,7 +99,11 @@ describe('TreeReader', () => {
   it('stops enumerating a directory once entry cap is reached', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-tree-large-'));
     temporaryRoots.push(root);
-    await Promise.all(Array.from({ length: 10_000 }, (_, index) => writeFile(path.join(root, `entry-${index}.txt`), 'x', 'utf8')));
+    // The assertion is about the cap, not the directory size: any count above
+    // maxEntries proves truncation. Creating 10k files spent ~4.4s of the 5s
+    // per-test budget on setup alone, so the case timed out on a loaded machine
+    // without ever exercising the reader.
+    await Promise.all(Array.from({ length: 512 }, (_, index) => writeFile(path.join(root, `entry-${index}.txt`), 'x', 'utf8')));
 
     const result = await new TreeReader().read(root, { maxDepth: 1, maxEntries: 2 });
 

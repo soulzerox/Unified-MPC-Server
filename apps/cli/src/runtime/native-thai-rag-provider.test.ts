@@ -1377,10 +1377,19 @@ describe('NativeThaiRagProviderDriver', () => {
       ok: false,
       error: { code: 'CONFLICT', details: { jobId: expect.any(String), reason: 'workspace-indexing' } },
     });
-    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
-      jobs: Array<{ jobId: string; providerJobId?: string; workspaceId: string; status: string; reindexReason?: string }>;
+    type PersistedIndexJob = { jobId: string; providerJobId?: string; workspaceId: string; status: string; reindexReason?: string };
+    const readIndexingJob = async (): Promise<PersistedIndexJob | undefined> => {
+      const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+        jobs: PersistedIndexJob[];
+      };
+      return persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running');
     };
-    const indexingJob = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running');
+    // The admission call returns before the adopted provider job id is
+    // persisted, so a single read raced the write and read as undefined on a
+    // loaded machine. Wait for the row instead of assuming the ordering.
+    await expect.poll(async () => (await readIndexingJob())?.providerJobId, { timeout: 5000, interval: 25 })
+      .toBe('idx_provider_admission');
+    const indexingJob = await readIndexingJob();
     expect(indexingJob).toMatchObject({
       providerJobId: 'idx_provider_admission',
       reindexReason: 'alias_created_or_repaired',

@@ -214,6 +214,15 @@ export async function canonicalStatus(deps: CanonicalStatusDeps): Promise<Canoni
  * truncated answer is visible instead of silent. The store read itself is not
  * bounded: `canonicalStatus()` must still verify the whole store to answer
  * `healthy|degraded`, so this bounds the response, not the I/O.
+ *
+ * Each collection keeps its first `limit` rows after the report's own order:
+ * refs by ref, overlays by Goal workspace id, blockers as reported, and jobs
+ * oldest-opened first (`openedAt`, then `operationId`). Jobs are re-ordered
+ * here because a backlog longer than `limit` should surface the stalled work
+ * that explains why the index is not progressing, and `activeJobCount` keeps
+ * the full size visible. That job order can therefore differ from the ledger
+ * order `unified-mpc index status` prints, which is unbounded and keyed by
+ * operation id.
  */
 export function boundCanonicalStatusReport(
   report: CanonicalStatusReport,

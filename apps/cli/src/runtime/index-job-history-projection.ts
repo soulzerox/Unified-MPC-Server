@@ -17,16 +17,17 @@ const JOB_ID_PLACEHOLDER = '<job-id>';
  * opener with no same quote after it is literal text and the scan continues,
  * unless a local path token follows it after optional whitespace; that
  * truncated path is redacted through the end of the text. Exact Git refs and
- * non-file URLs are diagnostics the operator surface deliberately keeps.
+ * non-file, non-path URLs are diagnostics the operator surface deliberately
+ * keeps.
  * A safe URL followed by another quote and a local path is split so the URL
  * stays readable while the path tail is redacted.
  */
 const QUOTE_OPENS_AFTER = new Set([' ', '\t', '\n', '\r', '(', '=', '"', "'", '`', '[', '{', ',', ';', ':', '\\']);
 const QUOTE_CLOSES_BEFORE = new Set([' ', '\t', '\n', '\r', '.', ',', ';', ':', ')', ']', '}', '>', '!', '?', '|']);
 const GIT_REF = /^refs\/[A-Za-z0-9._/-]+$/;
-const SAFE_URL = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
+const SAFE_URL = /^(?!(?:file|path):)[A-Za-z][A-Za-z0-9+.-]*:\/\//i;
 /** A prefix may stay literal only when it is one URL token: scheme, no whitespace or backslash. */
-const SAFE_URL_TOKEN = /^(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`<>|\\]+$/i;
+const SAFE_URL_TOKEN = /^(?!(?:file|path):)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'`<>|\\]+$/i;
 /** A truncated quoted path still starts with a local absolute token. */
 const PATH_START = /^(?:(?:file|path):\/|[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?!\/))/i;
 
@@ -158,6 +159,14 @@ function redactQuotedPaths(text: string): string {
 
 /** Absolute-local-path token classes, in the order they must be applied. */
 const FILE_URI = /\bfile:\/\/[^\s"'`<>|,;)]*/gi;
+/** `path:` is local-path source identity, like `file:`, never a readable URL. */
+const PATH_URI = /\bpath:\/\/[^\s"'`<>|,;)]*/gi;
+/**
+ * A protocol-relative token (`//host/share/...`) is a remote share, not a URL:
+ * the token boundary keeps `https://` literal because a scheme colon is not
+ * a boundary, and POSIX absolute paths require a single slash.
+ */
+const FORWARD_UNC = /(^|[\s(="'`[{,;])\/\/[^\s"'`<>|,;)]+/g;
 const WINDOWS_DRIVE = /\b[A-Za-z]:[\\/][^\s"'`<>|,;)]*/g;
 const WINDOWS_UNC = /\\\\[^\s"'`<>|,;)]*/g;
 const POSIX_ABSOLUTE = /(^|[\s(="'`[{,;:])(?:\/(?!\/)|~\/)[^\s"'`<>|,;)]*/g;
@@ -170,10 +179,11 @@ const JOB_ID = /\bidx_[A-Za-z0-9_-]+/g;
  *
  * The durable ledger keeps diagnostic detail, but §11's tool contract promises
  * that a response never carries owner identity: absolute local paths (quoted
- * paths with spaces, file URIs, Windows drive/UNC paths and POSIX absolute
- * tokens) and `idx_...` job-id tokens are replaced with placeholders after
- * control characters and whitespace are collapsed and before the
- * 400-character bound is applied.
+ * paths with spaces, `file:` and `path:` URIs, Windows drive/UNC paths,
+ * protocol-relative `//host/share` tokens and POSIX absolute tokens) and
+ * `idx_...` job-id tokens are replaced with placeholders after control
+ * characters and whitespace are collapsed and before the 400-character bound
+ * is applied.
  *
  * Pipeline order matters: collapse whitespace and control characters first so
  * the quoted-path scan sees one space per separator, then redact quoted paths
@@ -197,6 +207,8 @@ export function sanitizeIndexJobError(error: string): string | undefined {
     .join('');
   const redacted = redactQuotedPaths(normalized)
     .replace(FILE_URI, PATH_PLACEHOLDER)
+    .replace(PATH_URI, 'path:<path>')
+    .replace(FORWARD_UNC, (_match, prefix: string) => `${prefix}${PATH_PLACEHOLDER}`)
     .replace(WINDOWS_DRIVE, PATH_PLACEHOLDER)
     .replace(WINDOWS_UNC, PATH_PLACEHOLDER)
     .replace(POSIX_ABSOLUTE, (_match, prefix: string) => `${prefix}${PATH_PLACEHOLDER}`)

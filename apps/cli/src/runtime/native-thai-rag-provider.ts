@@ -2425,16 +2425,21 @@ function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Resul
   if (!result.ok) return result;
   const structuredError = structuredProviderError(result.value);
   if (structuredError !== undefined) {
+    // Contract v1 makes an unknown ErrorCode terminal unless the envelope marks
+    // it retryable, so the flag decides; an unmapped code never guesses. Known
+    // codes keep the classification they had before the vocabulary became open.
+    const knownCode = isKnownProviderErrorCode(structuredError.code);
     return err(appError(
       mapProviderErrorCode(structuredError.code),
       `Native Thai-RAG ${tool} failed: ${structuredError.message}`,
-      true,
+      knownCode || structuredError.retryable,
       {
         reason: structuredError.code,
         providerStatus: structuredError.status,
         // The provider's own retry classification must survive this mapping:
         // dropping it makes a contended write look terminal to the caller.
         ...(structuredError.retryable ? { retryable: 1 } : {}),
+        ...(knownCode ? {} : { unmappedProviderCode: 1 }),
         ...(structuredError.reason === undefined ? {} : { providerReason: structuredError.reason }),
       },
     ));
@@ -2493,11 +2498,45 @@ function normalizeWorkerPayload(value: unknown): unknown {
   }
 }
 
-function mapProviderErrorCode(code: string): 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NOT_FOUND' | 'CONFLICT' {
-  if (code === 'workspace_scope_required' || code === 'invalid_input') return 'INVALID_INPUT';
-  if (code === 'scope_denied' || code === 'permission_denied') return 'PERMISSION_DENIED';
-  if (code === 'workspace_not_found' || code === 'file_not_found' || code === 'index_job_not_found') return 'FILE_NOT_FOUND';
-  return 'CONFLICT';
+type UnifiedProviderErrorCode = 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NOT_FOUND' | 'CONFLICT';
+
+/**
+ * Every `ErrorCode` in contract v1 and the Unified error it becomes.
+ *
+ * The provider contract declares the vocabulary open for addition within v1
+ * (`contract/README.md` §2): a new code names a state the provider could
+ * already reach, and it does not move `contract_fingerprint`, so this table is
+ * the only place an addition becomes visible here. An unrecognised code is
+ * therefore terminal rather than a retryable `CONFLICT` — retrying something
+ * understood only as "some error" is how a permanent failure becomes a loop.
+ */
+const PROVIDER_ERROR_CODE_MAP: Readonly<Record<string, UnifiedProviderErrorCode>> = {
+  invalid_input: 'INVALID_INPUT',
+  workspace_scope_required: 'INVALID_INPUT',
+  scope_denied: 'PERMISSION_DENIED',
+  permission_denied: 'PERMISSION_DENIED',
+  workspace_not_found: 'FILE_NOT_FOUND',
+  file_not_found: 'FILE_NOT_FOUND',
+  index_job_not_found: 'FILE_NOT_FOUND',
+  memory_not_found: 'FILE_NOT_FOUND',
+  storage_unavailable: 'CONFLICT',
+  lexical_retrieval_unavailable: 'CONFLICT',
+  vector_retrieval_degraded: 'CONFLICT',
+  memory_reconciliation_pending: 'CONFLICT',
+  embedding_unavailable: 'CONFLICT',
+  stale_index: 'CONFLICT',
+  incompatible_index: 'CONFLICT',
+  indexing_conflict: 'CONFLICT',
+  cancellation: 'CONFLICT',
+  internal_failure: 'CONFLICT',
+};
+
+function isKnownProviderErrorCode(code: string): boolean {
+  return Object.hasOwn(PROVIDER_ERROR_CODE_MAP, code);
+}
+
+function mapProviderErrorCode(code: string): UnifiedProviderErrorCode {
+  return PROVIDER_ERROR_CODE_MAP[code] ?? 'CONFLICT';
 }
 
 function toolResultText(value: unknown): string | undefined {

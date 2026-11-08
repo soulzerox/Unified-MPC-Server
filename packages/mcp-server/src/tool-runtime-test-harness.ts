@@ -210,12 +210,16 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         jobs: [],
         manifestCount: 0,
         pinCount: 0,
+        refCount: 0,
         overlayCount: 0,
         quarantinedCount: 0,
         activeJobCount: 0,
         danglingRefs: [],
         missingOverlayBases: [],
         orphanedPins: [],
+        danglingRefCount: 0,
+        missingOverlayBaseCount: 0,
+        orphanedPinCount: 0,
       };
     },
     canonicalRevisionList: async () => {

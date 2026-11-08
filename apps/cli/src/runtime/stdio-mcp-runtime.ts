@@ -93,7 +93,7 @@ import {
   SqliteWorkspaceRepository,
   assertStorageIdentitySafe,
 } from '@unified-mpc/storage';
-import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GcLeaseStore, GoalOverlayStore, IndexJobLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, canonicalRevisionList, canonicalStatus, gcStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
+import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GcLeaseStore, GoalOverlayStore, IndexJobLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, boundCanonicalStatusReport, canonicalRevisionList, canonicalStatus, gcStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type Result, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
@@ -1447,10 +1447,10 @@ export function createStdioMcpRuntime(
     extensions,
     heavyJobQueue,
     heavyJobFairness: shellHeavyAdmission,
-    canonicalIndexStatus: async () => {
+    canonicalIndexStatus: async (options) => {
       assertStorageIdentitySafe(dataPath);
       const canonicalRoot = path.join(dataPath, 'canonical');
-      return canonicalStatus({
+      const report = await canonicalStatus({
         refs: new CanonicalRefStore(canonicalRoot),
         manifests: new CanonicalManifestStore(canonicalRoot),
         pins: new RevisionPinRegistry(canonicalRoot),
@@ -1458,6 +1458,9 @@ export function createStdioMcpRuntime(
         quarantine: new ArtifactQuarantineStore(canonicalRoot),
         jobs: new IndexJobLedger(canonicalRoot),
       });
+      // The MCP tool bounds again; this keeps the bound true for every caller of
+      // the service, including a future one that does not re-slice.
+      return options?.limit === undefined ? report : boundCanonicalStatusReport(report, options.limit);
     },
     canonicalRevisionList: async (options) => {
       assertStorageIdentitySafe(dataPath);

@@ -1,4 +1,5 @@
 import { appError, err, ok } from '@unified-mpc/domain';
+import { boundCanonicalStatusReport } from '@unified-mpc/workspace';
 import {
   defineTool,
   missingService,
@@ -9,6 +10,7 @@ import { canonicalGcStatusSchema, canonicalIndexStatusSchema, canonicalRevisionL
 
 const DEFAULT_REVISION_LIST_LIMIT = 50;
 const DEFAULT_GC_ROW_LIMIT = 50;
+const DEFAULT_STATUS_ROW_LIMIT = 50;
 
 /**
  * Read-only canonical index observability (#210 §7/§11).
@@ -23,15 +25,19 @@ export function canonicalTools(context: McpToolContext): McpToolDefinition[] {
   return [
     defineTool({
       name: 'canonical_index_status',
-      description: 'Read the canonical index store without mutating it. Reports the health verdict; each ref with its commit, tree, manifest identity, entry count and pin reasons; each Goal overlay with base=live|drifted|missing and modified/added/deleted counts; each unsettled index job with manifest presence; manifest/pin/overlay/quarantine/active-job counts; and the dangling-ref, missing-overlay-base and orphaned-pin blockers that would stop GC. Distinct from rag_index_status (provider execution history) and workspace_index_status (workspace file index). The report never includes provider job ids, provider result payloads or raw store paths.',
+      description: 'Read the canonical index store without mutating it. Reports the health verdict; each ref with its commit, tree, manifest identity, entry count and pin reasons; each Goal overlay with base=live|drifted|missing and modified/added/deleted counts; each unsettled index job with manifest presence; manifest/pin/overlay/quarantine/active-job counts; and the dangling-ref, missing-overlay-base and orphaned-pin blockers that would stop GC. Rows are bounded: `limit` defaults to 50 (max 200) and every count stays a full-store count (refCount, overlayCount, activeJobCount, danglingRefCount, missingOverlayBaseCount, orphanedPinCount), so a truncated answer is visible instead of silent. Distinct from rag_index_status (provider execution history) and workspace_index_status (workspace file index). The report never includes provider job ids, provider result payloads or raw store paths.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: canonicalIndexStatusSchema,
-      handler: async () => {
+      handler: async (input) => {
         const status = context.services.canonicalIndexStatus;
         if (status === undefined) return missingService();
         try {
-          const report = await status();
+          const limit = input.limit ?? DEFAULT_STATUS_ROW_LIMIT;
+          // The service is asked to apply the bound, but a port implementation
+          // that ignores it must not turn the advertised response into the whole
+          // store, so the tool bounds again. Counts stay full-store counts.
+          const report = boundCanonicalStatusReport(await status({ limit }), limit);
           return ok({ scope: 'canonical-store', ...report });
         } catch {
           // A store error can name a local path; keep the response fixed.

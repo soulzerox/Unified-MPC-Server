@@ -159,7 +159,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   mcp_install: service({ name: 'smoke-server', transport: 'stdio', command: 'node' }, 'installer.installServer'),
   mcp_call: service({ server: 'server-1', tool: 'noop', arguments: {}, descriptorFingerprint: '0'.repeat(64), catalogFingerprint: '0'.repeat(64), userConfirmed: true }, 'extensions.callMcpTool'),
   heavy_job_queue_status: service({ limit: 5 }, 'heavyJobQueue.listLive'),
-  canonical_index_status: service({}, 'canonicalIndexStatus'),
+  canonical_index_status: service({ limit: 5 }, 'canonicalIndexStatus'),
   canonical_gc_status: service({}, 'canonicalGcStatus'),
   canonical_revision_list: service({ limit: 5 }, 'canonicalRevisionList'),
   merge_policy_get: service({ repository: 'soulzerox/Unified-MPC-Server' }, 'mergePolicy.getByRepository'),

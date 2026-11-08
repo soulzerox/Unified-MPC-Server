@@ -153,7 +153,13 @@ export type StorageDiagnosticsProbe = () => Promise<StorageDiagnosticsSnapshot>;
  * Read-only canonical store projection supplied by the CLI, which owns the
  * canonical stores. The web server never reads those stores directly.
  */
-export type CanonicalStatusProbe = () => Promise<unknown>;
+export type CanonicalStatusProbe = (options?: {
+  /** Bound on refs, overlays, jobs and blocker rows; the probe applies its own default/cap. */
+  readonly limit?: number;
+}) => Promise<unknown>;
+
+/** The WebUI status card is bounded; `?limit=` may not exceed this. */
+export const CANONICAL_STATUS_MAX_LIMIT = 200;
 
 /**
  * Read-only canonical revision history plus GC lease/quarantine snapshot,
@@ -621,6 +627,15 @@ export class ControlPlaneServer {
       // card, never the dashboard.
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Content-Type', 'application/json');
+      const rawLimits = url.searchParams.getAll('limit');
+      const rawLimit = rawLimits[0] ?? null;
+      // Only one plain decimal in range is accepted; `0`, `+1`, `1.0`, `201`
+      // and repeated parameters are rejected before the store is touched.
+      if (rawLimits.length > 1
+        || (rawLimit !== null && (!/^[1-9][0-9]{0,2}$/.test(rawLimit) || Number(rawLimit) > CANONICAL_STATUS_MAX_LIMIT))) {
+        sendJsonError(res, 400, `limit must be an integer from 1 to ${CANONICAL_STATUS_MAX_LIMIT}`);
+        return;
+      }
       if (this.canonicalStatusProbe === undefined) {
         res.statusCode = 503;
         res.end(JSON.stringify({
@@ -631,7 +646,7 @@ export class ControlPlaneServer {
         return;
       }
       try {
-        const status = await this.canonicalStatusProbe();
+        const status = await this.canonicalStatusProbe(rawLimit === null ? {} : { limit: Number(rawLimit) });
         res.statusCode = 200;
         res.end(JSON.stringify({ available: true, scope: 'canonical-store', status }));
       } catch {

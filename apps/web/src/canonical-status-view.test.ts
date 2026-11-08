@@ -41,16 +41,20 @@ const report = {
   }],
   manifestCount: 2,
   pinCount: 1,
+  refCount: 1,
   overlayCount: 1,
   quarantinedCount: 0,
   activeJobCount: 1,
   danglingRefs: [],
   missingOverlayBases: [],
   orphanedPins: [],
+  danglingRefCount: 0,
+  missingOverlayBaseCount: 0,
+  orphanedPinCount: 0,
 };
 
 async function withServer(
-  probe: (() => Promise<unknown>) | undefined,
+  probe: ((options?: { readonly limit?: number }) => Promise<unknown>) | undefined,
   run: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'canonical-status-web-'));
@@ -108,6 +112,36 @@ describe('canonical store status projection', () => {
     });
   });
 
+  it('forwards the requested window to the probe and defaults when omitted', async () => {
+    const seen: Array<{ readonly limit?: number } | undefined> = [];
+    await withServer(async (options) => {
+      seen.push(options);
+      return report;
+    }, async (baseUrl) => {
+      const bounded = await fetch(baseUrl + '/api/canonical-status?limit=7');
+      expect(bounded.status).toBe(200);
+      const defaulted = await fetch(baseUrl + '/api/canonical-status');
+      expect(defaulted.status).toBe(200);
+    });
+    // The route forwards only an explicit limit; the probe owns the default.
+    expect(seen).toEqual([{ limit: 7 }, {}]);
+  });
+
+  it('rejects an invalid window before the store is read', async () => {
+    let calls = 0;
+    await withServer(async () => {
+      calls += 1;
+      return report;
+    }, async (baseUrl) => {
+      for (const query of ['limit=0', 'limit=201', 'limit=1.0', 'limit=%2B1', 'limit=abc', 'limit=', 'limit=1&limit=2']) {
+        const response = await fetch(baseUrl + '/api/canonical-status?' + query);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: 'limit must be an integer from 1 to 200' });
+      }
+    });
+    expect(calls).toBe(0);
+  });
+
   it('renders a canonical status card that polls the endpoint', () => {
     const html = renderDashboardHtml();
     expect(html).toContain('id="canonical-status-card"');
@@ -120,6 +154,11 @@ describe('canonical store status projection', () => {
     expect(html).toContain("' · overlays '");
     expect(html).toContain("' base=' + base");
     expect(html).toContain("' manifest=' + (job.manifestExists ? 'present' : 'missing')");
-    expect(html).toContain("'blockers dangling-refs='");
+    expect(html).toContain("'refs ' + String(refs.length) + ' of '");
+    expect(html).toContain("' · overlays ' + String(overlays.length) + ' of '");
+    expect(html).toContain("' · jobs ' + String(jobs.length) + ' of '");
+    expect(html).toContain('danglingRefCount');
+    expect(html).toContain('missingOverlayBaseCount');
+    expect(html).toContain('orphanedPinCount');
   });
 });

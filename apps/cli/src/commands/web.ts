@@ -18,6 +18,7 @@ import {
 } from '@unified-mpc/application';
 import {
   CANONICAL_LIFECYCLE_MAX_LIMIT,
+  CANONICAL_STATUS_MAX_LIMIT,
   ControlPlaneServer,
   type CanonicalLifecycleProbe,
   type CanonicalStatusProbe,
@@ -57,6 +58,7 @@ import {
   IndexJobLedger,
   RevisionPinRegistry,
   WorkspaceService,
+  boundCanonicalStatusReport,
   canonicalRevisionList,
   canonicalStatus,
   gcStatus,
@@ -403,24 +405,42 @@ const STORAGE_DIAGNOSTIC_SECRET_KEYS = [
   'cloudflare_api_token',
 ] as const;
 
+export const DEFAULT_CANONICAL_STATUS_LIMIT = 50;
+
+/**
+ * Defense in depth: the route validates too, but an embedded caller must not be
+ * able to turn the card into an unbounded store read. Omitted, non-finite and
+ * fractional values all resolve to a bounded integer inside 1..MAX.
+ */
+export function resolveCanonicalStatusLimit(requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested)) return DEFAULT_CANONICAL_STATUS_LIMIT;
+  return Math.min(Math.max(1, Math.trunc(requested)), CANONICAL_STATUS_MAX_LIMIT);
+}
+
 /**
  * Read-only canonical store projection for the dashboard (§11).
  *
  * The CLI owns the canonical stores; the control plane only projects the
  * report. Rooted at `<dataPath>/canonical`, the same layout `index status`
  * reads, so the dashboard and the CLI can never disagree about which store
- * they describe.
+ * they describe. The row projections are windowed so a long Goal history cannot
+ * turn the card into an unbounded response; every count stays a full-store
+ * count.
  */
 export function createCanonicalStatusProbe(dataPath: string): CanonicalStatusProbe {
   const canonicalRoot = path.join(dataPath, 'canonical');
-  return async () => canonicalStatus({
-    refs: new CanonicalRefStore(canonicalRoot),
-    manifests: new CanonicalManifestStore(canonicalRoot),
-    pins: new RevisionPinRegistry(canonicalRoot),
-    overlays: new GoalOverlayStore(canonicalRoot),
-    quarantine: new ArtifactQuarantineStore(canonicalRoot),
-    jobs: new IndexJobLedger(canonicalRoot),
-  });
+  return async (options) => {
+    const limit = resolveCanonicalStatusLimit(options?.limit);
+    const report = await canonicalStatus({
+      refs: new CanonicalRefStore(canonicalRoot),
+      manifests: new CanonicalManifestStore(canonicalRoot),
+      pins: new RevisionPinRegistry(canonicalRoot),
+      overlays: new GoalOverlayStore(canonicalRoot),
+      quarantine: new ArtifactQuarantineStore(canonicalRoot),
+      jobs: new IndexJobLedger(canonicalRoot),
+    });
+    return boundCanonicalStatusReport(report, limit);
+  };
 }
 
 /**

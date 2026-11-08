@@ -39,7 +39,7 @@ test('prunes only shims without a hook script and keeps the dispatcher', async (
 
     assert.deepEqual(result, { status: 'pruned', removed: ['pre-push'], dryRun: false });
     assert.deepEqual((await readdir(path.join(root, '.husky', '_'))).sort(), ['h', 'husky.sh', 'pre-commit']);
-    assert.deepEqual(await readdir(path.join(root, '.husky')), ['_', 'pre-commit'].sort());
+    assert.deepEqual((await readdir(path.join(root, '.husky'))).sort(), ['_', 'pre-commit']);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

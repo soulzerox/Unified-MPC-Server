@@ -702,6 +702,34 @@ describe('native provider read for a provider-owned job (issue #445)', () => {
     } finally { await driver.stop(); }
   });
 
+  it('keeps not-found when the provider names the lost job with its dedicated code', async () => {
+    const { driver } = await fixture(async (_poll, providerJobId) => providerJobId === 'idx_provider_same'
+      ? completed()
+      : {
+        content: [{ type: 'text', text: 'index_status' }],
+        structuredContent: {
+          result: 'index_status',
+          data: {
+            status: 'unavailable',
+            errors: [{
+              code: 'index_job_not_found',
+              message: 'index job is unknown',
+              details: { reason: 'provider_restart_or_retention_expiry', core_code: 'index_job_not_found' },
+            }],
+          },
+        },
+      });
+    try {
+      const read = await driver.call('index_status', {
+        workspace_id: workspaceId, job_id: 'idx_deadbeef',
+      });
+      expect(read.ok).toBe(false);
+      const error = (read as { ok: false; error: { code: string; message: string } }).error;
+      expect(error.code).toBe('FILE_NOT_FOUND');
+      expect(error.message).toContain('index job is unknown');
+    } finally { await driver.stop(); }
+  });
+
   it('keeps a timed-out provider read retryable instead of calling it not-found', async () => {
     const { driver } = await fixture(async (_poll, providerJobId) => {
       if (providerJobId === 'idx_provider_same') return completed();

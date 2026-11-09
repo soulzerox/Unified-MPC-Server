@@ -337,6 +337,7 @@ describe('web CLI command', () => {
 
         let registered = true;
         let restored = false;
+        const invalidate = vi.fn(async () => ({ ok: true as const, value: undefined }));
         const control = createWorkspaceControl(
           {
             get: async (id: string) => (registered && id === workspace.id ? workspace : null),
@@ -353,10 +354,14 @@ describe('web CLI command', () => {
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
           ledger,
+          { invalidate },
         );
 
         await expect(control.remove(workspace.id)).resolves.toBeNull();
         expect(restored).toBe(false);
+        // The archived identity is restorable, so the verification must go
+        // before the pin does or a later restore reuses an unpinned generation.
+        expect(invalidate).toHaveBeenCalledWith(workspace.id);
         // Without the release a live-provider pin would outlive the registration
         // and keep the manifest unprunable indefinitely.
         await expect(ledger.get(workspace.id)).resolves.toBeNull();
@@ -393,10 +398,52 @@ describe('web CLI command', () => {
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
           { release: async () => { throw new Error('ledger is read-only'); } },
+          { invalidate: async () => ({ ok: true as const, value: undefined }) },
         );
 
         await expect(control.remove(workspace.id)).rejects.toThrow('ledger is read-only');
         expect(restored).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('restores the registration when the provider verification cannot be invalidated', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-workspace-invalidate-fail-'));
+      try {
+        const workspace = {
+          id: '33333333-3333-4333-8333-333333333333',
+          displayName: 'Project',
+          rootPath: path.join(root, 'project'),
+          realRootPath: path.join(root, 'project'),
+          createdAt: '2026-11-09T00:00:00.000Z',
+        };
+        let registered = true;
+        let restored = false;
+        const release = vi.fn(async () => true);
+        const control = createWorkspaceControl(
+          {
+            get: async (id: string) => (registered && id === workspace.id ? workspace : null),
+            restore: async () => { restored = true; },
+          } as never,
+          {
+            list: async () => (registered ? [workspace] : []),
+            unregister: async () => {
+              registered = false;
+              return { ok: true, value: undefined };
+            },
+          } as never,
+          {} as never,
+          { forgetWorkspace: async () => undefined },
+          { getGoalRuntimeSnapshot: async () => null },
+          { release },
+          { invalidate: async () => ({ ok: false as const, error: { message: 'verification is read-only' } }) },
+        );
+
+        await expect(control.remove(workspace.id)).rejects.toThrow('verification is read-only');
+        expect(restored).toBe(true);
+        // The pin must survive while the verification still authorizes reuse.
+        expect(release).not.toHaveBeenCalled();
       } finally {
         await rm(root, { recursive: true, force: true });
       }

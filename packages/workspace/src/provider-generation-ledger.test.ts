@@ -87,6 +87,25 @@ describe('provider generation ledger (#210 bullet 4)', () => {
     });
   });
 
+  it('runs the caller guard before removing a row and keeps the row when it fails', async () => {
+    await withLedger(async (ledger) => {
+      await ledger.record({ workspaceId: WS, generationId: 'gen-1', manifestId: M1, repositoryId: 'repo_abc123' });
+      await ledger.record({ workspaceId: WS_OTHER, generationId: 'gen-2', manifestId: M2, repositoryId: 'repo_abc123' });
+      const events: string[] = [];
+
+      await expect(ledger.releaseUnknown([WS], {
+        beforeRelease: async (workspaceId) => {
+          events.push(`before:${workspaceId}`);
+          throw new Error('verification is read-only');
+        },
+      })).rejects.toThrow('verification is read-only');
+
+      expect(events).toEqual([`before:${WS_OTHER}`]);
+      expect(await ledger.get(WS_OTHER)).toEqual(expect.objectContaining({ manifestId: M2 }));
+      expect(await ledger.get(WS)).toEqual(expect.objectContaining({ manifestId: M1 }));
+    });
+  });
+
   it('releases a corrupt row for a removed workspace without reading it', async () => {
     await withLedger(async (ledger, dir) => {
       await ledger.record({ workspaceId: WS, generationId: 'gen-1', manifestId: M1, repositoryId: 'repo_abc123' });

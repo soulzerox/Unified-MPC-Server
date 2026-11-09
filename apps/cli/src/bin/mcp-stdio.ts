@@ -15,6 +15,7 @@ import {
 } from '@unified-mpc/shared';
 import { applyPendingSqliteRestoreSync, assertStorageIdentitySafe, SqliteBackupService, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceRoot, ProviderGenerationLedger, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { ThaiRagWorkspaceVerificationStore } from '@unified-mpc/thai-rag';
 import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/stdio-mcp-runtime.js';
 import { startNativeProviderOrDegrade } from '../runtime/native-provider-startup.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
@@ -177,6 +178,7 @@ async function main(): Promise<void> {
   const reconciled = await reconcileProviderGenerations(
     new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
     rawWorkspaceService,
+    new ThaiRagWorkspaceVerificationStore(dataPath),
   );
   if (reconciled.error !== undefined) {
     process.stderr.write(

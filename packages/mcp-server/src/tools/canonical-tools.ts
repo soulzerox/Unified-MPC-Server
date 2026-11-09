@@ -72,7 +72,7 @@ export function canonicalTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'canonical_revision_list',
-      description: 'Read the canonical revision history without mutating it. Lists stored revision manifests newest first, each with manifest id, repository id, revision id, commit/tree identity, target ref, entry count, created time, and the refs, pin reasons, Goal overlay ids and unsettled index-job ids that still retain it. Bounded: `limit` defaults to 50 (max 200) and `total` reports the full count, so a truncated answer is visible instead of silent. A manifest with no retention markers is unreachable by the prune path. Never prunes or judges reachability.',
+      description: 'Read the canonical revision history without mutating it. Lists stored revision manifests newest first, each with manifest id, repository id, revision id, commit/tree identity, target ref, entry count, created time, and the refs, pin reasons, Goal overlay ids, unsettled index-job ids and live provider-generation workspace ids that still retain it. Bounded: `limit` defaults to 50 (max 200) and `total` reports the full count, so a truncated answer is visible instead of silent. A manifest with no retention markers is unreachable by the prune path. Never prunes or judges reachability.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: canonicalRevisionListSchema,

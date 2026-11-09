@@ -10,6 +10,14 @@ import {
 } from '@unified-mpc/extensions';
 
 describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web Control Plane)', () => {
+  /**
+   * The merge profile runs every workspace suite in parallel, and this machine
+   * can be building unrelated projects at the same time. A high-concurrency
+   * request batch legitimately takes longer than vitest's 5 s default on a
+   * loaded host, which turned a correct test into a failed merge gate. Give the
+   * load scenarios an explicit budget instead of relying on the default.
+   */
+  const LOAD_TIMEOUT_MS = 30_000;
   const capabilityToken = 'stress-capability-token';
   let server: ControlPlaneServer;
   let gateway: GatewayService;
@@ -144,7 +152,7 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
         expect(data.state).toBe('BRIDGE_HEALTHY');
         expect(data.localPort).toBeDefined();
       }
-    });
+    }, LOAD_TIMEOUT_MS);
 
     it('handles 30 concurrent mixed requests across endpoints without failure', async () => {
       const endpoints = [
@@ -163,6 +171,6 @@ describe('Milestone 5 - Stress Test & Edge Case Audit (ChatGPT Web Gateway & Web
       for (const res of responses) {
         expect(res.status).toBe(200);
       }
-    });
+    }, LOAD_TIMEOUT_MS);
   });
 });

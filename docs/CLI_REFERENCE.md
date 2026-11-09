@@ -836,9 +836,10 @@ the database busy is a successful `compaction skipped (reader-pressure): ...`
 verdict, not a failure of the GC pass around it.
 
 - Exactly one of `--dry-run` or `--apply` is required; any other shape exits `2`.
-- The pass is pressure-gated: below the compaction threshold it prints
-  `skipped below-threshold` and does not run GC. `index gc --apply` remains the
-  unconditional GC verb.
+- The pass is pressure-gated. While a reader is active or the checkpoint is
+  busy it prints `skipped reader-pressure` (a later run retries); otherwise,
+  below the compaction threshold it prints `skipped below-threshold`. Neither
+  skip runs GC. `index gc --apply` remains the unconditional GC verb.
 - `--dry-run` still takes the fence and the admission decision — the safety
   decision must be the same one an apply takes — but runs GC in plan mode and
   verifies read-only.

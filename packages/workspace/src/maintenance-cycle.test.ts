@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -415,6 +415,21 @@ describe('runMaintenanceCycle (#210 §5-§7 bounded maintenance cycle)', () => {
       status: 'refused',
       reason: 'fence-acquire-failed',
       detail: 'held by other-worker until 2026-10-18T10:01:00.000Z',
+      tookFence: false,
+      tookAdmission: false,
+    });
+
+    // Corrupt: an unreadable record must refuse rather than look like a free
+    // fence, and the report must name the record rather than a holder.
+    const root2 = await tempRoot();
+    const { deps: deps2 } = await depsFor(root2);
+    await mkdir(path.join(root2, 'gc'), { recursive: true });
+    await writeFile(path.join(root2, 'gc', 'lease.json'), '{not json', 'utf8');
+    const r2 = await runMaintenanceCycle(deps2);
+    expect(r2).toEqual({
+      status: 'refused',
+      reason: 'fence-acquire-failed',
+      detail: 'fence record is unreadable',
       tookFence: false,
       tookAdmission: false,
     });

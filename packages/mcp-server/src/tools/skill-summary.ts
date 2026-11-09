@@ -48,8 +48,9 @@ export interface SkillCatalogSummaryOptions {
   readonly limit?: number;
   /**
    * Whether the catalog ranked these rows by relevance. `list()` only ranks a
-   * non-empty query, so a plain listing is still discovery order and the
-   * truncation hint must not call it relevance order.
+   * query with at least one significant token: stop words, punctuation and a
+   * single Latin character stay in discovery order, so the truncation hint must
+   * not call those rows relevance order.
    */
   readonly ranked?: boolean;
 }

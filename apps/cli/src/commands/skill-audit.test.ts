@@ -25,8 +25,10 @@ function emptyReport(overrides: Partial<SkillInventoryAuditReport['summary']> = 
       canonicalPresentNames: 0,
       canonicalMatchNames: 0,
       canonicalDivergingNames: 0,
+      canonicalOnlyNames: 0,
       canonicalAbsentNames: 0,
       duplicateCanonicalNames: 0,
+      canonicalUnverifiedNames: 0,
       ...overrides,
     },
   };
@@ -76,8 +78,10 @@ const divergentReport: SkillInventoryAuditReport = {
     canonicalPresentNames: 1,
     canonicalMatchNames: 0,
     canonicalDivergingNames: 1,
+    canonicalOnlyNames: 0,
     canonicalAbsentNames: 0,
     duplicateCanonicalNames: 0,
+    canonicalUnverifiedNames: 0,
   },
 };
 
@@ -116,7 +120,7 @@ describe('formatSkillInventoryAudit', () => {
     expect(lines.split('\n')).toEqual([
       'skill inventory: 3 directories across 2 roots, 1 declared names',
       '  unique 1 · identical 0 · divergent 0 · unverified 0',
-      'canonical: 0 present (0 matching, 0 diverging), 0 absent, 0 duplicate names',
+      'canonical 0 matching · 0 diverging · 0 only copy · 0 absent · 0 duplicate · 0 unverified',
       'no Skill name needs a precedence decision',
     ]);
   });
@@ -150,9 +154,26 @@ describe('formatSkillInventoryAudit', () => {
       skipped: [{ skillPath: '/home/user/.claude/skills/gamma/SKILL.md', reason: 'symbolic links are not staged' }],
     };
     const lines = formatSkillInventoryAudit(report);
+    expect(lines).toContain('  gamma  [unverified] canonical unverified');
+    expect(lines).not.toMatch(/gamma\s+\[unverified\][^\n]*variants/);
     expect(lines).toMatch(/unfingerprintable\s+claude-skills\s+\/home\/user\/\.claude\/skills\/gamma\/SKILL\.md/);
     expect(lines).toContain('unfingerprintable copies (1):');
     expect(lines).toContain('  /home/user/.claude/skills/gamma/SKILL.md  symbolic links are not staged');
+  });
+
+  it('partitions the canonical line so every declared name is counted once', () => {
+    const lines = formatSkillInventoryAudit(emptyReport({
+      declaredNames: 6,
+      canonicalMatchNames: 1,
+      canonicalDivergingNames: 1,
+      canonicalOnlyNames: 1,
+      canonicalAbsentNames: 1,
+      duplicateCanonicalNames: 1,
+      canonicalUnverifiedNames: 1,
+    }));
+    expect(lines.split('\n')).toContain(
+      'canonical 1 matching · 1 diverging · 1 only copy · 1 absent · 1 duplicate · 1 unverified',
+    );
   });
 });
 

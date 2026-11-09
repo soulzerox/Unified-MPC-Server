@@ -70,8 +70,13 @@ function canonicalLabel(entry: SkillInventoryAuditName): string {
 }
 
 function renderName(entry: SkillInventoryAuditName): string[] {
+  // An unfingerprintable copy means the audit cannot state a variant count, so
+  // it prints none rather than a `0` that would read as "one variant".
+  const variants = entry.classification === 'unverified'
+    ? ''
+    : `  variants ${entry.variantFingerprints.length}`;
   const lines = [
-    `  ${entry.name}  [${entry.classification}] ${canonicalLabel(entry)}  variants ${entry.variantFingerprints.length}`,
+    `  ${entry.name}  [${entry.classification}] ${canonicalLabel(entry)}${variants}`,
   ];
   for (const copy of entry.entries) {
     const fingerprint = copy.fingerprint === undefined ? 'unfingerprintable' : shortFingerprint(copy.fingerprint);
@@ -95,7 +100,14 @@ export function formatSkillInventoryAudit(report: SkillInventoryAuditReport): st
   const lines = [
     `skill inventory: ${summary.directories} directories across ${summary.roots} roots, ${summary.declaredNames} declared names`,
     `  unique ${summary.uniqueNames} · identical ${summary.identicalNames} · divergent ${summary.divergentNames} · unverified ${summary.unverifiedNames}`,
-    `canonical: ${summary.canonicalPresentNames} present (${summary.canonicalMatchNames} matching, ${summary.canonicalDivergingNames} diverging), ${summary.canonicalAbsentNames} absent, ${summary.duplicateCanonicalNames} duplicate names`,
+    `canonical ${[
+      `${summary.canonicalMatchNames} matching`,
+      `${summary.canonicalDivergingNames} diverging`,
+      `${summary.canonicalOnlyNames} only copy`,
+      `${summary.canonicalAbsentNames} absent`,
+      `${summary.duplicateCanonicalNames} duplicate`,
+      `${summary.canonicalUnverifiedNames} unverified`,
+    ].join(' · ')}`,
   ];
 
   const needsDecision = report.names.filter((entry) => (

@@ -883,10 +883,10 @@ or chosen — a divergent group is reported for human review.
 ```bash
 $ unified-mpc skill audit
 skill inventory: 391 directories across 10 roots, 188 declared names
-  unique 81 · identical 64 · divergent 43 · unverified 1
-canonical: 43 present (18 matching, 25 diverging), 145 absent, 0 duplicate names
-names needing a decision (43):
-  ask-matt  [divergent] canonical diverges  variants 4
+  unique 81 · identical 63 · divergent 43 · unverified 1
+canonical 75 matching · 26 diverging · 74 only copy · 12 absent · 0 duplicate · 1 unverified
+names needing a decision (44):
+  ask-matt  [divergent] canonical matches a legacy copy  variants 4
     <fingerprint>  claude-skills             /home/user/.claude/skills/ask-matt/SKILL.md
     ...
 use --json for the full inventory, including identical and unique names
@@ -898,10 +898,17 @@ use --json for the full inventory, including identical and unique names
 - `classification` counts distinct full-directory fingerprints: `unique` (one
   copy), `identical` (several copies, one fingerprint), `divergent` (several
   fingerprints), `unverified` (a copy could not be fingerprinted, so no variant
-  count is claimed).
+  count is claimed — the operator line prints no `variants` value for it).
 - `canonicalState` relates the canonical copy to its legacy siblings:
   `duplicate` (two canonical directories declare one name), `unverified`,
   `absent`, `only-canonical`, `matches`, `diverges`.
+- The `canonical` operator line partitions the declared names by
+  `canonicalState` — `matching`, `diverging`, `only copy`, `absent`,
+  `duplicate`, `unverified` — so the six counts always sum to
+  `declaredNames`. `matching` means a legacy copy holds the canonical content;
+  a name served only by the canonical root is counted as `only copy`, never as
+  matching. `--json` additionally reports `canonicalPresentNames` (every name
+  with a canonical copy) and the same buckets in `summary`.
 - `--canonical-root <path>` audits a specific canonical tree instead of the
   runtime's own; `--workspace <path>` adds that workspace's workspace-local
   Skill roots to the audit.

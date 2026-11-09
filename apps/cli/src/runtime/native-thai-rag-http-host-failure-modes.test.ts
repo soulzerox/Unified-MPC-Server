@@ -82,10 +82,14 @@ function spawnEnv(fixture: Fixture, providerPath: string | undefined): NodeJS.Pr
     UNIFIED_MPC_CHECKPOINT_KEY_BASE64: TEST_CHECKPOINT_KEY,
     ...(providerPath === undefined ? {} : { UNIFIED_MPC_THAI_RAG_PROVIDER_PATH: providerPath }),
   };
-  // A developer shell that arms the destructive workspace reset must not make
-  // these tests archive their temp registrations before startup.
+  // Inherited switches shape the shipped child's startup: an armed workspace
+  // reset makes it archive or refuse the temp registrations, and strict roots
+  // without a matching allowed root make it exit before "MCP stdio ready".
+  // Neither belongs to the behaviour these suites check.
   delete env.UNIFIED_MPC_RESET_WORKSPACES;
   delete env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES;
+  delete env.UNIFIED_MPC_STRICT_ROOTS;
+  delete env.UNIFIED_MPC_ALLOWED_ROOTS;
   return env;
 }
 

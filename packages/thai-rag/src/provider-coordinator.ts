@@ -1,7 +1,7 @@
 import { readFile, unlink } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import path from 'node:path';
-import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
+import { appError, err, isAppErrorCode, ok, type AppError, type AppErrorCode, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { PosixProcessIdentityProbe } from '@unified-mpc/process';
 import { resolveThaiRagProviderRoot } from './canonical-workspace.js';
 import {
@@ -67,7 +67,19 @@ type ProviderRequest =
 
 type ProviderResponse =
   | { readonly id: string; readonly ok: true; readonly value: unknown }
-  | { readonly id: string; readonly ok: false; readonly error: string };
+  | {
+    readonly id: string;
+    readonly ok: false;
+    readonly error: string;
+    /**
+     * The owner's Unified classification. Optional on the wire so a newer
+     * follower still reads an older owner: absent means the legacy
+     * `CONFLICT` + recoverable default, not a malformed response.
+     */
+    readonly code?: AppErrorCode;
+    readonly recoverable?: boolean;
+    readonly details?: Readonly<Record<string, string | number>>;
+  };
 
 export class ThaiRagProviderCoordinator {
   private readonly runtime: ThaiRagProviderRuntime;
@@ -231,17 +243,17 @@ export class ThaiRagProviderCoordinator {
 
   private async handleOwnerRequest(line: string, signal?: AbortSignal): Promise<ProviderResponse> {
     const parsed = parseRequest(line);
-    if (!parsed.ok) return { id: 'unknown', ok: false, error: parsed.error.message };
+    if (!parsed.ok) return failureResponse('unknown', parsed.error);
     if (parsed.value.method === 'health') {
       const health = await this.runtime.refresh(signal);
       return health.ok
         ? { id: parsed.value.id, ok: true, value: health.value }
-        : { id: parsed.value.id, ok: false, error: health.error.message };
+        : failureResponse(parsed.value.id, health.error);
     }
     const result = await this.runtime.call(parsed.value.tool, parsed.value.args, signal, parsed.value.budget);
     return result.ok
       ? { id: parsed.value.id, ok: true, value: result.value }
-      : { id: parsed.value.id, ok: false, error: result.error.message };
+      : failureResponse(parsed.value.id, result.error);
   }
 
   private async waitForFollowerHealth(
@@ -359,7 +371,12 @@ export class ThaiRagProviderCoordinator {
         }
         finish(response.value.ok
           ? ok(response.value.value)
-          : err(appError('CONFLICT', response.value.error, true)));
+          : err(appError(
+            response.value.code ?? 'CONFLICT',
+            response.value.error,
+            response.value.recoverable ?? true,
+            response.value.details,
+          )));
       });
       socket.once('connect', () => {
         delivered = true;
@@ -419,11 +436,42 @@ function parseResponse(line: string): Result<ProviderResponse> {
       return err(appError('INTERNAL_ERROR', 'Malformed Thai-RAG provider response', true));
     }
     if (value.ok) return ok({ id: value.id, ok: true, value: value.value });
-    if (typeof value.error === 'string') return ok({ id: value.id, ok: false, error: value.error });
-    return err(appError('INTERNAL_ERROR', 'Malformed Thai-RAG provider error response', true));
+    if (typeof value.error !== 'string') {
+      return err(appError('INTERNAL_ERROR', 'Malformed Thai-RAG provider error response', true));
+    }
+    // An absent classification is the legacy wire shape (#701 rollout): an
+    // older owner only sent a message, so default to what the follower used to
+    // produce. A present-but-unknown code is a protocol violation.
+    const code = value.code === undefined
+      ? 'CONFLICT'
+      : isAppErrorCode(value.code) ? value.code : 'INTERNAL_ERROR';
+    return ok({
+      id: value.id,
+      ok: false,
+      error: value.error,
+      code,
+      recoverable: typeof value.recoverable === 'boolean' ? value.recoverable : true,
+      ...(isErrorDetails(value.details) ? { details: value.details } : {}),
+    });
   } catch {
     return err(appError('INTERNAL_ERROR', 'Invalid Thai-RAG provider response JSON', true));
   }
+}
+
+function failureResponse(id: string, error: AppError): ProviderResponse {
+  return {
+    id,
+    ok: false,
+    error: error.message,
+    code: error.code,
+    recoverable: error.recoverable,
+    ...(error.details === undefined ? {} : { details: error.details }),
+  };
+}
+
+function isErrorDetails(value: unknown): value is Readonly<Record<string, string | number>> {
+  return isRecord(value)
+    && Object.values(value).every((entry) => typeof entry === 'string' || typeof entry === 'number');
 }
 
 function isProviderHealth(value: unknown): value is ThaiRagProviderHealth {

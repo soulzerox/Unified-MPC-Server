@@ -63,7 +63,7 @@ interface ProviderLock {
 }
 
 function spawnEnv(fixture: Fixture): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_NO_WARNINGS: '1',
     HOME: fixture.home,
@@ -72,6 +72,11 @@ function spawnEnv(fixture: Fixture): NodeJS.ProcessEnv {
     UNIFIED_MPC_CHECKPOINT_KEY_BASE64: TEST_CHECKPOINT_KEY,
     UNIFIED_MPC_THAI_RAG_PROVIDER_PATH: source,
   };
+  // A developer shell that arms the destructive workspace reset must not make
+  // these tests archive their temp registrations before startup.
+  delete env.UNIFIED_MPC_RESET_WORKSPACES;
+  delete env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES;
+  return env;
 }
 
 function captureOutput(child: ChildProcessWithoutNullStreams): () => string {

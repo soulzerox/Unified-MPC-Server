@@ -72,9 +72,21 @@ interface JournalRow {
   readonly error?: string;
 }
 
+// The shipped children read their configuration from the environment. These
+// suites set every value they depend on below, so an inherited Unified-MPC,
+// Thai-RAG or Tunnel switch must not decide whether a child reaches readiness
+// or where it writes its activity lease.
+function inheritedEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^(?:UNIFIED_MPC_|UNIFIED_THAI_RAG_|THAI_RAG_|TUNNEL_)/.test(name)) delete env[name];
+  }
+  return env;
+}
+
 function spawnEnv(fixture: Fixture, providerPath: string | undefined): NodeJS.ProcessEnv {
   return {
-    ...process.env,
+    ...inheritedEnv(),
     NODE_NO_WARNINGS: '1',
     HOME: fixture.home,
     XDG_DATA_HOME: path.join(fixture.home, '.local', 'share'),

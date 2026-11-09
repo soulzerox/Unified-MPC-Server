@@ -711,6 +711,54 @@ describe('web CLI command', () => {
       }
     });
 
+    it('sweeps provider-generation rows orphaned by an out-of-band archive before listening', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-provider-generation-reconcile-'));
+      const home = path.join(root, 'home');
+      await mkdir(home, { recursive: true });
+      const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+      const previousHome = process.env.HOME;
+      const previousXdgDataHome = process.env.XDG_DATA_HOME;
+      process.env.UNIFIED_MPC_DATA_PATH = root;
+      process.env.HOME = home;
+      process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+      const orphanId = '44444444-4444-4444-8444-444444444444';
+      const rowPath = path.join(root, 'canonical', 'provider-generations', `${orphanId}.json`);
+
+      try {
+        // An archive outside the removal adapter (lifecycle cleanup, a reset, a
+        // crash between archive and release) leaves this row behind with no
+        // registration to own it, so startup must drop it before serving.
+        await new ProviderGenerationLedger(path.join(root, 'canonical')).record({
+          workspaceId: orphanId,
+          generationId: 'generation-orphaned',
+          manifestId: canonicalManifestId({
+            repositoryId: 'repo_abc123',
+            revisionId: 'rev:v1:' + 'a'.repeat(64),
+            entries: [{ path: 'a.ts', contentHash: '1'.repeat(64) }],
+          }),
+          repositoryId: 'repo_abc123',
+        });
+        expect(existsSync(rowPath)).toBe(true);
+
+        const result = await runWeb({ port: 0 }, { goalRuntimeRead: {} as never });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        try {
+          expect(existsSync(rowPath)).toBe(false);
+        } finally {
+          await result.value.handle.close();
+        }
+      } finally {
+        if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+        else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousXdgDataHome;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('repairs managed policy artifacts before listening only when the opt-in flag is set', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'web-policy-repair-'));
       const workspaceRoot = path.join(root, 'workspace');

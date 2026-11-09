@@ -46,6 +46,12 @@ export interface SkillCatalogSummary {
 export interface SkillCatalogSummaryOptions {
   /** Keeps at most this many rows; the counts still describe the whole match. */
   readonly limit?: number;
+  /**
+   * Whether the catalog ranked these rows by relevance. `list()` only ranks a
+   * non-empty query, so a plain listing is still discovery order and the
+   * truncation hint must not call it relevance order.
+   */
+  readonly ranked?: boolean;
 }
 
 export function summarizeSkillCatalog(
@@ -67,7 +73,9 @@ export function summarizeSkillCatalog(
     detail: 'summary',
     omittedFields: SKILL_SUMMARY_OMITTED_FIELDS,
     hint: truncated
-      ? `showing ${kept.length} of ${skills.length} matches ranked by relevance; pass a larger limit or use skills_list with the same query for every match`
+      ? options.ranked === true
+        ? `showing ${kept.length} of ${skills.length} matches for this query, best first; pass a larger limit or use skills_list with the same query for every match`
+        : `showing ${kept.length} of ${skills.length} skills in discovery order, not relevance order; pass a query to rank them, a larger limit, or use skills_list for every skill`
       : `descriptions are ${SKILL_DESCRIPTION_PREVIEW_CHARS}-character previews of the text skill_match ranks; read one skill with skills_read for its complete text, or use skills_list with detail=full for the unprojected catalog`,
     duplicateNames: collectDuplicateNames(skills),
     skills: kept.map(summarizeSkillRow),

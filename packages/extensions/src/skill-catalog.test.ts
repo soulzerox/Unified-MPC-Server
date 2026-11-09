@@ -458,10 +458,12 @@ Duplicate content.
   it('ranks exact and name matches ahead of description-only matches', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-ranking-'));
     temporaryRoots.push(home);
+    // Description-only first: discovery order must not be able to produce the
+    // expected ranking, otherwise this test passes on the pre-ranking code.
     const skills = [
-      ['caption', 'Write a caption.'],
-      ['post-caption-helper', 'Helper for a post.'],
       ['social-notes', 'Ideas for a caption.'],
+      ['post-caption-helper', 'Helper for a post.'],
+      ['caption', 'Write a caption.'],
     ] as const;
     for (const [name, description] of skills) {
       const skillRoot = path.join(home, '.agents', 'skills', name);
@@ -501,5 +503,44 @@ Duplicate content.
     const compound = await catalog.list({ query: 'pagepilot' });
     expect(compound.ok).toBe(true);
     if (compound.ok) expect(compound.value.skills.map((skill) => skill.name)).toEqual(['page-pilot']);
+  });
+
+  it('falls back to whole-query matching when no significant token remains', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-degenerate-'));
+    temporaryRoots.push(home);
+    const fixtures = [
+      ['.agents', 'caption-helper', 'Writes the caption for a post.'],
+      ['.agents', 'image-tools', 'Crop and resize 图片 files.'],
+      ['.claude', 'caption-helper', 'A second caption helper for the team.'],
+    ] as const;
+    for (const [root, name, description] of fixtures) {
+      const skillRoot = path.join(home, root, 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listedIds = async (input: { readonly query?: string; readonly source?: string }): Promise<readonly string[]> => {
+      const listed = await catalog.list(input);
+      expect(listed.ok).toBe(true);
+      return listed.ok ? listed.value.skills.map((skill) => skill.id) : [];
+    };
+
+    // An all-stop-word query used to match as a whole-string substring. Losing
+    // every token must not turn that into "no matches".
+    expect(new Set(await listedIds({ query: 'the' }))).toEqual(new Set([
+      'agents-skills/caption-helper',
+      'claude-skills/caption-helper',
+    ]));
+
+    // Punctuation normalizes to an empty query, which still lists the catalog.
+    expect((await listedIds({ query: '???' })).length).toBe(3);
+
+    // One Latin letter is dropped as noise and falls back to the whole query;
+    // one CJK character is a word and must still be findable.
+    expect((await listedIds({ query: 'c' })).length).toBe(3);
+    expect(await listedIds({ query: '图' })).toEqual(['agents-skills/image-tools']);
+
+    // The source filter still applies before ranking.
+    expect(await listedIds({ query: 'caption helper', source: 'claude-skills' })).toEqual(['claude-skills/caption-helper']);
   });
 });

@@ -403,6 +403,12 @@ const QUERY_STOP_WORDS = new Set([
   'you', 'your',
 ]);
 const LATIN_WORD = /^[a-z0-9]+$/;
+/**
+ * A single Latin letter or digit ("c", "2") is noise, but a single character is
+ * a whole word in scripts that do not separate words with spaces, so only Latin
+ * tokens are dropped for being short.
+ */
+const MIN_LATIN_TOKEN_LENGTH = 2;
 
 interface SkillSearchFields {
   readonly name: string;
@@ -416,13 +422,26 @@ interface SkillSearchFields {
   readonly descriptionCompounds: ReadonlySet<string>;
 }
 
+interface SkillMatchScore {
+  /** Share of the query's significant words this skill covers, 0-100. */
+  readonly coverage: number;
+  /** Where those words matched, plus bonuses for an exact or prefix query. */
+  readonly relevance: number;
+}
+
 function rankSkillMatches(skills: readonly SkillSummary[], query: string): readonly SkillSummary[] {
   const tokens = queryTokens(query);
-  if (tokens.length === 0) return [];
+  // Nothing significant to rank ("the", "!!!", "c") is not the same as no
+  // match: keep the pre-ranking behaviour and filter on the whole query, so a
+  // weak query returns fewer rows instead of none.
+  if (tokens.length === 0) return skills.filter((skill) => wholeQueryMatches(skill, query));
   return skills
-    .map((skill) => ({ skill, score: scoreSkillMatch(skill, query, tokens) }))
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score
+    .flatMap((skill) => {
+      const score = scoreSkillMatch(skill, query, tokens);
+      return score === undefined ? [] : [{ skill, score }];
+    })
+    .sort((left, right) => right.score.coverage - left.score.coverage
+      || right.score.relevance - left.score.relevance
       || compareText(left.skill.name, right.skill.name)
       || compareText(left.skill.id, right.skill.id))
     .map((entry) => entry.skill);
@@ -432,7 +451,8 @@ function queryTokens(query: string): readonly string[] {
   const tokens: string[] = [];
   const seen = new Set<string>();
   for (const token of query.split(' ')) {
-    if (token.length < 2 || QUERY_STOP_WORDS.has(token) || seen.has(token)) continue;
+    if (QUERY_STOP_WORDS.has(token) || (LATIN_WORD.test(token) && token.length < MIN_LATIN_TOKEN_LENGTH)) continue;
+    if (token.length === 0 || seen.has(token)) continue;
     seen.add(token);
     tokens.push(token);
   }
@@ -443,28 +463,34 @@ function scoreSkillMatch(
   skill: SkillSummary,
   query: string,
   tokens: readonly string[],
-): number {
+): SkillMatchScore | undefined {
   const fields = searchFields(skill);
   let matched = 0;
-  let fieldScore = 0;
+  let relevance = 0;
   for (const token of tokens) {
     const inName = fieldMatchesToken(fields.name, fields.nameWords, fields.nameCompounds, token);
     const inId = fieldMatchesToken(fields.id, fields.idWords, fields.idCompounds, token);
     const inDescription = fieldMatchesToken(fields.description, fields.descriptionWords, fields.descriptionCompounds, token);
     if (inName || inId || inDescription) matched += 1;
-    if (inName) fieldScore += 30;
-    if (inId) fieldScore += 12;
-    if (inDescription) fieldScore += 6;
+    if (inName) relevance += 30;
+    if (inId) relevance += 12;
+    if (inDescription) relevance += 6;
   }
-  if (matched === 0) return 0;
+  if (matched === 0) return undefined;
 
-  let score = Math.round((matched / tokens.length) * 100) + fieldScore;
-  if (fields.name === query) score += 140;
-  else if (fields.name.startsWith(query)) score += 70;
-  else if (fields.name.includes(query)) score += 50;
-  if (fields.id.includes(query)) score += 20;
-  if (fields.description.includes(query)) score += 35;
-  return score;
+  if (fields.name === query) relevance += 140;
+  else if (fields.name.startsWith(query)) relevance += 70;
+  else if (fields.name.includes(query)) relevance += 50;
+  if (fields.id.includes(query)) relevance += 20;
+  if (fields.description.includes(query)) relevance += 35;
+  return { coverage: Math.round((matched / tokens.length) * 100), relevance };
+}
+
+/** The pre-ranking match: the whole normalized query as one substring. */
+function wholeQueryMatches(skill: SkillSummary, query: string): boolean {
+  return normalizeSearchText(skill.name).includes(query)
+    || normalizeSearchText(skill.id).includes(query)
+    || normalizeSearchText(skill.description).includes(query);
 }
 
 function searchFields(skill: SkillSummary): SkillSearchFields {

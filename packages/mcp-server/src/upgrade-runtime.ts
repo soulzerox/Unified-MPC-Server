@@ -2135,7 +2135,10 @@ export class UpgradeRuntimeService {
         ready: true,
         executed: true,
         query,
-        ...summarizeSkillCatalog(listed.value.skills, { limit: readSkillMatchLimit(input) }),
+        ...summarizeSkillCatalog(listed.value.skills, {
+          limit: readSkillMatchLimit(input),
+          ranked: query.length > 0,
+        }),
       });
     }
 

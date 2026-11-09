@@ -35,7 +35,9 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.source === undefined ? {} : { source: input.source }),
         });
         if (!listed.ok || input.detail === 'full') return listed;
-        return ok(summarizeSkillCatalog(listed.value.skills));
+        return ok(summarizeSkillCatalog(listed.value.skills, {
+          ranked: (input.query ?? '').trim().length > 0,
+        }));
       },
     }),
     defineTool({

@@ -189,6 +189,92 @@ describe('ThaiRagProviderCoordinator', () => {
     await owner.close();
   });
 
+  it('forwards the owner error code, recoverability and details to a follower', async () => {
+    const dataRoot = await root();
+    const terminal = appError('CONFLICT', 'Native Thai-RAG code_index failed: some_future_state', false, {
+      reason: 'some_future_state',
+      unmappedProviderCode: 1,
+    });
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => err(terminal) }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => { throw new Error('follower driver must not run'); } }),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    const result = await follower.call('code_index', { workspace_id: 'ws' });
+
+    // The client-facing stdio peer is a follower: if this path flattens the
+    // classification, an owner-side terminal provider failure is still a retry
+    // loop on the surface that ships.
+    expect(result).toEqual({ ok: false, error: terminal });
+    await follower.close();
+    await owner.close();
+  });
+
+  it('defaults a legacy owner response with no classification to CONFLICT and retryable', async () => {
+    const dataRoot = await root();
+    const providerRoot = path.join(dataRoot, 'thai-rag');
+    const socketPath = path.join(providerRoot, 'provider.sock');
+    await mkdir(providerRoot, { recursive: true });
+    const heartbeat = new Date().toISOString();
+    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+      ownerId: 'legacy-owner',
+      pid: process.pid,
+      startedAt: heartbeat,
+      processIdentity: 'legacy-identity',
+      heartbeatAt: heartbeat,
+      providerVersion: '4.61.0',
+    }));
+    const health = { providerId: 'thai-rag', providerVersion: '4.61.0', state: 'ready', embeddingIndexGeneration: 1 };
+    const stub = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        let id = 'unknown';
+        let method = '';
+        try {
+          const parsed: unknown = JSON.parse(chunk.split('\n')[0] ?? '');
+          if (isRecord(parsed) && typeof parsed.id === 'string') id = parsed.id;
+          if (isRecord(parsed) && typeof parsed.method === 'string') method = parsed.method;
+        } catch { /* the owner echoes whatever id it can read */ }
+        // The pre-#701 owner wire shape: the error is a bare message.
+        const body = method === 'health'
+          ? { id, ok: true, value: health }
+          : { id, ok: false, error: 'legacy owner failure' };
+        socket.end(`${JSON.stringify(body)}\n`);
+      });
+    });
+    await new Promise<void>((resolve) => stub.listen(socketPath, resolve));
+    const coordinator = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      followerConnectTimeoutMs: 200,
+      isProcessAlive: (): boolean => true,
+      processIdentityProbe: async (): Promise<string | null> => 'legacy-identity',
+      driver: driver({ call: async () => { throw new Error('a follower must never start its own driver'); } }),
+    });
+    try {
+      expect((await coordinator.start()).ok).toBe(true);
+      const result = await coordinator.call('code_index', { workspace_id: 'ws' });
+      expect(result).toEqual({ ok: false, error: appError('CONFLICT', 'legacy owner failure', true) });
+    } finally {
+      await coordinator.close();
+      await new Promise<void>((resolve) => stub.close(() => resolve()));
+    }
+  });
+
   it('propagates follower cancellation to the owner producer', async () => {
     const dataRoot = await root();
     let producerAborted = false;

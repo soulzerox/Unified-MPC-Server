@@ -19,6 +19,7 @@ import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/std
 import { startNativeProviderOrDegrade } from '../runtime/native-provider-startup.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
 import { StrictWorkspaceRepository, canonicalizeAllowedRoots, requestedPathInsideAllowedRoot } from '../runtime/strict-workspace-repository.js';
+import { reconcileProviderGenerations } from '../runtime/provider-generation-reconcile.js';
 import { resolveRequestedWorkspacePath } from '../runtime/workspace-selection.js';
 import { resetWorkspaceRegistrations } from '../runtime/workspace-reset.js';
 
@@ -104,7 +105,6 @@ async function main(): Promise<void> {
       rawWorkspaceService,
       backupService,
       readArg('--confirm-reset-workspaces') ?? process.env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES,
-      new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
     );
     process.stderr.write(
       `Unified-MPC stdio: archived ${result.archived} previous workspace registration(s)`
@@ -168,6 +168,20 @@ async function main(): Promise<void> {
 
   for (const entry of await workspaceService.list()) {
     process.stderr.write(`Unified-MPC workspace id=${entry.id} root=${entry.realRootPath}\n`);
+  }
+  // A reset archives every registration, and this startup then restores the
+  // workspace it serves with the same id. Reconcile only after that restore, so
+  // a generation the provider will reuse without a reindex stays pinned. The
+  // raw registry is the known set: a workspace outside the strict allowlist is
+  // still a live registration and its ledger row must survive.
+  const reconciled = await reconcileProviderGenerations(
+    new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
+    rawWorkspaceService,
+  );
+  if (reconciled.error !== undefined) {
+    process.stderr.write(
+      `Unified-MPC stdio: could not release orphaned provider generations: ${reconciled.error}\n`,
+    );
   }
   database.close();
 

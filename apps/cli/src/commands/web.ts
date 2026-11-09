@@ -71,6 +71,7 @@ import { EXTENSIONS_SETTINGS_KEY, IdeSyncService, ensureExtensionsSettingsMigrat
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
+import { reconcileProviderGenerations } from '../runtime/provider-generation-reconcile.js';
 import { missingOptionValue, unexpectedOption } from './options.js';
 
 export interface WebCommand {
@@ -206,11 +207,10 @@ export async function runWeb(
     // row left behind keeps pinning a manifest no workspace can use. A stale
     // pin is safe and the next start retries, so a cleanup failure must not
     // take the control plane down.
-    try {
-      await releaseOrphanedProviderGenerations(providerGenerations, workspaceService);
-    } catch (error: unknown) {
+    const reconciled = await reconcileProviderGenerations(providerGenerations, workspaceService);
+    if (reconciled.error !== undefined) {
       process.stderr.write(
-        `Unified-MPC web: could not release orphaned provider generations: ${error instanceof Error ? error.message : String(error)}\n`,
+        `Unified-MPC web: could not release orphaned provider generations: ${reconciled.error}\n`,
       );
     }
     const workspaceControl = createWorkspaceControl(
@@ -281,18 +281,6 @@ export function createWebGoalRuntimeProjection(
       },
     },
   });
-}
-
-/**
- * Release provider-generation rows for workspaces that are no longer active
- * (#210 bullet 4 follow-up). Archived registrations cannot own a live
- * generation, so their rows must not keep pinning a manifest.
- */
-export async function releaseOrphanedProviderGenerations(
-  providerGenerations: Pick<ProviderGenerationLedger, 'releaseUnknown'>,
-  workspaceService: Pick<WorkspaceService, 'list'>,
-): Promise<string[]> {
-  return providerGenerations.releaseUnknown((await workspaceService.list()).map((workspace) => workspace.id));
 }
 
 export function createWorkspaceControl(

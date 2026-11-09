@@ -14,10 +14,6 @@ interface WorkspaceResetBackupService {
   create(reason: 'manual'): Promise<{ readonly id: string }>;
 }
 
-interface ProviderGenerationRelease {
-  releaseUnknown(knownWorkspaceIds: readonly string[]): Promise<readonly string[]>;
-}
-
 export interface WorkspaceResetResult {
   readonly archived: number;
   readonly backupId: string | null;
@@ -28,15 +24,14 @@ export interface WorkspaceResetResult {
  * It is still a broad persistent mutation, so it requires an exact phrase and a
  * restorable SQLite snapshot before the first row is removed.
  *
- * Every registration is gone after a successful reset, so provider-generation
- * rows are released as well. The release also runs when there is nothing left
- * to archive, which lets a retry converge after a failed release.
+ * Provider-generation rows are reconciled by the caller after it restores the
+ * workspace this process is about to serve: releasing every row here would
+ * unpin a generation that the restored workspace keeps using without a reindex.
  */
 export async function resetWorkspaceRegistrations(
   workspaces: WorkspaceRegistrationService,
   backups: WorkspaceResetBackupService,
   confirmation: string | undefined,
-  providerGenerations?: ProviderGenerationRelease,
 ): Promise<WorkspaceResetResult> {
   if (confirmation !== WORKSPACE_RESET_CONFIRMATION) {
     throw new Error(
@@ -45,10 +40,7 @@ export async function resetWorkspaceRegistrations(
   }
 
   const existing = await workspaces.list();
-  if (existing.length === 0) {
-    await providerGenerations?.releaseUnknown([]);
-    return { archived: 0, backupId: null };
-  }
+  if (existing.length === 0) return { archived: 0, backupId: null };
 
   const backup = await backups.create('manual');
   if (workspaces.unregisterMany !== undefined) {
@@ -56,7 +48,6 @@ export async function resetWorkspaceRegistrations(
   } else {
     for (const workspace of existing) assertSuccessful(await workspaces.unregister(workspace.id));
   }
-  await providerGenerations?.releaseUnknown([]);
   return { archived: existing.length, backupId: backup.id };
 }
 

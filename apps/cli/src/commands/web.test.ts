@@ -16,7 +16,6 @@ import {
   createGoalControl,
   createWebGoalRuntimeProjection,
   createWorkspaceControl,
-  releaseOrphanedProviderGenerations,
   resolveCanonicalLifecycleLimit,
   resolveCanonicalStatusLimit,
   runWeb,
@@ -317,18 +316,6 @@ describe('web CLI command', () => {
   });
 
   describe('workspace control', () => {
-    it('releases rows for provider generations whose workspace is no longer registered', async () => {
-      const releaseUnknown = vi.fn(async () => ['workspace-gone']);
-
-      const released = await releaseOrphanedProviderGenerations(
-        { releaseUnknown },
-        { list: async () => [{ id: 'workspace-live' }] } as never,
-      );
-
-      expect(releaseUnknown).toHaveBeenCalledWith(['workspace-live']);
-      expect(released).toEqual(['workspace-gone']);
-    });
-
     it('releases the provider generation ledger row when a workspace registration is removed', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'web-workspace-remove-'));
       try {

@@ -57,9 +57,12 @@ import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretTool
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
+  EXTENSIONS_SETTINGS_KEY,
   IdeSyncService,
   InstallerService,
+  parseExtensionsSettings,
   PrunerService,
+  SkillInventoryAuditService,
   type InstallServerInput,
   type InstallServerResult,
   type InstallSkillInput,
@@ -68,6 +71,7 @@ import {
   type PruneServerResult,
   type PruneSkillInput,
   type PruneSkillResult,
+  type SkillInventoryAuditReport,
   type SyncTarget,
   type ExtensionsService,
 } from '@unified-mpc/extensions';
@@ -163,6 +167,12 @@ import {
   parseIndexSpaceArgs,
   type IndexSpaceCommand,
 } from './commands/index-space.js';
+import {
+  formatSkillInventoryAudit,
+  parseSkillAuditArgs,
+  skillAuditExitCode,
+  type SkillAuditCommand,
+} from './commands/skill-audit.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
 import {
   parsePublishCredentialArgs,
@@ -190,6 +200,7 @@ export * from './commands/index-revision-prune.js';
 export * from './commands/index-repair.js';
 export * from './commands/index-gc.js';
 export * from './commands/index-gc-expire.js';
+export * from './commands/skill-audit.js';
 export * from './commands/publish-credential.js';
 
 export type CliCommand =
@@ -223,6 +234,7 @@ export type CliCommand =
   | IndexStatusCommand
   | IndexJobListCommand
   | IndexSpaceCommand
+  | SkillAuditCommand
   | PublishCredentialCommand
   | WebCommand
   | ToolsCommand;
@@ -264,6 +276,10 @@ export interface CliDependencies {
     readonly limit?: number;
   }): Promise<ThaiRagIndexJobListing>;
   canonicalLogicalSpace?(): Promise<LogicalSpaceReport>;
+  skillAudit?(input: {
+    readonly canonicalRoot?: string;
+    readonly workspaceRoot?: string;
+  }): Promise<Result<SkillInventoryAuditReport>>;
   canonicalRevisionList?(options?: { readonly limit?: number }): Promise<CanonicalRevisionListReport>;
   canonicalRevisionPin?(input: {
     readonly action: 'pin' | 'unpin';
@@ -340,6 +356,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
     return err(appError('INVALID_INPUT', 'Usage: unified-mpc index status|space|revision|gc|maintenance|repair ...'));
   }
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
+  if (args[0] === 'skill') return parseSkillAuditArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
   return err(appError('INVALID_INPUT', 'Unknown unified-mpc command'));
@@ -382,6 +399,7 @@ Commands:
   index status [--json]                  Report canonical store health, refs and blocking state
   index job list [--json]                List durable index jobs with reuse, embedding and failure detail
   index space [--json]                   Report logical canonical-space counts, never physical bytes
+  skill audit [--json]                   Inventory every discoverable Skill copy and its canonical match
   publish-credential grant <remote>      Grant a publish credential lease from stdin
   publish-credential revoke <lease>      Revoke a publish credential lease
   publish-credential status <lease>      Show lease expiry and hosts without the secret
@@ -651,6 +669,24 @@ Commands:
         writeError(error instanceof Error ? error.message : String(error));
         return 1;
       }
+    }
+    case 'skill-audit': {
+      if (dependencies.skillAudit === undefined) {
+        writeError('Skill inventory audit is not available');
+        return 1;
+      }
+      const audit = await dependencies.skillAudit({
+        ...(parsed.value.canonicalRoot === undefined ? {} : { canonicalRoot: parsed.value.canonicalRoot }),
+        ...(parsed.value.workspaceRoot === undefined ? {} : { workspaceRoot: parsed.value.workspaceRoot }),
+      });
+      if (!audit.ok) {
+        writeError(audit.error.message);
+        return 1;
+      }
+      write(parsed.value.json
+        ? JSON.stringify(audit.value, null, 2)
+        : formatSkillInventoryAudit(audit.value));
+      return skillAuditExitCode(audit.value);
     }
     case 'publish-credential-grant':
     case 'publish-credential-revoke':
@@ -1087,6 +1123,17 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     extensions ??= createLocalExtensionsService({ workspaceRootProvider: async (): Promise<string> => process.cwd() });
     return extensions;
   };
+  // The audit must honour the same root enable/disable rules as discovery, so it
+  // reads the persisted extensions settings instead of assuming the defaults. A
+  // host whose storage identity is unusable still gets an audit: the defaults
+  // enable every root, which is the widest inventory and never hides a copy.
+  const getAuditSettings = (): ReturnType<typeof parseExtensionsSettings> => {
+    try {
+      return parseExtensionsSettings(getWorkspaceState().settings.get(EXTENSIONS_SETTINGS_KEY));
+    } catch {
+      return parseExtensionsSettings(undefined);
+    }
+  };
   let toolRegistry: ToolRegistry | undefined;
   let mcpRuntime: StdioMcpRuntime | undefined;
   const harnessActivationLedger = new HarnessActivationLedger();
@@ -1239,6 +1286,15 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       const dataPath = resolveDataPathFromShared();
       assertStorageIdentitySafe(dataPath);
       return logicalSpaceReportFromRoot(path.join(dataPath, 'canonical'));
+    },
+    skillAudit: async (input): Promise<Result<SkillInventoryAuditReport>> => {
+      const canonicalRoot = input.canonicalRoot ?? path.join(resolveDataPathFromShared(), 'extensions', 'skills');
+      return new SkillInventoryAuditService({
+        settings: getAuditSettings(),
+        managedRoot: canonicalRoot,
+        ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: path.resolve(input.workspaceRoot) }),
+        bundledRoots: [],
+      }).audit();
     },
     canonicalRevisionPin: async (input): Promise<CanonicalRevisionPinReport> => {
       const dataPath = resolveDataPathFromShared();

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok, type Result } from '@unified-mpc/domain';
 import type { DoctorReport } from '@unified-mpc/application';
-import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult } from '@unified-mpc/extensions';
+import type { InstallServerResult, InstallSkillResult, PruneServerResult, PruneSkillResult, SkillInventoryAuditReport } from '@unified-mpc/extensions';
 import type { SqlitePhysicalMetrics, StorageRecoveryResult } from '@unified-mpc/storage';
 import type { CanonicalStatusReport, CanonicalRevisionListReport, CanonicalRevisionPinReport, CanonicalStoreRepairReport, GcCycleReport, GcExpireReport, GcStatusReport, GitRevisionAdvanceResult, LogicalSpaceReport, MaintenanceCycleReport, RevisionPruneReport } from '@unified-mpc/workspace';
 import type { ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
@@ -87,6 +87,7 @@ const EXPECTATIONS: readonly ExampleExpectation[] = [
   { pattern: /^unified-mpc index status(?:\s|$)/, kind: 'index-status', dispatch: 'canonicalStatus' },
   { pattern: /^unified-mpc index job list(?:\s|$)/, kind: 'index-job-list', dispatch: 'indexJobList' },
   { pattern: /^unified-mpc index space(?:\s|$)/, kind: 'index-space', dispatch: 'canonicalLogicalSpace' },
+  { pattern: /^unified-mpc skill audit(?:\s|$)/, kind: 'skill-audit', dispatch: 'skillAudit' },
 ];
 
 /**
@@ -118,6 +119,29 @@ function replayDependencies(calls: string[]): CliDependencies {
     installSkill: async (): Promise<Result<InstallSkillResult>> => {
       calls.push('installSkill');
       return ok({ name: 'documented-skill', installedPaths: [], targets: ['all'] });
+    },
+    skillAudit: async (): Promise<Result<SkillInventoryAuditReport>> => {
+      calls.push('skillAudit');
+      return ok({
+        schemaVersion: 1,
+        names: [],
+        roots: [],
+        skipped: [],
+        summary: {
+          directories: 0,
+          roots: 0,
+          declaredNames: 0,
+          uniqueNames: 0,
+          identicalNames: 0,
+          divergentNames: 0,
+          unverifiedNames: 0,
+          canonicalPresentNames: 0,
+          canonicalMatchNames: 0,
+          canonicalDivergingNames: 0,
+          canonicalAbsentNames: 0,
+          duplicateCanonicalNames: 0,
+        },
+      });
     },
     installServer: async (): Promise<Result<InstallServerResult>> => {
       calls.push('installServer');

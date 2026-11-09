@@ -82,14 +82,18 @@ function spawnEnv(fixture: Fixture, providerPath: string | undefined): NodeJS.Pr
     UNIFIED_MPC_CHECKPOINT_KEY_BASE64: TEST_CHECKPOINT_KEY,
     ...(providerPath === undefined ? {} : { UNIFIED_MPC_THAI_RAG_PROVIDER_PATH: providerPath }),
   };
-  // Inherited switches shape the shipped child's startup: an armed workspace
-  // reset makes it archive or refuse the temp registrations, and strict roots
-  // without a matching allowed root make it exit before "MCP stdio ready".
-  // Neither belongs to the behaviour these suites check.
+  // Inherited developer switches shape the shipped children: an armed
+  // workspace reset archives or refuses the temp registrations, strict roots
+  // without a matching root and an invalid legacy-session TTL abort startup,
+  // and the bypass switches change admission. Clear them so these suites test
+  // the behaviour they name.
   delete env.UNIFIED_MPC_RESET_WORKSPACES;
   delete env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES;
   delete env.UNIFIED_MPC_STRICT_ROOTS;
   delete env.UNIFIED_MPC_ALLOWED_ROOTS;
+  delete env.UNIFIED_MPC_STDIO_FULL_BYPASS_ALL;
+  delete env.UNIFIED_MPC_UNRESTRICTED;
+  delete env.UNIFIED_MPC_LEGACY_SESSION_TTL_MS;
   return env;
 }
 

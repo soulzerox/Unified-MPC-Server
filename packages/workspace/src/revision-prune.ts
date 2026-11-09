@@ -8,7 +8,8 @@ export type RevisionRetainReason =
   | 'canonical-ref'
   | 'pin'
   | 'overlay-base'
-  | 'index-job';
+  | 'index-job'
+  | 'provider-generation';
 
 /**
  * Single-owner guard for the destructive half (#210 §12).
@@ -33,6 +34,12 @@ export interface RevisionPruneDeps {
   readonly overlays: GoalOverlayStore;
   /** Manifests referenced by active/pending index jobs; caller owns that ledger. */
   readonly indexJobManifestIds: readonly string[];
+  /**
+   * Manifests an active Thai-RAG provider generation was built from (#210
+   * bullet 4); caller owns that ledger. Omitted means no provider-generation
+   * retention is wired, not that none exists.
+   */
+  readonly providerGenerationManifestIds?: readonly string[];
   readonly dryRun: boolean;
   /**
    * Required in practice for any non-dry-run caller; dry runs never take it.
@@ -65,8 +72,9 @@ export type RevisionPruneReport = RevisionPrunePlan | { readonly status: 'refuse
  * content-addressed artifacts are never touched — physical deletion
  * stays with the artifact GC path (#145-scheduled) that re-checks
  * reachability after quarantine. Retained roots are reported with their
- * reason (canonical refs, pins, overlay bases, active index jobs) so the
- * decision is auditable. Dry-run plans without deleting; idempotent.
+ * reason (canonical refs, pins, overlay bases, active index jobs, active
+ * provider generations) so the decision is auditable. Dry-run plans without
+ * deleting; idempotent.
  *
  * With a `lease` supplied the delete pass runs under the U28 single-owner
  * fence: a held or unreadable lease refuses before any planning work, the
@@ -160,6 +168,9 @@ async function runPass(
   }
   for (const manifestId of deps.indexJobManifestIds) {
     if ((await deps.manifests.get(manifestId)) !== null) retain(manifestId, 'index-job');
+  }
+  for (const manifestId of deps.providerGenerationManifestIds ?? []) {
+    if ((await deps.manifests.get(manifestId)) !== null) retain(manifestId, 'provider-generation');
   }
   for (const manifestId of await deps.pins.pinnedManifestIds({ strict: true })) {
     if ((await deps.manifests.get(manifestId)) !== null) retain(manifestId, 'pin');

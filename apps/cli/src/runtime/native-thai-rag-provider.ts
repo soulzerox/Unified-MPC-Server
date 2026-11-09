@@ -21,6 +21,7 @@ import {
   CanonicalRefStore,
   CanonicalSourceExpectationError,
   GoalOverlayStore,
+  ProviderGenerationLedger,
   buildCanonicalSourceExpectations,
   resolveCanonicalSourceIdentity,
   resolveGoalLogicalView,
@@ -245,8 +246,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly canonicalRefs: CanonicalRefStore;
   private readonly canonicalManifests: CanonicalManifestStore;
   private readonly canonicalOverlays: GoalOverlayStore;
+  /**
+   * Active provider generation -> canonical manifest (#210 bullet 4). GC and
+   * revision prune read this ledger so the revision a live generation was
+   * built from cannot be collected as unreferenced.
+   */
+  private readonly providerGenerations: ProviderGenerationLedger;
   /** Binding/fence per Unified job id, merged into the job ledger on completion. */
-  private readonly canonicalIndexRecords = new Map<string, CanonicalIndexRecord>();
+  private readonly canonicalIndexRecords = new Map<string, CanonicalIndexPlan>();
   private readonly workspaceMetadata = new Map<string, { readonly lifecycleKind?: WorkspaceLifecycleKind; readonly goalId?: string }>();
   private revisionManifestSupported = false;
   private expectedHashFenceSupported = false;
@@ -345,6 +352,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     // "never promoted" and silently drop the identity claim (#210 §13).
     this.canonicalManifests = new CanonicalManifestStore(canonicalRoot, { strictReads: true });
     this.canonicalOverlays = new GoalOverlayStore(canonicalRoot);
+    this.providerGenerations = new ProviderGenerationLedger(canonicalRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
     this.indexStatusTimeoutMs = Math.max(1_000, Math.floor(options.indexStatusTimeoutMs ?? DEFAULT_INDEX_STATUS_TIMEOUT_MS));
@@ -693,7 +701,21 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     };
     if (!background) {
       const result = await this.callIndexWorker('code_index', childArgs, signal, budget);
-      return result.ok ? ok(mergeCanonicalIndexRecord(result.value, plan.value)) : result;
+      if (!result.ok) return result;
+      try {
+        await this.recordProviderGeneration(workspace.value.workspaceId, plan.value, result.value);
+      } catch (error) {
+        // The generation is live at the provider but Unified cannot prove which
+        // manifest it came from. Reporting success would let GC prune that
+        // manifest, so the request fails and a retry re-records the binding.
+        return err(appError(
+          'CONFLICT',
+          `canonical provider generation ledger write failed for workspace ${workspace.value.workspaceId}: ${errorMessage(error)}`,
+          true,
+          { reason: 'provider-generation-ledger-write-failed', workspaceId: workspace.value.workspaceId },
+        ));
+      }
+      return ok(mergeCanonicalIndexRecord(result.value, plan.value));
     }
     if (!this.cancellableIndexJobs) {
       return this.legacyBackgroundCodeIndex(workspace.value.workspaceId, childArgs, force, plan.value, budget);
@@ -927,11 +949,56 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     return record === undefined ? result : mergeCanonicalIndexRecord(result, record);
   }
 
+  /**
+   * Bind the provider generation that just became active to the canonical
+   * manifest it was built from (#210 bullet 4).
+   *
+   * A bound generation keeps its manifest reachable for GC and revision prune.
+   * When the same workspace publishes a *different* generation from bytes no
+   * manifest describes (the plan is absent/dirty/unsupported), the previous row
+   * is released: retaining that manifest for a generation that no longer
+   * references it would only postpone ordinary revision GC.
+   *
+   * Reusing the same generation id proves nothing was replaced, so the row is
+   * kept even when this request had no manifest identity: an unbound request
+   * can legitimately be answered from the existing generation, and releasing
+   * its manifest would strand it. A provider response without `generation_id`
+   * (legacy contract) likewise leaves the last proven binding in place.
+   *
+   * A ledger write failure is deliberately *not* swallowed — the pass returns
+   * an error and the next admission retries, while a silently missing row would
+   * let GC prune the manifest the generation still needs.
+   */
+  private async recordProviderGeneration(
+    workspaceId: string,
+    plan: CanonicalIndexPlan | undefined,
+    result: unknown,
+  ): Promise<void> {
+    const generationId = nestedString(result, 'generation_id');
+    if (generationId === undefined) return;
+    const identity = plan?.sourceIdentity;
+    const current = await this.providerGenerations.get(workspaceId);
+    if (generationId === current?.generationId) {
+      if (identity === undefined) return;
+      if (current.manifestId === identity.manifest_id && current.repositoryId === identity.repository_id) return;
+    }
+    if (identity === undefined) {
+      await this.providerGenerations.release(workspaceId);
+      return;
+    }
+    await this.providerGenerations.record({
+      workspaceId,
+      generationId,
+      manifestId: identity.manifest_id,
+      repositoryId: identity.repository_id,
+    });
+  }
+
   private async legacyBackgroundCodeIndex(
     workspaceId: string,
     childArgs: Readonly<Record<string, unknown>>,
     force: boolean,
-    plan: CanonicalIndexRecord,
+    plan: CanonicalIndexPlan,
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const job = await this.jobs.create(
@@ -946,8 +1013,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         'code_index',
         await this.indexSessions.call(SERVER_NAME, this.launchConfig!, 'code_index', childArgs, undefined, {}, budget),
       ));
-      if (result.ok) await this.jobs.complete(job.jobId, mergeCanonicalIndexRecord(result.value, plan), this.ownerId ?? '');
-      else await this.jobs.fail(job.jobId, result.error.message, this.ownerId ?? '');
+      if (result.ok) {
+        await this.recordProviderGeneration(workspaceId, plan, result.value);
+        await this.jobs.complete(job.jobId, mergeCanonicalIndexRecord(result.value, plan), this.ownerId ?? '');
+      } else {
+        await this.jobs.fail(job.jobId, result.error.message, this.ownerId ?? '');
+      }
       this.canonicalIndexRecords.delete(job.jobId);
       return result;
     });
@@ -962,7 +1033,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     workspaceId: string,
     childArgs: Readonly<Record<string, unknown>>,
     force: boolean,
-    plan: CanonicalIndexRecord,
+    plan: CanonicalIndexPlan,
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const ownerId = this.ownerId ?? '';
@@ -1320,6 +1391,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           await this.jobs.fail(jobId, `Native Thai-RAG background index failed: ${reason}`, ownerId);
           return;
         }
+        await this.recordProviderGeneration(
+          workspaceId,
+          this.canonicalIndexRecords.get(jobId),
+          result,
+        );
         await this.jobs.complete(jobId, this.mergeCanonicalJobResult(jobId, result), ownerId);
         return;
       }
@@ -1767,8 +1843,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           indexed = normalizeWorkerCallResult('code_index', raw);
         }
 
-        if (indexed.ok) await this.jobs.complete(job.jobId, this.mergeCanonicalJobResult(job.jobId, indexed.value), ownerId);
-        else await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
+        if (indexed.ok) {
+          await this.recordProviderGeneration(workspace.id, canonical.value, indexed.value);
+          await this.jobs.complete(job.jobId, this.mergeCanonicalJobResult(job.jobId, indexed.value), ownerId);
+        } else {
+          await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
+        }
 
         if (!this.refreshIsCurrent(generation) || !this.started || !indexed.ok) {
           await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);

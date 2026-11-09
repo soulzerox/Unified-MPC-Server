@@ -309,7 +309,8 @@ were not understood.
 
 Read-only listing of the revision manifests the store holds, newest first, with
 every store root that still references each one: canonical refs, pin reasons,
-Goal overlay bases and unsettled index jobs.
+Goal overlay bases, unsettled index jobs and live Thai-RAG provider
+generations.
 
 ```bash
 $ unified-mpc index revision list
@@ -319,14 +320,17 @@ revisions 2
   man:v1:9b1c4f2e7a60 commit 261b4942fe79 tree 5e2a7c9d1b30 entries 692 created 2026-10-30T00:00:00.000Z
     pins rollback
     index-jobs op_reindex
+    provider-generations 9628fc78-f52f-428e-b358-bbfb66037150
 ```
 
 - One summary line per revision: manifest id, commit, Git tree OID, entry count
   and creation time.
 - Detail lines appear only when a store still holds the revision: `refs` (ref
-  names), `pins` (pin reasons), `overlay-bases` (Goal workspace ids) and
-  `index-jobs` (operation ids). A revision with no detail lines is referenced by
-  nothing — the state a later prune slice would collect.
+  names), `pins` (pin reasons), `overlay-bases` (Goal workspace ids),
+  `index-jobs` (operation ids) and `provider-generations` (workspace ids whose
+  live Thai-RAG generation was built from the manifest). A revision with no
+  detail lines is referenced by nothing — the state a later prune slice would
+  collect.
 - This is a report, not a health verdict: an empty store prints `revisions 0`
   and exits `0`, and the command never mutates the store.
 - Exit `0` for any successful read; `1` when the store cannot be read; `2` for
@@ -389,8 +393,9 @@ pins none
 ### `unified-mpc index revision prune --dry-run|--apply [--json]`
 
 Plans or executes the prune of revision manifests: every stored revision that no
-canonical ref, pin, Goal overlay base or unsettled index job still holds.
-Exactly one mode is required rather than defaulted.
+canonical ref, pin, Goal overlay base, unsettled index job or live Thai-RAG
+provider generation still holds. Exactly one mode is required rather than
+defaulted.
 
 ```bash
 $ unified-mpc index revision prune --dry-run
@@ -398,28 +403,29 @@ planned (dry-run) pruneable 1 retained 2
 prune man:v1:9b1c4f2e7a60
 retain man:v1:3c9f1e7a5d2b canonical-ref
 retain man:v1:ff0371d8c4e2 pin
+retain man:v1:6a2b3c4d5e6f provider-generation
 ```
 
 - `--dry-run` prints `prune` candidates and never writes. `--apply` takes the
   single-owner GC lease and re-reads refs, pins, overlay bases and manifest rows
   inside the fenced pass, deleting only the manifests that are still
   unreachable, so a `pin` or `advance` created after the plan is retained. The
-  index-job ledger is snapshotted immediately before the pass takes the lease,
-  the same pre-fence window `index gc --apply` and `index gc expire --apply`
-  accept. The lease window is renewed as the pass deletes, so a long prune
-  cannot silently outlive its fence.
+  index-job and provider-generation ledgers are snapshotted immediately before
+  the pass takes the lease, the same pre-fence window `index gc --apply` and
+  `index gc expire --apply` accept. The lease window is renewed as the pass
+  deletes, so a long prune cannot silently outlive its fence.
 - Only revision manifest JSON is deleted. Content-addressed artifacts are shared
   and stay with artifact GC, which re-checks reachability after quarantine.
 - An apply prints `applied pruneable N removed N retained N`, then one
   `removed <id>` line per deleted manifest and the `retain` lines. A refused
   pass prints `refused <reason>`: another owner holds the lease, the fence
-  record is unreadable, the index-job ledger cannot be read, or the pass ran
-  without a lease.
+  record is unreadable, the index-job or provider-generation ledger cannot be
+  read, or the pass ran without a lease.
 - A manifest row that exists but cannot be deleted fails the pass with the
   failing path in the error, so `removed` never claims a row that is still on
   disk.
 - `retain` lines name why the planner kept a revision: `canonical-ref`, `pin`,
-  `overlay-base` or `index-job`.
+  `overlay-base`, `index-job` or `provider-generation`.
 - A plan with nothing to collect prints `planned (dry-run) pruneable 0 retained N`
   and still exits `0`.
 - A pin that lands while `--apply` holds the lease is refused (`gc lease held by
@@ -493,7 +499,8 @@ missing-overlay-bases 0
 
 Plans the artifact GC cycle: the content hashes and repository-scoped artifact
 keys reachable from every retained revision (canonical refs, pins, Goal overlay
-bases, unsettled index jobs), and the ones no retained revision references.
+bases, unsettled index jobs, live Thai-RAG provider generations), and the ones
+no retained revision references.
 `--dry-run` prints that plan; `--apply` writes the unreachable set to the
 quarantine ledger under the single-owner cleanup lease. Exactly one mode is
 required rather than defaulted, so the verb never becomes a mutation by
@@ -515,10 +522,11 @@ artifact-unreachable repo:v1:documented file:v1:ff0371d8c4e2
   artifact-key planner only reads file bindings, so listing them here would mark
   every chunk collectible.
 - A refusal (no reachability roots, a root manifest missing on disk, no
-  artifact reachability evidence, an artifact record or index-job ledger that
-  cannot be read) prints `refused <reason>` and exits `1`: a GC plan that cannot
-  prove reachability must not look like an empty plan. A skipped corrupt record
-  would hide both a candidate and the bindings that keep live artifacts reachable.
+  artifact reachability evidence, an artifact record, index-job ledger or
+  provider-generation ledger that cannot be read) prints `refused <reason>` and
+  exits `1`: a GC plan that cannot prove reachability must not look like an
+  empty plan. A skipped corrupt record would hide both a candidate and the
+  bindings that keep live artifacts reachable.
 - The plan is advisory: a concurrent `advance`, `pin` or index job can change
   reachability, so re-run it before acting on it.
 - Exit `0` for any plan; `1` when the plan is refused or the store cannot be
@@ -577,8 +585,8 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
 - Reachability is re-checked in this pass, so an artifact that became live again
   after quarantine is `retain`ed even after its deadline. A refused plan (no
   reachability roots, a root manifest missing on disk, an unreadable ref/pin/
-  overlay/index-job ledger, or an artifact record that cannot be read) prints
-  `refused <reason>` and exits `1`; nothing is released.
+  overlay/index-job/provider-generation ledger, or an artifact record that
+  cannot be read) prints `refused <reason>` and exits `1`; nothing is released.
 - Exit `0` for any plan; `1` when the plan is refused or the ledger cannot be
   read; `2` when neither mode is given, both are given, or another argument is
   unknown.
@@ -616,9 +624,9 @@ retain repo:v1:documented file:v1:ff0371d8c4e2
   document) exits `1` instead of being reported as an empty ledger: `due 0` must
   never stand in for "the ledger is unreadable".
 - Reachability roots and artifact records are read strictly: a ref, pin,
-  overlay or index-job ledger file, or an artifact record, that cannot be read
-  refuses the pass instead of being dropped. A dropped root or binding would
-  make live artifacts look unreachable and get them deleted.
+  overlay, index-job or provider-generation ledger file, or an artifact record,
+  that cannot be read refuses the pass instead of being dropped. A dropped root
+  or binding would make live artifacts look unreachable and get them deleted.
 - A due artifact-key row without a wired record delete refuses the pass: the
   row is never released as "deleted" while its record survives.
 - A held or unreadable lease prints `refused gc lease ...` and exits `1` before
@@ -778,9 +786,10 @@ shown 3
 
 Read-only logical counterpart to `storage metrics`: it counts what the canonical
 store retains, not how many bytes the SQLite file occupies. Manifests are
-classified by the prune planner (retained by a ref, pin, Goal overlay base or
-live index job vs prunable) and file artifacts by the GC reachability planner
-(reachable vs unreferenced). Nothing is deleted and no physical fact is claimed.
+classified by the prune planner (retained by a ref, pin, Goal overlay base,
+live index job or live provider generation vs prunable) and file artifacts by
+the GC reachability planner (reachable vs unreferenced). Nothing is deleted and
+no physical fact is claimed.
 
 ```bash
 $ unified-mpc index space

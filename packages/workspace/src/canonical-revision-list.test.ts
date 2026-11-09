@@ -8,6 +8,7 @@ import { CanonicalRefStore } from './canonical-ref-store.js';
 import { GoalOverlayStore } from './goal-overlay-store.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { IndexJobLedger } from './index-job-ledger.js';
+import { ProviderGenerationLedger } from './provider-generation-ledger.js';
 import { attachGoalBasePin } from './goal-base-pin.js';
 import { canonicalRevisionList } from './canonical-revision-list.js';
 
@@ -131,6 +132,42 @@ describe('canonical revision list projection (#210 §7)', () => {
         overlayGoalIds: [],
         indexJobOperationIds: ['op_reindex'],
       });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the workspace whose live provider generation holds a revision', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'canon-revisions-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const manifests = new CanonicalManifestStore(dir);
+      const pins = new RevisionPinRegistry(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const jobs = new IndexJobLedger(dir);
+      const providerGenerations = new ProviderGenerationLedger(dir);
+      const workspaceId = '11111111-1111-4111-8111-111111111111';
+      const indexed = manifestFixture('9', '2026-10-15T00:00:00.000Z');
+      await putManifest(manifests, indexed);
+      await providerGenerations.record({
+        workspaceId,
+        generationId: 'gen-1',
+        manifestId: indexed.manifestId,
+        repositoryId: REPO,
+      });
+
+      const report = await canonicalRevisionList({
+        refs, manifests, pins, overlays, jobs, providerGenerations,
+      });
+      expect(report.revisions[0]).toMatchObject({
+        manifestId: indexed.manifestId,
+        providerGenerationWorkspaceIds: [workspaceId],
+      });
+
+      // A caller that does not project the ledger does not claim the revision
+      // has no roots; the field is simply absent.
+      const withoutLedger = await canonicalRevisionList({ refs, manifests, pins, overlays, jobs });
+      expect(withoutLedger.revisions[0]).not.toHaveProperty('providerGenerationWorkspaceIds');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

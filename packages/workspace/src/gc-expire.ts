@@ -26,6 +26,12 @@ export interface GcExpireLease {
 
 export interface GcExpireInput {
   readonly indexJobManifestIds: readonly string[];
+  /**
+   * Manifests an active Thai-RAG provider generation was built from (#210
+   * bullet 4); caller owns that ledger. Omitted means no provider-generation
+   * retention is wired, not that none exists.
+   */
+  readonly providerGenerationManifestIds?: readonly string[];
   readonly now: Date;
   readonly graceMs: number;
   readonly dryRun: boolean;
@@ -144,6 +150,9 @@ async function runPass(
       pins: stores.pins,
       overlays: stores.overlays,
       indexJobManifestIds: input.indexJobManifestIds,
+      ...(input.providerGenerationManifestIds === undefined
+        ? {}
+        : { providerGenerationManifestIds: input.providerGenerationManifestIds }),
     });
   } catch (error) {
     return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
@@ -178,6 +187,9 @@ async function runPass(
         pins: stores.pins,
         overlays: stores.overlays,
         indexJobManifestIds: input.indexJobManifestIds,
+        ...(input.providerGenerationManifestIds === undefined
+          ? {}
+          : { providerGenerationManifestIds: input.providerGenerationManifestIds }),
       });
     } catch (error) {
       // Strict root reads refuse rather than dropping a root they cannot read:

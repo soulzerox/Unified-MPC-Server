@@ -56,6 +56,12 @@ export interface RetainedManifestDeps {
   readonly overlays: GoalOverlayStore;
   /** Manifests referenced by active/pending index jobs; caller owns that ledger. */
   readonly indexJobManifestIds: readonly string[];
+  /**
+   * Manifests an active Thai-RAG provider generation was built from (#210
+   * bullet 4); caller owns that ledger. Omitted means no provider-generation
+   * retention is wired, not that none exists.
+   */
+  readonly providerGenerationManifestIds?: readonly string[];
 }
 
 /**
@@ -74,6 +80,7 @@ export async function collectRetainedManifestIds(deps: RetainedManifestDeps): Pr
     if (overlay !== null) ids.add(overlay.baseManifestId);
   }
   for (const manifestId of deps.indexJobManifestIds) ids.add(manifestId);
+  for (const manifestId of deps.providerGenerationManifestIds ?? []) ids.add(manifestId);
   return [...ids].sort();
 }
 

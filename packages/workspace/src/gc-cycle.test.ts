@@ -87,6 +87,26 @@ describe('GC cycle orchestrator (#210 U22)', () => {
     }
   });
 
+  it('keeps the artifacts of the manifest an active provider generation was built from', async () => {
+    const deps = await scenario();
+    try {
+      const indexed = manifestFor('d'.repeat(40), [{ path: 'indexed.ts', contentHash: H('2') }]);
+      await deps.manifests.put(indexed);
+      const report = await runGcCycle(deps, {
+        candidates: [H('1'), H('2'), H('3')],
+        indexJobManifestIds: [],
+        providerGenerationManifestIds: [indexed.manifestId],
+        now: NOW,
+        graceMs: GRACE,
+        dryRun: false,
+      });
+      expect(report).toMatchObject({ status: 'planned', reachable: [H('1'), H('2')], unreachable: [H('3')] });
+      expect((await deps.quarantine.list()).map((entry) => entry.hash)).toEqual([H('3')]);
+    } finally {
+      await rm(deps.dir, { recursive: true, force: true });
+    }
+  });
+
   it('propagates a refused plan and quarantines nothing when no roots exist', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-cycle-'));
     try {

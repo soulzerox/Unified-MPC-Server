@@ -22,6 +22,7 @@ import {
   GoalOverlayStore,
   IndexJobLedger,
   logicalSpaceReportFromRoot,
+  ProviderGenerationLedger,
   pinCanonicalRevision,
   pruneRevisionManifests,
   repairCanonicalStore,
@@ -887,7 +888,7 @@ function gcLeaseOwnerId(): string {
   return `unified-mpc-cli:${os.hostname()}:${process.pid}`;
 }
 
-type StrictIndexJobRead =
+type StrictGcRootRead =
   | { readonly status: 'read'; readonly manifestIds: readonly string[] }
   | { readonly status: 'refused'; readonly reason: string };
 
@@ -900,13 +901,34 @@ type StrictIndexJobRead =
  * ledger before their pass, so they share one mapping instead of three
  * near-identical try/catch blocks.
  */
-async function readIndexJobManifestsForGc(jobs: IndexJobLedger): Promise<StrictIndexJobRead> {
+async function readIndexJobManifestsForGc(jobs: IndexJobLedger): Promise<StrictGcRootRead> {
   try {
     return { status: 'read', manifestIds: await jobs.liveManifestIds({ strict: true }) };
   } catch (error) {
     return {
       status: 'refused',
       reason: error instanceof Error ? error.message : 'failed to read the index job ledger',
+    };
+  }
+}
+
+/**
+ * Read the provider-generation ledger as a GC input (#210 bullet 4).
+ *
+ * A live Thai-RAG generation holds its source manifest even after the index
+ * job that built it finishes. Reading strictly is the point: a missing or
+ * malformed row would look like "no generation" and let the planner prune the
+ * revision the generation still answers from.
+ */
+async function readProviderGenerationManifestsForGc(
+  generations: ProviderGenerationLedger,
+): Promise<StrictGcRootRead> {
+  try {
+    return { status: 'read', manifestIds: await generations.liveManifestIds({ strict: true }) };
+  } catch (error) {
+    return {
+      status: 'refused',
+      reason: error instanceof Error ? error.message : 'failed to read the provider generation ledger',
     };
   }
 }
@@ -964,6 +986,8 @@ async function runCanonicalGc(root: string, input: CanonicalGcRun): Promise<GcCy
   // A refusal returns before the lease is taken, so nothing is quarantined.
   const ledger = await readIndexJobManifestsForGc(jobs);
   if (ledger.status === 'refused') return ledger;
+  const generations = await readProviderGenerationManifestsForGc(new ProviderGenerationLedger(root));
+  if (generations.status === 'refused') return generations;
   return runGcCycle({
     refs: new CanonicalRefStore(root),
     manifests: new CanonicalManifestStore(root),
@@ -975,6 +999,7 @@ async function runCanonicalGc(root: string, input: CanonicalGcRun): Promise<GcCy
     candidates: [...contentHashes].sort(),
     artifactCandidates,
     indexJobManifestIds: ledger.manifestIds,
+    providerGenerationManifestIds: generations.manifestIds,
     now: new Date(),
     // The caller's window: every row this pass writes carries the same
     // deadline, so a later `index gc expire --apply` can prove grace.
@@ -1207,6 +1232,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         jobs: new IndexJobLedger(root),
+        providerGenerations: new ProviderGenerationLedger(root),
       }, options);
     },
     canonicalLogicalSpace: async (): Promise<LogicalSpaceReport> => {
@@ -1244,6 +1270,8 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       // A refusal returns before the lease is taken, so nothing is deleted.
       const ledger = await readIndexJobManifestsForGc(jobs);
       if (ledger.status === 'refused') return ledger;
+      const generations = await readProviderGenerationManifestsForGc(new ProviderGenerationLedger(root));
+      if (generations.status === 'refused') return generations;
       // Only the mutating pass takes the U28 fence; a plan stays read-only and
       // unfenced, exactly like the artifact GC verbs.
       const lease = input.dryRun
@@ -1255,6 +1283,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         pins: new RevisionPinRegistry(root),
         overlays: new GoalOverlayStore(root),
         indexJobManifestIds: ledger.manifestIds,
+        providerGenerationManifestIds: generations.manifestIds,
         dryRun: input.dryRun,
         now: new Date(),
         ...(lease === undefined ? {} : { lease }),
@@ -1365,6 +1394,8 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       // A refusal returns before the lease is taken, so nothing is released.
       const ledger = await readIndexJobManifestsForGc(jobs);
       if (ledger.status === 'refused') return ledger;
+      const generations = await readProviderGenerationManifestsForGc(new ProviderGenerationLedger(root));
+      if (generations.status === 'refused') return generations;
       // Only the mutating pass takes the U28 fence and owns the delete
       // callbacks; a plan is read-only and unfenced.
       const lease = input.dryRun
@@ -1379,6 +1410,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         artifacts,
       }, {
         indexJobManifestIds: ledger.manifestIds,
+        providerGenerationManifestIds: generations.manifestIds,
         now: new Date(),
         // Each quarantine row carries its own grace deadline; the cycle-level
         // window is unused by the expire pass, but the contract requires it.

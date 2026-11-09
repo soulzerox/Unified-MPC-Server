@@ -44,6 +44,10 @@ export function formatCanonicalRevisionList(report: CanonicalRevisionListReport)
     if (revision.pins.length > 0) lines.push(`    pins ${revision.pins.join(' ')}`);
     if (revision.overlayGoalIds.length > 0) lines.push(`    overlay-bases ${revision.overlayGoalIds.join(' ')}`);
     if (revision.indexJobOperationIds.length > 0) lines.push(`    index-jobs ${revision.indexJobOperationIds.join(' ')}`);
+    const providerGenerations = revision.providerGenerationWorkspaceIds ?? [];
+    if (providerGenerations.length > 0) {
+      lines.push(`    provider-generations ${providerGenerations.join(' ')}`);
+    }
   }
   return lines.join('\n');
 }

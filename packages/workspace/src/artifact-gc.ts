@@ -10,15 +10,20 @@ export type GcManifestEntries = readonly GcManifestEntry[];
  * Reachability roots for logical artifact GC (#210 U17).
  *
  * Every retained manifest — active canonical refs, explicit pins, Goal
- * overlay bases, active/pending index jobs — contributes its referenced
- * artifacts as reachable. Callers own policy about *which* manifests are
- * roots; this planner only computes what is still reachable from them.
+ * overlay bases, active/pending index jobs and active provider generations —
+ * contributes its referenced artifacts as reachable. Callers own policy about
+ * *which* manifests are roots; this planner only computes what is still
+ * reachable from them.
+ *
+ * `providerGenerationManifests` is optional so a caller that predates #210
+ * bullet 4 keeps compiling; the store-backed assembler always supplies it.
  */
 export interface GcRootSet {
   readonly canonicalRefManifests: readonly GcManifestEntries[];
   readonly pinnedManifests: readonly GcManifestEntries[];
   readonly goalOverlayBases: readonly GcManifestEntries[];
   readonly indexJobManifests: readonly GcManifestEntries[];
+  readonly providerGenerationManifests?: readonly GcManifestEntries[];
 }
 
 export type GcPlan =
@@ -29,7 +34,8 @@ function rootCount(roots: GcRootSet): number {
   return roots.canonicalRefManifests.length
     + roots.pinnedManifests.length
     + roots.goalOverlayBases.length
-    + roots.indexJobManifests.length;
+    + roots.indexJobManifests.length
+    + (roots.providerGenerationManifests?.length ?? 0);
 }
 
 function collect(roots: GcRootSet, into: Set<string>): void {
@@ -38,6 +44,7 @@ function collect(roots: GcRootSet, into: Set<string>): void {
     roots.pinnedManifests,
     roots.goalOverlayBases,
     roots.indexJobManifests,
+    roots.providerGenerationManifests ?? [],
   ]) {
     for (const manifest of group) {
       for (const entry of manifest) into.add(entry.contentHash.toLowerCase());

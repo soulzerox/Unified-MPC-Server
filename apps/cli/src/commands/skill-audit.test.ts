@@ -78,8 +78,10 @@ const divergentReport: SkillInventoryAuditReport = {
     canonicalPresentNames: 1,
     canonicalMatchNames: 0,
     canonicalDivergingNames: 1,
+    canonicalOnlyNames: 0,
     canonicalAbsentNames: 0,
     duplicateCanonicalNames: 0,
+    canonicalUnverifiedNames: 0,
   },
 };
 

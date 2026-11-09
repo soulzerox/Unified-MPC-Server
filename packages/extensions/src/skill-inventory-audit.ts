@@ -83,7 +83,7 @@ export interface SkillInventoryAuditSummary {
   readonly canonicalPresentNames: number;
   /**
    * Declared names whose canonical copy holds the same content as at least one
-   * legacy copy. A name served only by the canonical root is `onlyCanonicalNames`
+   * legacy copy. A name served only by the canonical root is `canonicalOnlyNames`
    * instead: there is no legacy sibling for it to match.
    */
   readonly canonicalMatchNames: number;

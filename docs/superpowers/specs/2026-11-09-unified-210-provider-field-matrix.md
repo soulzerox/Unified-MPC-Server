@@ -44,7 +44,7 @@ their existing provider semantics and are outside schema v1.
 | Field | Sent by Unified | Shape | Required | Rule |
 | --- | --- | --- | --- | --- |
 | `workspace_id` | always | string | yes | Canonical workspace id; the only required key |
-| `source_identity` | Native mode only | closed object | yes in Native | See §3. Omitted entirely in standalone |
+| `source_identity` | Native mode, only when the canonical binding resolves to `bound` | closed object | no (schema requires only `workspace_id`) | See §3. Omitted in standalone and in Native whenever the binding is `absent`, `dirty`, `goal_unadmitted` or `unsupported`: a run that cannot claim a revision must not publish one |
 | `expected_paths` | when the view has tracked bytes | object | no | repo-relative path → exact 64-hex SHA-256 |
 | `deleted_paths` | when the revision removed paths | string[] | no | sorted, unique, normalized; never overlaps `expected_paths` |
 | `paths` | scoped index requests | string[] | no | Same path rules as the fence; duplicates collapse |
@@ -100,7 +100,7 @@ provider's skip policy.
 | Field | Owner | Meaning |
 | --- | --- | --- |
 | `repository_provenance` | Thai-RAG | `git-common-dir:sha256:<64hex>` local trust boundary shared only by Git worktrees; never a path or remote URL |
-| `trust_scope` | Thai-RAG | `workspace` when provenance resolved, `repository_provenance_unverified` otherwise |
+| `trust_scope` | Thai-RAG | `workspace` when provenance resolved, `repository_provenance_unverified` when a trust boundary was attempted but could not be verified, `null` when no trust boundary applies (most `health` results) |
 
 Both are derived locally by the provider. Sending them as inputs would let a
 caller claim a trust boundary it does not own. The result envelope requires
@@ -122,8 +122,8 @@ is negotiated through the handshake and the provider's own generation record:
 | `contract_version` | `metadata` / handshake | Unified `validateThaiRagHandshake` |
 | `contract_fingerprint` | `metadata` / handshake | Must be a tested fingerprint |
 | `compatibility_range` | `metadata` / handshake | Must admit the vendored v1 |
-| `generation.{contract,embedding,index,storage}` | `metadata` | Provider reuse decision; a mismatch is `incompatible_index`, never a silent reuse |
-| `expectedEmbeddingProfile` / `expectedEmbeddingModel` / `expectedPreprocessingVersion` | optional `code_index` options | Unified asks for the profile it was built against (contract 1.0 maps to `nomic-embed-text-v2-moe` + preprocessing `1`) |
+| `generation.{contract,embedding,index,storage}` | `metadata` | Provider reuse key; compare it yourself. `incompatible_index` is reserved vocabulary: no current code path emits it (README §8) — a changed embedding profile rebuilds the generation instead of rejecting the request |
+| `expectedEmbeddingProfile` / `expectedEmbeddingModel` / `expectedPreprocessingVersion` | Unified-side handshake-validation options | Not sent to the provider: `validateThaiRagHandshake` checks them against the handshake. Contract 1.0 maps to `nomic-embed-text-v2-moe` + preprocessing `1` |
 
 The provider records exactly one generation identity per contract/embedding/
 index/storage tuple. Unified never reads storage internals to decide reuse.
@@ -131,10 +131,12 @@ index/storage tuple. Unified never reads storage internals to decide reuse.
 ## 7. Standalone mode
 
 Standalone omits `source_identity`: there is no Unified canonical revision to
-claim. The provider mints `lman:v1:` from its own scan and reports
-`source_authority: standalone_local`. Everything else in the matrix is
-unchanged; identity carry-through rules still apply (an error or a core without
-identity support claims nothing).
+claim. The provider mints `lman:v1:` from its own scan and reports the
+`source_authority` derived from the adapter's declared control mode:
+`local_git_revision` for `standalone_git`, `local_filesystem` when nothing is
+declared (`standalone_snapshot`), and `unified_canonical_manifest` in Native
+mode. Everything else in the matrix is unchanged; identity carry-through rules
+still apply (an error or a core without identity support claims nothing).
 
 ## 8. What pins this matrix
 

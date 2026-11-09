@@ -257,10 +257,21 @@ describe('Thailand-RAG provider contract corpus', () => {
       }
       expect(hasNoNul(identity.repository_id) && (identity.repository_id as string).trim().length > 0, `${file} publishes a malformed repository_id`).toBe(true);
       expect(identity.manifest_id, `${file} publishes a malformed manifest_id`).toMatch(/^man:v1:[0-9a-f]{64}$/);
-      expect(identity.revision_id, `${file} publishes a malformed revision_id`).toMatch(/^rev:v1:[0-9a-f]{64}$/);
-      expect(identity.commit_sha, `${file} publishes a malformed commit_sha`).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
-      expect(identity.tree_oid, `${file} publishes a malformed tree_oid`).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
-      expect(typeof identity.ref === 'string' && identity.ref.startsWith('refs/') && !identity.ref.includes('..') && hasNoNul(identity.ref), `${file} publishes a malformed ref`).toBe(true);
+      // The closed schema requires only repository_id and manifest_id, so an
+      // optional identity field is checked exactly when it is present.
+      const optionalIdentity: ReadonlyArray<readonly [string, RegExp]> = [
+        ['revision_id', /^rev:v1:[0-9a-f]{64}$/],
+        ['commit_sha', /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/],
+        ['tree_oid', /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/],
+      ];
+      for (const [field, pattern] of optionalIdentity) {
+        if (identity[field] === undefined) continue;
+        expect(identity[field], `${file} publishes a malformed ${field}`).toMatch(pattern);
+      }
+      if (identity.ref !== undefined) {
+        expect(identity.ref, `${file} publishes a malformed ref`).toMatch(/^refs\/(?![\s\S]*\.\.)[\s\S]+$/);
+        expect(hasNoNul(identity.ref), `${file} publishes a ref containing NUL`).toBe(true);
+      }
     }
 
     expect(identityCount, 'no fixture publishes a source_identity to check').toBeGreaterThan(0);

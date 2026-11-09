@@ -138,8 +138,10 @@ function replayDependencies(calls: string[]): CliDependencies {
           canonicalPresentNames: 0,
           canonicalMatchNames: 0,
           canonicalDivergingNames: 0,
+          canonicalOnlyNames: 0,
           canonicalAbsentNames: 0,
           duplicateCanonicalNames: 0,
+          canonicalUnverifiedNames: 0,
         },
       });
     },

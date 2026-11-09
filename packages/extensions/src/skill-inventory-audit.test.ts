@@ -34,6 +34,22 @@ ${body}
   return directory;
 }
 
+function canonicalPartition(summary: {
+  readonly canonicalMatchNames: number;
+  readonly canonicalDivergingNames: number;
+  readonly canonicalOnlyNames: number;
+  readonly canonicalAbsentNames: number;
+  readonly duplicateCanonicalNames: number;
+  readonly canonicalUnverifiedNames: number;
+}): number {
+  return summary.canonicalMatchNames
+    + summary.canonicalDivergingNames
+    + summary.canonicalOnlyNames
+    + summary.canonicalAbsentNames
+    + summary.duplicateCanonicalNames
+    + summary.canonicalUnverifiedNames;
+}
+
 function audit(home: string, managedRoot: string): SkillInventoryAuditService {
   return new SkillInventoryAuditService({
     settings: DEFAULT_EXTENSIONS_SETTINGS,
@@ -119,6 +135,52 @@ describe('SkillInventoryAuditService', () => {
       canonicalAbsentNames: 1,
       canonicalPresentNames: 1,
     });
+  });
+
+  it('counts only a legacy copy with matching content as a canonical match', async () => {
+    const home = await createHome();
+    const canonicalRoot = path.join(home, 'canonical-skills');
+    await writeSkill(path.join(home, '.claude', 'skills'), 'shared', 'shared', 'same body\n');
+    await writeSkill(canonicalRoot, 'shared', 'shared', 'same body\n');
+    await writeSkill(canonicalRoot, 'canonical-only', 'canonical-only', 'canonical\n');
+    await writeSkill(path.join(home, '.claude', 'skills'), 'legacy-only', 'legacy-only', 'legacy\n');
+
+    const report = await audit(home, canonicalRoot).audit();
+    expect(report.ok).toBe(true);
+    if (!report.ok) return;
+
+    const summary = report.value.summary;
+    expect(summary).toMatchObject({
+      declaredNames: 3,
+      canonicalMatchNames: 1,
+      canonicalOnlyNames: 1,
+      canonicalDivergingNames: 0,
+      canonicalAbsentNames: 1,
+      duplicateCanonicalNames: 0,
+      canonicalUnverifiedNames: 0,
+    });
+    expect(canonicalPartition(summary)).toBe(summary.declaredNames);
+  });
+
+  it('partitions an unfingerprintable legacy-only name instead of dropping it', async () => {
+    const home = await createHome();
+    const canonicalRoot = path.join(home, 'canonical-skills');
+    const legacy = await writeSkill(path.join(home, '.claude', 'skills'), 'delta', 'delta', 'legacy\n');
+    await symlink(path.join(home, 'outside.md'), path.join(legacy, 'linked.md'));
+
+    const report = await audit(home, canonicalRoot).audit();
+    expect(report.ok).toBe(true);
+    if (!report.ok) return;
+
+    const summary = report.value.summary;
+    expect(summary).toMatchObject({
+      declaredNames: 1,
+      canonicalPresentNames: 0,
+      canonicalAbsentNames: 0,
+      canonicalUnverifiedNames: 1,
+      canonicalMatchNames: 0,
+    });
+    expect(canonicalPartition(summary)).toBe(summary.declaredNames);
   });
 
   it('surfaces two canonical directories advertising one logical name as a duplicate', async () => {

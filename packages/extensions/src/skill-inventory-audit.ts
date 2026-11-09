@@ -81,10 +81,20 @@ export interface SkillInventoryAuditSummary {
   readonly divergentNames: number;
   readonly unverifiedNames: number;
   readonly canonicalPresentNames: number;
+  /**
+   * Declared names whose canonical copy holds the same content as at least one
+   * legacy copy. A name served only by the canonical root is `onlyCanonicalNames`
+   * instead: there is no legacy sibling for it to match.
+   */
   readonly canonicalMatchNames: number;
   readonly canonicalDivergingNames: number;
+  /** Declared names whose only copy is the canonical one. */
+  readonly canonicalOnlyNames: number;
   readonly canonicalAbsentNames: number;
+  /** Declared names with more than one canonical directory, the #294 defect. */
   readonly duplicateCanonicalNames: number;
+  /** Declared names whose canonical relationship cannot be stated. */
+  readonly canonicalUnverifiedNames: number;
 }
 
 export interface SkillInventoryAuditReport {
@@ -263,11 +273,12 @@ function summarize(
     divergentNames: count((entry) => entry.classification === 'divergent'),
     unverifiedNames: count((entry) => entry.classification === 'unverified'),
     canonicalPresentNames: count((entry) => entry.entries.some((copy) => copy.isCanonical)),
-    canonicalMatchNames: count((entry) => entry.canonicalState === 'matches'
-      || entry.canonicalState === 'only-canonical'),
+    canonicalMatchNames: count((entry) => entry.canonicalState === 'matches'),
     canonicalDivergingNames: count((entry) => entry.canonicalState === 'diverges'),
+    canonicalOnlyNames: count((entry) => entry.canonicalState === 'only-canonical'),
     canonicalAbsentNames: count((entry) => entry.canonicalState === 'absent'),
     duplicateCanonicalNames: count((entry) => entry.canonicalState === 'duplicate'),
+    canonicalUnverifiedNames: count((entry) => entry.canonicalState === 'unverified'),
   };
 }
 

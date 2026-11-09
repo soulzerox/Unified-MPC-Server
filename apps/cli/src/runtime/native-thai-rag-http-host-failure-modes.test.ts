@@ -72,9 +72,21 @@ interface JournalRow {
   readonly error?: string;
 }
 
+// The shipped children read their configuration from the environment. These
+// suites set every value they depend on below, so an inherited Unified-MPC,
+// Thai-RAG or Tunnel switch must not decide whether a child reaches readiness
+// or where it writes its activity lease.
+function inheritedEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^(?:UNIFIED_MPC_|UNIFIED_THAI_RAG_|THAI_RAG_|TUNNEL_)/.test(name)) delete env[name];
+  }
+  return env;
+}
+
 function spawnEnv(fixture: Fixture, providerPath: string | undefined): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+  return {
+    ...inheritedEnv(),
     NODE_NO_WARNINGS: '1',
     HOME: fixture.home,
     XDG_DATA_HOME: path.join(fixture.home, '.local', 'share'),
@@ -82,22 +94,6 @@ function spawnEnv(fixture: Fixture, providerPath: string | undefined): NodeJS.Pr
     UNIFIED_MPC_CHECKPOINT_KEY_BASE64: TEST_CHECKPOINT_KEY,
     ...(providerPath === undefined ? {} : { UNIFIED_MPC_THAI_RAG_PROVIDER_PATH: providerPath }),
   };
-  // Inherited developer switches shape the shipped children: an armed
-  // workspace reset archives or refuses the temp registrations, strict roots
-  // without a matching root and an invalid legacy-session TTL abort startup,
-  // and the bypass switches change admission. Clear them so these suites test
-  // the behaviour they name.
-  delete env.UNIFIED_MPC_RESET_WORKSPACES;
-  delete env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES;
-  delete env.UNIFIED_MPC_STRICT_ROOTS;
-  delete env.UNIFIED_MPC_ALLOWED_ROOTS;
-  delete env.UNIFIED_MPC_STDIO_FULL_BYPASS_ALL;
-  delete env.UNIFIED_MPC_UNRESTRICTED;
-  delete env.UNIFIED_MPC_LEGACY_SESSION_TTL_MS;
-  // Forward-only belongs to the follower; an HTTP host that inherits it never
-  // elects the provider, so it must not leak into the host these suites start.
-  delete env.UNIFIED_THAI_RAG_FORWARD_ONLY;
-  return env;
 }
 
 function captureOutput(child: ChildProcessWithoutNullStreams): () => string {

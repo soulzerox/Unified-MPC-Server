@@ -171,7 +171,7 @@ function sanitizeExecutablePath(value: string, platform: NodeJS.Platform = proce
 
 function appendStringField(
   fields: string[],
-  details: Readonly<Record<string, string | number>>,
+  details: Readonly<Record<string, unknown>>,
   key: string,
   label = key,
 ): void {

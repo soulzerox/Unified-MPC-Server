@@ -1,11 +1,11 @@
 import { existsSync } from 'node:fs';
 import { getEventListeners } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { appError, err, ok, type ResultBudget } from '@unified-mpc/domain';
+import { appError, err, ok, type AppError, type ResultBudget } from '@unified-mpc/domain';
 import {
   ThaiRagProviderCoordinator,
   type ThaiRagProviderDriver,
@@ -224,54 +224,177 @@ describe('ThaiRagProviderCoordinator', () => {
 
   it('defaults a legacy owner response with no classification to CONFLICT and retryable', async () => {
     const dataRoot = await root();
-    const providerRoot = path.join(dataRoot, 'thai-rag');
-    const socketPath = path.join(providerRoot, 'provider.sock');
-    await mkdir(providerRoot, { recursive: true });
-    const heartbeat = new Date().toISOString();
-    await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
-      ownerId: 'legacy-owner',
-      pid: process.pid,
-      startedAt: heartbeat,
-      processIdentity: 'legacy-identity',
-      heartbeatAt: heartbeat,
-      providerVersion: '4.61.0',
-    }));
-    const health = { providerId: 'thai-rag', providerVersion: '4.61.0', state: 'ready', embeddingIndexGeneration: 1 };
-    const stub = createServer((socket) => {
-      socket.setEncoding('utf8');
-      socket.on('data', (chunk: string) => {
-        let id = 'unknown';
-        let method = '';
-        try {
-          const parsed: unknown = JSON.parse(chunk.split('\n')[0] ?? '');
-          if (isRecord(parsed) && typeof parsed.id === 'string') id = parsed.id;
-          if (isRecord(parsed) && typeof parsed.method === 'string') method = parsed.method;
-        } catch { /* the owner echoes whatever id it can read */ }
-        // The pre-#701 owner wire shape: the error is a bare message.
-        const body = method === 'health'
-          ? { id, ok: true, value: health }
-          : { id, ok: false, error: 'legacy owner failure' };
-        socket.end(`${JSON.stringify(body)}\n`);
-      });
-    });
-    await new Promise<void>((resolve) => stub.listen(socketPath, resolve));
-    const coordinator = new ThaiRagProviderCoordinator({
-      dataRoot,
-      ownerId: 'stdio-runtime',
-      providerVersion: '4.61.0',
-      embeddingIndexGeneration: 1,
-      followerConnectTimeoutMs: 200,
-      isProcessAlive: (): boolean => true,
-      processIdentityProbe: async (): Promise<string | null> => 'legacy-identity',
-      driver: driver({ call: async () => { throw new Error('a follower must never start its own driver'); } }),
-    });
+    const stub = await stubProviderOwner(dataRoot, ({ id }) => ({ id, ok: false, error: 'legacy owner failure' }));
+    const coordinator = followerForStub(dataRoot);
     try {
       expect((await coordinator.start()).ok).toBe(true);
       const result = await coordinator.call('code_index', { workspace_id: 'ws' });
       expect(result).toEqual({ ok: false, error: appError('CONFLICT', 'legacy owner failure', true) });
     } finally {
       await coordinator.close();
-      await new Promise<void>((resolve) => stub.close(() => resolve()));
+      await stub.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'an unknown wire code becomes INTERNAL_ERROR and keeps recoverable and details',
+      response: (id: string): Record<string, unknown> => ({
+        id,
+        ok: false,
+        error: 'future owner failure',
+        code: 'FUTURE_CODE',
+        recoverable: false,
+        details: { reason: 'future', nested: { expected: ['a'] } },
+      }),
+      expected: appError('INTERNAL_ERROR', 'future owner failure', false, {
+        reason: 'future',
+        nested: { expected: ['a'] },
+      }),
+    },
+    {
+      name: 'a non-boolean recoverable defaults to retryable',
+      response: (id: string): Record<string, unknown> => ({
+        id,
+        ok: false,
+        error: 'bad recoverable',
+        code: 'CONFLICT',
+        recoverable: 'yes',
+      }),
+      expected: appError('CONFLICT', 'bad recoverable', true),
+    },
+    {
+      name: 'non-record details are dropped instead of failing the response',
+      response: (id: string): Record<string, unknown> => ({
+        id,
+        ok: false,
+        error: 'bad details',
+        code: 'CONFLICT',
+        recoverable: false,
+        details: ['not', 'a', 'record'],
+      }),
+      expected: appError('CONFLICT', 'bad details', false),
+    },
+  ] as Array<{ name: string; response: (id: string) => Record<string, unknown>; expected: AppError }>)(
+    'parses a wire failure where $name',
+    async ({ response, expected }) => {
+      const dataRoot = await root();
+      const stub = await stubProviderOwner(dataRoot, ({ id }) => response(id));
+      const coordinator = followerForStub(dataRoot);
+      try {
+        expect((await coordinator.start()).ok).toBe(true);
+        const result = await coordinator.call('code_index', { workspace_id: 'ws' });
+        expect(result).toEqual({ ok: false, error: expected });
+      } finally {
+        await coordinator.close();
+        await stub.close();
+      }
+    },
+  );
+
+  it('forwards a health failure with nested details instead of dropping them', async () => {
+    const dataRoot = await root();
+    const healthFailure = appError('CONFLICT', 'Thai-RAG provider handshake rejected: degraded', false, {
+      reason: 'health-degraded',
+      disallowed: ['vector_store', 'embedder'],
+      expected: { contract: '1.0', embedding: 'gemma' },
+    });
+    let failHealth = false;
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({
+        health: async () => failHealth ? err(healthFailure) : ok(healthy),
+      }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    failHealth = true;
+    const result = await follower.health();
+
+    expect(result).toEqual({ ok: false, error: healthFailure });
+    await follower.close();
+    await owner.close();
+  });
+
+  it('returns a classified INTERNAL_ERROR when the owner call throws', async () => {
+    const dataRoot = await root();
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver({ call: async () => { throw new Error('driver exploded'); } }),
+    });
+    const follower = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'stdio-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    expect((await follower.start()).ok).toBe(true);
+
+    const result = await follower.call('code_index', { workspace_id: 'ws' });
+
+    expect(result).toEqual({
+      ok: false,
+      error: appError(
+        'INTERNAL_ERROR',
+        'Thai-RAG provider owner request failed: driver exploded',
+        true,
+        { reason: 'owner-request-threw' },
+      ),
+    });
+    await follower.close();
+    await owner.close();
+  });
+
+  it('keeps the request id when the owner rejects a malformed request', async () => {
+    const dataRoot = await root();
+    const owner = new ThaiRagProviderCoordinator({
+      dataRoot,
+      ownerId: 'http-runtime',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+      driver: driver(),
+    });
+    expect((await owner.start()).ok).toBe(true);
+    try {
+      const response = await new Promise<unknown>((resolve, reject) => {
+        const socket = createConnection(path.join(dataRoot, 'thai-rag', 'provider.sock'));
+        socket.setEncoding('utf8');
+        socket.once('data', (chunk: string) => {
+          socket.destroy();
+          try {
+            resolve(JSON.parse(chunk));
+          } catch (error) {
+            reject(error);
+          }
+        });
+        socket.once('error', reject);
+        socket.write(`${JSON.stringify({ id: 'req-1', method: 'bogus' })}\n`);
+      });
+      expect(response).toEqual({
+        id: 'req-1',
+        ok: false,
+        error: 'Unsupported Thai-RAG provider request',
+        code: 'INVALID_INPUT',
+        recoverable: false,
+      });
+    } finally {
+      await owner.close();
     }
   });
 
@@ -881,6 +1004,58 @@ describe('ThaiRagProviderCoordinator', () => {
     expect(elapsed).toBeLessThan(1_000);
   });
 });
+
+async function stubProviderOwner(
+  dataRoot: string,
+  failure: (request: { readonly id: string }) => Record<string, unknown>,
+): Promise<{ close: () => Promise<void> }> {
+  const providerRoot = path.join(dataRoot, 'thai-rag');
+  const socketPath = path.join(providerRoot, 'provider.sock');
+  await mkdir(providerRoot, { recursive: true });
+  const heartbeat = new Date().toISOString();
+  await writeFile(path.join(providerRoot, 'provider.lock'), JSON.stringify({
+    ownerId: 'stub-owner',
+    pid: process.pid,
+    startedAt: heartbeat,
+    processIdentity: 'stub-identity',
+    heartbeatAt: heartbeat,
+    providerVersion: '4.61.0',
+  }));
+  const health = { providerId: 'thai-rag', providerVersion: '4.61.0', state: 'ready', embeddingIndexGeneration: 1 };
+  const server = createServer((socket) => {
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => {
+      let id = 'unknown';
+      let method = '';
+      try {
+        const parsed: unknown = JSON.parse(chunk.split('\n')[0] ?? '');
+        if (isRecord(parsed) && typeof parsed.id === 'string') id = parsed.id;
+        if (isRecord(parsed) && typeof parsed.method === 'string') method = parsed.method;
+      } catch { /* the stub echoes whatever id it can read */ }
+      const body = method === 'health' ? { id, ok: true, value: health } : failure({ id });
+      socket.end(`${JSON.stringify(body)}\n`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  return {
+    close: async (): Promise<void> => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+function followerForStub(dataRoot: string): ThaiRagProviderCoordinator {
+  return new ThaiRagProviderCoordinator({
+    dataRoot,
+    ownerId: 'stdio-runtime',
+    providerVersion: '4.61.0',
+    embeddingIndexGeneration: 1,
+    followerConnectTimeoutMs: 200,
+    isProcessAlive: (): boolean => true,
+    processIdentityProbe: async (): Promise<string | null> => 'stub-identity',
+    driver: driver({ call: async () => { throw new Error('a follower must never start its own driver'); } }),
+  });
+}
 
 function driver(overrides: Partial<ThaiRagProviderDriver> = {}): ThaiRagProviderDriver {
   return {

@@ -12,6 +12,16 @@ describe('Result helpers', () => {
       error: { code: 'INVALID_INPUT', message: 'bad input', recoverable: false },
     });
   });
+
+  it('keeps open details values', () => {
+    expect(appError('CONFLICT', 'nested', false, {
+      expected: ['a'],
+      actual: { kind: 'b' },
+    }).details).toEqual({
+      expected: ['a'],
+      actual: { kind: 'b' },
+    });
+  });
 });
 
 describe('isAppErrorCode', () => {

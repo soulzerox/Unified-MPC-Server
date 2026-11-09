@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
-import { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
+import { SkillCatalog, parseSkillMarkdown, skillQueryIsRanked } from './skill-catalog.js';
 
 const temporaryRoots: string[] = [];
 
@@ -458,15 +458,15 @@ Duplicate content.
   it('ranks exact and name matches ahead of description-only matches', async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-ranking-'));
     temporaryRoots.push(home);
-    // Description-only first: discovery order must not be able to produce the
-    // expected ranking, otherwise this test passes on the pre-ranking code.
+    // Directory names sort the opposite way to relevance, so discovery order
+    // cannot produce the expected ranking and the pre-ranking code fails here.
     const skills = [
-      ['social-notes', 'Ideas for a caption.'],
-      ['post-caption-helper', 'Helper for a post.'],
-      ['caption', 'Write a caption.'],
+      ['aaa-social', 'social-notes', 'Ideas for a caption.'],
+      ['mmm-helper', 'post-caption-helper', 'Helper for a post.'],
+      ['zzz-exact', 'caption', 'Write a caption.'],
     ] as const;
-    for (const [name, description] of skills) {
-      const skillRoot = path.join(home, '.agents', 'skills', name);
+    for (const [directory, name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', directory);
       await mkdir(skillRoot, { recursive: true });
       await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
     }
@@ -542,5 +542,16 @@ Duplicate content.
 
     // The source filter still applies before ranking.
     expect(await listedIds({ query: 'caption helper', source: 'claude-skills' })).toEqual(['claude-skills/caption-helper']);
+  });
+
+  it('reports whether a query will actually be ranked', () => {
+    // Listing surfaces use this instead of `query.length > 0`, because these
+    // queries stay in discovery order even though they are non-empty.
+    for (const query of [undefined, '', '   ', '???', 'the', 'c']) {
+      expect(skillQueryIsRanked(query)).toBe(false);
+    }
+    for (const query of ['facebook page plan', 'caption', 'แคปชั่น', '图']) {
+      expect(skillQueryIsRanked(query)).toBe(true);
+    }
   });
 });

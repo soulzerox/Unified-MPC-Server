@@ -429,6 +429,19 @@ interface SkillMatchScore {
   readonly relevance: number;
 }
 
+/**
+ * Whether `list()` will rank `query` by relevance instead of returning a
+ * filtered catalog in discovery order. A caller that describes its own listing
+ * order needs this: a non-empty string is not enough, because a query made of
+ * stop words, punctuation or a single Latin character still falls back to
+ * whole-string filtering.
+ */
+export function skillQueryIsRanked(query: string | undefined): boolean {
+  if (query === undefined) return false;
+  const normalized = normalizeSearchText(query);
+  return normalized.length > 0 && queryTokens(normalized).length > 0;
+}
+
 function rankSkillMatches(skills: readonly SkillSummary[], query: string): readonly SkillSummary[] {
   const tokens = queryTokens(query);
   // Nothing significant to rank ("the", "!!!", "c") is not the same as no

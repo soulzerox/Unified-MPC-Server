@@ -25,7 +25,7 @@ export {
   type ExtensionsSettingsStore,
   type PersistedExtensionsSettingsMigrationReport,
 } from './settings-migration.js';
-export { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
+export { SkillCatalog, parseSkillMarkdown, skillQueryIsRanked } from './skill-catalog.js';
 export {
   SkillInventoryAuditService,
   type SkillInventoryAuditEntry,

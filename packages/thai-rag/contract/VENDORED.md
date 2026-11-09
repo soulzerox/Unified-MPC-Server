@@ -22,10 +22,12 @@ file by hand.
 4. Regenerate the `files` hash map from the repository root:
 
    ```sh
-   find packages/thai-rag/contract -type f \
-     ! -name PROVENANCE.json ! -name VENDORED.md \
-     | sort | xargs sha256sum
+   pnpm --filter @unified-mpc/thai-rag contract:provenance
    ```
+
+   The script rewrites `files` in `PROVENANCE.json` with contract-relative,
+   posix-separated keys, skipping `PROVENANCE.json` and `VENDORED.md`. It leaves
+   `sourceCommit`, `vendoredAt` and the remaining metadata untouched.
 
 5. Run `pnpm --filter @unified-mpc/thai-rag test`. A failure means the new
    corpus disagrees with Unified's boundary readers; that is the point of the

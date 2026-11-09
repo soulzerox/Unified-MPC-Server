@@ -49,7 +49,8 @@ uses.
      `health-unavailable`);
    - every fixture `errors[].code` is in the schema enum and is mapped by
      Unified's table, and every mapped value is a real `AppErrorCode`;
-   - the schema's closed `source_identity` field set still matches the fields
+   - the schema's closed `source_identity` field set still matches the vendored
+     native example; the CLI suite separately asserts the exact identity
      Unified sends.
 5. Document the refresh procedure in `packages/thai-rag/contract/VENDORED.md`.
 

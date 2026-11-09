@@ -17,6 +17,7 @@
     "@unified-mpc/process": "workspace:*"
   },
   "scripts": {
+    "contract:provenance": "node scripts/write-contract-provenance.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build": "tsc --outDir dist"

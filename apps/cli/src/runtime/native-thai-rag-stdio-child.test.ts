@@ -5,9 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { canonicalManifestId, ok } from '@unified-mpc/domain';
 import { SqliteDatabase, SqliteWorkspaceRepository } from '@unified-mpc/storage';
 import type { ThaiRagProviderDriver } from '@unified-mpc/thai-rag';
+import { ProviderGenerationLedger } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime } from './stdio-mcp-runtime.js';
 
 /**
@@ -25,7 +26,9 @@ const temporaryRoots: string[] = [];
 const children: ChildProcessWithoutNullStreams[] = [];
 const TEST_CHECKPOINT_KEY = Buffer.alloc(32, 0x46).toString('base64');
 const CLI_STDIO_BIN = fileURLToPath(new URL('../../dist/bin/mcp-stdio.js', import.meta.url));
-const WORKSPACE_ID = 'workspace-stdio-child';
+// Production registrations use UUID workspace ids, and the provider-generation
+// ledger rejects anything else, so the fixture must too.
+const WORKSPACE_ID = '77777777-7777-4777-8777-777777777777';
 
 const HEALTHY = {
   workerReachable: true,
@@ -263,5 +266,42 @@ describe('mcp-stdio child process forwards to the live provider host (#407)', ()
     expect(result?.isError).toBe(true);
     expect(text).toMatch(/forward host is unreachable|forward-host-unreachable/i);
     expect(existsSync(providerLockPath(fixture.dataPath))).toBe(false);
+  }, 60_000);
+});
+
+describe('mcp-stdio startup sweeps orphaned provider generations (#710)', () => {
+  it('releases the row of an unregistered workspace and keeps the served registration row', async () => {
+    const fixture = await createFixture();
+    const ledger = new ProviderGenerationLedger(path.join(fixture.dataPath, 'canonical'));
+    const manifestId = canonicalManifestId({
+      repositoryId: 'repo_stdio123',
+      revisionId: 'rev:v1:' + 'b'.repeat(64),
+      entries: [{ path: 'a.ts', contentHash: '2'.repeat(64) }],
+    });
+    const orphanId = '55555555-5555-4555-8555-555555555555';
+    await ledger.record({
+      workspaceId: orphanId,
+      generationId: 'generation-orphaned',
+      manifestId,
+      repositoryId: 'repo_stdio123',
+    });
+    await ledger.record({
+      workspaceId: WORKSPACE_ID,
+      generationId: 'generation-live',
+      manifestId,
+      repositoryId: 'repo_stdio123',
+    });
+    const orphanRow = path.join(fixture.dataPath, 'canonical', 'provider-generations', `${orphanId}.json`);
+    const liveRow = path.join(fixture.dataPath, 'canonical', 'provider-generations', `${WORKSPACE_ID}.json`);
+    expect(existsSync(orphanRow)).toBe(true);
+    expect(existsSync(liveRow)).toBe(true);
+
+    // The sweep runs before the runtime is created, so readiness proves it
+    // finished. Deleting the startup call leaves the orphan row behind.
+    const session = startChild(fixture.dataPath, fixture.home, fixture.workspacePath);
+    await waitForReady(session);
+
+    expect(existsSync(orphanRow)).toBe(false);
+    expect(existsSync(liveRow)).toBe(true);
   }, 60_000);
 });

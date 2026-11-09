@@ -1,0 +1,52 @@
+{
+  "status": "ok",
+  "data": {
+    "job_id": "idx_01J9W3V6K5YQ4M2N8R7T0S1P3R",
+    "workspace_id": "ws-3e9bd95b-0f52-4629-b354-b2873a7a2d38",
+    "status": "cancelled",
+    "indexed_files": 2,
+    "cancellation_requested": true,
+    "cancellation_completed": true
+  },
+  "workspace_id": "ws-3e9bd95b-0f52-4629-b354-b2873a7a2d38",
+  "repository_id": null,
+  "revision_id": null,
+  "artifact_id": null,
+  "repository_provenance": "git-common-dir:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "trust_scope": "workspace",
+  "operation_id": "op-status-02",
+  "generation": null,
+  "warnings": [],
+  "errors": [],
+  "metadata": {
+    "provider_name": "thai-rag",
+    "provider_version": "0.1.0",
+    "contract_version": "1.0",
+    "contract_fingerprint": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+    "compatibility_range": {
+      "min": "1.0",
+      "max": "1.x"
+    },
+    "index_job_contract_version": "1.1",
+    "generation": {
+      "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+      "embedding": "nomic-embed-text-v2-moe:latest",
+      "index": "1",
+      "storage": "sqlite"
+    },
+    "embedding": {
+      "profile": "nomic-embed-text-v2-moe:latest",
+      "model": "nomic-embed-text-v2-moe:latest",
+      "dimension": 768,
+      "preprocessing_version": "1",
+      "ready": true
+    },
+    "readiness": {
+      "storage_ready": true,
+      "fts_ready": true,
+      "vector_store_ready": true,
+      "embedding_ready": true,
+      "workspace_ready": true
+    }
+  }
+}

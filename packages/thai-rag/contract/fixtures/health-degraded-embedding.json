@@ -1,0 +1,156 @@
+{
+  "status": "degraded",
+  "data": {
+    "schema_version": 1,
+    "schemaVersion": 1,
+    "provider_id": "thai-rag",
+    "providerId": "thai-rag",
+    "provider_version": "0.1.0",
+    "providerVersion": "0.1.0",
+    "contract_version": "1.0",
+    "compatibility_range": {
+      "min": "1.0",
+      "max": "1.x"
+    },
+    "contract_fingerprint": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+    "index_job_contract_version": "1.1",
+    "capability_contract": 1,
+    "control_mode": "unified_native",
+    "source_authority": "unified_canonical_manifest",
+    "revision_manifest": true,
+    "delta_index": true,
+    "dirty_overlay": true,
+    "expected_hash_fence": true,
+    "local_structural_evidence": true,
+    "local_scheduler": false,
+    "local_gc": false,
+    "constraint_resolution": true,
+    "external_scheduler": true,
+    "capabilities": [
+      "adopt_legacy_index",
+      "cancel_index",
+      "code_blast_radius",
+      "code_context",
+      "code_index",
+      "code_search",
+      "forget",
+      "health",
+      "index_status",
+      "pre_edit_context",
+      "recall",
+      "record_event",
+      "remember",
+      "resolve_event",
+      "version"
+    ],
+    "workspace_scope_model": "explicit_workspace_id",
+    "result_model": "structured_provider_result",
+    "error_model": "machine_readable_error",
+    "lifecycle_state": "degraded",
+    "state": "degraded",
+    "embedding_index_generation": 1,
+    "embeddingIndexGeneration": 1,
+    "generation": {
+      "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+      "embedding": "nomic-embed-text-v2-moe:latest",
+      "index": "1",
+      "storage": "sqlite"
+    },
+    "embedding": {
+      "profile": "nomic-embed-text-v2-moe:latest",
+      "model": "nomic-embed-text-v2-moe:latest",
+      "dimension": 768,
+      "preprocessing_version": "1",
+      "ready": false
+    },
+    "readiness": {
+      "storage_ready": true,
+      "fts_ready": true,
+      "vector_store_ready": true,
+      "embedding_ready": false,
+      "workspace_ready": true
+    },
+    "ready": false,
+    "embedding_ready": false,
+    "embedding_backend": {
+      "backend": "ollama",
+      "model": "nomic-embed-text-v2-moe:latest",
+      "base_url": "http://127.0.0.1:11434",
+      "keep_alive": "5m",
+      "ready": false,
+      "reason": "connection refused"
+    },
+    "components": {
+      "worker_reachable": true,
+      "sqlite_available": true,
+      "fts_available": true,
+      "vector_store_available": true,
+      "embedder_available": false,
+      "lexical_retrieval_available": true,
+      "semantic_retrieval_available": false,
+      "active_jobs": []
+    },
+    "degradation": [
+      "embedder-unavailable"
+    ],
+    "workspaces": [
+      {
+        "workspaceId": "ws-3e9bd95b-0f52-4629-b354-b2873a7a2d38",
+        "indexGeneration": 1,
+        "ready": true,
+        "reason": null
+      }
+    ]
+  },
+  "workspace_id": "ws-3e9bd95b-0f52-4629-b354-b2873a7a2d38",
+  "repository_id": null,
+  "revision_id": null,
+  "artifact_id": null,
+  "repository_provenance": null,
+  "trust_scope": null,
+  "operation_id": "op-health-02",
+  "generation": null,
+  "warnings": [
+    "embedding backend unavailable; lexical retrieval may be degraded"
+  ],
+  "errors": [
+    {
+      "code": "embedding_unavailable",
+      "message": "embedding backend unavailable",
+      "details": {
+        "operation": "health"
+      }
+    }
+  ],
+  "metadata": {
+    "provider_name": "thai-rag",
+    "provider_version": "0.1.0",
+    "contract_version": "1.0",
+    "contract_fingerprint": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+    "compatibility_range": {
+      "min": "1.0",
+      "max": "1.x"
+    },
+    "index_job_contract_version": "1.1",
+    "generation": {
+      "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+      "embedding": "nomic-embed-text-v2-moe:latest",
+      "index": "1",
+      "storage": "sqlite"
+    },
+    "embedding": {
+      "profile": "nomic-embed-text-v2-moe:latest",
+      "model": "nomic-embed-text-v2-moe:latest",
+      "dimension": 768,
+      "preprocessing_version": "1",
+      "ready": false
+    },
+    "readiness": {
+      "storage_ready": true,
+      "fts_ready": true,
+      "vector_store_ready": true,
+      "embedding_ready": false,
+      "workspace_ready": true
+    }
+  }
+}

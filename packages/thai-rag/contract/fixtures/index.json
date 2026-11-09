@@ -1,0 +1,159 @@
+{
+  "schema": "provider-contract.v1.schema.json",
+  "description": "Conformance corpus for the canonical provider contract. Every fixture is a complete ProviderResult envelope; the request examples exercise the canonical code_index subset. The same corpus must pass unchanged against the Python provider and every adapter (Unified native, standalone FastMCP/CLI).",
+  "fixtures": [
+    {
+      "file": "fixtures/health-ready.json",
+      "operation": "health",
+      "state": "ready",
+      "expect": {
+        "status": "ok",
+        "error_codes": []
+      }
+    },
+    {
+      "file": "fixtures/health-degraded-embedding.json",
+      "operation": "health",
+      "state": "degraded-embedding",
+      "expect": {
+        "status": "degraded",
+        "error_codes": [
+          "embedding_unavailable"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/health-unavailable-storage.json",
+      "operation": "health",
+      "state": "unavailable-storage",
+      "expect": {
+        "status": "unavailable",
+        "error_codes": [
+          "storage_unavailable",
+          "lexical_retrieval_unavailable",
+          "vector_retrieval_degraded"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/indexing-conflict.json",
+      "operation": "code_index",
+      "state": "indexing-conflict",
+      "expect": {
+        "status": "unavailable",
+        "error_codes": [
+          "indexing_conflict"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/workspace-scope-denied.json",
+      "operation": "code_search",
+      "state": "workspace-scope-denied",
+      "expect": {
+        "status": "unavailable",
+        "error_codes": [
+          "scope_denied"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/zero-change-verification.json",
+      "operation": "code_index",
+      "state": "zero-change-verification",
+      "expect": {
+        "status": "ok",
+        "error_codes": [],
+        "data_equals": {
+          "status": "complete",
+          "indexed": 0,
+          "reconciliation.reused_active_generation": true
+        }
+      }
+    },
+    {
+      "file": "fixtures/lexical-only-index.json",
+      "operation": "code_index",
+      "state": "lexical-only-index",
+      "expect": {
+        "status": "ok",
+        "error_codes": [],
+        "data_equals": {
+          "lexical_only": true,
+          "vector_coverage": "none"
+        }
+      }
+    },
+    {
+      "file": "fixtures/stale-source.json",
+      "operation": "code_index",
+      "state": "stale-source",
+      "expect": {
+        "status": "review_required",
+        "error_codes": [
+          "stale_index"
+        ]
+      }
+    },
+    {
+      "file": "fixtures/job-unknown-after-restart.json",
+      "operation": "index_status",
+      "state": "job-lost-after-restart",
+      "expect": {
+        "status": "unavailable",
+        "error_codes": [
+          "index_job_not_found"
+        ],
+        "error_details_contains": {
+          "reason": "provider_restart_or_retention_expiry",
+          "core_code": "index_job_not_found"
+        }
+      }
+    },
+    {
+      "file": "fixtures/job-cancelled.json",
+      "operation": "index_status",
+      "state": "cancelled-job",
+      "expect": {
+        "status": "ok",
+        "error_codes": [],
+        "data_equals": {
+          "status": "cancelled"
+        }
+      }
+    },
+    {
+      "file": "fixtures/typed-failure-sqlite-busy.json",
+      "operation": "code_index",
+      "state": "typed-provider-failure",
+      "expect": {
+        "status": "unavailable",
+        "error_codes": [
+          "storage_unavailable"
+        ],
+        "error_details_contains": {
+          "retryable": true,
+          "reason": "sqlite_busy"
+        }
+      }
+    }
+  ],
+  "requests": [
+    {
+      "file": "examples/index-request-native.json",
+      "state": "native-canonical-index-request",
+      "expect": {
+        "has_source_identity": true,
+        "expected_paths": 2,
+        "deleted_paths": 1
+      }
+    },
+    {
+      "file": "examples/index-request-standalone.json",
+      "state": "standalone-local-index-request",
+      "expect": {
+        "has_source_identity": false
+      }
+    }
+  ]
+}

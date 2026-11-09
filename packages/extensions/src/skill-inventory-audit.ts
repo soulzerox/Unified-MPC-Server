@@ -93,9 +93,13 @@ export interface SkillInventoryAuditSummary {
   readonly canonicalAbsentNames: number;
   /** Declared names with more than one canonical directory, the #294 defect. */
   readonly duplicateCanonicalNames: number;
-  /** Declared names whose canonical relationship cannot be stated. */
-  readonly canonicalUnverifiedNames: number;
-}
+  /**
+   * Declared names whose canonical relationship cannot be stated. `unverified`
+   * outranks `absent` and `only-canonical`: an unfingerprintable copy stops the
+   * audit before it would claim where the canonical copy is, so a name with no
+   * canonical copy at all lands here instead of in `canonicalAbsentNames`.
+   */
+  readonly canonicalUnverifiedNames: number;}
 
 export interface SkillInventoryAuditReport {
   readonly schemaVersion: 1;

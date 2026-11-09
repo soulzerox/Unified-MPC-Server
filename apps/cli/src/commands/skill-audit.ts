@@ -90,10 +90,11 @@ function renderName(entry: SkillInventoryAuditName): string[] {
  * Render the read-only Skill inventory projection.
  *
  * The summary is always printed; the per-name detail is limited to names that
- * need a decision — any divergence, a canonical duplicate, or evidence the
- * audit could not compute. Identical and unique names are counted only, so the
- * operator output stays readable on a host with hundreds of copies while
- * `--json` keeps the complete inventory.
+ * need a decision — any divergence, a canonical duplicate, a name with no
+ * canonical copy, or evidence the audit could not compute. Identical names the
+ * canonical root matches, and names only the canonical root serves, are counted
+ * without listing, so the operator output stays readable on a host with
+ * hundreds of copies while `--json` keeps the complete inventory.
  */
 export function formatSkillInventoryAudit(report: SkillInventoryAuditReport): string {
   const summary = report.summary;
@@ -110,11 +111,17 @@ export function formatSkillInventoryAudit(report: SkillInventoryAuditReport): st
     ].join(' · ')}`,
   ];
 
+  // A declared name with no canonical copy is the migration gap #294 asks the
+  // operator to close, so it is listed by name, not just counted on the summary
+  // line. A name is settled only when its copies are identical and the canonical
+  // root matches them, or when the canonical root is its only copy; those stay
+  // counted without listing so the projection remains readable.
   const needsDecision = report.names.filter((entry) => (
     entry.classification === 'divergent'
     || entry.classification === 'unverified'
     || entry.canonicalState === 'duplicate'
     || entry.canonicalState === 'diverges'
+    || entry.canonicalState === 'absent'
   ));
   if (needsDecision.length === 0) {
     lines.push('no Skill name needs a precedence decision');

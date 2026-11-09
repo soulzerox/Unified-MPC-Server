@@ -885,7 +885,7 @@ $ unified-mpc skill audit
 skill inventory: 391 directories across 10 roots, 188 declared names
   unique 81 · identical 63 · divergent 43 · unverified 1
 canonical 75 matching · 26 diverging · 74 only copy · 12 absent · 0 duplicate · 1 unverified
-names needing a decision (44):
+names needing a decision (56):
   ask-matt  [divergent] canonical matches a legacy copy  variants 4
     <fingerprint>  claude-skills             /home/user/.claude/skills/ask-matt/SKILL.md
     ...
@@ -916,9 +916,13 @@ use --json for the full inventory, including identical and unique names
 - `--canonical-root <path>` audits a specific canonical tree instead of the
   runtime's own; `--workspace <path>` adds that workspace's workspace-local
   Skill roots to the audit.
-- The operator lines list only the names that need a decision; `--json` prints
-  the complete `SkillInventoryAuditReport`, including identical and unique
-  names.
+- The operator lines list only the names that need a decision: any `divergent`
+  or `unverified` name, a `duplicate` or `diverges` canonical relationship, and
+  a name with no canonical copy (`absent`), which the operator has to import or
+  declare intentionally client-local. An `identical` name the canonical root
+  matches, and a name only the canonical root serves (`only-canonical`), are
+  counted only. `--json` prints the complete `SkillInventoryAuditReport`,
+  including identical and unique names.
 - Exit `0` normally, `1` when two canonical directories advertise the same
   logical name (`duplicateCanonicalNames > 0`), `2` for argument errors.
   Divergence on its own is the expected state of a host that still keeps its

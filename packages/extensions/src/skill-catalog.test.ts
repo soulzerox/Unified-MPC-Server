@@ -429,4 +429,77 @@ Duplicate content.
     expect(read.error.message).toContain('agents-skills/duplicate-skill');
     expect(read.error.message).toContain('workspace-agents-skills/duplicate-skill');
   });
+
+  it('matches multi-word queries across fields and ranks full token coverage first', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-tokens-'));
+    temporaryRoots.push(home);
+    const skills = [
+      ['facebook-content-planner', 'Generate a weekly Facebook Page content plan from a theme and audience.'],
+      ['facebook-ads', 'Facebook ads only.'],
+      ['page-notes', 'Notes about planning a page.'],
+    ] as const;
+    for (const [name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await catalog.list({ query: 'facebook page plan' });
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.skills.map((skill) => skill.name)).toEqual([
+      'facebook-content-planner',
+      'page-notes',
+      'facebook-ads',
+    ]);
+  });
+
+  it('ranks exact and name matches ahead of description-only matches', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-ranking-'));
+    temporaryRoots.push(home);
+    const skills = [
+      ['caption', 'Write a caption.'],
+      ['post-caption-helper', 'Helper for a post.'],
+      ['social-notes', 'Ideas for a caption.'],
+    ] as const;
+    for (const [name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await catalog.list({ query: 'caption' });
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.skills.map((skill) => skill.name)).toEqual([
+      'caption',
+      'post-caption-helper',
+      'social-notes',
+    ]);
+  });
+
+  it('matches Thai words and space-separated compounds', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-thai-'));
+    temporaryRoots.push(home);
+    const skills = [
+      ['page-pilot', 'ใช้ร่างแคปชั่น Facebook Page ภาษาไทย'],
+      ['unrelated', 'Something else.'],
+    ] as const;
+    for (const [name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const thai = await catalog.list({ query: 'แคปชั่น facebook' });
+    expect(thai.ok).toBe(true);
+    if (thai.ok) expect(thai.value.skills.map((skill) => skill.name)).toEqual(['page-pilot']);
+
+    const compound = await catalog.list({ query: 'pagepilot' });
+    expect(compound.ok).toBe(true);
+    if (compound.ok) expect(compound.value.skills.map((skill) => skill.name)).toEqual(['page-pilot']);
+  });
 });

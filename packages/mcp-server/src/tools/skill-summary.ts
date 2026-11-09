@@ -67,7 +67,7 @@ export function summarizeSkillCatalog(
     detail: 'summary',
     omittedFields: SKILL_SUMMARY_OMITTED_FIELDS,
     hint: truncated
-      ? `showing ${kept.length} of ${skills.length} matches in discovery order, not relevance order; pass a larger limit or use skills_list with the same query for every match`
+      ? `showing ${kept.length} of ${skills.length} matches ranked by relevance; pass a larger limit or use skills_list with the same query for every match`
       : `descriptions are ${SKILL_DESCRIPTION_PREVIEW_CHARS}-character previews of the text skill_match ranks; read one skill with skills_read for its complete text, or use skills_list with detail=full for the unprojected catalog`,
     duplicateNames: collectDuplicateNames(skills),
     skills: kept.map(summarizeSkillRow),

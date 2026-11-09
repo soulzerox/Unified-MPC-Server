@@ -24,14 +24,9 @@ export class SkillCatalog {
     const skills = await this.discover();
     const query = input.query === undefined ? undefined : normalizeSearchText(input.query);
     const source = input.source?.trim().toLowerCase();
-    const filtered = skills.filter((skill) => {
-      if (source !== undefined && source.length > 0 && skill.source.toLowerCase() !== source) return false;
-      if (query === undefined || query.length === 0) return true;
-      return normalizeSearchText(skill.name).includes(query)
-        || normalizeSearchText(skill.description).includes(query)
-        || normalizeSearchText(skill.id).includes(query);
-    });
-    return ok({ skills: filtered });
+    const filtered = skills.filter((skill) => source === undefined || source.length === 0 || skill.source.toLowerCase() === source);
+    if (query === undefined || query.length === 0) return ok({ skills: filtered });
+    return ok({ skills: rankSkillMatches(filtered, query) });
   }
 
   public async read(input: { readonly skillId: string; readonly relativePath?: string }): Promise<Result<SkillContent>> {
@@ -392,4 +387,128 @@ function trustTierForSource(source: string): ExtensionTrustTier {
 
 function normalizeSearchText(value: string): string {
   return value.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ');
+}
+
+/**
+ * `skill_match` receives short keyword phrases and occasionally a full prompt.
+ * Matching the whole query as one substring made "facebook page plan" miss a
+ * skill described as "Facebook Page content plan", and discovery order meant
+ * `marketing-plan` never reached the ten-row shortlist. Split the query into
+ * significant words, match each word at a word boundary (with prefix matching
+ * for plurals and compounds), then rank by coverage before field weight.
+ */
+const QUERY_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'how', 'i', 'in', 'is',
+  'it', 'me', 'my', 'of', 'on', 'or', 'that', 'the', 'this', 'to', 'use', 'when', 'with',
+  'you', 'your',
+]);
+const LATIN_WORD = /^[a-z0-9]+$/;
+
+interface SkillSearchFields {
+  readonly name: string;
+  readonly nameWords: readonly string[];
+  readonly nameCompounds: ReadonlySet<string>;
+  readonly id: string;
+  readonly idWords: readonly string[];
+  readonly idCompounds: ReadonlySet<string>;
+  readonly description: string;
+  readonly descriptionWords: readonly string[];
+  readonly descriptionCompounds: ReadonlySet<string>;
+}
+
+function rankSkillMatches(skills: readonly SkillSummary[], query: string): readonly SkillSummary[] {
+  const tokens = queryTokens(query);
+  if (tokens.length === 0) return [];
+  return skills
+    .map((skill) => ({ skill, score: scoreSkillMatch(skill, query, tokens) }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score
+      || compareText(left.skill.name, right.skill.name)
+      || compareText(left.skill.id, right.skill.id))
+    .map((entry) => entry.skill);
+}
+
+function queryTokens(query: string): readonly string[] {
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const token of query.split(' ')) {
+    if (token.length < 2 || QUERY_STOP_WORDS.has(token) || seen.has(token)) continue;
+    seen.add(token);
+    tokens.push(token);
+  }
+  return tokens;
+}
+
+function scoreSkillMatch(
+  skill: SkillSummary,
+  query: string,
+  tokens: readonly string[],
+): number {
+  const fields = searchFields(skill);
+  let matched = 0;
+  let fieldScore = 0;
+  for (const token of tokens) {
+    const inName = fieldMatchesToken(fields.name, fields.nameWords, fields.nameCompounds, token);
+    const inId = fieldMatchesToken(fields.id, fields.idWords, fields.idCompounds, token);
+    const inDescription = fieldMatchesToken(fields.description, fields.descriptionWords, fields.descriptionCompounds, token);
+    if (inName || inId || inDescription) matched += 1;
+    if (inName) fieldScore += 30;
+    if (inId) fieldScore += 12;
+    if (inDescription) fieldScore += 6;
+  }
+  if (matched === 0) return 0;
+
+  let score = Math.round((matched / tokens.length) * 100) + fieldScore;
+  if (fields.name === query) score += 140;
+  else if (fields.name.startsWith(query)) score += 70;
+  else if (fields.name.includes(query)) score += 50;
+  if (fields.id.includes(query)) score += 20;
+  if (fields.description.includes(query)) score += 35;
+  return score;
+}
+
+function searchFields(skill: SkillSummary): SkillSearchFields {
+  const name = normalizeSearchText(skill.name);
+  const id = normalizeSearchText(skill.id);
+  const description = normalizeSearchText(skill.description);
+  return {
+    name,
+    nameWords: name.split(' '),
+    nameCompounds: adjacentCompounds(name.split(' ')),
+    id,
+    idWords: id.split(' '),
+    idCompounds: adjacentCompounds(id.split(' ')),
+    description,
+    descriptionWords: description.split(' '),
+    descriptionCompounds: adjacentCompounds(description.split(' ')),
+  };
+}
+
+/**
+ * Joins adjacent words so "copy writing" matches the query token
+ * "copywriting" and "page pilot" matches "pagepilot" without turning the whole
+ * description into one string, where a partial token like "otional" would
+ * match inside "promotional".
+ */
+function adjacentCompounds(words: readonly string[]): ReadonlySet<string> {
+  const compounds = new Set<string>();
+  for (let index = 0; index < words.length - 1; index += 1) {
+    compounds.add(`${words[index]}${words[index + 1]}`);
+  }
+  return compounds;
+}
+
+function fieldMatchesToken(
+  field: string,
+  words: readonly string[],
+  compounds: ReadonlySet<string>,
+  token: string,
+): boolean {
+  if (!LATIN_WORD.test(token)) return field.includes(token);
+  if (words.some((word) => word === token || word.startsWith(token))) return true;
+  return compounds.has(token);
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

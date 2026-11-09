@@ -902,6 +902,10 @@ use --json for the full inventory, including identical and unique names
 - `canonicalState` relates the canonical copy to its legacy siblings:
   `duplicate` (two canonical directories declare one name), `unverified`,
   `absent`, `only-canonical`, `matches`, `diverges`.
+- `unverified` outranks `absent` and `only-canonical`: an unfingerprintable copy
+  stops the audit before it would claim where the canonical copy is, so a name
+  with no canonical copy at all is counted as `unverified` rather than `absent`,
+  and `absent` only counts names the audit could fully fingerprint.
 - The `canonical` operator line partitions the declared names by
   `canonicalState` — `matching`, `diverging`, `only copy`, `absent`,
   `duplicate`, `unverified` — so the six counts always sum to

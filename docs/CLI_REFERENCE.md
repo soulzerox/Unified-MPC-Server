@@ -869,7 +869,53 @@ verdict, not a failure of the GC pass around it.
 
 ---
 
-## 10. Exit Code Contract
+## 10. Skill Inventory Audit
+
+### `unified-mpc skill audit [--json]`
+
+Read-only inventory of every Skill directory this host can discover, grouped by
+the `name` each `SKILL.md` declares. It answers the question the canonical
+registry cannot: for one logical Skill name, which directories advertise it,
+what full-directory content each one has, and whether the canonical copy holds
+the same content as its legacy siblings. Nothing is imported, pruned, deleted
+or chosen — a divergent group is reported for human review.
+
+```bash
+$ unified-mpc skill audit
+skill inventory: 391 directories across 10 roots, 188 declared names
+  unique 81 · identical 64 · divergent 43 · unverified 1
+canonical: 43 present (18 matching, 25 diverging), 145 absent, 0 duplicate names
+names needing a decision (43):
+  ask-matt  [divergent] canonical diverges  variants 4
+    <fingerprint>  claude-skills             /home/user/.claude/skills/ask-matt/SKILL.md
+    ...
+use --json for the full inventory, including identical and unique names
+```
+
+- Copies are grouped by the declared `name`, not by directory name, so two
+  folders that advertise one Skill are reported as one logical name. The
+  canonical identity convention is `skill:<declared name>`.
+- `classification` counts distinct full-directory fingerprints: `unique` (one
+  copy), `identical` (several copies, one fingerprint), `divergent` (several
+  fingerprints), `unverified` (a copy could not be fingerprinted, so no variant
+  count is claimed).
+- `canonicalState` relates the canonical copy to its legacy siblings:
+  `duplicate` (two canonical directories declare one name), `unverified`,
+  `absent`, `only-canonical`, `matches`, `diverges`.
+- `--canonical-root <path>` audits a specific canonical tree instead of the
+  runtime's own; `--workspace <path>` adds that workspace's workspace-local
+  Skill roots to the audit.
+- The operator lines list only the names that need a decision; `--json` prints
+  the complete `SkillInventoryAuditReport`, including identical and unique
+  names.
+- Exit `0` normally, `1` when two canonical directories advertise the same
+  logical name (`duplicateCanonicalNames > 0`), `2` for argument errors.
+  Divergence on its own is the expected state of a host that still keeps its
+  legacy roots, so it never fails the command.
+
+---
+
+## 11. Exit Code Contract
 
 The `unified-mpc` CLI adheres to a deterministic exit code contract:
 - `0`: Success / normal termination.

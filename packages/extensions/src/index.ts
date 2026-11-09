@@ -26,6 +26,18 @@ export {
   type PersistedExtensionsSettingsMigrationReport,
 } from './settings-migration.js';
 export { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
+export {
+  SkillInventoryAuditService,
+  type SkillInventoryAuditEntry,
+  type SkillInventoryAuditName,
+  type SkillInventoryAuditOptions,
+  type SkillInventoryAuditReport,
+  type SkillInventoryAuditRoot,
+  type SkillInventoryAuditSkipped,
+  type SkillInventoryAuditSummary,
+  type SkillInventoryCanonicalState,
+  type SkillInventoryClassification,
+} from './skill-inventory-audit.js';
 export { McpConfigLoader, exclusionReason, normalizeLaunchConfig, stripJsonComments } from './mcp-config-loader.js';
 export {
   McpSessionManager,

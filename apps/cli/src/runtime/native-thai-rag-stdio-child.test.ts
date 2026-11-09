@@ -85,12 +85,15 @@ function startChild(
   // stdio strict-root and full-bypass variables too: full bypass silently
   // disables strict roots, which would collapse the filtered repository onto
   // the raw registry and make the isolation assertion pass for the wrong
-  // reason. The isolation test sets strict roots explicitly below.
+  // reason. The isolation test sets strict roots explicitly below. A reset
+  // variable would archive the fixture's registrations before the sweep.
   const inheritedEnv = { ...process.env };
   delete inheritedEnv.UNIFIED_THAI_RAG_FORWARD_ONLY;
   delete inheritedEnv.UNIFIED_MPC_STDIO_FULL_BYPASS_ALL;
   delete inheritedEnv.UNIFIED_MPC_STRICT_ROOTS;
   delete inheritedEnv.UNIFIED_MPC_ALLOWED_ROOTS;
+  delete inheritedEnv.UNIFIED_MPC_RESET_WORKSPACES;
+  delete inheritedEnv.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES;
   const strictEnv = strictAllowedRoots === undefined ? {} : {
     UNIFIED_MPC_STRICT_ROOTS: '1',
     // `parseAllowedRoots` splits on `;`, not the platform path delimiter.

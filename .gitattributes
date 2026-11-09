@@ -1,4 +1,7 @@
 # Keep integrity-verified source and generated expectations byte-stable across OS checkouts.
 packages/capabilities/src/windows-capability-bridge.ps1 text eol=lf
 packages/capabilities/src/windows-capability-integrity.generated.ts text eol=lf
+# The vendored provider contract is sha256-pinned by PROVENANCE.json, so a CRLF
+# checkout would fail the provenance test for every file.
+packages/thai-rag/contract/** text eol=lf
 *.sh text eol=lf

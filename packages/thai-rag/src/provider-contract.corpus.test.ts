@@ -169,7 +169,11 @@ describe('Thailand-RAG provider contract corpus', () => {
     expect([...unifiedCodes].sort()).toEqual(['CONFLICT', 'FILE_NOT_FOUND', 'INVALID_INPUT', 'PERMISSION_DENIED']);
   });
 
-  it('keeps the closed source_identity field set aligned with the native request', async () => {
+  // The exact identity Unified sends is asserted against `CanonicalSourceIdentity`
+  // in apps/cli/src/runtime/native-thai-rag-provider.test.ts ('forwards the exact
+  // source identity ...'). This test only proves the published example and the
+  // closed schema agree, which is the part the corpus itself owns.
+  it('keeps the closed source_identity field set aligned with the vendored native example', async () => {
     const schema = await readContractJson('provider-contract.v1.schema.json') as ProviderSchema;
     const sourceIdentity = schema.$defs.source_identity;
     expect(sourceIdentity, 'schema has no source_identity definition').toBeDefined();

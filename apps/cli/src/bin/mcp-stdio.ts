@@ -14,7 +14,7 @@ import {
   resolveDataPath as resolveDataPathFromShared,
 } from '@unified-mpc/shared';
 import { applyPendingSqliteRestoreSync, assertStorageIdentitySafe, SqliteBackupService, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository } from '@unified-mpc/storage';
-import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceRoot, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
+import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceRoot, ProviderGenerationLedger, WorkspaceService, type Workspace } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/stdio-mcp-runtime.js';
 import { startNativeProviderOrDegrade } from '../runtime/native-provider-startup.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
@@ -104,6 +104,7 @@ async function main(): Promise<void> {
       rawWorkspaceService,
       backupService,
       readArg('--confirm-reset-workspaces') ?? process.env.UNIFIED_MPC_CONFIRM_RESET_WORKSPACES,
+      new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
     );
     process.stderr.write(
       `Unified-MPC stdio: archived ${result.archived} previous workspace registration(s)`

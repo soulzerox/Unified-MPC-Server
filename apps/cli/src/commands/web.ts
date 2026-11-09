@@ -136,6 +136,7 @@ export async function runWeb(
     const workspaceRepository = new SqliteWorkspaceRepository(database);
     const workspaceService = new WorkspaceService(workspaceRepository);
     const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
+    const providerGenerations = new ProviderGenerationLedger(path.join(dataPath, 'canonical'));
     const goalRepository = new SqliteGoalRepository(database);
     const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
     const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
@@ -200,13 +201,25 @@ export async function runWeb(
       goalRuntimeProjections,
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
+    // A registration can be archived outside the removal adapter (lifecycle
+    // cleanup, --reset-workspaces, a crash between archive and release), and a
+    // row left behind keeps pinning a manifest no workspace can use. A stale
+    // pin is safe and the next start retries, so a cleanup failure must not
+    // take the control plane down.
+    try {
+      await releaseOrphanedProviderGenerations(providerGenerations, workspaceService);
+    } catch (error: unknown) {
+      process.stderr.write(
+        `Unified-MPC web: could not release orphaned provider generations: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
     const workspaceControl = createWorkspaceControl(
       workspaceRepository,
       workspaceService,
       settings,
       workspaceIndex,
       goalRuntimeSnapshots,
-      new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
+      providerGenerations,
     );
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const canonicalStatusProbe = serverOptions?.canonicalStatusProbe
@@ -268,6 +281,18 @@ export function createWebGoalRuntimeProjection(
       },
     },
   });
+}
+
+/**
+ * Release provider-generation rows for workspaces that are no longer active
+ * (#210 bullet 4 follow-up). Archived registrations cannot own a live
+ * generation, so their rows must not keep pinning a manifest.
+ */
+export async function releaseOrphanedProviderGenerations(
+  providerGenerations: Pick<ProviderGenerationLedger, 'releaseUnknown'>,
+  workspaceService: Pick<WorkspaceService, 'list'>,
+): Promise<string[]> {
+  return providerGenerations.releaseUnknown((await workspaceService.list()).map((workspace) => workspace.id));
 }
 
 export function createWorkspaceControl(

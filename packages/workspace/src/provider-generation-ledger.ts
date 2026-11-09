@@ -120,6 +120,41 @@ export class ProviderGenerationLedger {
     return this.readFile(this.pathFor(id), id, isStrictRead(options));
   }
 
+  /**
+   * Drop rows whose workspace is no longer registered (#210 bullet 4 follow-up).
+   *
+   * A registration can be archived without the web removal adapter: a
+   * `--reset-workspaces` pass, lifecycle auto-cleanup, or a crash between
+   * archive and release. Those rows would otherwise keep pinning manifests no
+   * workspace can build a generation from. The file name carries the workspace
+   * id, so a corrupt row for a removed workspace is released too; a corrupt row
+   * for a live workspace stays, and the strict GC reader still refuses on it.
+   */
+  public async releaseUnknown(knownWorkspaceIds: readonly string[]): Promise<string[]> {
+    const known = new Set(knownWorkspaceIds.map(requireWorkspaceId));
+    let entries: string[];
+    try {
+      entries = await readdir(this.directory);
+    } catch (error) {
+      if (isMissingPath(error)) return [];
+      throw new Error(`cannot read the provider generation ledger: ${errorMessage(error)}`);
+    }
+    const released: string[] = [];
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const workspaceId = entry.slice(0, -'.json'.length);
+      if (!WORKSPACE_ID.test(workspaceId) || known.has(workspaceId)) continue;
+      try {
+        await rm(path.join(this.directory, entry));
+      } catch (error) {
+        if (isMissingPath(error)) continue;
+        throw new Error(`cannot release provider generation row ${workspaceId}: ${errorMessage(error)}`);
+      }
+      released.push(workspaceId);
+    }
+    return released.sort();
+  }
+
   public async list(options?: ReachabilityReadOptions): Promise<ProviderGenerationRecord[]> {
     const strict = isStrictRead(options);
     let entries: string[];

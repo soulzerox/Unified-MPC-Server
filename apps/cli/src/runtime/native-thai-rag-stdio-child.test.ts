@@ -81,9 +81,16 @@ function startChild(
     );
   }
   // The test proves the shipped default, so inherit the rest of the
-  // environment but never an operator's forward-only override.
+  // environment but never an operator's forward-only override. Clear the
+  // stdio strict-root and full-bypass variables too: full bypass silently
+  // disables strict roots, which would collapse the filtered repository onto
+  // the raw registry and make the isolation assertion pass for the wrong
+  // reason. The isolation test sets strict roots explicitly below.
   const inheritedEnv = { ...process.env };
   delete inheritedEnv.UNIFIED_THAI_RAG_FORWARD_ONLY;
+  delete inheritedEnv.UNIFIED_MPC_STDIO_FULL_BYPASS_ALL;
+  delete inheritedEnv.UNIFIED_MPC_STRICT_ROOTS;
+  delete inheritedEnv.UNIFIED_MPC_ALLOWED_ROOTS;
   const strictEnv = strictAllowedRoots === undefined ? {} : {
     UNIFIED_MPC_STRICT_ROOTS: '1',
     // `parseAllowedRoots` splits on `;`, not the platform path delimiter.
@@ -331,6 +338,10 @@ describe('mcp-stdio startup sweeps orphaned provider generations (#710)', () => 
     // the unserved row.
     const session = startChild(fixture.dataPath, fixture.home, fixture.workspacePath, [fixture.workspacePath]);
     await waitForReady(session);
+    // The discrimination depends on strict roots actually engaging: full
+    // bypass disables them and folds the filtered repository onto the raw one.
+    expect(session.stderr()).toContain('strict_roots=1');
+    expect(session.stderr()).not.toContain('full_bypass=1');
 
     expect(existsSync(orphanRow)).toBe(false);
     expect(existsSync(servedRow)).toBe(true);

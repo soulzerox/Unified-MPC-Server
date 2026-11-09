@@ -40,6 +40,9 @@ import {
   THAI_RAG_EMBEDDING_COMPATIBILITY,
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_PRODUCTION_BRIDGE,
+  isThaiRagProviderErrorCode,
+  mapThaiRagProviderErrorCode,
+  parseThaiRagHandshakePayload,
   validateThaiRagHandshake,
   type ThaiRagProviderDriver,
   type ThaiRagProviderDriverHealth,
@@ -2277,92 +2280,9 @@ function isIndexStatusPollTimeout(error: { readonly code: string; readonly messa
 }
 
 function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake> {
-  const payload = normalizeWorkerPayload(value);
-  const outer = isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
-  const data = isRecord(outer) && isRecord(outer.data) && typeof outer.data.provider_id === 'string' ? outer.data : outer;
-  if (!isRecord(data)
-    || typeof data.provider_id !== 'string'
-    || typeof data.provider_version !== 'string'
-    || typeof data.contract_version !== 'string'
-    || !isRecord(data.compatibility_range)
-    || typeof data.compatibility_range.min !== 'string'
-    || typeof data.compatibility_range.max !== 'string'
-    || typeof data.contract_fingerprint !== 'string'
-    || typeof data.index_job_contract_version !== 'string'
-    || !Array.isArray(data.capabilities)
-    || !data.capabilities.every((capability) => typeof capability === 'string')
-    || typeof data.workspace_scope_model !== 'string'
-    || typeof data.state !== 'string'
-    || !isRecord(data.embedding)
-    || typeof data.embedding.profile !== 'string'
-    || typeof data.embedding.model !== 'string'
-    || typeof data.embedding.dimension !== 'number'
-    || (data.embedding.preprocessing_version !== undefined && typeof data.embedding.preprocessing_version !== 'string')
-    || !isRecord(data.generation)
-    || typeof data.generation.contract !== 'string'
-    || typeof data.generation.embedding !== 'string'
-    || typeof data.generation.index !== 'string'
-    || typeof data.generation.storage !== 'string'
-    || typeof data.embedding_index_generation !== 'number'
-    || (data.revision_manifest !== undefined && typeof data.revision_manifest !== 'boolean')
-    || (data.expected_hash_fence !== undefined && typeof data.expected_hash_fence !== 'boolean')
-    || (data.degraded_reasons !== undefined && (!Array.isArray(data.degraded_reasons) || !data.degraded_reasons.every((reason) => typeof reason === 'string')))) {
-    return err(appError('CONFLICT', 'Native Thai-RAG worker returned malformed handshake metadata', true, { reason: 'malformed-handshake' }));
-  }
-  const components = isRecord(data.components) ? parseProviderComponents(data.components) : undefined;
-  return ok({
-    providerId: data.provider_id as ThaiRagProviderHandshake['providerId'],
-    providerVersion: data.provider_version,
-    contractVersion: data.contract_version,
-    compatibilityRange: { min: data.compatibility_range.min, max: data.compatibility_range.max },
-    contractFingerprint: data.contract_fingerprint,
-    indexJobContractVersion: data.index_job_contract_version,
-    capabilities: data.capabilities,
-    workspaceScopeModel: data.workspace_scope_model,
-    health: data.state,
-    embedding: {
-      profile: data.embedding.profile,
-      model: data.embedding.model,
-      dimension: data.embedding.dimension,
-      ...(data.embedding.preprocessing_version === undefined ? {} : { preprocessingVersion: data.embedding.preprocessing_version }),
-    },
-    generation: {
-      contract: data.generation.contract,
-      embedding: data.generation.embedding,
-      index: data.generation.index,
-      storage: data.generation.storage,
-    },
-    ...(typeof data.workspace_id === 'string' ? { workspaceId: data.workspace_id } : {}),
-    ...(typeof data.workspace_ready === 'boolean' ? { workspaceReady: data.workspace_ready } : {}),
-    ...(data.degraded_reasons === undefined ? {} : { degradedReasons: data.degraded_reasons }),
-     ...(components === undefined ? {} : { components }),
-    embeddingIndexGeneration: data.embedding_index_generation,
-    ...(typeof data.revision_manifest === 'boolean' ? { revisionManifest: data.revision_manifest } : {}),
-    ...(typeof data.expected_hash_fence === 'boolean' ? { expectedHashFence: data.expected_hash_fence } : {}),
-    ...(typeof data.legacy_adapter === 'string' ? { legacyAdapter: data.legacy_adapter } : {}),
-  });
-}
-
-function parseProviderComponents(value: Record<string, unknown>): ThaiRagProviderDriverHealth | undefined {
-  if (typeof value.worker_reachable !== 'boolean'
-    || typeof value.sqlite_available !== 'boolean'
-    || typeof value.fts_available !== 'boolean'
-    || typeof value.vector_store_available !== 'boolean'
-    || typeof value.embedder_available !== 'boolean'
-    || typeof value.lexical_retrieval_available !== 'boolean'
-    || typeof value.semantic_retrieval_available !== 'boolean'
-    || !Array.isArray(value.active_jobs)
-    || !value.active_jobs.every((job) => typeof job === 'string')) return undefined;
-  return {
-    workerReachable: value.worker_reachable,
-    sqliteAvailable: value.sqlite_available,
-    ftsAvailable: value.fts_available,
-    vectorStoreAvailable: value.vector_store_available,
-    embedderAvailable: value.embedder_available,
-    lexicalRetrievalAvailable: value.lexical_retrieval_available,
-    semanticRetrievalAvailable: value.semantic_retrieval_available,
-    activeJobs: value.active_jobs,
-  };
+  // `structuredContent` / `content[0].text` is an MCP transport detail. The
+  // payload reader is shared with the vendored provider-contract corpus.
+  return parseThaiRagHandshakePayload(normalizeWorkerPayload(value));
 }
 
 function embeddingCompatibility(contractVersion: string): {
@@ -2441,9 +2361,9 @@ function normalizeWorkerCallResult(tool: string, result: Result<unknown>): Resul
     // Contract v1 makes an unknown ErrorCode terminal unless the envelope marks
     // it retryable, so the flag decides; an unmapped code never guesses. Known
     // codes keep the classification they had before the vocabulary became open.
-    const knownCode = isKnownProviderErrorCode(structuredError.code);
+    const knownCode = isThaiRagProviderErrorCode(structuredError.code);
     return err(appError(
-      mapProviderErrorCode(structuredError.code),
+      mapThaiRagProviderErrorCode(structuredError.code),
       `Native Thai-RAG ${tool} failed: ${structuredError.message}`,
       knownCode || structuredError.retryable,
       {
@@ -2509,50 +2429,6 @@ function normalizeWorkerPayload(value: unknown): unknown {
   } catch {
     return value;
   }
-}
-
-type UnifiedProviderErrorCode = 'INVALID_INPUT' | 'PERMISSION_DENIED' | 'FILE_NOT_FOUND' | 'CONFLICT';
-
-/**
- * Every `ErrorCode` in contract v1 and the Unified error it becomes.
- *
- * The provider contract declares the vocabulary open for addition within v1
- * (`contract/README.md` §2): a new code names a state the provider could
- * already reach, and it does not move `contract_fingerprint`, so this table is
- * the only place an addition becomes visible here. An unrecognised code is
- * therefore terminal rather than a retryable `CONFLICT` — retrying something
- * understood only as "some error" is how a permanent failure becomes a loop.
- */
-const PROVIDER_ERROR_CODE_MAP: ReadonlyMap<string, UnifiedProviderErrorCode> = new Map<string, UnifiedProviderErrorCode>([
-  ['invalid_input', 'INVALID_INPUT'],
-  ['workspace_scope_required', 'INVALID_INPUT'],
-  ['scope_denied', 'PERMISSION_DENIED'],
-  ['permission_denied', 'PERMISSION_DENIED'],
-  ['workspace_not_found', 'FILE_NOT_FOUND'],
-  ['file_not_found', 'FILE_NOT_FOUND'],
-  ['index_job_not_found', 'FILE_NOT_FOUND'],
-  ['memory_not_found', 'FILE_NOT_FOUND'],
-  ['storage_unavailable', 'CONFLICT'],
-  ['lexical_retrieval_unavailable', 'CONFLICT'],
-  ['vector_retrieval_degraded', 'CONFLICT'],
-  ['memory_reconciliation_pending', 'CONFLICT'],
-  ['embedding_unavailable', 'CONFLICT'],
-  ['stale_index', 'CONFLICT'],
-  ['incompatible_index', 'CONFLICT'],
-  ['indexing_conflict', 'CONFLICT'],
-  ['cancellation', 'CONFLICT'],
-  ['internal_failure', 'CONFLICT'],
-]);
-
-function isKnownProviderErrorCode(code: string): boolean {
-  return PROVIDER_ERROR_CODE_MAP.has(code);
-}
-
-function mapProviderErrorCode(code: string): UnifiedProviderErrorCode {
-  // A Map lookup, not an object index: `constructor`, `__proto__` and
-  // `toString` are absent from a Map, while an object literal would inherit
-  // them and hand `appError` a non-string code for an unknown provider value.
-  return PROVIDER_ERROR_CODE_MAP.get(code) ?? 'CONFLICT';
 }
 
 function toolResultText(value: unknown): string | undefined {

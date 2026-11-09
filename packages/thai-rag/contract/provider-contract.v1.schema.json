@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:thai-rag-mcp:contract:provider:v1",
+  "title": "Thai-RAG canonical provider contract v1",
+  "description": "Machine-readable form of the transport-independent Thai-RAG provider contract (issue #1). The top-level schema validates one ProviderResult envelope. Request-side definitions live in $defs: source_identity, expected_paths, deleted_paths and canonical_index_request. Closed definitions change only in a new major schema file, except ErrorCode, which may gain values within v1 (see its x-evolution annotation); provider data and metadata may add fields within v1. Normative field semantics are documented in contract/README.md.",
+  "type": "object",
+  "$ref": "#/$defs/provider_result",
+  "$defs": {
+    "provider_status": {
+      "title": "ProviderStatus",
+      "type": "string",
+      "enum": ["ok", "review_required", "degraded", "unavailable"]
+    },
+    "error_code": {
+      "title": "ErrorCode",
+      "description": "Stable machine-readable failure vocabulary. A consumer switches on this value, never on the message. Values may be added within v1; an unrecognised value is a terminal failure of that operation unless the envelope sets details.retryable, and a consumer must not reject a result merely because the code is absent from this enum.",
+      "x-evolution": {
+        "addition": "additive-within-v1",
+        "removalOrRename": "breaking",
+        "unknownCode": "terminal-failure-unless-retryable",
+        "consumerValidation": "open-string"
+      },
+      "type": "string",
+      "enum": [
+        "invalid_input",
+        "workspace_scope_required",
+        "workspace_not_found",
+        "index_job_not_found",
+        "memory_not_found",
+        "scope_denied",
+        "storage_unavailable",
+        "lexical_retrieval_unavailable",
+        "vector_retrieval_degraded",
+        "memory_reconciliation_pending",
+        "embedding_unavailable",
+        "stale_index",
+        "incompatible_index",
+        "indexing_conflict",
+        "cancellation",
+        "internal_failure"
+      ]
+    },
+    "sha256": {
+      "title": "SHA-256 content hash",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_object_id": {
+      "title": "Git object id",
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "repository_id": {
+      "title": "Repository identity",
+      "description": "Non-empty after trimming and free of NUL, exactly as the provider's identity validator requires.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
+    },
+    "canonical_manifest_id": {
+      "title": "Unified canonical manifest id",
+      "description": "Unified mints this id (man:v1) from the exact tree it observed. Thai-RAG records it and never mints or repairs one.",
+      "type": "string",
+      "pattern": "^man:v1:[0-9a-f]{64}$"
+    },
+    "local_manifest_id": {
+      "title": "Standalone local manifest id",
+      "description": "Standalone mode mints this id (lman:v1) from its own scan. It can never satisfy a request for a canonical man:v1 id.",
+      "type": "string",
+      "pattern": "^lman:v1:[0-9a-f]{64}$"
+    },
+    "revision_id": {
+      "title": "Revision id",
+      "type": "string",
+      "pattern": "^rev:v1:[0-9a-f]{64}$"
+    },
+    "git_ref": {
+      "title": "Exact Git ref",
+      "type": "string",
+      "pattern": "^refs/(?!.*\\.\\.)[^\\u0000]+$"
+    },
+    "relative_path": {
+      "title": "Repo-relative source path",
+      "description": "Canonical wire form: forward slashes, no absolute prefix, no backslash, no empty or parent segment, no trailing slash, not whitespace-only. The receiver normalizes a leading ./ before validation.",
+      "type": "string",
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*/$)(?=.*\\S).+$"
+    },
+    "workspace_id": {
+      "title": "Explicit canonical workspace id",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
+    },
+    "source_identity": {
+      "title": "Canonical source identity supplied by Unified #210",
+      "description": "Exactly the fields Unified sends byte-for-byte; an unknown field is refused rather than dropped. repository_id and manifest_id are required. In standalone mode this block is absent and the local revision adapter owns source truth.",
+      "type": "object",
+      "required": ["repository_id", "manifest_id"],
+      "additionalProperties": false,
+      "properties": {
+        "repository_id": { "$ref": "#/$defs/repository_id" },
+        "manifest_id": { "$ref": "#/$defs/canonical_manifest_id" },
+        "ref": { "$ref": "#/$defs/git_ref" },
+        "commit_sha": { "$ref": "#/$defs/git_object_id" },
+        "tree_oid": { "$ref": "#/$defs/git_object_id" },
+        "revision_id": { "$ref": "#/$defs/revision_id" }
+      }
+    },
+    "expected_paths": {
+      "title": "Content fence for one canonical revision",
+      "description": "Repo-relative path -> the exact SHA-256 the scanner will read. Unified derives this from the effective logical view (base manifest + Goal overlay - tombstones), substituting the live hash where the worktree already drifts from the view. A hash that disagrees with the live byte is a stale request, not a provider repair.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/relative_path" },
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "deleted_paths": {
+      "title": "Declared removals (tombstones)",
+      "description": "Paths the caller's revision no longer contains. A declaration, not a fence: the provider hides the path even when a copy still exists in the checkout. A path cannot be both expected with a hash and deleted.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/relative_path" }
+    },
+    "requested_paths": {
+      "title": "Scoped request paths",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/relative_path" }
+    },
+    "canonical_index_request": {
+      "title": "Canonical code_index request subset",
+      "description": "The fields this contract pins for a canonical index request. Other code_index options (force, background, dry_run, max_files, vectors, ...) keep their existing provider semantics and are outside schema v1. standalone mode omits source_identity.",
+      "type": "object",
+      "required": ["workspace_id"],
+      "additionalProperties": true,
+      "properties": {
+        "workspace_id": { "$ref": "#/$defs/workspace_id" },
+        "source_identity": { "$ref": "#/$defs/source_identity" },
+        "expected_paths": { "$ref": "#/$defs/expected_paths" },
+        "deleted_paths": { "$ref": "#/$defs/deleted_paths" },
+        "paths": { "$ref": "#/$defs/requested_paths" },
+        "mode": { "type": "string", "enum": ["delta", "full"] },
+        "priority": { "type": "string", "enum": ["blocking", "background"] }
+      }
+    },
+    "compatibility_range": {
+      "title": "Contract compatibility range",
+      "type": "object",
+      "required": ["min", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "min": { "type": "string", "minLength": 1 },
+        "max": { "type": "string", "minLength": 1 }
+      }
+    },
+    "generation_compatibility": {
+      "title": "Generation identity used for reuse decisions",
+      "description": "Answers 'is this semantic generation current for the caller?' without reading storage internals. A mismatch is reported as incompatible_index; a generation is never silently reused across a contract, embedding or index-generation change.",
+      "type": "object",
+      "required": ["contract", "embedding", "index", "storage"],
+      "additionalProperties": false,
+      "properties": {
+        "contract": { "$ref": "#/$defs/sha256" },
+        "embedding": { "type": "string", "minLength": 1 },
+        "index": { "type": "string", "minLength": 1 },
+        "storage": { "type": "string", "minLength": 1 }
+      }
+    },
+    "embedding_compatibility": {
+      "title": "Embedding profile identity",
+      "description": "Model-specific vector identity stays isolated from file/revision identity. profile is the reuse key; dimension and preprocessing_version must match before cached vectors are reused.",
+      "type": "object",
+      "required": ["profile", "model", "dimension", "preprocessing_version", "ready"],
+      "additionalProperties": true,
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "dimension": { "type": "integer", "minimum": 1 },
+        "preprocessing_version": { "type": "string", "minLength": 1 },
+        "ready": { "type": "boolean" }
+      }
+    },
+    "readiness": {
+      "title": "Channel readiness",
+      "type": "object",
+      "required": [
+        "storage_ready",
+        "fts_ready",
+        "vector_store_ready",
+        "embedding_ready",
+        "workspace_ready"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "storage_ready": { "type": "boolean" },
+        "fts_ready": { "type": "boolean" },
+        "vector_store_ready": { "type": "boolean" },
+        "embedding_ready": { "type": "boolean" },
+        "workspace_ready": { "type": "boolean" }
+      }
+    },
+    "provider_metadata": {
+      "title": "Provider result metadata",
+      "description": "The handshake every result carries. The envelope is closed; this block may add fields within contract 1.x.",
+      "type": "object",
+      "required": [
+        "provider_name",
+        "provider_version",
+        "contract_version",
+        "contract_fingerprint",
+        "compatibility_range",
+        "index_job_contract_version",
+        "generation",
+        "embedding",
+        "readiness"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "provider_name": { "const": "thai-rag" },
+        "provider_version": { "type": "string", "minLength": 1 },
+        "contract_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+        "contract_fingerprint": { "$ref": "#/$defs/sha256" },
+        "compatibility_range": { "$ref": "#/$defs/compatibility_range" },
+        "index_job_contract_version": { "type": "string", "minLength": 1 },
+        "generation": { "$ref": "#/$defs/generation_compatibility" },
+        "embedding": { "$ref": "#/$defs/embedding_compatibility" },
+        "readiness": { "$ref": "#/$defs/readiness" }
+      }
+    },
+    "provider_error": {
+      "title": "Typed provider error",
+      "type": "object",
+      "required": ["code", "message", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/error_code" },
+        "message": { "type": "string", "minLength": 1 },
+        "details": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "provider_result": {
+      "title": "ProviderResult envelope",
+      "description": "One canonical result. Every key is emitted by ProviderResult.to_dict(), so a missing key is a contract violation rather than an omission. data keeps the per-operation payload and may add fields within contract 1.x.",
+      "type": "object",
+      "required": [
+        "status",
+        "data",
+        "workspace_id",
+        "repository_id",
+        "revision_id",
+        "artifact_id",
+        "repository_provenance",
+        "trust_scope",
+        "operation_id",
+        "generation",
+        "warnings",
+        "errors",
+        "metadata"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "#/$defs/provider_status" },
+        "data": true,
+        "workspace_id": { "type": ["string", "null"], "minLength": 1 },
+        "repository_id": { "type": ["string", "null"], "minLength": 1 },
+        "revision_id": { "anyOf": [{ "$ref": "#/$defs/revision_id" }, { "type": "null" }] },
+        "artifact_id": { "type": ["string", "null"], "minLength": 1 },
+        "repository_provenance": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "pattern": "^git-common-dir:sha256:[0-9a-f]{64}$"
+        },
+        "trust_scope": {
+          "enum": ["workspace", "repository_provenance_unverified", null]
+        },
+        "operation_id": { "type": ["string", "null"], "minLength": 1 },
+        "generation": { "type": ["string", "object", "null"] },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/provider_error" } },
+        "metadata": { "$ref": "#/$defs/provider_metadata" }
+      }
+    },
+    "contract_handshake": {
+      "title": "version/health capability handshake",
+      "description": "The transport-independent contract data returned by version() and health(). Additional fields are allowed within contract 1.x; required keys and the capability vocabulary are not.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "provider_id",
+        "provider_version",
+        "contract_version",
+        "compatibility_range",
+        "contract_fingerprint",
+        "index_job_contract_version",
+        "capability_contract",
+        "control_mode",
+        "source_authority",
+        "revision_manifest",
+        "delta_index",
+        "dirty_overlay",
+        "expected_hash_fence",
+        "local_structural_evidence",
+        "local_scheduler",
+        "local_gc",
+        "constraint_resolution",
+        "external_scheduler",
+        "capabilities",
+        "workspace_scope_model",
+        "result_model",
+        "error_model",
+        "generation",
+        "embedding",
+        "readiness"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "schema_version": { "const": 1 },
+        "provider_id": { "const": "thai-rag" },
+        "provider_version": { "type": "string", "minLength": 1 },
+        "contract_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+        "compatibility_range": { "$ref": "#/$defs/compatibility_range" },
+        "contract_fingerprint": { "$ref": "#/$defs/sha256" },
+        "index_job_contract_version": { "type": "string", "minLength": 1 },
+        "capability_contract": { "type": "integer", "minimum": 1 },
+        "control_mode": {
+          "type": "string",
+          "enum": ["unified_native", "standalone_git", "standalone_snapshot"]
+        },
+        "source_authority": { "type": "string", "minLength": 1 },
+        "revision_manifest": { "type": "boolean" },
+        "delta_index": { "type": "boolean" },
+        "dirty_overlay": { "type": "boolean" },
+        "expected_hash_fence": { "type": "boolean" },
+        "local_structural_evidence": { "type": "boolean" },
+        "local_scheduler": { "type": "boolean" },
+        "local_gc": { "type": "boolean" },
+        "constraint_resolution": { "type": "boolean" },
+        "external_scheduler": { "type": "boolean" },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "adopt_legacy_index",
+              "cancel_index",
+              "code_blast_radius",
+              "code_context",
+              "code_index",
+              "code_search",
+              "forget",
+              "health",
+              "index_status",
+              "pre_edit_context",
+              "recall",
+              "record_event",
+              "remember",
+              "resolve_event",
+              "version"
+            ]
+          }
+        },
+        "workspace_scope_model": { "const": "explicit_workspace_id" },
+        "result_model": { "const": "structured_provider_result" },
+        "error_model": { "const": "machine_readable_error" },
+        "generation": { "$ref": "#/$defs/generation_compatibility" },
+        "embedding": { "$ref": "#/$defs/embedding_compatibility" },
+        "readiness": { "$ref": "#/$defs/readiness" }
+      }
+    }
+  }
+}

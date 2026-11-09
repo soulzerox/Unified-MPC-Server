@@ -1,0 +1,26 @@
+{
+  "sourceRepository": "soulzerox/thai-rag-mcp",
+  "sourceUrl": "https://github.com/soulzerox/thai-rag-mcp",
+  "sourceCommit": "5da9dbcf50ad43608f771da76603fb4c8991f001",
+  "sourceDirectory": "contract",
+  "vendoredAt": "2026-11-09",
+  "note": "Verbatim copy. PROVENANCE.json and VENDORED.md are not part of the copied set. Refresh with packages/thai-rag/contract/VENDORED.md.",
+  "files": {
+    "README.md": "1f2a667ec7bfa91a5f2abd96f9eb87b76a5b93bb35669bd01072f3524c412d30",
+    "provider-contract.v1.schema.json": "75c35d1cb0b3639664169f11118f0d77b4674afb081bb3d23c134478bcff1a3d",
+    "examples/index-request-native.json": "aba78b5f4faa9cc7e53ffefa97be85e83389b64912469f1dd5079124a36b47c1",
+    "examples/index-request-standalone.json": "9bc43a9e6f0479ca67e33a57a0067c349f12d19ceeb59433ff2393184cfa4fbe",
+    "fixtures/index.json": "0dfad864460b710d9dc78af3796e3170684f6770904039af91b247bcc3b9b92e",
+    "fixtures/health-degraded-embedding.json": "16c8358b1c0e84ff215831cf4ab79d1cd661d049e4210ae84df40a67d8c90030",
+    "fixtures/health-ready.json": "718860d3dbca5f99bb5f76f83e84ee077d6903794e07597af9db9122b4c62e88",
+    "fixtures/health-unavailable-storage.json": "f25c4b8fd0373e0b4b6e476f365f321329f403436be78fc66ab727027274461d",
+    "fixtures/indexing-conflict.json": "6868da8cf5b1b46554207bd289d2f6d871d2ca8ccedc1da157bd15796d872f33",
+    "fixtures/job-cancelled.json": "93ffdc8adcdb203b9bb0625c9dc8566f6869cbb41a980bb1bd3e5914fa69683d",
+    "fixtures/job-unknown-after-restart.json": "d0271949e08b475a43586fc2efc7459d36fe6ff63bf6d3848c5f7b66d15693cf",
+    "fixtures/lexical-only-index.json": "ad5122f8a142ab7a04e72fec3aece2c943dc73f91f76321cbcc2bcca4fbfe794",
+    "fixtures/stale-source.json": "08c1aaa66ad276ca077e243eafc7bbb15235a2e15495185a1513e505769a3280",
+    "fixtures/typed-failure-sqlite-busy.json": "ed4961c1b9ffd47432681e1ed7bf7de064cb7a5053814d0594b7c26cbacc74ce",
+    "fixtures/workspace-scope-denied.json": "d16efc0d32ea79f4a05f60eef25bcf1264ad25b6be970098edd10bd550bc3a69",
+    "fixtures/zero-change-verification.json": "4f1391a43675578bb5da386bad92bc9f26f64a4bcf2398fcf466dd3134503597"
+  }
+}

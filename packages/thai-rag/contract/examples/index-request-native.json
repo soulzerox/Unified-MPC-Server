@@ -1,0 +1,19 @@
+{
+  "workspace_id": "ws-3e9bd95b-0f52-4629-b354-b2873a7a2d38",
+  "source_identity": {
+    "repository_id": "github:soulzerox/thai-rag-mcp",
+    "manifest_id": "man:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "revision_id": "rev:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "tree_oid": "dddddddddddddddddddddddddddddddddddddddd",
+    "ref": "refs/heads/main"
+  },
+  "expected_paths": {
+    "src/provider.py": "1111111111111111111111111111111111111111111111111111111111111111",
+    "src/server.py": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "deleted_paths": ["src/legacy.py"],
+  "paths": ["src/provider.py", "src/server.py", "src/new_module.py"],
+  "mode": "delta",
+  "priority": "background"
+}

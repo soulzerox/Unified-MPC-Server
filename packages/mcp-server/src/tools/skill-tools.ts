@@ -1,4 +1,5 @@
 import { ok } from '@unified-mpc/domain';
+import { skillQueryIsRanked } from '@unified-mpc/extensions';
 import { z } from 'zod';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import { skillsListSchema, skillsReadSchema } from './schemas.js';
@@ -35,7 +36,9 @@ export function skillTools(context: McpToolContext): McpToolDefinition[] {
           ...(input.source === undefined ? {} : { source: input.source }),
         });
         if (!listed.ok || input.detail === 'full') return listed;
-        return ok(summarizeSkillCatalog(listed.value.skills));
+        return ok(summarizeSkillCatalog(listed.value.skills, {
+          ranked: skillQueryIsRanked(input.query),
+        }));
       },
     }),
     defineTool({

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_EXTENSIONS_SETTINGS } from './types.js';
-import { SkillCatalog, parseSkillMarkdown } from './skill-catalog.js';
+import { SkillCatalog, parseSkillMarkdown, skillQueryIsRanked } from './skill-catalog.js';
 
 const temporaryRoots: string[] = [];
 
@@ -428,5 +428,130 @@ Duplicate content.
     expect(read.error.code).toBe('INVALID_INPUT');
     expect(read.error.message).toContain('agents-skills/duplicate-skill');
     expect(read.error.message).toContain('workspace-agents-skills/duplicate-skill');
+  });
+
+  it('matches multi-word queries across fields and ranks full token coverage first', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-tokens-'));
+    temporaryRoots.push(home);
+    const skills = [
+      ['facebook-content-planner', 'Generate a weekly Facebook Page content plan from a theme and audience.'],
+      ['facebook-ads', 'Facebook ads only.'],
+      ['page-notes', 'Notes about planning a page.'],
+    ] as const;
+    for (const [name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await catalog.list({ query: 'facebook page plan' });
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.skills.map((skill) => skill.name)).toEqual([
+      'facebook-content-planner',
+      'page-notes',
+      'facebook-ads',
+    ]);
+  });
+
+  it('ranks exact and name matches ahead of description-only matches', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-ranking-'));
+    temporaryRoots.push(home);
+    // Directory names sort the opposite way to relevance, so discovery order
+    // cannot produce the expected ranking and the pre-ranking code fails here.
+    const skills = [
+      ['aaa-social', 'social-notes', 'Ideas for a caption.'],
+      ['mmm-helper', 'post-caption-helper', 'Helper for a post.'],
+      ['zzz-exact', 'caption', 'Write a caption.'],
+    ] as const;
+    for (const [directory, name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', directory);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await catalog.list({ query: 'caption' });
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(listed.value.skills.map((skill) => skill.name)).toEqual([
+      'caption',
+      'post-caption-helper',
+      'social-notes',
+    ]);
+  });
+
+  it('matches Thai words and space-separated compounds', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-thai-'));
+    temporaryRoots.push(home);
+    const skills = [
+      ['page-pilot', 'ใช้ร่างแคปชั่น Facebook Page ภาษาไทย'],
+      ['unrelated', 'Something else.'],
+    ] as const;
+    for (const [name, description] of skills) {
+      const skillRoot = path.join(home, '.agents', 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const thai = await catalog.list({ query: 'แคปชั่น facebook' });
+    expect(thai.ok).toBe(true);
+    if (thai.ok) expect(thai.value.skills.map((skill) => skill.name)).toEqual(['page-pilot']);
+
+    const compound = await catalog.list({ query: 'pagepilot' });
+    expect(compound.ok).toBe(true);
+    if (compound.ok) expect(compound.value.skills.map((skill) => skill.name)).toEqual(['page-pilot']);
+  });
+
+  it('falls back to whole-query matching when no significant token remains', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-skill-match-degenerate-'));
+    temporaryRoots.push(home);
+    const fixtures = [
+      ['.agents', 'caption-helper', 'Writes the caption for a post.'],
+      ['.agents', 'image-tools', 'Crop and resize 图片 files.'],
+      ['.claude', 'caption-helper', 'A second caption helper for the team.'],
+    ] as const;
+    for (const [root, name, description] of fixtures) {
+      const skillRoot = path.join(home, root, 'skills', name);
+      await mkdir(skillRoot, { recursive: true });
+      await writeFile(path.join(skillRoot, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n`, 'utf8');
+    }
+    const catalog = new SkillCatalog({ homeDir: home, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listedIds = async (input: { readonly query?: string; readonly source?: string }): Promise<readonly string[]> => {
+      const listed = await catalog.list(input);
+      expect(listed.ok).toBe(true);
+      return listed.ok ? listed.value.skills.map((skill) => skill.id) : [];
+    };
+
+    // An all-stop-word query used to match as a whole-string substring. Losing
+    // every token must not turn that into "no matches".
+    expect(new Set(await listedIds({ query: 'the' }))).toEqual(new Set([
+      'agents-skills/caption-helper',
+      'claude-skills/caption-helper',
+    ]));
+
+    // Punctuation normalizes to an empty query, which still lists the catalog.
+    expect((await listedIds({ query: '???' })).length).toBe(3);
+
+    // One Latin letter is dropped as noise and falls back to the whole query;
+    // one CJK character is a word and must still be findable.
+    expect((await listedIds({ query: 'c' })).length).toBe(3);
+    expect(await listedIds({ query: '图' })).toEqual(['agents-skills/image-tools']);
+
+    // The source filter still applies before ranking.
+    expect(await listedIds({ query: 'caption helper', source: 'claude-skills' })).toEqual(['claude-skills/caption-helper']);
+  });
+
+  it('reports whether a query will actually be ranked', () => {
+    // Listing surfaces use this instead of `query.length > 0`, because these
+    // queries stay in discovery order even though they are non-empty.
+    for (const query of [undefined, '', '   ', '???', 'the', 'c']) {
+      expect(skillQueryIsRanked(query)).toBe(false);
+    }
+    for (const query of ['facebook page plan', 'caption', 'แคปชั่น', '图']) {
+      expect(skillQueryIsRanked(query)).toBe(true);
+    }
   });
 });

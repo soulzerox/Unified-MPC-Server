@@ -302,6 +302,21 @@ describe('skills and mcp bridge tools', () => {
     expect(unique.value).toMatchObject({ duplicateNames: [] });
   });
 
+  it('only claims relevance order when the catalog actually ranked the rows', () => {
+    const skills = Array.from({ length: 3 }, (_, index) => ({
+      id: `a/skill-${index}`,
+      name: `skill-${index}`,
+      description: '',
+      source: 'a',
+    }));
+
+    // `list()` ranks only a non-empty query, so a plain truncated listing is
+    // still discovery order and must not tell the model it saw the best rows.
+    expect(summarizeSkillCatalog(skills, { limit: 1, ranked: true }).hint).toContain('best first');
+    expect(summarizeSkillCatalog(skills, { limit: 1, ranked: false }).hint).toContain('discovery order');
+    expect(summarizeSkillCatalog(skills, { limit: 1 }).hint).toContain('discovery order');
+  });
+
   it('detects duplicate logical names across the whole catalog, not only the returned rows', () => {
     // `skill_match` caps rows with `limit`; a collision that fell outside the
     // cap would stay invisible exactly when the catalog is too large to read.

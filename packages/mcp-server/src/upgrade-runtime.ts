@@ -14,6 +14,7 @@ import {
 } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
 import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescriptor } from '@unified-mpc/capabilities';
+import { skillQueryIsRanked } from '@unified-mpc/extensions';
 import { createProcessTreeTerminator } from '@unified-mpc/process';
 import { normalizeProjectProfile } from '@unified-mpc/shared';
 import {
@@ -2135,7 +2136,10 @@ export class UpgradeRuntimeService {
         ready: true,
         executed: true,
         query,
-        ...summarizeSkillCatalog(listed.value.skills, { limit: readSkillMatchLimit(input) }),
+        ...summarizeSkillCatalog(listed.value.skills, {
+          limit: readSkillMatchLimit(input),
+          ranked: skillQueryIsRanked(query),
+        }),
       });
     }
 

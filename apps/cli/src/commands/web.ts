@@ -67,10 +67,12 @@ import {
   isProjectWorkspace,
   workspaceLifecycleKind,
 } from '@unified-mpc/workspace';
+import { ThaiRagWorkspaceVerificationStore } from '@unified-mpc/thai-rag';
 import { EXTENSIONS_SETTINGS_KEY, IdeSyncService, ensureExtensionsSettingsMigrated, parseExtensionsSettings, type ManagedPolicyRepairReport } from '@unified-mpc/extensions';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
+import { reconcileProviderGenerations } from '../runtime/provider-generation-reconcile.js';
 import { missingOptionValue, unexpectedOption } from './options.js';
 
 export interface WebCommand {
@@ -136,6 +138,8 @@ export async function runWeb(
     const workspaceRepository = new SqliteWorkspaceRepository(database);
     const workspaceService = new WorkspaceService(workspaceRepository);
     const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
+    const providerGenerations = new ProviderGenerationLedger(path.join(dataPath, 'canonical'));
+    const providerVerifications = new ThaiRagWorkspaceVerificationStore(dataPath);
     const goalRepository = new SqliteGoalRepository(database);
     const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
     const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
@@ -200,13 +204,26 @@ export async function runWeb(
       goalRuntimeProjections,
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
+    // A registration can be archived outside the removal adapter (lifecycle
+    // cleanup, --reset-workspaces, a crash between archive and release), and a
+    // row left behind keeps pinning a manifest no workspace can use. A stale
+    // pin is safe and the next start retries, so a cleanup failure must not
+    // take the control plane down. The sweep drops the persisted verification
+    // first: a restored identity must not reuse a generation whose pin is gone.
+    const reconciled = await reconcileProviderGenerations(providerGenerations, workspaceService, providerVerifications);
+    if (reconciled.error !== undefined) {
+      process.stderr.write(
+        `Unified-MPC web: could not release orphaned provider generations: ${reconciled.error}\n`,
+      );
+    }
     const workspaceControl = createWorkspaceControl(
       workspaceRepository,
       workspaceService,
       settings,
       workspaceIndex,
       goalRuntimeSnapshots,
-      new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
+      providerGenerations,
+      providerVerifications,
     );
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const canonicalStatusProbe = serverOptions?.canonicalStatusProbe
@@ -277,6 +294,7 @@ export function createWorkspaceControl(
   workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
   goalRuntimeSnapshots: Pick<SqliteGoalRuntimeSnapshotRepository, 'getGoalRuntimeSnapshot'>,
   providerGenerations: Pick<ProviderGenerationLedger, 'release'>,
+  providerVerifications: Pick<ThaiRagWorkspaceVerificationStore, 'invalidate'>,
 ): WorkspaceControlPort {
   const projectList = async (): Promise<readonly WebWorkspaceSummary[]> => (await workspaceService.list())
     .filter((workspace) => isProjectWorkspace(workspace)
@@ -331,8 +349,13 @@ export function createWorkspaceControl(
         await workspaceIndex.forgetWorkspace(workspaceId);
         // A removed registration has no live provider generation, so releasing
         // its ledger row lets revision GC prune the manifest that generation was
-        // built from. A failure restores the registration instead of reporting a
-        // removal whose pin silently leaked.
+        // built from. The persisted verification goes first: `add` can restore
+        // this archived identity, and a fresh verification would otherwise let
+        // admission reuse the generation without a reindex and without a pin.
+        // A failure restores the registration instead of reporting a removal
+        // whose pin or verification silently leaked.
+        const invalidated = await providerVerifications.invalidate(workspaceId);
+        if (!invalidated.ok) throw new Error(invalidated.error.message);
         await providerGenerations.release(workspaceId);
       } catch (error: unknown) {
         await workspaceRepository.restore(existing.id, existing).catch(() => undefined);

@@ -32,6 +32,16 @@ export interface ProviderGenerationRecordInput {
   readonly repositoryId: string;
 }
 
+export interface ProviderGenerationReleaseUnknownOptions {
+  /**
+   * Runs before a row is removed. A throw stops the sweep and leaves the
+   * remaining rows in place, so a caller can first drop state that would let a
+   * restored workspace reuse the generation (for example a persisted provider
+   * verification record) and only then let the manifest pin disappear.
+   */
+  readonly beforeRelease?: (workspaceId: string) => Promise<void>;
+}
+
 interface StoredProviderGeneration {
   readonly schemaVersion: 1;
   readonly workspaceId: string;
@@ -118,6 +128,51 @@ export class ProviderGenerationLedger {
   public async get(workspaceId: string, options?: ReachabilityReadOptions): Promise<ProviderGenerationRecord | null> {
     const id = requireWorkspaceId(workspaceId);
     return this.readFile(this.pathFor(id), id, isStrictRead(options));
+  }
+
+  /**
+   * Drop rows whose workspace is no longer registered (#210 bullet 4 follow-up).
+   *
+   * A registration can be archived without the web removal adapter: a
+   * `--reset-workspaces` pass, lifecycle auto-cleanup, or a crash between
+   * archive and release. Those rows would otherwise keep pinning manifests no
+   * workspace can build a generation from. The file name carries the workspace
+   * id, so a corrupt row for a removed workspace is released too; a corrupt row
+   * for a live workspace stays, and the strict GC reader still refuses on it.
+   *
+   * `beforeRelease` makes the caller's safety precondition part of the sweep: a
+   * restored registration reuses the archived identity, and a persisted
+   * provider verification record could let admission answer from the same
+   * generation without a reindex. The caller therefore invalidates that record
+   * first; a failure throws here and the row keeps pinning.
+   */
+  public async releaseUnknown(
+    knownWorkspaceIds: readonly string[],
+    options: ProviderGenerationReleaseUnknownOptions = {},
+  ): Promise<string[]> {
+    const known = new Set(knownWorkspaceIds.map(requireWorkspaceId));
+    let entries: string[];
+    try {
+      entries = await readdir(this.directory);
+    } catch (error) {
+      if (isMissingPath(error)) return [];
+      throw new Error(`cannot read the provider generation ledger: ${errorMessage(error)}`);
+    }
+    const released: string[] = [];
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const workspaceId = entry.slice(0, -'.json'.length);
+      if (!WORKSPACE_ID.test(workspaceId) || known.has(workspaceId)) continue;
+      if (options.beforeRelease !== undefined) await options.beforeRelease(workspaceId);
+      try {
+        await rm(path.join(this.directory, entry));
+      } catch (error) {
+        if (isMissingPath(error)) continue;
+        throw new Error(`cannot release provider generation row ${workspaceId}: ${errorMessage(error)}`);
+      }
+      released.push(workspaceId);
+    }
+    return released.sort();
   }
 
   public async list(options?: ReachabilityReadOptions): Promise<ProviderGenerationRecord[]> {

@@ -23,6 +23,10 @@ export interface WorkspaceResetResult {
  * A workspace reset archives only unified-mpc registration rows, never project files.
  * It is still a broad persistent mutation, so it requires an exact phrase and a
  * restorable SQLite snapshot before the first row is removed.
+ *
+ * Provider-generation rows are reconciled by the caller after it restores the
+ * workspace this process is about to serve: releasing every row here would
+ * unpin a generation that the restored workspace keeps using without a reindex.
  */
 export async function resetWorkspaceRegistrations(
   workspaces: WorkspaceRegistrationService,

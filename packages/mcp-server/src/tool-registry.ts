@@ -2497,10 +2497,10 @@ function optionalChannelEvidence(evidence: Record<string, unknown> | undefined):
 const CURRENT_SEMANTIC_STATES = new Set(['available', 'ok', 'lexical_only']);
 
 /**
- * The error-details contract is flat scalar pairs (`Readonly<Record<string,
- * string | number>>`), so a refusal describes the per-channel map with a
- * deterministic summary instead of a nested object. The object map itself stays
- * available where structured payloads are allowed — the preparation receipt.
+ * Refusals describe the per-channel map as a deterministic one-line summary,
+ * while the preparation receipt keeps the full object map. Error details are
+ * an open payload, so the summary is a presentation choice, not a type
+ * constraint.
  */
 function channelEvidenceSummary(channels: Readonly<Record<string, string>>): string {
   return Object.entries(channels).sort(([left], [right]) => left.localeCompare(right))

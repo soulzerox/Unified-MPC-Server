@@ -94,6 +94,9 @@ function spawnEnv(fixture: Fixture, providerPath: string | undefined): NodeJS.Pr
   delete env.UNIFIED_MPC_STDIO_FULL_BYPASS_ALL;
   delete env.UNIFIED_MPC_UNRESTRICTED;
   delete env.UNIFIED_MPC_LEGACY_SESSION_TTL_MS;
+  // Forward-only belongs to the follower; an HTTP host that inherits it never
+  // elects the provider, so it must not leak into the host these suites start.
+  delete env.UNIFIED_THAI_RAG_FORWARD_ONLY;
   return env;
 }
 

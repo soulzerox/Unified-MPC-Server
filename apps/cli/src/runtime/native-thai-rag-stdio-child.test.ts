@@ -69,7 +69,12 @@ interface ChildSession {
   notify(method: string): void;
 }
 
-function startChild(dataPath: string, home: string, workspacePath: string): ChildSession {
+function startChild(
+  dataPath: string,
+  home: string,
+  workspacePath: string,
+  strictAllowedRoots?: readonly string[],
+): ChildSession {
   if (!existsSync(CLI_STDIO_BIN)) {
     throw new Error(
       `mcp-stdio build is missing; run \`corepack pnpm --filter @unified-mpc/cli build\` (looked for ${CLI_STDIO_BIN})`,
@@ -79,9 +84,15 @@ function startChild(dataPath: string, home: string, workspacePath: string): Chil
   // environment but never an operator's forward-only override.
   const inheritedEnv = { ...process.env };
   delete inheritedEnv.UNIFIED_THAI_RAG_FORWARD_ONLY;
+  const strictEnv = strictAllowedRoots === undefined ? {} : {
+    UNIFIED_MPC_STRICT_ROOTS: '1',
+    // `parseAllowedRoots` splits on `;`, not the platform path delimiter.
+    UNIFIED_MPC_ALLOWED_ROOTS: strictAllowedRoots.join(';'),
+  };
   const child = spawn(process.execPath, [CLI_STDIO_BIN, '--workspace', workspacePath], {
     env: {
       ...inheritedEnv,
+      ...strictEnv,
       NODE_NO_WARNINGS: '1',
       HOME: home,
       XDG_DATA_HOME: path.join(home, '.local', 'share'),
@@ -270,38 +281,59 @@ describe('mcp-stdio child process forwards to the live provider host (#407)', ()
 });
 
 describe('mcp-stdio startup sweeps orphaned provider generations (#710)', () => {
-  it('releases the row of an unregistered workspace and keeps the served registration row', async () => {
+  it('releases the row of an unregistered workspace and keeps every registered row', async () => {
     const fixture = await createFixture();
+    // A registration outside the strict allowed roots is still a live
+    // registration. The sweep must use the raw registry, so its row survives
+    // even though neither the filtered repository nor the served workspace
+    // selection can see it.
+    const unservedId = '88888888-8888-4888-8888-888888888888';
+    const unservedRoot = path.join(fixture.root, 'unserved-workspace');
+    await mkdir(unservedRoot, { recursive: true });
+    const database = new SqliteDatabase(path.join(fixture.dataPath, 'unified-mpc.sqlite'));
+    try {
+      await new SqliteWorkspaceRepository(database).insert({
+        id: unservedId,
+        displayName: 'stdio-unserved-fixture',
+        rootPath: unservedRoot,
+        realRootPath: unservedRoot,
+        createdAt: '2026-08-10T00:00:00.000Z',
+      });
+    } finally {
+      database.close();
+    }
+
     const ledger = new ProviderGenerationLedger(path.join(fixture.dataPath, 'canonical'));
     const manifestId = canonicalManifestId({
       repositoryId: 'repo_stdio123',
       revisionId: 'rev:v1:' + 'b'.repeat(64),
       entries: [{ path: 'a.ts', contentHash: '2'.repeat(64) }],
     });
-    const orphanId = '55555555-5555-4555-8555-555555555555';
-    await ledger.record({
-      workspaceId: orphanId,
-      generationId: 'generation-orphaned',
-      manifestId,
-      repositoryId: 'repo_stdio123',
-    });
-    await ledger.record({
-      workspaceId: WORKSPACE_ID,
-      generationId: 'generation-live',
-      manifestId,
-      repositoryId: 'repo_stdio123',
-    });
-    const orphanRow = path.join(fixture.dataPath, 'canonical', 'provider-generations', `${orphanId}.json`);
-    const liveRow = path.join(fixture.dataPath, 'canonical', 'provider-generations', `${WORKSPACE_ID}.json`);
+    for (const workspaceId of ['55555555-5555-4555-8555-555555555555', WORKSPACE_ID, unservedId]) {
+      await ledger.record({
+        workspaceId,
+        generationId: `generation-${workspaceId}`,
+        manifestId,
+        repositoryId: 'repo_stdio123',
+      });
+    }
+    const rowFor = (workspaceId: string): string => path.join(fixture.dataPath, 'canonical', 'provider-generations', `${workspaceId}.json`);
+    const orphanRow = rowFor('55555555-5555-4555-8555-555555555555');
+    const servedRow = rowFor(WORKSPACE_ID);
+    const unservedRow = rowFor(unservedId);
     expect(existsSync(orphanRow)).toBe(true);
-    expect(existsSync(liveRow)).toBe(true);
+    expect(existsSync(servedRow)).toBe(true);
+    expect(existsSync(unservedRow)).toBe(true);
 
     // The sweep runs before the runtime is created, so readiness proves it
-    // finished. Deleting the startup call leaves the orphan row behind.
-    const session = startChild(fixture.dataPath, fixture.home, fixture.workspacePath);
+    // finished. Deleting the startup call leaves the orphan row behind, and a
+    // sweep fed the filtered repository instead of the raw registry deletes
+    // the unserved row.
+    const session = startChild(fixture.dataPath, fixture.home, fixture.workspacePath, [fixture.workspacePath]);
     await waitForReady(session);
 
     expect(existsSync(orphanRow)).toBe(false);
-    expect(existsSync(liveRow)).toBe(true);
+    expect(existsSync(servedRow)).toBe(true);
+    expect(existsSync(unservedRow)).toBe(true);
   }, 60_000);
 });

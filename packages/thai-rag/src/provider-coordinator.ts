@@ -78,7 +78,7 @@ type ProviderResponse =
      */
     readonly code?: AppErrorCode;
     readonly recoverable?: boolean;
-    readonly details?: Readonly<Record<string, string | number>>;
+    readonly details?: Readonly<Record<string, unknown>>;
   };
 
 export class ThaiRagProviderCoordinator {
@@ -213,7 +213,16 @@ export class ThaiRagProviderCoordinator {
         void this.handleOwnerRequest(line, requestController.signal).then((response) => {
           socket.end(`${JSON.stringify(response)}\n`);
         }).catch((error: unknown) => {
-          socket.end(`${JSON.stringify({ id: 'unknown', ok: false, error: errorMessage(error) } satisfies ProviderResponse)}\n`);
+          // Defensive last resort: `handleOwnerRequest` classifies its own
+          // failures, so this only fires if that classification itself fails.
+          // Keep the request id so the follower does not turn it into a
+          // correlation mismatch and discard the message.
+          socket.end(`${JSON.stringify(failureResponse(requestIdOf(line), appError(
+            'INTERNAL_ERROR',
+            `Thai-RAG provider owner request failed: ${errorMessage(error)}`,
+            true,
+            { reason: 'owner-request-threw' },
+          )))}\n`);
         });
       });
     });
@@ -243,17 +252,27 @@ export class ThaiRagProviderCoordinator {
 
   private async handleOwnerRequest(line: string, signal?: AbortSignal): Promise<ProviderResponse> {
     const parsed = parseRequest(line);
-    if (!parsed.ok) return failureResponse('unknown', parsed.error);
-    if (parsed.value.method === 'health') {
-      const health = await this.runtime.refresh(signal);
-      return health.ok
-        ? { id: parsed.value.id, ok: true, value: health.value }
-        : failureResponse(parsed.value.id, health.error);
+    const id = parsed.ok ? parsed.value.id : requestIdOf(line);
+    try {
+      if (!parsed.ok) return failureResponse(id, parsed.error);
+      if (parsed.value.method === 'health') {
+        const health = await this.runtime.refresh(signal);
+        return health.ok
+          ? { id: parsed.value.id, ok: true, value: health.value }
+          : failureResponse(parsed.value.id, health.error);
+      }
+      const result = await this.runtime.call(parsed.value.tool, parsed.value.args, signal, parsed.value.budget);
+      return result.ok
+        ? { id: parsed.value.id, ok: true, value: result.value }
+        : failureResponse(parsed.value.id, result.error);
+    } catch (error) {
+      return failureResponse(id, appError(
+        'INTERNAL_ERROR',
+        `Thai-RAG provider owner request failed: ${errorMessage(error)}`,
+        true,
+        { reason: 'owner-request-threw' },
+      ));
     }
-    const result = await this.runtime.call(parsed.value.tool, parsed.value.args, signal, parsed.value.budget);
-    return result.ok
-      ? { id: parsed.value.id, ok: true, value: result.value }
-      : failureResponse(parsed.value.id, result.error);
   }
 
   private async waitForFollowerHealth(
@@ -408,6 +427,20 @@ export class ThaiRagProviderCoordinator {
   }
 }
 
+/**
+ * Best-effort request id for a line that `parseRequest` rejected. Returning the
+ * id lets the follower accept an `INVALID_INPUT` response instead of treating it
+ * as a correlation mismatch and discarding the classification.
+ */
+function requestIdOf(line: string): string {
+  try {
+    const value: unknown = JSON.parse(line);
+    return isRecord(value) && typeof value.id === 'string' ? value.id : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 function parseRequest(line: string): Result<ProviderRequest> {
   try {
     const value: unknown = JSON.parse(line);
@@ -469,9 +502,11 @@ function failureResponse(id: string, error: AppError): ProviderResponse {
   };
 }
 
-function isErrorDetails(value: unknown): value is Readonly<Record<string, string | number>> {
-  return isRecord(value)
-    && Object.values(value).every((entry) => typeof entry === 'string' || typeof entry === 'number');
+function isErrorDetails(value: unknown): value is Readonly<Record<string, unknown>> {
+  // The provider contract leaves `details` open (`additionalProperties: true`),
+  // and handshake diagnostics legitimately carry arrays and nested objects.
+  // Rejecting the whole object here silently discarded those details.
+  return isRecord(value);
 }
 
 function isProviderHealth(value: unknown): value is ThaiRagProviderHealth {

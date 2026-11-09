@@ -2255,7 +2255,7 @@ const PROVIDER_JOB_LOSS_RESTART_LIMIT = 3;
 
 function isLostProviderIndexJob(error: {
   readonly message: string;
-  readonly details?: Readonly<Record<string, string | number>>;
+  readonly details?: Readonly<Record<string, unknown>>;
 }): boolean {
   if (error.details?.providerReason === 'provider_restart_or_retention_expiry') return true;
   return /index job is unknown/i.test(error.message);
@@ -2493,7 +2493,7 @@ function structuredProviderError(value: unknown): {
  * admits a job, so retrying is correct; failing it abandons the workspace's
  * generation and restarts the whole build (issue #445 churn).
  */
-function isRetryableStorageBusy(error: { readonly details?: Readonly<Record<string, string | number>> }): boolean {
+function isRetryableStorageBusy(error: { readonly details?: Readonly<Record<string, unknown>> }): boolean {
   return error.details?.providerReason === 'sqlite_busy';
 }
 

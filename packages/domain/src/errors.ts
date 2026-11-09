@@ -24,7 +24,12 @@ export interface AppError {
   readonly code: AppErrorCode;
   readonly message: string;
   readonly recoverable: boolean;
-  readonly details?: Readonly<Record<string, string | number>>;
+  /**
+   * Open diagnostic payload. The provider contract leaves `errors[].details`
+   * open (`additionalProperties: true`), so adapters may forward nested values
+   * such as arrays or objects instead of flattening them.
+   */
+  readonly details?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -69,7 +74,7 @@ export function appError(
   code: AppErrorCode,
   message: string,
   recoverable = false,
-  details?: Readonly<Record<string, string | number>>,
+  details?: Readonly<Record<string, unknown>>,
 ): AppError {
   return { code, message, recoverable, ...(details === undefined ? {} : { details }) };
 }

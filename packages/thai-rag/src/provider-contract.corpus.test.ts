@@ -80,6 +80,8 @@ interface ProviderFixture {
   readonly data?: unknown;
   readonly metadata: FixtureMetadata;
   readonly errors?: readonly FixtureError[];
+  readonly repository_provenance: string | null;
+  readonly trust_scope: string | null;
 }
 
 interface SchemaDefinition {
@@ -115,6 +117,14 @@ async function listContractFiles(directory = CONTRACT_ROOT, prefix = ''): Promis
     else files.push(relative);
   }
   return files.sort();
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasNoNul(value: unknown): boolean {
+  return typeof value === 'string' && !value.includes('\u0000');
 }
 
 async function loadCorpus(): Promise<{ index: CorpusIndex; fixtures: ReadonlyMap<string, ProviderFixture> }> {
@@ -197,6 +207,63 @@ describe('Thailand-RAG provider contract corpus', () => {
     for (const field of sent) {
       expect(Object.keys(sourceIdentity.properties ?? {}), `native example sends '${field}', which the closed schema refuses`).toContain(field);
     }
+  });
+
+  // #210: the trust boundary is provider-derived, never an input. Unified
+  // sends repository identity and source hashes; the provider echoes its own
+  // local provenance and trust scope. This pins both halves without a schema
+  // engine: the closed result envelope, the closed identity block, and the
+  // provenance/trust pairing the contract README requires.
+  it('keeps every published identity inside the closed result contract', async () => {
+    const schema = await readContractJson('provider-contract.v1.schema.json') as ProviderSchema;
+    const identityDefinition = schema.$defs.source_identity;
+    const resultDefinition = schema.$defs.provider_result;
+    expect(identityDefinition, 'schema has no source_identity definition').toBeDefined();
+    expect(resultDefinition, 'schema has no provider_result definition').toBeDefined();
+    if (identityDefinition === undefined || resultDefinition === undefined) return;
+
+    const identityFields = Object.keys(identityDefinition.properties ?? {});
+    const requiredIdentity = [...(identityDefinition.required ?? [])].sort();
+    const requiredResult = [...(resultDefinition.required ?? [])].sort();
+    const { fixtures } = await loadCorpus();
+    let identityCount = 0;
+
+    for (const [file, fixture] of fixtures) {
+      expect(Object.keys(fixture).sort(), `${file} does not publish the closed ProviderResult envelope`).toEqual(requiredResult);
+
+      if (typeof fixture.repository_provenance === 'string') {
+        expect(fixture.trust_scope, `${file} resolved provenance without claiming the workspace trust scope`).toBe('workspace');
+      } else {
+        expect(fixture.repository_provenance, `${file} publishes an unreadable repository_provenance`).toBeNull();
+        expect(fixture.trust_scope, `${file} claims workspace trust without repository provenance`).not.toBe('workspace');
+      }
+
+      const identity = isRecord(fixture.data) ? fixture.data.source_identity : undefined;
+      // `null` is the documented "no canonical identity" answer for standalone
+      // and lexical-only results, so only an object is checked field by field.
+      if (identity === undefined || identity === null) continue;
+      expect(isRecord(identity), `${file} publishes a non-object source_identity`).toBe(true);
+      if (!isRecord(identity)) continue;
+      identityCount += 1;
+
+      const keys = Object.keys(identity).sort();
+      for (const field of keys) {
+        expect(identityFields, `${file} publishes source_identity.${field}, which the closed schema refuses`).toContain(field);
+        expect(typeof identity[field], `${file} publishes a non-string source_identity.${field}`).toBe('string');
+        expect((identity[field] as string).length, `${file} publishes an empty source_identity.${field}`).toBeGreaterThan(0);
+      }
+      for (const field of requiredIdentity) {
+        expect(keys, `${file} omits required source_identity.${field}`).toContain(field);
+      }
+      expect(hasNoNul(identity.repository_id) && (identity.repository_id as string).trim().length > 0, `${file} publishes a malformed repository_id`).toBe(true);
+      expect(identity.manifest_id, `${file} publishes a malformed manifest_id`).toMatch(/^man:v1:[0-9a-f]{64}$/);
+      expect(identity.revision_id, `${file} publishes a malformed revision_id`).toMatch(/^rev:v1:[0-9a-f]{64}$/);
+      expect(identity.commit_sha, `${file} publishes a malformed commit_sha`).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+      expect(identity.tree_oid, `${file} publishes a malformed tree_oid`).toMatch(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+      expect(typeof identity.ref === 'string' && identity.ref.startsWith('refs/') && !identity.ref.includes('..') && hasNoNul(identity.ref), `${file} publishes a malformed ref`).toBe(true);
+    }
+
+    expect(identityCount, 'no fixture publishes a source_identity to check').toBeGreaterThan(0);
   });
 
   it.each([

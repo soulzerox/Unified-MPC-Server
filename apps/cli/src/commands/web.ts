@@ -206,6 +206,7 @@ export async function runWeb(
       settings,
       workspaceIndex,
       goalRuntimeSnapshots,
+      new ProviderGenerationLedger(path.join(dataPath, 'canonical')),
     );
     const goalControl = createGoalControl(goalRepository, settings, workspaceControl.activate);
     const canonicalStatusProbe = serverOptions?.canonicalStatusProbe
@@ -269,12 +270,13 @@ export function createWebGoalRuntimeProjection(
   });
 }
 
-function createWorkspaceControl(
+export function createWorkspaceControl(
   workspaceRepository: SqliteWorkspaceRepository,
   workspaceService: WorkspaceService,
   settings: SqliteSettingsRepository,
   workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
   goalRuntimeSnapshots: Pick<SqliteGoalRuntimeSnapshotRepository, 'getGoalRuntimeSnapshot'>,
+  providerGenerations: Pick<ProviderGenerationLedger, 'release'>,
 ): WorkspaceControlPort {
   const projectList = async (): Promise<readonly WebWorkspaceSummary[]> => (await workspaceService.list())
     .filter((workspace) => isProjectWorkspace(workspace)
@@ -327,6 +329,11 @@ function createWorkspaceControl(
       if (!removed.ok) throw new Error(removed.error.message);
       try {
         await workspaceIndex.forgetWorkspace(workspaceId);
+        // A removed registration has no live provider generation, so releasing
+        // its ledger row lets revision GC prune the manifest that generation was
+        // built from. A failure restores the registration instead of reporting a
+        // removal whose pin silently leaked.
+        await providerGenerations.release(workspaceId);
       } catch (error: unknown) {
         await workspaceRepository.restore(existing.id, existing).catch(() => undefined);
         throw error;

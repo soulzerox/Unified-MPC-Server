@@ -1834,6 +1834,85 @@ describe('CLI execution dispatcher', () => {
     }
   });
 
+  it('refuses every GC verb when the provider generation ledger cannot be read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-provider-ledger-'));
+    const dataPath = path.join(root, 'data');
+    const canonical = path.join(dataPath, 'canonical');
+    const home = path.join(root, 'home');
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = dataPath;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+    try {
+      const { repositoryId, manifest, deadArtifactKey } = await seedCanonicalGcFixture(dataPath);
+      const quarantine = new ArtifactQuarantineStore(canonical);
+      // A due row would be released by `index gc expire` if the pass ran, so
+      // its survival distinguishes refusal from a pass that did work.
+      const expirableHash = '9'.repeat(64);
+      await quarantine.quarantine([expirableHash], {
+        now: new Date('2026-11-01T00:00:00.000Z'),
+        graceMs: 60_000,
+      });
+
+      // A malformed row can name the one manifest that keeps a live provider
+      // generation alive, so every destructive verb must refuse before taking
+      // the lease instead of treating the row as "no generation".
+      const generations = path.join(canonical, 'provider-generations');
+      await mkdir(generations, { recursive: true });
+      await writeFile(path.join(generations, '11111111-1111-4111-8111-111111111111.json'), '{not json', 'utf8');
+
+      const lease = new GcLeaseStore(canonical);
+      for (const args of [
+        ['index', 'revision', 'prune', '--apply'],
+        ['index', 'gc', '--apply', '--grace', '1h'],
+        ['index', 'gc', 'expire', '--apply'],
+      ]) {
+        const output: string[] = [];
+        const errors: string[] = [];
+        const code = await runCli(args, {
+          ...createDefaultCliDependencies(),
+          write: (text) => output.push(text),
+          writeError: (text) => errors.push(text),
+        });
+        expect(errors, `${args.join(' ')}\n${errors.join('\n')}`).toEqual([]);
+        expect(code, output.join('\n')).toBe(1);
+        expect(output.join('\n')).toContain('refused');
+        expect(output.join('\n')).toContain('provider generation row');
+        // A released lease also reads null, so inspect the record: `free` means
+        // the verb refused before taking the fence.
+        expect(await lease.inspect()).toEqual({ status: 'free' });
+      }
+
+      // Nothing was pruned or deleted, and no quarantine row was released.
+      const manifests = new CanonicalManifestStore(canonical);
+      expect(await manifests.get(manifest.manifestId)).not.toBeNull();
+      expect(await quarantine.list()).toEqual([
+        expect.objectContaining({ kind: 'content-hash', hash: expirableHash }),
+      ]);
+      await expect(new CanonicalArtifactStore(canonical).has(repositoryId, deadArtifactKey)).resolves.toBe(true);
+
+      // JSON mode reports the refusal instead of emitting nothing at all.
+      const json: string[] = [];
+      const jsonCode = await runCli(['index', 'gc', 'expire', '--dry-run', '--json'], {
+        ...createDefaultCliDependencies(),
+        write: (text) => json.push(text),
+        writeError: () => undefined,
+      });
+      expect(jsonCode).toBe(1);
+      expect(JSON.parse(json.join('\n'))).toMatchObject({ status: 'refused' });
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('pins a revision through the real canonical store under the shared cleanup lease', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-revision-pin-'));
     const dataPath = path.join(root, 'data');

@@ -7,7 +7,7 @@ import { appError, canonicalManifestId, err, type GoalRecord, type WorkspaceAdmi
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
-import { CanonicalManifestStore, CanonicalRefStore, ArtifactQuarantineStore, IndexJobLedger } from '@unified-mpc/workspace';
+import { CanonicalManifestStore, CanonicalRefStore, ArtifactQuarantineStore, IndexJobLedger, ProviderGenerationLedger } from '@unified-mpc/workspace';
 import { ControlPlaneServer } from '@unified-mpc/web';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -15,6 +15,7 @@ import {
   createCanonicalStatusProbe,
   createGoalControl,
   createWebGoalRuntimeProjection,
+  createWorkspaceControl,
   resolveCanonicalLifecycleLimit,
   resolveCanonicalStatusLimit,
   runWeb,
@@ -311,6 +312,94 @@ describe('web CLI command', () => {
       expect(await control.continue('workspace-a', 'goal-a')).toMatchObject({ goalId: 'goal-a', currentPhase: 'frontend' });
       expect(await control.preferred('workspace-a')).toBe('goal-a');
       expect([...values.values()].join('\n')).toContain('goal-a');
+    });
+  });
+
+  describe('workspace control', () => {
+    it('releases the provider generation ledger row when a workspace registration is removed', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-workspace-remove-'));
+      try {
+        const canonicalRoot = path.join(root, 'canonical');
+        const ledger = new ProviderGenerationLedger(canonicalRoot);
+        const workspace = {
+          id: '11111111-1111-4111-8111-111111111111',
+          displayName: 'Project',
+          rootPath: path.join(root, 'project'),
+          realRootPath: path.join(root, 'project'),
+          createdAt: '2026-11-09T00:00:00.000Z',
+        };
+        await ledger.record({
+          workspaceId: workspace.id,
+          generationId: 'generation-1',
+          manifestId: `man:v1:${'a'.repeat(64)}`,
+          repositoryId: 'repo_abc123',
+        });
+
+        let registered = true;
+        let restored = false;
+        const control = createWorkspaceControl(
+          {
+            get: async (id: string) => (registered && id === workspace.id ? workspace : null),
+            restore: async () => { restored = true; },
+          } as never,
+          {
+            list: async () => (registered ? [workspace] : []),
+            unregister: async () => {
+              registered = false;
+              return { ok: true, value: undefined };
+            },
+          } as never,
+          {} as never,
+          { forgetWorkspace: async () => undefined },
+          { getGoalRuntimeSnapshot: async () => null },
+          ledger,
+        );
+
+        await expect(control.remove(workspace.id)).resolves.toBeNull();
+        expect(restored).toBe(false);
+        // Without the release a live-provider pin would outlive the registration
+        // and keep the manifest unprunable indefinitely.
+        await expect(ledger.get(workspace.id)).resolves.toBeNull();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('restores the registration when the provider generation row cannot be released', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'web-workspace-release-fail-'));
+      try {
+        const workspace = {
+          id: '22222222-2222-4222-8222-222222222222',
+          displayName: 'Project',
+          rootPath: path.join(root, 'project'),
+          realRootPath: path.join(root, 'project'),
+          createdAt: '2026-11-09T00:00:00.000Z',
+        };
+        let registered = true;
+        let restored = false;
+        const control = createWorkspaceControl(
+          {
+            get: async (id: string) => (registered && id === workspace.id ? workspace : null),
+            restore: async () => { restored = true; },
+          } as never,
+          {
+            list: async () => (registered ? [workspace] : []),
+            unregister: async () => {
+              registered = false;
+              return { ok: true, value: undefined };
+            },
+          } as never,
+          {} as never,
+          { forgetWorkspace: async () => undefined },
+          { getGoalRuntimeSnapshot: async () => null },
+          { release: async () => { throw new Error('ledger is read-only'); } },
+        );
+
+        await expect(control.remove(workspace.id)).rejects.toThrow('ledger is read-only');
+        expect(restored).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
   });
 

@@ -51,6 +51,12 @@ export interface GcCycleInput {
    */
   readonly artifactCandidates?: readonly GcCycleArtifactCandidate[];
   readonly indexJobManifestIds: readonly string[];
+  /**
+   * Manifests an active Thai-RAG provider generation was built from (#210
+   * bullet 4); caller owns that ledger. Omitted means no provider-generation
+   * retention is wired, not that none exists.
+   */
+  readonly providerGenerationManifestIds?: readonly string[];
   readonly now: Date;
   readonly graceMs: number;
   readonly dryRun: boolean;
@@ -182,6 +188,9 @@ async function runCycle(
       pins: stores.pins,
       overlays: stores.overlays,
       indexJobManifestIds: input.indexJobManifestIds,
+      ...(input.providerGenerationManifestIds === undefined
+        ? {}
+        : { providerGenerationManifestIds: input.providerGenerationManifestIds }),
     });
   } catch (error) {
     return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };
@@ -208,6 +217,9 @@ async function runCycle(
         pins: stores.pins,
         overlays: stores.overlays,
         indexJobManifestIds: input.indexJobManifestIds,
+        ...(input.providerGenerationManifestIds === undefined
+          ? {}
+          : { providerGenerationManifestIds: input.providerGenerationManifestIds }),
       });
     } catch (error) {
       return { status: 'refused', reason: error instanceof Error ? error.message : String(error) };

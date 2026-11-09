@@ -13,6 +13,7 @@ import {
   CanonicalManifestStore,
   CanonicalRefStore,
   GoalOverlayStore,
+  ProviderGenerationLedger,
   attachGoalBasePin,
   type StoredManifest,
   type WorkspaceLifecycleKind,
@@ -3432,6 +3433,58 @@ describe('canonical code_index source identity (#210 §13)', () => {
       expect(callArgs).not.toHaveProperty('canonical_binding');
       expect(callArgs).not.toHaveProperty('canonical_fence');
     }
+    await driver.stop();
+  });
+
+  it('binds the recorded provider generation to its manifest and releases it when unbound', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    await write(workspaceRoot, 'src/a.ts', HELLO);
+    await write(workspaceRoot, 'src/b.ts', WORLD);
+    const manifest = await seedSource(dataRoot, [
+      { path: 'src/a.ts', contentHash: HELLO_HASH },
+      { path: 'src/b.ts', contentHash: WORLD_HASH },
+    ]);
+    let evidence = sourceEvidence();
+    let generation = 'gen-1';
+    const driver = createCanonicalDriver({
+      dataRoot,
+      workspaceRoot,
+      calls: [],
+      onCodeIndex: () => success('code_index', { status: 'ok', indexed: 2, generation_id: generation }),
+      get evidence() { return evidence; },
+    });
+    await startCanonicalDriver(driver, dataRoot);
+    const ledger = new ProviderGenerationLedger(path.join(dataRoot, 'canonical'));
+
+    await expect(driver.call('code_index', { workspace_id: workspaceId, workspace_path: workspaceRoot }))
+      .resolves.toMatchObject({ ok: true });
+    expect(await ledger.get(workspaceId)).toMatchObject({
+      generationId: 'gen-1',
+      manifestId: manifest.manifestId,
+      repositoryId: REPOSITORY_ID,
+    });
+
+    // Reusing the recorded generation proves nothing was replaced: the row
+    // must survive even though this request could not claim the manifest.
+    evidence = sourceEvidence({
+      dirtyState: 'dirty',
+      changedPaths: ['src/a.ts'],
+      deletedPaths: [],
+    });
+    await expect(driver.call('code_index', { workspace_id: workspaceId, workspace_path: workspaceRoot }))
+      .resolves.toMatchObject({ ok: true });
+    expect(await ledger.get(workspaceId)).toMatchObject({
+      generationId: 'gen-1',
+      manifestId: manifest.manifestId,
+    });
+
+    // A different generation built from bytes the canonical view cannot claim
+    // releases the row instead of retaining a manifest it no longer serves.
+    generation = 'gen-2';
+    await expect(driver.call('code_index', { workspace_id: workspaceId, workspace_path: workspaceRoot }))
+      .resolves.toMatchObject({ ok: true });
+    expect(await ledger.get(workspaceId)).toBeNull();
     await driver.stop();
   });
 

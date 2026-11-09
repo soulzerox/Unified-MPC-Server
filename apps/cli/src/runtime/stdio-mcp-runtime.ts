@@ -93,7 +93,7 @@ import {
   SqliteWorkspaceRepository,
   assertStorageIdentitySafe,
 } from '@unified-mpc/storage';
-import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GcLeaseStore, GoalOverlayStore, IndexJobLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, boundCanonicalStatusReport, canonicalRevisionList, canonicalStatus, gcStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
+import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GcLeaseStore, GoalOverlayStore, IndexJobLedger, ProviderGenerationLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, boundCanonicalStatusReport, canonicalRevisionList, canonicalStatus, gcStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type Result, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import {
   DEFAULT_INDEX_STATUS_TIMEOUT_MS,
@@ -1471,6 +1471,7 @@ export function createStdioMcpRuntime(
         pins: new RevisionPinRegistry(canonicalRoot),
         overlays: new GoalOverlayStore(canonicalRoot),
         jobs: new IndexJobLedger(canonicalRoot),
+        providerGenerations: new ProviderGenerationLedger(canonicalRoot),
       }, options);
     },
     canonicalGcStatus: async () => {

@@ -56,6 +56,7 @@ import {
   GcLeaseStore,
   GoalOverlayStore,
   IndexJobLedger,
+  ProviderGenerationLedger,
   RevisionPinRegistry,
   WorkspaceService,
   boundCanonicalStatusReport,
@@ -477,6 +478,7 @@ export function createCanonicalLifecycleProbe(dataPath: string): CanonicalLifecy
         pins: new RevisionPinRegistry(canonicalRoot),
         overlays: new GoalOverlayStore(canonicalRoot),
         jobs: new IndexJobLedger(canonicalRoot),
+        providerGenerations: new ProviderGenerationLedger(canonicalRoot),
       }, { limit }),
       gcStatus(
         { quarantine: new ArtifactQuarantineStore(canonicalRoot), lease: new GcLeaseStore(canonicalRoot) },

@@ -30,6 +30,7 @@ export * from './artifact-quarantine.js';
 export * from './gc-expire.js';
 export * from './revision-verify.js';
 export * from './index-job-ledger.js';
+export * from './provider-generation-ledger.js';
 export * from './canonical-status.js';
 export * from './canonical-revision-list.js';
 export * from './canonical-revision-pin.js';

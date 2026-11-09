@@ -11,6 +11,12 @@ export interface GcRootAssemblerDeps {
   readonly overlays: GoalOverlayStore;
   /** Manifests referenced by active/pending index jobs; caller owns that ledger. */
   readonly indexJobManifestIds: readonly string[];
+  /**
+   * Manifests an active Thai-RAG provider generation was built from (#210
+   * bullet 4); caller owns that ledger. Omitted means no provider-generation
+   * retention is wired, not that none exists.
+   */
+  readonly providerGenerationManifestIds?: readonly string[];
 }
 
 async function entriesFor(
@@ -30,9 +36,10 @@ async function entriesFor(
  * Assemble logical GC reachability roots from live store state (#210 U18).
  *
  * Folds the real reachability holders — active canonical refs, explicit
- * pins, Goal overlay bases and caller-supplied index-job manifests — into
- * the `GcRootSet` the U17 planner consumes, so GC policy runs against
- * actual retained state instead of hand-passed roots.
+ * pins, Goal overlay bases, caller-supplied index-job manifests and active
+ * provider-generation manifests — into the `GcRootSet` the U17 planner
+ * consumes, so GC policy runs against actual retained state instead of
+ * hand-passed roots.
  *
  * Fails closed when any root manifest referenced by the stores is missing
  * on disk: a silently dropped root would make the planner treat artifacts
@@ -66,9 +73,20 @@ export async function assembleGcRoots(deps: GcRootAssemblerDeps): Promise<GcRoot
     indexJobManifests.push(await entriesFor(deps.manifests, manifestId, missing));
   }
 
+  const providerGenerationManifests: GcManifestEntries[] = [];
+  for (const manifestId of deps.providerGenerationManifestIds ?? []) {
+    providerGenerationManifests.push(await entriesFor(deps.manifests, manifestId, missing));
+  }
+
   if (missing.length > 0) {
     throw new Error(`refusing to assemble GC roots: missing manifests on disk: ${missing.sort().join(', ')}`);
   }
 
-  return { canonicalRefManifests, pinnedManifests, goalOverlayBases, indexJobManifests };
+  return {
+    canonicalRefManifests,
+    pinnedManifests,
+    goalOverlayBases,
+    indexJobManifests,
+    providerGenerationManifests,
+  };
 }

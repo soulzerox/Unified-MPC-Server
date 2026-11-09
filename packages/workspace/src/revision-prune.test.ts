@@ -108,6 +108,29 @@ describe('revision manifest prune (#210 U20)', () => {
     }
   });
 
+  it('never prunes a manifest an active provider generation was built from', async () => {
+    const s = await scenario();
+    try {
+      const indexed = manifestFor('8'.repeat(40), [{ path: 'indexed.ts', contentHash: H('6') }]);
+      await s.manifests.put(indexed);
+      const report = await pruneRevisionManifests({
+        ...s,
+        indexJobManifestIds: [],
+        providerGenerationManifestIds: [indexed.manifestId],
+        dryRun: false,
+        lease: leaseFor(s.lease),
+      });
+      if (report.status !== 'planned') throw new Error(`expected a plan, got ${report.reason}`);
+      expect(report.pruneable).toEqual([s.stale.manifestId]);
+      expect(report.removed).toEqual([s.stale.manifestId]);
+      expect(await s.manifests.get(indexed.manifestId)).not.toBeNull();
+      const retained = new Map(report.retained.map((row) => [row.manifestId, row.reason]));
+      expect(retained.get(indexed.manifestId)).toBe('provider-generation');
+    } finally {
+      await rm(s.dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports retained roots with their reason and skips missing manifests', async () => {
     const s = await scenario();
     try {

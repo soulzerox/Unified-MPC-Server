@@ -158,7 +158,12 @@ This document closes the "specify and publish the exact fields" bullet only.
 Still open on #210:
 
 - bullet 3: standalone revision/manifest control plane (thai-rag-mcp #61)
-- bullet 4: artifact reuse/GC must not strand a provider generation
-- bullet 5: FTS5/source-manifest freshness without waiting on embeddings
+
+Bullet 4 is closed by linking the active provider generation to the canonical
+manifest it was built from: `ProviderGenerationLedger`
+(`packages/workspace/src/provider-generation-ledger.ts`) is read strictly by
+artifact GC, revision prune, GC expire and the logical-space projection, so a
+live generation's manifest and artifacts cannot be collected. Bullet 5 was
+evidenced in #463/#464.
 
 Parent #210 remains open.

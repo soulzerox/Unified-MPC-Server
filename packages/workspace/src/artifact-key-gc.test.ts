@@ -112,7 +112,8 @@ describe('artifact-key GC planner (#210 §7)', () => {
 
       expect(await collectRetainedManifestIds({
         refs, pins, overlays, indexJobManifestIds: [active.manifestId, M2],
-      })).toEqual([M2, active.manifestId, overlayBase.manifestId, pinned.manifestId].sort());
+        providerGenerationManifestIds: [M2, 'man:v1:' + '3'.repeat(64)],
+      })).toEqual([M2, active.manifestId, overlayBase.manifestId, pinned.manifestId, 'man:v1:' + '3'.repeat(64)].sort());
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -2,6 +2,7 @@ import type { CanonicalManifestStore } from './canonical-manifest-store.js';
 import type { CanonicalRefStore } from './canonical-ref-store.js';
 import type { GoalOverlayStore } from './goal-overlay-store.js';
 import type { IndexJobLedger } from './index-job-ledger.js';
+import type { ProviderGenerationLedger } from './provider-generation-ledger.js';
 import type { RevisionPinRegistry } from './revision-pin-registry.js';
 
 export interface CanonicalRevisionListDeps {
@@ -10,6 +11,12 @@ export interface CanonicalRevisionListDeps {
   readonly pins: RevisionPinRegistry;
   readonly overlays: GoalOverlayStore;
   readonly jobs: IndexJobLedger;
+  /**
+   * Active Thai-RAG provider-generation bindings (#210 bullet 4). Omitted by a
+   * caller that does not project them; every production surface supplies it,
+   * because a revision retained by a live generation must not list as bare.
+   */
+  readonly providerGenerations?: ProviderGenerationLedger;
 }
 
 /** One stored revision manifest plus every store root that still references it. */
@@ -26,6 +33,8 @@ export interface CanonicalRevisionSummary {
   readonly pins: readonly string[];
   readonly overlayGoalIds: readonly string[];
   readonly indexJobOperationIds: readonly string[];
+  /** Workspace ids whose live provider generation was built from this manifest. */
+  readonly providerGenerationWorkspaceIds?: readonly string[];
 }
 
 export interface CanonicalRevisionListOptions {
@@ -58,9 +67,10 @@ function sorted(map: Map<string, string[]>, key: string): string[] {
  * `canonicalStatus` answers "what is active and is the store consistent"; this
  * answers "what revisions exist and what still holds each of them". Every
  * retention root the prune path respects is reported per manifest — canonical
- * refs, pin reasons, Goal overlay bases and unsettled index jobs — so an
- * operator can see whether a revision is reachable before a future prune or GC
- * slice acts on it. Counting only: no reachability decision is made here.
+ * refs, pin reasons, Goal overlay bases, unsettled index jobs and live
+ * provider generations — so an operator can see whether a revision is
+ * reachable before a future prune or GC slice acts on it. Counting only: no
+ * reachability decision is made here.
  *
  * Newest manifest first by `createdAt`, with the manifest id as a deterministic
  * tiebreak so two manifests written in the same millisecond still list in a
@@ -73,11 +83,12 @@ export async function canonicalRevisionList(
   deps: CanonicalRevisionListDeps,
   options: CanonicalRevisionListOptions = {},
 ): Promise<CanonicalRevisionListReport> {
-  const [manifests, refStates, overlayIds, jobs] = await Promise.all([
+  const [manifests, refStates, overlayIds, jobs, providerGenerations] = await Promise.all([
     deps.manifests.listAll(),
     deps.refs.list(),
     deps.overlays.listIds(),
     deps.jobs.list(),
+    deps.providerGenerations === undefined ? [] : deps.providerGenerations.list(),
   ]);
 
   const ordered = [...manifests].sort((left, right) => {
@@ -102,6 +113,11 @@ export async function canonicalRevisionList(
   const jobsByManifest = new Map<string, string[]>();
   for (const job of jobs) push(jobsByManifest, job.manifestId, job.operationId);
 
+  const providerGenerationWorkspaceIdsByManifest = new Map<string, string[]>();
+  for (const generation of providerGenerations) {
+    push(providerGenerationWorkspaceIdsByManifest, generation.manifestId, generation.workspaceId);
+  }
+
   const revisions: CanonicalRevisionSummary[] = [];
   for (const manifest of retained) {
     const pins = await deps.pins.list(manifest.manifestId);
@@ -118,6 +134,12 @@ export async function canonicalRevisionList(
       pins: [...new Set(pins.map((pin) => pin.reason))].sort(),
       overlayGoalIds: sorted(overlayGoalIdsByManifest, manifest.manifestId),
       indexJobOperationIds: sorted(jobsByManifest, manifest.manifestId),
+      ...(deps.providerGenerations === undefined
+        ? {}
+        : {
+            providerGenerationWorkspaceIds:
+              sorted(providerGenerationWorkspaceIdsByManifest, manifest.manifestId),
+          }),
     });
   }
 

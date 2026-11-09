@@ -612,6 +612,10 @@ export function getClientScriptJs(): string {
             if (Array.isArray(revision.indexJobOperationIds) && revision.indexJobOperationIds.length > 0) {
               markers.push('index-jobs=' + String(revision.indexJobOperationIds.length));
             }
+            if (Array.isArray(revision.providerGenerationWorkspaceIds)
+              && revision.providerGenerationWorkspaceIds.length > 0) {
+              markers.push('provider-generations=' + String(revision.providerGenerationWorkspaceIds.length));
+            }
             appendLine('revision ' + String(revision.manifestId || 'unknown')
               + ' commit ' + String(revision.commitSha || 'unknown').slice(0, 12)
               + ' tree ' + String(revision.treeOid || 'unknown').slice(0, 12)

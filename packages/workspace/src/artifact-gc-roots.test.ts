@@ -109,6 +109,45 @@ describe('GC root assembler (#210 U18)', () => {
     }
   });
 
+  it('includes caller-supplied provider generation manifests as roots', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-roots-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const manifests = new CanonicalManifestStore(dir);
+      const pins = new RevisionPinRegistry(dir);
+      const overlays = new GoalOverlayStore(dir);
+      const generation = manifestFor('a'.repeat(40), [{ path: 'indexed.ts', contentHash: H('5') }]);
+      await manifests.put(generation);
+
+      const roots = await assembleGcRoots({
+        manifests, refs, pins, overlays, indexJobManifestIds: [],
+        providerGenerationManifestIds: [generation.manifestId],
+      });
+      const plan = planArtifactGc({ roots, candidates: [H('5')] });
+      if (plan.status !== 'planned') throw new Error('expected planned');
+      expect(plan.unreachable).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a provider generation manifest is missing from the store', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-roots-'));
+    try {
+      const refs = new CanonicalRefStore(dir);
+      const manifests = new CanonicalManifestStore(dir);
+      const pins = new RevisionPinRegistry(dir);
+      const overlays = new GoalOverlayStore(dir);
+
+      await expect(assembleGcRoots({
+        manifests, refs, pins, overlays, indexJobManifestIds: [],
+        providerGenerationManifestIds: ['man:v1:' + 'b'.repeat(64)],
+      })).rejects.toThrow(/missing/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when a reachability root manifest is missing from the store', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'gc-roots-'));
     try {

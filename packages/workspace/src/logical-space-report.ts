@@ -3,6 +3,7 @@ import { CanonicalManifestStore } from './canonical-manifest-store.js';
 import { CanonicalRefStore } from './canonical-ref-store.js';
 import { GoalOverlayStore } from './goal-overlay-store.js';
 import { IndexJobLedger } from './index-job-ledger.js';
+import { ProviderGenerationLedger } from './provider-generation-ledger.js';
 import { RevisionPinRegistry } from './revision-pin-registry.js';
 import { assembleGcRoots } from './artifact-gc-roots.js';
 import { planArtifactGc } from './artifact-gc.js';
@@ -15,6 +16,8 @@ export interface LogicalSpaceDeps {
   readonly overlays: GoalOverlayStore;
   /** Manifests referenced by active/pending index jobs; caller owns that ledger. */
   readonly indexJobManifestIds: readonly string[];
+  /** Manifests an active provider generation was built from (#210 bullet 4). */
+  readonly providerGenerationManifestIds?: readonly string[];
   /** Every content hash the artifact store currently holds. */
   readonly artifactCandidates: readonly string[];
   /**
@@ -122,10 +125,11 @@ export async function logicalSpaceReport(deps: LogicalSpaceDeps): Promise<Logica
 /**
  * Store-backed entry point for `<data>/canonical` (#210 §2).
  *
- * Every read is strict: the artifact listing, manifests, the index-job ledger,
- * refs, pins and Goal overlays. A record that cannot be read becomes `refused` — a
- * tolerant listing would silently drop it and report a smaller, "measured"
- * store, which is exactly the undercount this projection must never print.
+ * Every read is strict: the artifact listing, manifests, the index-job and
+ * provider-generation ledgers, refs, pins and Goal overlays. A record that
+ * cannot be read becomes `refused` — a tolerant listing would silently drop it
+ * and report a smaller, "measured" store, which is exactly the undercount this
+ * projection must never print.
  */
 export async function logicalSpaceReportFromRoot(root: string): Promise<LogicalSpaceReport> {
   try {
@@ -144,6 +148,7 @@ export async function logicalSpaceReportFromRoot(root: string): Promise<LogicalS
       pins: new RevisionPinRegistry(root),
       overlays: new GoalOverlayStore(root),
       indexJobManifestIds: await new IndexJobLedger(root).liveManifestIds({ strict: true }),
+      providerGenerationManifestIds: await new ProviderGenerationLedger(root).liveManifestIds({ strict: true }),
       artifactCandidates: [...contentHashes].sort(),
     });
   } catch (error) {

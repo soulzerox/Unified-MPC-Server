@@ -310,8 +310,9 @@ describe('skills and mcp bridge tools', () => {
       source: 'a',
     }));
 
-    // `list()` ranks only a non-empty query, so a plain truncated listing is
-    // still discovery order and must not tell the model it saw the best rows.
+    // `list()` only ranks a query with a significant token, so a plain
+    // truncated listing is still discovery order and must not tell the model it
+    // saw the best rows.
     expect(summarizeSkillCatalog(skills, { limit: 1, ranked: true }).hint).toContain('best first');
     expect(summarizeSkillCatalog(skills, { limit: 1, ranked: false }).hint).toContain('discovery order');
     expect(summarizeSkillCatalog(skills, { limit: 1 }).hint).toContain('discovery order');

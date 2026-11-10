@@ -49,10 +49,10 @@ export const CATEGORIES = [
 /** Contract states. A receipt can only be written with the first two. */
 export const FINDING_STATUSES = ['open', 'fixed', 'accepted_nonblocking', 'invalidated'];
 export const RECORDABLE_STATUSES = ['open', 'accepted_nonblocking'];
-export const COMMANDS = ['capsule', 'record', 'status'];
+export const COMMANDS = ['capsule', 'record', 'status', 'backlog'];
 
 export function parseArgs(argv) {
-  const options = { command: undefined, base: 'main', repo: undefined, pr: undefined, findings: undefined, reviewer: undefined };
+  const options = { command: undefined, base: 'main', repo: undefined, pr: undefined, findings: undefined, reviewer: undefined, json: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--pr') {
@@ -72,6 +72,8 @@ export function parseArgs(argv) {
     } else if (argument === '--reviewer') {
       index += 1;
       options.reviewer = argv[index];
+    } else if (argument === '--json') {
+      options.json = true;
     } else if (argument === '--help' || argument === '-h') {
       options.help = true;
     } else if (options.command === undefined && !argument.startsWith('-')) {
@@ -84,7 +86,11 @@ export function parseArgs(argv) {
   if (!COMMANDS.includes(options.command)) {
     throw new RangeError(`command must be one of ${COMMANDS.join(', ')}`);
   }
-  if (options.pr === undefined) throw new RangeError('--pr is required');
+  if (options.command === 'backlog' && options.pr !== undefined) {
+    throw new RangeError('backlog does not take --pr; it reads every receipt in the repository');
+  }
+  if (options.command !== 'backlog' && options.pr === undefined) throw new RangeError('--pr is required');
+  if (options.command !== 'backlog' && options.json === true) throw new RangeError('--json is only valid for backlog');
   if (typeof options.base !== 'string' || options.base.trim() === '') throw new RangeError('--base must not be empty');
   if (options.command === 'record' && options.findings === undefined) throw new RangeError('record requires --findings <file>');
   return options;
@@ -197,6 +203,104 @@ export function findReviewReceipt(receipts, headSha) {
 }
 
 /**
+ * A receipt is evidence about one head, so it stops gating the moment that head
+ * is no longer the PR's head — and stops mattering entirely once the PR merged
+ * or closed. This groups every open required fix by what it can still block,
+ * using the same predicate as the merge gate (`status === 'open'` and
+ * `required_fix === true`) rather than severity, which is only a label.
+ */
+export function summarizeReviewBacklog({ repository, receipts, pullRequests, corruptReceiptCount = 0 }) {
+  const pullByNumber = new Map(pullRequests.map((pull) => [pull.number, pull]));
+  const scoped = receipts.filter((receipt) => receipt !== null && typeof receipt === 'object'
+    && (receipt.repository === undefined || repository === undefined || receipt.repository === repository));
+  const buckets = { blockingNow: [], supersededHead: [], mergedOrClosed: [], unknownPullRequest: [] };
+  let openFindings = 0;
+  let blockingOpen = 0;
+
+  for (const receipt of scoped) {
+    const findings = Array.isArray(receipt.findings) ? receipt.findings : [];
+    openFindings += findings.filter((finding) => finding?.status === 'open').length;
+    const blocking = findings.filter((finding) => finding?.status === 'open' && finding?.required_fix === true);
+    blockingOpen += blocking.length;
+    if (blocking.length === 0) continue;
+
+    const pull = pullByNumber.get(receipt.prNumber);
+    for (const finding of blocking) {
+      const row = {
+        prNumber: receipt.prNumber,
+        title: pull?.title,
+        receiptHead: receipt.headSha,
+        pullHead: pull?.headRefOid,
+        file: finding.file,
+        line: finding.line ?? null,
+        severity: finding.severity,
+        category: finding.category,
+        claim: finding.claim,
+      };
+      if (pull === undefined) buckets.unknownPullRequest.push(row);
+      else if (pull.state !== 'OPEN') buckets.mergedOrClosed.push(row);
+      else if (pull.headRefOid === receipt.headSha) buckets.blockingNow.push(row);
+      else buckets.supersededHead.push(row);
+    }
+  }
+
+  for (const rows of Object.values(buckets)) {
+    rows.sort((left, right) => left.prNumber - right.prNumber
+      || String(left.file).localeCompare(String(right.file))
+      || (left.line ?? 0) - (right.line ?? 0));
+  }
+
+  return {
+    repository,
+    receipts: scoped.length,
+    corruptReceiptCount,
+    openFindings,
+    blockingOpen,
+    blockingNow: buckets.blockingNow,
+    supersededHead: buckets.supersededHead,
+    mergedOrClosed: buckets.mergedOrClosed,
+    unknownPullRequest: buckets.unknownPullRequest,
+  };
+}
+
+function findingLocation(row) {
+  return row.line === null || row.line === undefined ? String(row.file) : `${row.file}:${row.line}`;
+}
+
+/**
+ * The merge guard fails closed when a receipt cannot be read, so the report that
+ * answers "is anything blocked?" must not answer "no" while it is missing
+ * evidence. An unresolved PR is the same kind of gap: a receipt names a PR that
+ * the listing did not return, so this run cannot prove that row is history.
+ */
+export function reviewBacklogNeedsAttention(summary) {
+  return summary.blockingNow.length > 0
+    || summary.corruptReceiptCount > 0
+    || summary.unknownPullRequest.length > 0;
+}
+
+export function formatReviewBacklog(summary) {
+  const lines = [
+    `review backlog — ${summary.repository ?? 'unknown repository'}`,
+    `  receipts ${summary.receipts} (corrupt ${summary.corruptReceiptCount})`,
+    `  open findings ${summary.openFindings}, blocking open ${summary.blockingOpen}`,
+    `  blocking now ${summary.blockingNow.length} · superseded head ${summary.supersededHead.length}`
+      + ` · merged/closed ${summary.mergedOrClosed.length} · unknown PR ${summary.unknownPullRequest.length}`,
+  ];
+  for (const row of summary.blockingNow) {
+    lines.push(`  BLOCK #${row.prNumber} ${findingLocation(row)} — ${row.claim}`);
+  }
+  if (summary.corruptReceiptCount > 0) {
+    lines.push(`  WARN ${summary.corruptReceiptCount} unreadable receipt(s); the merge guard would fail closed`);
+  }
+  if (summary.unknownPullRequest.length > 0) {
+    lines.push(`  WARN ${summary.unknownPullRequest.length} receipt(s) name a PR that is not in the listing`);
+  }
+  if (!reviewBacklogNeedsAttention(summary)) lines.push('nothing blocks an open PR right now');
+  return lines.join('\n');
+}
+
+/**
  * Merge-time predicate. `record` already validated the document, but a receipt
  * is a file on disk: the verdict is recomputed here so an edited receipt cannot
  * claim a review that its own findings do not support.
@@ -288,6 +392,19 @@ export async function readPullRequest(repository, prNumber) {
   const pr = JSON.parse(await run(['gh', 'pr', 'view', String(prNumber), '--repo', repository, '--json', fields]));
   pr.baseRefOid = (await run(['gh', 'api', `repos/${repository}/pulls/${String(prNumber)}`, '--jq', '.base.sha'])).trim();
   return pr;
+}
+
+/**
+ * One listing for the whole backlog: `gh pr view` per receipt would be dozens of
+ * network calls, and only the PR state and current head decide whether an old
+ * finding still blocks anything.
+ */
+export async function readPullRequestStates(repository) {
+  const output = await run([
+    'gh', 'pr', 'list', '--repo', repository, '--state', 'all', '--limit', '5000',
+    '--json', 'number,state,title,headRefOid',
+  ]);
+  return JSON.parse(output);
 }
 
 /**
@@ -750,6 +867,23 @@ async function statusCommand(options) {
   return evaluation.eligible ? 0 : 1;
 }
 
+async function backlogCommand(options) {
+  const repository = await resolveRepository(options.repo);
+  const [store, pullRequests] = await Promise.all([
+    readReviewReceipts(),
+    readPullRequestStates(repository),
+  ]);
+  const summary = summarizeReviewBacklog({
+    repository,
+    receipts: store.records,
+    pullRequests,
+    corruptReceiptCount: store.corrupt.length,
+  });
+  if (options.json === true) console.log(JSON.stringify(summary, null, 2));
+  else console.log(formatReviewBacklog(summary));
+  return reviewBacklogNeedsAttention(summary) ? 1 : 0;
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help === true) {
@@ -758,11 +892,13 @@ async function main() {
       '  node scripts/review-gate.mjs capsule --pr <n> [--repo owner/name] [--base main]',
       '  node scripts/review-gate.mjs record  --pr <n> --findings <file> [--reviewer <label>] [--repo owner/name] [--base main]',
       '  node scripts/review-gate.mjs status  --pr <n> [--repo owner/name] [--base main]',
+      '  node scripts/review-gate.mjs backlog [--repo owner/name] [--json]',
     ].join('\n'));
     return 0;
   }
   if (options.command === 'capsule') return capsuleCommand(options);
   if (options.command === 'record') return recordCommand(options);
+  if (options.command === 'backlog') return backlogCommand(options);
   return statusCommand(options);
 }
 

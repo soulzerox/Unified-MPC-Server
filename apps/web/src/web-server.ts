@@ -2643,9 +2643,10 @@ function httpStatusForResult(result: { readonly ok: boolean; readonly error?: { 
     case 'UNSUPPORTED_TARGET': return 422;
     case 'PERMISSION_DENIED': return 403;
     case 'WORKSPACE_NOT_FOUND': return 404;
-    // The services behind this helper (IDE policy sync, prune, install) report an
-    // unwritable or full target as INTERNAL_ERROR. Mapping that to 400 would tell
-    // the caller a valid request was its own fault and would drop the 5xx signal.
+    // The services behind this helper (IDE policy sync, skill prune, server prune)
+    // report an unwritable or full target as INTERNAL_ERROR. Mapping that to 400
+    // would tell the caller a valid request was its own fault and would drop the
+    // 5xx signal.
     case 'INTERNAL_ERROR': return 500;
     default: return 400;
   }

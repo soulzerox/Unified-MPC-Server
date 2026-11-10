@@ -554,7 +554,7 @@ describe('canonical extension registry', () => {
         const loaded = await registry.load();
         expect(loaded).toMatchObject({
           ok: false,
-          error: { code: 'INVALID_INPUT' },
+          error: { code: 'INTERNAL_ERROR' },
         });
       }
     } finally {

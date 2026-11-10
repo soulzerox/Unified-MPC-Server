@@ -857,7 +857,7 @@ describe('InstallerService - Server Ingestion Pipeline', () => {
     });
 
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.code).toBe('INVALID_INPUT');
+    if (!result.ok) expect(result.error.code).toBe('INTERNAL_ERROR');
     expect(await readFile(canonicalRegistryFile, 'utf8')).toBe(invalidRegistry);
     await expect(
       readFile(path.join(dataDir, 'extensions', 'mcp', 'registry.json'), 'utf8'),

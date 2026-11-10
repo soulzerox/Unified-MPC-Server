@@ -10,7 +10,9 @@ import { promisify } from 'node:util';
 
 import {
   applyEvidencePlan,
+  evidencePlanBlocker,
   planEvidencePrune,
+  planLocalVerifyEvidence,
   planReviewEvidence,
   planReviewEvidencePrune,
   pruneLocalVerifyEvidence,
@@ -767,6 +769,48 @@ test('applying a plan deletes exactly what it reported, even when the store chan
     assert.deepEqual(await readdir(path.join(reviewRoot, 'receipts')), ['late.json']);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('applying a plan refuses a capsule root swapped for a symlink after planning', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'review-prune-root-swap-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'review-prune-root-swap-target-'));
+  try {
+    const reviewRoot = path.join(root, '.unified-mpc', 'reviews');
+    await writeCapsule(reviewRoot, HEAD_OLD, 1, '2026-01-01T00:00:00.000Z');
+    const plan = await planReviewEvidence({ root, headSha: HEAD_CURRENT, keepRecent: 0 });
+
+    await writeCapsule(path.join(outside, 'reviews'), HEAD_CURRENT, 2, '2026-02-01T00:00:00.000Z');
+    await rm(path.join(reviewRoot, 'capsules'), { recursive: true, force: true });
+    await symlink(path.join(outside, 'reviews', 'capsules'), path.join(reviewRoot, 'capsules'));
+
+    assert.match(await evidencePlanBlocker(plan), /became a symlink after planning/);
+    await assert.rejects(applyEvidencePlan(plan), /became a symlink after planning/);
+    assert.deepEqual(await readdir(path.join(outside, 'reviews', 'capsules')), [`${HEAD_CURRENT.slice(0, 12)}-2`]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('applying a plan refuses a verification root replaced after planning', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'verification-prune-root-swap-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'verification-prune-root-swap-target-'));
+  try {
+    const verificationRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(verificationRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const plan = await planLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0 });
+
+    await writeReceipt(path.join(outside, 'local-verify'), `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await rm(verificationRoot, { recursive: true, force: true });
+    await symlink(path.join(outside, 'local-verify'), verificationRoot);
+
+    assert.match(await evidencePlanBlocker(plan), /became a symlink after planning/);
+    await assert.rejects(applyEvidencePlan(plan), /became a symlink after planning/);
+    assert.deepEqual(await readdir(path.join(outside, 'local-verify')), [`aaaaaaaaaaaa-${UUID_1}.json`]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

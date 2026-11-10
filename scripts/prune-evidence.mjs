@@ -27,12 +27,14 @@ const execFileAsync = promisify(execFile);
  * Both stores are planned before either one is touched, and `--apply` deletes
  * exactly the entries that were planned, so a refusal in one store stops the run
  * before the other loses anything and there is no second planning pass that could
- * discover a new reason to refuse after the first store is already pruned.
- * `latest.json` and `merges/` are never deleted. The evidence roots, plus
- * `merges/`, `logs/`, `capsules/` and `receipts/`, must be real directories and
- * deletion never follows a symlink. An unreadable branch ref, merge record,
- * receipt, capsule or latest pointer makes it refuse instead of guessing, because
- * the keep-set is the only thing that makes the deletion safe.
+ * discover a new reason to refuse after the first store is already pruned. The
+ * deletion roots are checked for identity again immediately before deleting, so a
+ * root replaced by a symlink after planning is refused. `latest.json` and
+ * `merges/` are never deleted. The evidence roots, plus `merges/`, `logs/`,
+ * `capsules/` and `receipts/`, must be real directories and deletion never
+ * follows a symlink. An unreadable branch ref, merge record, receipt, capsule or
+ * latest pointer makes it refuse instead of guessing, because the keep-set is the
+ * only thing that makes the deletion safe.
  */
 
 const VERIFICATION_RECEIPT_PATTERN = /^(?<head>[0-9a-f]{12})-(?<verificationId>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
@@ -337,7 +339,49 @@ export async function planLocalVerifyEvidence({
     currentHeadSha: headSha,
     keepRecent,
   });
-  return { status: 'pruned', store: 'verification', targets: { receiptRoot, logRoot }, ...plan };
+  return {
+    status: 'pruned',
+    store: 'verification',
+    targets: { receiptRoot, logRoot },
+    guards: [await identityGuard(receiptRoot), await identityGuard(logRoot)].filter((guard) => guard !== undefined),
+    ...plan,
+  };
+}
+
+/**
+ * Records the device and inode of a deletion root so `applyEvidencePlan` can
+ * prove it is deleting inside the same directory it planned against. A plan keeps
+ * absolute paths; a path alone would resolve through a root that was replaced
+ * with a symlink between planning and applying.
+ */
+async function identityGuard(directory) {
+  const stats = await lstatOrUndefined(directory);
+  if (stats === undefined) return undefined;
+  return { path: directory, dev: stats.dev, ino: stats.ino };
+}
+
+/**
+ * Returns a reason when a plan may no longer be applied, or `undefined` when the
+ * deletion roots are the same directories they were at plan time. Symlinks are
+ * refused rather than resolved: the whole point is that the target of the delete
+ * must not have moved.
+ *
+ * A local writer that swaps a root inside the window between this check and the
+ * delete is still possible; closing that would need `openat` on a directory file
+ * descriptor, which Node does not expose. What this does guarantee is that the
+ * decision and the deletion name the same directory, and `fs.rm` never follows a
+ * symlink it does find.
+ */
+export async function evidencePlanBlocker(plan) {
+  if (plan === undefined || plan.status !== 'pruned') return undefined;
+  for (const guard of plan.guards ?? []) {
+    const stats = await lstatOrUndefined(guard.path);
+    if (stats === undefined) return `${guard.path} disappeared after planning`;
+    if (stats.isSymbolicLink()) return `${guard.path} became a symlink after planning`;
+    if (!stats.isDirectory()) return `${guard.path} is not a directory any more`;
+    if (stats.dev !== guard.dev || stats.ino !== guard.ino) return `${guard.path} was replaced after planning`;
+  }
+  return undefined;
 }
 
 /**
@@ -348,6 +392,8 @@ export async function planLocalVerifyEvidence({
  */
 export async function applyEvidencePlan(plan) {
   if (plan === undefined || plan.status !== 'pruned') return;
+  const blocker = await evidencePlanBlocker(plan);
+  if (blocker !== undefined) throw new Error(blocker);
   if (plan.store === 'verification') {
     for (const entry of plan.remove) {
       await rm(path.join(plan.targets.receiptRoot, entry.fileName), { force: true });
@@ -455,7 +501,13 @@ export async function planReviewEvidence({
     currentHeadSha: headSha,
     keepRecent,
   });
-  return { status: 'pruned', store: 'review', targets: { capsuleRoot, receiptRoot }, ...plan };
+  return {
+    status: 'pruned',
+    store: 'review',
+    targets: { capsuleRoot, receiptRoot },
+    guards: [await identityGuard(capsuleRoot), await identityGuard(receiptRoot)].filter((guard) => guard !== undefined),
+    ...plan,
+  };
 }
 
 /** Plans, and unless `dryRun` applies, the review store cleanup. */
@@ -541,6 +593,15 @@ async function main() {
   if (refused !== undefined) {
     console.error(`evidence prune refused: ${refused.reason}`);
     return 1;
+  }
+  // Both plans are checked before either is applied, so a deletion root that moved
+  // after planning stops the run with both stores intact.
+  for (const plan of [verification, review]) {
+    const blocker = await evidencePlanBlocker(plan);
+    if (blocker !== undefined) {
+      console.error(`evidence prune refused: ${blocker}`);
+      return 1;
+    }
   }
   if (!options.dryRun) {
     await applyEvidencePlan(verification);

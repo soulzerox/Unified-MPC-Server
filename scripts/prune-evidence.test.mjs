@@ -814,6 +814,27 @@ test('applying a plan refuses a verification root replaced after planning', asyn
   }
 });
 
+test('applying a plan refuses a logs root that appeared after planning', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'verification-prune-logs-appeared-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'verification-prune-logs-appeared-target-'));
+  try {
+    const verificationRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(verificationRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const plan = await planLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0 });
+
+    await mkdir(path.join(outside, UUID_1), { recursive: true });
+    await writeFile(path.join(outside, UUID_1, 'step.log'), 'keep\n', 'utf8');
+    await symlink(outside, path.join(verificationRoot, 'logs'));
+
+    assert.match(await evidencePlanBlocker(plan), /logs appeared after planning/);
+    await assert.rejects(applyEvidencePlan(plan), /logs appeared after planning/);
+    assert.deepEqual(await readdir(path.join(outside, UUID_1)), ['step.log']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test('review prune reports nothing to keep when there is no review store', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'review-prune-missing-'));
   try {

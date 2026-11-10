@@ -29,7 +29,7 @@ const execFileAsync = promisify(execFile);
  * before the other loses anything and there is no second planning pass that could
  * discover a new reason to refuse after the first store is already pruned. The
  * deletion roots are checked for identity again immediately before deleting, so a
- * root replaced by a symlink after planning is refused. `latest.json` and
+ * root replaced, created or removed after planning is refused. `latest.json` and
  * `merges/` are never deleted. The evidence roots, plus `merges/`, `logs/`,
  * `capsules/` and `receipts/`, must be real directories and deletion never
  * follows a symlink. An unreadable branch ref, merge record, receipt, capsule or
@@ -343,7 +343,7 @@ export async function planLocalVerifyEvidence({
     status: 'pruned',
     store: 'verification',
     targets: { receiptRoot, logRoot },
-    guards: [await identityGuard(receiptRoot), await identityGuard(logRoot)].filter((guard) => guard !== undefined),
+    guards: [await identityGuard(receiptRoot), await identityGuard(logRoot)],
     ...plan,
   };
 }
@@ -352,11 +352,13 @@ export async function planLocalVerifyEvidence({
  * Records the device and inode of a deletion root so `applyEvidencePlan` can
  * prove it is deleting inside the same directory it planned against. A plan keeps
  * absolute paths; a path alone would resolve through a root that was replaced
- * with a symlink between planning and applying.
+ * with a symlink between planning and applying. A root that did not exist yet is
+ * recorded as absent, because a directory created there after planning is not the
+ * one this plan decided about.
  */
 async function identityGuard(directory) {
   const stats = await lstatOrUndefined(directory);
-  if (stats === undefined) return undefined;
+  if (stats === undefined) return { path: directory, absent: true };
   return { path: directory, dev: stats.dev, ino: stats.ino };
 }
 
@@ -376,6 +378,10 @@ export async function evidencePlanBlocker(plan) {
   if (plan === undefined || plan.status !== 'pruned') return undefined;
   for (const guard of plan.guards ?? []) {
     const stats = await lstatOrUndefined(guard.path);
+    if (guard.absent === true) {
+      if (stats !== undefined) return `${guard.path} appeared after planning`;
+      continue;
+    }
     if (stats === undefined) return `${guard.path} disappeared after planning`;
     if (stats.isSymbolicLink()) return `${guard.path} became a symlink after planning`;
     if (!stats.isDirectory()) return `${guard.path} is not a directory any more`;
@@ -505,7 +511,7 @@ export async function planReviewEvidence({
     status: 'pruned',
     store: 'review',
     targets: { capsuleRoot, receiptRoot },
-    guards: [await identityGuard(capsuleRoot), await identityGuard(receiptRoot)].filter((guard) => guard !== undefined),
+    guards: [await identityGuard(capsuleRoot), await identityGuard(receiptRoot)],
     ...plan,
   };
 }

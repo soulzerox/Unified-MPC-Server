@@ -566,7 +566,7 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     const resolved = await store.resolveActiveGeneration();
     expect(resolved.ok).toBe(false);
     if (!resolved.ok) {
-      expect(resolved.error.code).toBe('INVALID_INPUT');
+      expect(resolved.error.code).toBe('INTERNAL_ERROR');
       expect(resolved.error.message).toContain('registry');
     }
   });
@@ -598,7 +598,7 @@ describe('CanonicalMcpMigrationCutoverStateStore', () => {
     const resolved = await store.resolveActiveGeneration();
     expect(resolved.ok).toBe(false);
     if (!resolved.ok) {
-      expect(resolved.error.code).toBe('INVALID_INPUT');
+      expect(resolved.error.code).toBe('INTERNAL_ERROR');
       expect(resolved.error.message).toContain('generation hash');
     }
   });

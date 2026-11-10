@@ -26,7 +26,8 @@
     "verify:local": "node scripts/local-verify.mjs --profile merge",
     "verify:targeted": "node scripts/local-verify.mjs --profile targeted",
     "merge:pr": "node scripts/guarded-merge.mjs",
-    "review:pr": "node scripts/review-gate.mjs"
+    "review:pr": "node scripts/review-gate.mjs",
+    "evidence:prune": "node scripts/prune-local-verify-evidence.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.33.0",

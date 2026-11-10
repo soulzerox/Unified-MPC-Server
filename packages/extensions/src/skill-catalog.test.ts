@@ -612,6 +612,30 @@ Duplicate content.
     }
   });
 
+  it('discovers codex plugin cache skills under CODEX_HOME', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'skill-catalog-codex-cache-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'codex-home');
+    const isolatedHome = path.join(root, 'isolated-home');
+    const pluginSkill = path.join(codexHome, 'plugins', 'cache', 'plugin-skill');
+    await mkdir(pluginSkill, { recursive: true });
+    await writeFile(path.join(pluginSkill, 'SKILL.md'), '---\nname: plugin-skill\ndescription: Plugin cache\n---\n', 'utf8');
+    // A same-shaped decoy under the fallback home would satisfy a regression
+    // that computes plugins/cache from `home` instead of CODEX_HOME.
+    const decoy = path.join(isolatedHome, 'plugins', 'cache', 'decoy-plugin-skill');
+    await mkdir(decoy, { recursive: true });
+    await writeFile(path.join(decoy, 'SKILL.md'), '---\nname: decoy-plugin-skill\ndescription: Wrong root\n---\n', 'utf8');
+
+    const catalog = new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, () => catalog.list());
+
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    const ids = listed.value.skills.map((skill) => skill.id);
+    expect(ids).toContain('codex-plugin-skills/plugin-skill');
+    expect(ids).not.toContain('codex-plugin-skills/decoy-plugin-skill');
+  });
+
   it('prefers a pinned home directory over an ambient CODEX_HOME', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'skill-catalog-codex-pinned-'));
     temporaryRoots.push(root);

@@ -1024,7 +1024,9 @@ export class ControlPlaneServer {
           });
       const result = await syncService.sync(targets);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Policy sync for targets [${targets.join(', ')}]: ${result.ok ? 'OK' : 'FAILED'}`);
-      res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+      // A rejected target set is a caller mistake, not a server fault: report it as
+      // 422/400 so clients can tell their own bad input from a real sync failure.
+      res.writeHead(httpStatusForResult(result), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
       return;
     }
@@ -2641,6 +2643,10 @@ function httpStatusForResult(result: { readonly ok: boolean; readonly error?: { 
     case 'UNSUPPORTED_TARGET': return 422;
     case 'PERMISSION_DENIED': return 403;
     case 'WORKSPACE_NOT_FOUND': return 404;
+    // The services behind this helper (IDE policy sync, prune, install) report an
+    // unwritable or full target as INTERNAL_ERROR. Mapping that to 400 would tell
+    // the caller a valid request was its own fault and would drop the 5xx signal.
+    case 'INTERNAL_ERROR': return 500;
     default: return 400;
   }
 }

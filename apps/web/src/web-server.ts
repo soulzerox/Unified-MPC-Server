@@ -1024,7 +1024,9 @@ export class ControlPlaneServer {
           });
       const result = await syncService.sync(targets);
       this.recordLog(result.ok ? 'SUCCESS' : 'ERROR', `Policy sync for targets [${targets.join(', ')}]: ${result.ok ? 'OK' : 'FAILED'}`);
-      res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+      // A rejected target set is a caller mistake, not a server fault: report it as
+      // 422/400 so clients can tell their own bad input from a real sync failure.
+      res.writeHead(httpStatusForResult(result), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
       return;
     }

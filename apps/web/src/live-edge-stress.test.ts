@@ -125,6 +125,30 @@ describe('ControlPlaneServer - live edge and stress smoke', () => {
     expect((await response.json()).ok).toBe(true);
   });
 
+  it('reports an empty policy sync target list as a client error, not a server fault', async () => {
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/policies/sync`, {
+      method: 'POST',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: [] }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe('INVALID_INPUT');
+  });
+
+  it('reports an unsupported policy sync target as 422 rather than 500', async () => {
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/policies/sync`, {
+      method: 'POST',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: ['bogus'] }),
+    });
+    expect(response.status).toBe(422);
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe('UNSUPPORTED_TARGET');
+  });
+
   it('does not expose WebUI extension installation endpoints', async () => {
     for (const pathname of ['/api/skills/install', '/api/servers/install']) {
       const response = await fetch(`http://127.0.0.1:${server.port}${pathname}`, {

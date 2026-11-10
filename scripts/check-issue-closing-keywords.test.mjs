@@ -187,3 +187,77 @@ test('extracts pull request title/body from the GitHub event payload conservativ
     /pull_request metadata/,
   );
 });
+
+test('flags retractions with words between the negation and the keyword', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'Nothing here closes #71',
+    body: [
+      'This does not, however, close #72.',
+      'This is not intended to close #73.',
+      'This never closes #74.',
+      'This is not a PR that fixes #75.',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    hazards.map(({ source, keyword, issueRef }) => ({ source, keyword, issueRef })),
+    [
+      { source: 'title', keyword: 'close', issueRef: '#71' },
+      { source: 'body', keyword: 'close', issueRef: '#72' },
+      { source: 'body', keyword: 'close', issueRef: '#73' },
+      { source: 'body', keyword: 'close', issueRef: '#74' },
+      { source: 'body', keyword: 'fix', issueRef: '#75' },
+    ],
+  );
+});
+
+test('does not flag a real closure that follows "not only"', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'This not only fixes #81 but also resolves #82.',
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('does not read a negation on one line as retracting a keyword on the next', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: ['- Nothing here', '- Closes #91', 'Never mind the details.', 'Closes #92'].join('\n'),
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('does not scan past an intervening "not only" closure from an earlier negation', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'Nothing here, not only fixes #93 but also resolves #94.',
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('keeps the excerpt on one line for a multi-line retraction', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'This does not,\nhowever, close #95.',
+  });
+
+  assert.deepEqual(
+    hazards.map(({ source, keyword, issueRef, excerpt }) => ({ source, keyword, issueRef, excerpt })),
+    [{ source: 'body', keyword: 'close', issueRef: '#95', excerpt: 'not, however, close #95' }],
+  );
+});
+
+test('does not cross a blank line from a negation to a later closure', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'Nothing here\n\nCloses #96',
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('treats a heading line as its own block when the next line closes an issue', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: '## Nothing here\nCloses #97',
+  });
+
+  assert.deepEqual(hazards, []);
+});

@@ -99,7 +99,8 @@ export interface SkillInventoryAuditSummary {
    * audit before it would claim where the canonical copy is, so a name with no
    * canonical copy at all lands here instead of in `canonicalAbsentNames`.
    */
-  readonly canonicalUnverifiedNames: number;}
+  readonly canonicalUnverifiedNames: number;
+}
 
 export interface SkillInventoryAuditReport {
   readonly schemaVersion: 1;

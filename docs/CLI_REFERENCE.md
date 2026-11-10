@@ -884,9 +884,9 @@ or chosen — a divergent group is reported for human review.
 $ unified-mpc skill audit
 skill inventory: 391 directories across 10 roots, 188 declared names
   unique 81 · identical 63 · divergent 43 · unverified 1
-canonical 75 matching · 26 diverging · 74 only copy · 12 absent · 0 duplicate · 1 unverified
+canonical 74 matching · 27 diverging · 74 only copy · 12 absent · 0 duplicate · 1 unverified
 names needing a decision (56):
-  ask-matt  [divergent] canonical matches a legacy copy  variants 4
+  ask-matt  [divergent] canonical diverges  variants 5
     <fingerprint>  claude-skills             /home/user/.claude/skills/ask-matt/SKILL.md
     ...
 use --json for the full inventory, including identical and unique names

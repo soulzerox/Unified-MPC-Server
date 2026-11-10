@@ -137,15 +137,26 @@ export async function pruneLocalVerifyEvidence({
 }) {
   const requestedRoot = path.join(root, '.unified-mpc', 'local-verify');
   const protectedHeads = protectedHeadShas instanceof Set ? protectedHeadShas : new Set(protectedHeadShas);
-  const entries = await listDirectory(requestedRoot);
-  if (entries === undefined) return { status: 'missing', keep: [], remove: [], dryRun };
 
-  // Deleting through a symlinked evidence root would remove files outside the
-  // checkout, so require the root to resolve to the literal path under `root`
-  // and do every deletion through that resolved path.
+  // Deleting through a symlinked or dangling evidence root must never look like
+  // "nothing to prune", so resolve the root before deciding anything.
   let receiptRoot;
   try {
     const resolvedRoot = await realpath(root);
+    const requestedStats = await lstatOrUndefined(requestedRoot);
+    if (requestedStats === undefined) {
+      const metaStats = await lstatOrUndefined(path.join(root, '.unified-mpc'));
+      if (metaStats !== undefined && !metaStats.isDirectory()) {
+        return { status: 'refused', reason: 'local verification metadata root is not a real directory', keep: [], remove: [], dryRun };
+      }
+      return { status: 'missing', keep: [], remove: [], dryRun };
+    }
+    if (requestedStats.isSymbolicLink()) {
+      return { status: 'refused', reason: 'local verification evidence root is a symlink', keep: [], remove: [], dryRun };
+    }
+    if (!requestedStats.isDirectory()) {
+      return { status: 'refused', reason: 'local verification evidence root is not a real directory', keep: [], remove: [], dryRun };
+    }
     receiptRoot = await realpath(requestedRoot);
     if (receiptRoot !== path.join(resolvedRoot, '.unified-mpc', 'local-verify')) {
       return { status: 'refused', reason: 'local verification evidence root is a symlink', keep: [], remove: [], dryRun };
@@ -154,6 +165,19 @@ export async function pruneLocalVerifyEvidence({
     return {
       status: 'refused',
       reason: `cannot resolve local verification evidence root: ${error instanceof Error ? error.message : String(error)}`,
+      keep: [],
+      remove: [],
+      dryRun,
+    };
+  }
+
+  let entries;
+  try {
+    entries = await readdir(receiptRoot, { withFileTypes: true });
+  } catch (error) {
+    return {
+      status: 'refused',
+      reason: `cannot read local verification evidence root: ${error instanceof Error ? error.message : String(error)}`,
       keep: [],
       remove: [],
       dryRun,

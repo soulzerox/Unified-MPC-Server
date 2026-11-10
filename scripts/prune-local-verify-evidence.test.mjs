@@ -1,3 +1,4 @@
+/* global process */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
@@ -424,6 +425,46 @@ test('refuses when a merge record symlink is broken', async () => {
     assert.equal((await readdir(receiptRoot)).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('refuses a dangling evidence-root symlink instead of reporting nothing to prune', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-dangling-'));
+  try {
+    await mkdir(path.join(root, '.unified-mpc'), { recursive: true });
+    await symlink(path.join(root, '.unified-mpc', 'gone'), path.join(root, '.unified-mpc', 'local-verify'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /evidence root is a symlink/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('refuses a root that does not exist', async () => {
+  const root = path.join(tmpdir(), `evidence-prune-absent-${process.pid}-${Date.now()}`);
+
+  const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+  assert.equal(result.status, 'refused');
+  assert.match(result.reason, /cannot resolve local verification evidence root/);
+});
+
+test('refuses a symlinked metadata root even before the evidence root exists', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-meta-only-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-meta-only-target-'));
+  try {
+    await symlink(outside, path.join(root, '.unified-mpc'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /metadata root is not a real directory/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

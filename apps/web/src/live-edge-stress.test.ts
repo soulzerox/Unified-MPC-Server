@@ -2,6 +2,8 @@ import { request as httpRequest } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
+import { appError, err } from '@unified-mpc/domain';
+import type { IdeSyncService } from '@unified-mpc/extensions';
 
 const capabilityToken = 'live-edge-stress-capability';
 const origin = (port: number): string => `http://127.0.0.1:${port}`;
@@ -147,6 +149,33 @@ describe('ControlPlaneServer - live edge and stress smoke', () => {
     const body = await response.json();
     expect(body.ok).toBe(false);
     expect(body.error.code).toBe('UNSUPPORTED_TARGET');
+  });
+
+  it('keeps a policy sync write failure as a server fault', async () => {
+    // An unwritable home directory is not the caller's fault: this must stay 5xx so
+    // monitoring still sees a real sync failure, unlike a rejected target set.
+    const failingSync = {
+      sync: async (): Promise<unknown> => err(appError('INTERNAL_ERROR', 'Failed to sync IDE policies: EROFS: read-only file system')),
+    } as unknown as IdeSyncService;
+    const failingServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, ideSync: failingSync });
+    await failingServer.listen();
+    try {
+      const response = await fetch(`http://127.0.0.1:${failingServer.port}/api/policies/sync`, {
+        method: 'POST',
+        headers: {
+          Origin: origin(failingServer.port),
+          'x-unified-mpc-capability': capabilityToken,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ targets: ['all'] }),
+      });
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe('INTERNAL_ERROR');
+    } finally {
+      await failingServer.close();
+    }
   });
 
   it('does not expose WebUI extension installation endpoints', async () => {

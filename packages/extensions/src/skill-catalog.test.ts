@@ -12,6 +12,24 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+/** Run `body` with environment overrides applied, restoring them afterwards. A `undefined` value unsets the key. */
+async function withEnv<T>(overrides: Readonly<Record<string, string | undefined>>, body: () => Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 describe('SkillCatalog', () => {
   it('parses folded frontmatter descriptions', () => {
     const parsed = parseSkillMarkdown(`---
@@ -553,5 +571,66 @@ Duplicate content.
     for (const query of ['facebook page plan', 'caption', 'แคปชั่น', '图']) {
       expect(skillQueryIsRanked(query)).toBe(true);
     }
+  });
+
+  it('discovers codex skills from CODEX_HOME when no home directory is pinned', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'skill-catalog-codex-'));
+    temporaryRoots.push(root);
+    const codexHome = path.join(root, 'codex-home');
+    const isolatedHome = path.join(root, 'isolated-home');
+    const skillRoot = path.join(codexHome, 'skills', 'codex-skill');
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(path.join(skillRoot, 'SKILL.md'), '---\nname: codex-skill\ndescription: From CODEX_HOME\n---\n# Codex\n', 'utf8');
+    const fallbackSkill = path.join(isolatedHome, '.codex', 'skills', 'isolated-codex-skill');
+    await mkdir(fallbackSkill, { recursive: true });
+    await writeFile(path.join(fallbackSkill, 'SKILL.md'), '---\nname: isolated-codex-skill\ndescription: Wrong root\n---\n', 'utf8');
+
+    const catalog = new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await withEnv({ CODEX_HOME: codexHome, HOME: isolatedHome }, () => catalog.list());
+
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    const ids = listed.value.skills.map((skill) => skill.id);
+    expect(ids).toContain('codex-skills/codex-skill');
+    expect(ids).not.toContain('codex-skills/isolated-codex-skill');
+  });
+
+  it('falls back to <home>/.codex for codex skills when CODEX_HOME is unset or blank', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'skill-catalog-codex-default-'));
+    temporaryRoots.push(root);
+    const isolatedHome = path.join(root, 'isolated-home');
+    const skillRoot = path.join(isolatedHome, '.codex', 'skills', 'fallback-skill');
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(path.join(skillRoot, 'SKILL.md'), '---\nname: fallback-skill\ndescription: Home fallback\n---\n# Fallback\n', 'utf8');
+
+    const catalog = new SkillCatalog({ settings: DEFAULT_EXTENSIONS_SETTINGS });
+    for (const configured of [undefined, '', '   ']) {
+      const listed = await withEnv({ CODEX_HOME: configured, HOME: isolatedHome }, () => catalog.list());
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) continue;
+      expect(listed.value.skills.map((skill) => skill.id)).toContain('codex-skills/fallback-skill');
+    }
+  });
+
+  it('prefers a pinned home directory over an ambient CODEX_HOME', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'skill-catalog-codex-pinned-'));
+    temporaryRoots.push(root);
+    const pinnedHome = path.join(root, 'pinned-home');
+    const decoyHome = path.join(root, 'decoy-home');
+    const pinnedSkill = path.join(pinnedHome, '.codex', 'skills', 'pinned-skill');
+    const decoySkill = path.join(decoyHome, 'skills', 'decoy-skill');
+    await mkdir(pinnedSkill, { recursive: true });
+    await mkdir(decoySkill, { recursive: true });
+    await writeFile(path.join(pinnedSkill, 'SKILL.md'), '---\nname: pinned-skill\ndescription: Pinned\n---\n', 'utf8');
+    await writeFile(path.join(decoySkill, 'SKILL.md'), '---\nname: decoy-skill\ndescription: Decoy\n---\n', 'utf8');
+
+    const catalog = new SkillCatalog({ homeDir: pinnedHome, settings: DEFAULT_EXTENSIONS_SETTINGS });
+    const listed = await withEnv({ CODEX_HOME: decoyHome }, () => catalog.list());
+
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    const ids = listed.value.skills.map((skill) => skill.id);
+    expect(ids).toContain('codex-skills/pinned-skill');
+    expect(ids).not.toContain('codex-skills/decoy-skill');
   });
 });

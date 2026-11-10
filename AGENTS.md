@@ -38,6 +38,14 @@ Copy the `mergeReady` verdict and the failing step names into the PR body. Never
 claim local CI passed without a receipt for the current head. The unit tests for
 the profile runner are `node --test scripts/local-verify.test.mjs`.
 
+Receipts and their logs are audit evidence and are never collected
+automatically, so a long-lived checkout grows by roughly a megabyte per run.
+`pnpm evidence:prune` is the opt-in cleanup: it is a dry run unless you pass
+`--apply`, it requires `GIT_HEAD_SHA`, and it keeps every receipt for the current
+head, every receipt a merge record spent, and the newest `--keep` runs (default
+5). `latest.json`, `merges/` and review capsules are never touched. It refuses
+instead of guessing when a merge record or receipt is unreadable.
+
 ## Exact-head review before merge
 
 Verification is not a review. A merge also needs a review receipt from a

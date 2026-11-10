@@ -23,6 +23,18 @@ const PARENTHETICAL_RETRACTION_PATTERN = new RegExp(
   'gi',
 );
 
+/**
+ * The narrow patterns above cannot cross ordinary words, so they miss the
+ * common retractions "does not, however, close", "never closes", "Nothing here
+ * closes" and "not a PR that closes". GitHub still parses the keyword in each
+ * of them, so the rest of the sentence is scanned too. `not only` is skipped
+ * because it names a real closing rather than a retraction.
+ */
+const SENTENCE_NEGATED_CLOSING_PATTERN = new RegExp(
+  String.raw`\b(?:not|never|nothing|none)\b(?!\s+only\b)[^.!?;\n]*?\b(close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)\b`,
+  'gi',
+);
+
 const USAGE = 'Usage: node scripts/check-issue-closing-keywords.mjs <github-event.json> | - | --title <title> --body-file <path>';
 
 function normalizeForScan(value) {
@@ -53,7 +65,9 @@ export function findNegatedClosingKeywordHazards(metadata) {
         issueRef: match[2],
         excerpt: match[0].trim(),
       };
-      const key = `${hazard.source}\u0000${hazard.keyword}\u0000${hazard.issueRef}\u0000${hazard.excerpt}`;
+      // One issue can be retracted more than once; the first wording is the
+      // excerpt worth reporting.
+      const key = `${hazard.source}\u0000${hazard.keyword}\u0000${hazard.issueRef}`;
       if (seen.has(key)) continue;
       seen.add(key);
       hazards.push(hazard);
@@ -65,6 +79,7 @@ export function findNegatedClosingKeywordHazards(metadata) {
     collect(source, normalized, NEGATED_CLOSING_PATTERN);
     collect(source, normalized, RETRACTED_CLOSING_PATTERN);
     collect(source, normalized, PARENTHETICAL_RETRACTION_PATTERN);
+    collect(source, normalized, SENTENCE_NEGATED_CLOSING_PATTERN);
   }
 
   return hazards;

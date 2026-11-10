@@ -187,3 +187,34 @@ test('extracts pull request title/body from the GitHub event payload conservativ
     /pull_request metadata/,
   );
 });
+
+test('flags retractions with words between the negation and the keyword', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    title: 'Nothing here closes #71',
+    body: [
+      'This does not, however, close #72.',
+      'This is not intended to close #73.',
+      'This never closes #74.',
+      'This is not a PR that fixes #75.',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    hazards.map(({ source, keyword, issueRef }) => ({ source, keyword, issueRef })),
+    [
+      { source: 'title', keyword: 'close', issueRef: '#71' },
+      { source: 'body', keyword: 'close', issueRef: '#72' },
+      { source: 'body', keyword: 'close', issueRef: '#73' },
+      { source: 'body', keyword: 'close', issueRef: '#74' },
+      { source: 'body', keyword: 'fix', issueRef: '#75' },
+    ],
+  );
+});
+
+test('does not flag a real closure that follows "not only"', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'This not only fixes #81 but also resolves #82.',
+  });
+
+  assert.deepEqual(hazards, []);
+});

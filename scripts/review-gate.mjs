@@ -502,6 +502,27 @@ async function readCapsule(headSha, prNumber) {
 }
 
 /**
+ * A review receipt names the capsule it read, so re-freezing that head would
+ * replace the evidence the receipt stands on with a new id and a new PR
+ * description. A head with a recorded review therefore cannot be frozen again;
+ * the only way to a new capsule is a new head. A receipt named for this head
+ * that cannot be read is the same refusal, because nothing can prove which
+ * capsule it stands on.
+ */
+export function capsuleFreezeBlockers({ receipt, corruptReceiptNames = [], headSha }) {
+  const blockers = [];
+  if (receipt !== undefined) {
+    blockers.push(`a review receipt (${String(receipt.reviewId)}) already stands on capsule ${String(receipt.capsuleId)} for ${headSha.slice(0, 12)}; a new capsule needs a new head`);
+  }
+  const prefix = `${headSha.slice(0, 12)}-`;
+  const corruptForHead = corruptReceiptNames.filter((name) => name.startsWith(prefix));
+  if (corruptForHead.length > 0) {
+    blockers.push(`unreadable review receipt(s) for this head: ${corruptForHead.join(', ')}; inspect or remove them before freezing a capsule`);
+  }
+  return blockers;
+}
+
+/**
  * The reviewer reads `diff.patch`; the fingerprint was computed from the diff at
  * freeze time. Without this check a capsule file could be edited or truncated
  * after freeze and a clean receipt written for bytes nobody reviewed.
@@ -689,6 +710,16 @@ async function capsuleCommand(options) {
   const treeBlockers = await gitCleanAtHead(pr.headRefOid);
   if (treeBlockers.length > 0) {
     throw new Error(`cannot freeze a capsule from this checkout:\n  - ${treeBlockers.join('\n  - ')}`);
+  }
+
+  const store = await readReviewReceipts();
+  const freezeBlockers = capsuleFreezeBlockers({
+    receipt: findReviewReceipt(store.records, pr.headRefOid),
+    corruptReceiptNames: store.corrupt,
+    headSha: pr.headRefOid,
+  });
+  if (freezeBlockers.length > 0) {
+    throw new Error(`cannot freeze a capsule for this head:\n  - ${freezeBlockers.join('\n  - ')}`);
   }
 
   const [diff, files, skill, verification] = await Promise.all([

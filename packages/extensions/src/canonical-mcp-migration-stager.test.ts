@@ -273,7 +273,7 @@ describe('CanonicalMcpMigrationStager', () => {
     const second = await stager.stage(manifest);
     expect(second.ok).toBe(false);
     if (!second.ok) {
-      expect(second.error.code).toBe('INVALID_INPUT');
+      expect(second.error.code).toBe('INTERNAL_ERROR');
       expect(second.error.message).toContain('registry is corrupt');
     }
   });

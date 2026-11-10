@@ -324,10 +324,11 @@ review-ready: yes
 ```
 
 It prints `capsule: missing` when the head was never frozen, lists every blocker
-that keeps the verdict at `no`, and exits `1` in that case. It reads the same
-capsule, skill identity, diff fingerprint and receipt the merge guard reads, so
+that keeps the verdict at `no`, and exits `1` in that case. It evaluates the same
+skill identity, diff fingerprint and review receipt the merge guard evaluates, so
 `review-ready: yes` is the gate's own verdict rather than a summary of the files
-on disk.
+on disk. The capsule line only reports which frozen capsule exists for that head;
+the merge guard itself never reads it.
 
 ### Capsule
 

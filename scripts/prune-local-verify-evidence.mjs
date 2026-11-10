@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 /* global process, console */
+import { execFile } from 'node:child_process';
 import { lstat, readdir, readFile, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Verification receipts are evidence: `merge:pr` looks one up by exact head, and
@@ -12,26 +16,30 @@ import { fileURLToPath } from 'node:url';
  *
  * This script is the opt-in answer. It never runs from `verify:local`, it is a
  * dry run unless `--apply` is passed, and it deletes only receipts whose head is
- * neither the current HEAD nor named by a merge record or `latest.json` and that
- * are not among the newest `--keep` runs. `latest.json`, `merges/` and the review
- * capsules are never touched. An unreadable merge record, receipt or latest
- * pointer makes it refuse instead of guessing, because the keep-set is the only
- * thing that makes the deletion safe.
+ * neither the current HEAD, a branch or tag tip, nor named by a merge record or
+ * `latest.json`, and that are not among the newest `--keep` runs. Keeping branch
+ * tips is what protects an unmerged but already verified PR: its receipt is the
+ * one `merge:pr` will look up when the merge finally happens. `latest.json`,
+ * `merges/` and the review capsules are never touched. An unreadable merge
+ * record, receipt or latest pointer makes it refuse instead of guessing, because
+ * the keep-set is the only thing that makes the deletion safe.
  */
 
 const RECEIPT_PATTERN = /^(?<head>[0-9a-f]{12})-(?<verificationId>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
+const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /**
  * Splits receipts into what may stay and what is superseded. A receipt is kept
- * when its head is the current HEAD, when a merge record spent it, when
- * `latest.json` points at it, or when it is one of the newest `keepRecent` runs.
- * `keepRecent` is a floor, not a target: a protected receipt is kept even when
- * it is older than the newest runs.
+ * when its head is the current HEAD, when the head is still a branch or tag tip,
+ * when a merge record spent it, when `latest.json` points at it, or when it is
+ * one of the newest `keepRecent` runs. `keepRecent` is a floor, not a target: a
+ * protected receipt is kept even when it is older than the newest runs.
  */
 export function planEvidencePrune({
   receipts,
   mergeVerificationIds,
   latestVerificationId,
+  protectedHeadShas,
   currentHeadSha,
   keepRecent = 5,
 }) {
@@ -42,6 +50,7 @@ export function planEvidencePrune({
   for (const receipt of receipts) {
     let reason;
     if (receipt.headSha === currentHeadSha) reason = 'current-head';
+    else if (protectedHeadShas?.has(receipt.headSha)) reason = 'branch-tip';
     else if (mergeVerificationIds.has(receipt.verificationId)) reason = 'merge-record';
     else if (receipt.verificationId === latestVerificationId) reason = 'latest';
     else if (recent.has(receipt.fileName)) reason = 'recent';
@@ -99,13 +108,29 @@ async function removeLogDirectory(logRoot, verificationId) {
   if (stats.isDirectory()) await rm(target, { recursive: true, force: true });
 }
 
+export async function resolveProtectedHeads(root) {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['-C', root, 'for-each-ref', '--format=%(objectname)'],
+    { maxBuffer: 8 * 1024 * 1024 },
+  );
+  return new Set(stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0));
+}
+
 /**
  * Plans and, unless `dryRun`, deletes superseded receipts and their log
  * directories under `<root>/.unified-mpc/local-verify`.
  */
-export async function pruneLocalVerifyEvidence({ root, headSha, keepRecent = 5, dryRun = false }) {
+export async function pruneLocalVerifyEvidence({
+  root,
+  headSha,
+  protectedHeadShas = [],
+  keepRecent = 5,
+  dryRun = false,
+}) {
   const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
   const logRoot = path.join(receiptRoot, 'logs');
+  const protectedHeads = protectedHeadShas instanceof Set ? protectedHeadShas : new Set(protectedHeadShas);
   const entries = await listDirectory(receiptRoot);
   if (entries === undefined) return { status: 'missing', keep: [], remove: [], dryRun };
 
@@ -158,6 +183,7 @@ export async function pruneLocalVerifyEvidence({ root, headSha, keepRecent = 5, 
     receipts,
     mergeVerificationIds,
     latestVerificationId,
+    protectedHeadShas: protectedHeads,
     currentHeadSha: headSha,
     keepRecent,
   });
@@ -171,7 +197,7 @@ export async function pruneLocalVerifyEvidence({ root, headSha, keepRecent = 5, 
 }
 
 function parseArguments(argv) {
-  const options = { root: process.cwd(), keepRecent: 5, dryRun: true };
+  const options = { root: process.cwd(), keepRecent: 5, dryRun: true, protect: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--apply') options.dryRun = false;
@@ -181,6 +207,12 @@ function parseArguments(argv) {
       if (value === undefined) throw new Error('--keep requires a count');
       options.keepRecent = Number(value);
       if (!Number.isInteger(options.keepRecent) || options.keepRecent < 0) throw new Error('--keep requires a non-negative integer');
+      index += 1;
+    } else if (argument === '--protect') {
+      const value = argv[index + 1];
+      if (value === undefined) throw new Error('--protect requires a full commit SHA');
+      if (!FULL_SHA_PATTERN.test(value)) throw new Error('--protect requires a full 40-character commit SHA');
+      options.protect.push(value);
       index += 1;
     } else if (argument === '--root') {
       const value = argv[index + 1];
@@ -198,7 +230,12 @@ async function main() {
   if (typeof headSha !== 'string' || headSha.length === 0) {
     throw new Error('set GIT_HEAD_SHA to the current commit (for example: GIT_HEAD_SHA=$(git rev-parse HEAD))');
   }
-  const result = await pruneLocalVerifyEvidence({ ...options, headSha });
+  if (!FULL_SHA_PATTERN.test(headSha)) {
+    throw new Error('GIT_HEAD_SHA must be the full 40-character commit SHA');
+  }
+  const protectedHeadShas = await resolveProtectedHeads(options.root);
+  for (const sha of options.protect) protectedHeadShas.add(sha);
+  const result = await pruneLocalVerifyEvidence({ ...options, headSha, protectedHeadShas });
   if (result.status === 'refused') {
     console.error(`evidence prune refused: ${result.reason}`);
     return 1;

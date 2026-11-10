@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import {
   planEvidencePrune,
   pruneLocalVerifyEvidence,
+  resolveProtectedHeads,
 } from './prune-local-verify-evidence.mjs';
+
+const execFileAsync = promisify(execFile);
 
 const UUID_1 = '11111111-1111-4111-8111-111111111111';
 const UUID_2 = '22222222-2222-4222-8222-222222222222';
@@ -221,6 +226,72 @@ test('prunes receipts whose log directory was never written', async () => {
     assert.equal(result.status, 'pruned');
     assert.deepEqual(result.remove.map((entry) => entry.verificationId), [UUID_1]);
     assert.deepEqual((await readdir(receiptRoot)).sort(), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps a receipt whose head is still a branch tip', () => {
+  const plan = planEvidencePrune({
+    receipts: [
+      receipt(`aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', UUID_1, '2026-01-01T00:00:00.000Z'),
+      receipt(`bbbbbbbbbbbb-${UUID_2}.json`, 'bbbbbbbbbbbb', UUID_2, '2026-02-01T00:00:00.000Z'),
+    ],
+    mergeVerificationIds: new Set(),
+    protectedHeadShas: new Set(['aaaaaaaaaaaa']),
+    currentHeadSha: 'bbbbbbbbbbbb',
+    keepRecent: 0,
+  });
+
+  assert.deepEqual(plan.keep.map((entry) => entry.reason), ['branch-tip', 'current-head']);
+  assert.deepEqual(plan.remove, []);
+});
+
+test('applying keeps a verified head that is still a branch tip', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-branch-tip-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await writeReceipt(receiptRoot, `bbbbbbbbbbbb-${UUID_2}.json`, 'bbbbbbbbbbbb', '2026-02-01T00:00:00.000Z');
+
+    const result = await pruneLocalVerifyEvidence({
+      root,
+      headSha: 'cccccccccccc',
+      protectedHeadShas: new Set(['aaaaaaaaaaaa']),
+      keepRecent: 0,
+      dryRun: false,
+    });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.keep.map((entry) => entry.fileName), [`aaaaaaaaaaaa-${UUID_1}.json`]);
+    assert.deepEqual(result.remove.map((entry) => entry.fileName), [`bbbbbbbbbbbb-${UUID_2}.json`]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('resolveProtectedHeads returns every branch and tag tip', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-refs-'));
+  try {
+    const git = (...args) => execFileAsync('git', ['-C', root, ...args]);
+    const identity = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false'];
+    await git('init', '-q', '-b', 'main');
+    await writeFile(path.join(root, 'a.txt'), 'a\n', 'utf8');
+    await git('add', 'a.txt');
+    await git(...identity, 'commit', '-q', '-m', 'one');
+    const first = (await git('rev-parse', 'HEAD')).stdout.trim();
+    await git('tag', 'v1');
+    await git('checkout', '-q', '-b', 'feature');
+    await writeFile(path.join(root, 'b.txt'), 'b\n', 'utf8');
+    await git('add', 'b.txt');
+    await git(...identity, 'commit', '-q', '-m', 'two');
+    const second = (await git('rev-parse', 'HEAD')).stdout.trim();
+    await git('checkout', '-q', 'main');
+
+    const heads = await resolveProtectedHeads(root);
+
+    assert.equal(heads.has(first), true);
+    assert.equal(heads.has(second), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

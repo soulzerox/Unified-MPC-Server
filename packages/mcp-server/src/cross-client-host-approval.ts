@@ -113,6 +113,8 @@ export function startCrossClientHostApprovalWorker(
   let closed = false;
   let scanning = false;
   const inFlight = new Set<Promise<void>>();
+  let signalClose: () => void = () => undefined;
+  const closeSignal = new Promise<void>((resolve) => { signalClose = resolve; });
 
   /**
    * Registers broker work so `close()` can wait for it. The `closed` check and
@@ -164,7 +166,18 @@ export function startCrossClientHostApprovalWorker(
         }
         let approved = false;
         try {
-          approved = await options.provider(payload.request);
+          // A close must not wait for a human answering the prompt, so the
+          // provider is abandoned when the worker is asked to stop. The answer
+          // cannot be delivered anymore either: close() already stopped the
+          // worker and the requester will time out on its own.
+          approved = await Promise.race([
+            options.provider(payload.request),
+            closeSignal.then(() => false),
+          ]);
+          if (closed) {
+            await rm(claimedPath, { force: true }).catch(() => undefined);
+            break;
+          }
           if (approved && payload.request.approvalScope !== undefined) {
             await writeRoute(resolved.directory, payload.request.approvalScope.id, workerId, resolved.now());
           }
@@ -194,6 +207,7 @@ export function startCrossClientHostApprovalWorker(
 
   const closeWorker = async (): Promise<void> => {
     closed = true;
+    signalClose();
     clearInterval(scanTimer);
     clearInterval(heartbeatTimer);
     while (inFlight.size > 0) await Promise.allSettled([...inFlight]);

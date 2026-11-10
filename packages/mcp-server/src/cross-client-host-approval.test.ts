@@ -92,18 +92,17 @@ describe('cross-client host approval broker', () => {
     await expect(provider(scopedRequest())).resolves.toBe(false);
   });
 
-  it('drains in-flight broker work before close resolves so nothing is recreated afterwards', async () => {
+  it('closes while a provider prompt is still pending and leaves no broker files behind', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-approval-close-'));
     temporaryRoots.push(directory);
-    let releaseProvider: () => void = () => undefined;
-    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
     let prompts = 0;
+    let releaseProvider: () => void = () => undefined;
+    const providerGate = new Promise<boolean>((resolve) => { releaseProvider = (): void => { resolve(false); }; });
     const worker = startCrossClientHostApprovalWorker({
       directory,
       provider: async (): Promise<boolean> => {
         prompts += 1;
-        await providerGate;
-        return true;
+        return providerGate;
       },
       workerId: 'trusted-stdio-close',
       pollMs: 10,
@@ -111,24 +110,18 @@ describe('cross-client host approval broker', () => {
       workerFreshMs: 100,
     });
     workers.push(worker);
-    const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 5_000, pollMs: 10 });
+    const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 200, pollMs: 10 });
     const request = provider(scopedRequest('scope-close'));
 
     await waitFor(() => prompts === 1);
-    let closedResolved = false;
-    const closing = worker.close().then(() => { closedResolved = true; });
+    // The prompt is still open, so a close that waited for it would hang here.
+    await expect(worker.close()).resolves.toBeUndefined();
+    await expect(request).resolves.toBe(false);
 
-    // Heartbeats keep firing while the scan is parked inside the provider.
-    await delay(60);
-    expect(closedResolved).toBe(false);
-
-    releaseProvider();
-    await closing;
-    await expect(request).resolves.toBe(true);
-
-    // Nothing may be recreated after close resolved, which is what the temporary
-    // root teardown relies on.
+    // Nothing may be recreated after close resolved, which is what both the
+    // temporary-root teardown and the stdio shutdown path rely on.
     await delay(40);
     await expect(readdir(path.join(directory, 'workers'))).resolves.toEqual([]);
+    releaseProvider();
   });
 });

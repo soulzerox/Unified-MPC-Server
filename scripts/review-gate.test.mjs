@@ -23,6 +23,7 @@ import {
   reviewBacklogNeedsAttention,
   reviewFingerprint,
   reviewVerdict,
+  selectVerificationReceipt,
   skillVersionBlocker,
   summarizeReviewBacklog,
   validateFindings,
@@ -676,4 +677,65 @@ test('verificationGateBlockers refuses a receipt whose fingerprint does not matc
   });
 
   assert.deepEqual(blocks, ['verification receipt fingerprint does not match the head']);
+});
+
+function verificationReceipt(overrides = {}) {
+  const headSha = overrides.headSha ?? 'a'.repeat(40);
+  return {
+    verificationId: 'v-merge',
+    profile: 'merge',
+    profileVersion: PROFILE_VERSION,
+    headSha,
+    dirty: false,
+    mergeReady: true,
+    ok: true,
+    diffFingerprint: expectedFingerprint(headSha),
+    completedAt: '2026-10-30T06:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('selectVerificationReceipt keeps an older merge-ready receipt when a weaker run is newer', () => {
+  const headSha = 'a'.repeat(40);
+  const mergeReady = verificationReceipt({ headSha });
+  const laterTargeted = verificationReceipt({
+    headSha,
+    verificationId: 'v-targeted',
+    profile: 'targeted',
+    mergeReady: false,
+    completedAt: '2026-10-30T07:00:00.000Z',
+  });
+
+  const selected = selectVerificationReceipt([mergeReady, laterTargeted], headSha);
+
+  assert.equal(selected.verificationId, 'v-merge');
+  assert.deepEqual(verificationGateBlockers({ verification: selected, headSha }), []);
+});
+
+test('selectVerificationReceipt reports the newest receipt when none qualifies', () => {
+  const headSha = 'a'.repeat(40);
+  const olderTargeted = verificationReceipt({
+    headSha,
+    verificationId: 'v-old-targeted',
+    profile: 'targeted',
+    mergeReady: false,
+    completedAt: '2026-10-30T06:00:00.000Z',
+  });
+  const newestDirty = verificationReceipt({
+    headSha,
+    verificationId: 'v-dirty',
+    dirty: true,
+    mergeReady: false,
+    completedAt: '2026-10-30T08:00:00.000Z',
+  });
+
+  const selected = selectVerificationReceipt([olderTargeted, newestDirty], headSha);
+
+  assert.equal(selected.verificationId, 'v-dirty');
+  assert.match(verificationGateBlockers({ verification: selected, headSha }).join('\n'), /not merge-ready/);
+});
+
+test('selectVerificationReceipt ignores other heads', () => {
+  assert.equal(selectVerificationReceipt([verificationReceipt()], 'b'.repeat(40)), undefined);
+  assert.equal(selectVerificationReceipt([], 'a'.repeat(40)), undefined);
 });

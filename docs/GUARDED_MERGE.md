@@ -267,8 +267,12 @@ store:
 
 1. resolve the open PR and freeze `headRefOid`;
 2. find a verification receipt for that exact SHA with `profile: "merge"`,
-   `dirty: false`, `mergeReady: true`, and a `diffFingerprint` recomputed from
-   the head;
+   `dirty: false`, `mergeReady: true`, a current `profileVersion`, and a
+   `diffFingerprint` recomputed from the head. The head is immutable, so any
+   receipt that satisfies all of this authorizes it: a later weaker run on the
+   same commit (`verify:targeted`, or a run from a dirty tree) cannot revoke an
+   earlier merge-ready receipt. When no receipt qualifies, the newest one is
+   reported so its blockers explain the refusal;
 3. find a review receipt for that exact SHA with `role: "reviewer"`, the
    current bundled skill hash, `verdict: "clean"`, no open blocking finding, and
    a `reviewedFingerprint` recomputed from `gh pr diff`;
@@ -315,7 +319,9 @@ or a fingerprint from another tree). The merge guard requires that receipt
 anyway, so a review that runs first spends a reviewer on a head that cannot land.
 `record` applies the same predicate, because a capsule frozen before this check
 existed is still on disk and still recordable, and `status` reports the same
-blockers, so no two commands give different answers.
+blockers, so no two commands give different answers. Selection prefers the newest
+receipt that satisfies the whole predicate over a newer weaker one on the same
+commit, for the same immutable-head reason as the merge guard.
 
 The receipt name is one per head and `record` creates it with a hard link, so
 two concurrent recorders cannot both write: the filesystem refuses the second

@@ -108,7 +108,7 @@ test('parseRepositoryFromRemote rejects empty and shapeless remotes', () => {
   assert.throws(() => parseRepositoryFromRemote('git@github.com:owner/re po.git'), /cannot parse/);
 });
 
-test('findReceipt returns the latest receipt for the exact head only', () => {
+test('findReceipt returns the receipt that authorizes the exact head', () => {
   const older = { ...RECEIPT, verificationId: 'older', completedAt: '2026-10-30T06:00:00.000Z' };
   const newer = { ...RECEIPT, verificationId: 'newer', completedAt: '2026-10-30T07:00:00.000Z' };
   const otherHead = { ...RECEIPT, verificationId: 'other', headSha: 'b'.repeat(40) };
@@ -116,6 +116,20 @@ test('findReceipt returns the latest receipt for the exact head only', () => {
   assert.equal(findReceipt([older, newer, otherHead], HEAD).verificationId, 'newer');
   assert.equal(findReceipt([otherHead], HEAD), undefined);
   assert.equal(findReceipt([], HEAD), undefined);
+});
+
+test('findReceipt does not let a later targeted run revoke a merge-ready head', () => {
+  const mergeReady = { ...RECEIPT, verificationId: 'merge-ready', completedAt: '2026-10-30T06:00:00.000Z' };
+  const laterTargeted = {
+    ...RECEIPT,
+    verificationId: 'later-targeted',
+    profile: 'targeted',
+    mergeReady: false,
+    completedAt: '2026-10-30T09:00:00.000Z',
+  };
+
+  assert.equal(findReceipt([mergeReady, laterTargeted], HEAD).verificationId, 'merge-ready');
+  assert.equal(evaluate({ receipt: findReceipt([mergeReady, laterTargeted], HEAD) }).eligible, true);
 });
 
 test('a green receipt on the exact head is eligible', () => {

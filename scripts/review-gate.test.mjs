@@ -29,6 +29,7 @@ import {
   verificationGateBlockers,
   writeReviewReceipt,
 } from './review-gate.mjs';
+import { PROFILE_VERSION } from './local-verify.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -578,7 +579,7 @@ test('the backlog gate fails closed on evidence it cannot read or resolve', () =
 test('verificationGateBlockers accepts a merge-ready receipt for the exact head', () => {
   const headSha = 'a'.repeat(40);
   assert.deepEqual(verificationGateBlockers({
-    verification: { headSha, mergeReady: true, dirty: false, profile: 'merge' },
+    verification: { headSha, mergeReady: true, dirty: false, profile: 'merge', profileVersion: PROFILE_VERSION },
     headSha,
   }), []);
 });
@@ -593,7 +594,7 @@ test('verificationGateBlockers refuses a head with no local verification', () =>
 
 test('verificationGateBlockers reports every reason a receipt cannot gate a review', () => {
   const blocks = verificationGateBlockers({
-    verification: { headSha: 'c'.repeat(40), mergeReady: false, dirty: true, profile: 'targeted' },
+    verification: { headSha: 'c'.repeat(40), mergeReady: false, dirty: true, profile: 'targeted', profileVersion: PROFILE_VERSION - 1 },
     headSha: 'd'.repeat(40),
   });
 
@@ -602,5 +603,16 @@ test('verificationGateBlockers reports every reason a receipt cannot gate a revi
     'verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`',
     'verification receipt was produced from a dirty worktree',
     "verification receipt used the 'targeted' profile, not 'merge'",
+    `verification receipt used profile version ${PROFILE_VERSION - 1}, current is ${PROFILE_VERSION}`,
   ]);
+});
+
+test('verificationGateBlockers refuses a receipt from an older profile version', () => {
+  const headSha = 'a'.repeat(40);
+  const blocks = verificationGateBlockers({
+    verification: { headSha, mergeReady: true, dirty: false, profile: 'merge', profileVersion: PROFILE_VERSION - 1 },
+    headSha,
+  });
+
+  assert.deepEqual(blocks, [`verification receipt used profile version ${PROFILE_VERSION - 1}, current is ${PROFILE_VERSION}`]);
 });

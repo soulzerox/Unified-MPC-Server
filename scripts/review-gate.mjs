@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PROFILE_VERSION } from './local-verify.mjs';
 
 /**
  * Exact-head review gate (#144).
@@ -31,6 +32,7 @@ export const SKILL_RELATIVE_PATH = `.agents/skills/${SKILL_ID}/SKILL.md`;
 export const SKILL_PATH = path.join(ROOT, SKILL_RELATIVE_PATH);
 export const WORKFLOW_VERSION = 1;
 export const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
 export const SEVERITIES = ['blocking', 'nonblocking'];
 export const CATEGORIES = [
   'correctness',
@@ -502,6 +504,12 @@ export function verificationGateBlockers({ verification, headSha }) {
   if (verification.mergeReady !== true) blockers.push('verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`');
   if (verification.dirty !== false) blockers.push('verification receipt was produced from a dirty worktree');
   if (verification.profile !== 'merge') blockers.push(`verification receipt used the '${String(verification.profile)}' profile, not 'merge'`);
+  // A bumped PROFILE_VERSION means the step set changed, so an older receipt
+  // vouched for steps this profile no longer runs. The merge guard refuses it,
+  // so a review started on it would only be spent on a head that cannot land.
+  if (verification.profileVersion !== PROFILE_VERSION) {
+    blockers.push(`verification receipt used profile version ${String(verification.profileVersion)}, current is ${PROFILE_VERSION}`);
+  }
   return blockers;
 }
 
@@ -815,10 +823,17 @@ async function recordCommand(options) {
     throw new Error(`no capsule for ${pr.headRefOid.slice(0, 12)}; run \`pnpm review:pr capsule --pr ${options.pr}\` first`);
   }
 
-  const skill = await readSkillIdentity();
-  const diff = await readPullDiff(repository, pr.number);
+  const [skill, diff, verification] = await Promise.all([
+    readSkillIdentity(),
+    readPullDiff(repository, pr.number),
+    findVerificationReceipt(pr.headRefOid),
+  ]);
   const fingerprint = reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff });
-  const blockers = [];
+  // A capsule can outlive the gate that froze it: one written before this check
+  // existed is still on disk and still readable. Recording is the last write
+  // before the merge guard, so the same predicate is applied here instead of
+  // trusting whatever the capsule froze.
+  const blockers = verificationGateBlockers({ verification, headSha: pr.headRefOid });
 
   if (submitted.head_sha !== pr.headRefOid) {
     blockers.push(`findings were written for ${String(submitted.head_sha).slice(0, 12)}, current PR head is ${pr.headRefOid.slice(0, 12)}; run a fresh review`);

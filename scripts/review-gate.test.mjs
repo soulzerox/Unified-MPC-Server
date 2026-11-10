@@ -26,8 +26,10 @@ import {
   skillVersionBlocker,
   summarizeReviewBacklog,
   validateFindings,
+  verificationGateBlockers,
   writeReviewReceipt,
 } from './review-gate.mjs';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -572,4 +574,85 @@ test('the backlog gate fails closed on evidence it cannot read or resolve', () =
   assert.equal(reviewBacklogNeedsAttention(unresolved), true);
   assert.match(formatReviewBacklog(corrupt), /WARN 1 unreadable receipt/);
   assert.match(formatReviewBacklog(unresolved), /WARN 1 receipt\(s\) name a PR that is not in the listing/);
+});
+
+test('verificationGateBlockers accepts a merge-ready receipt for the exact head', () => {
+  const headSha = 'a'.repeat(40);
+  assert.deepEqual(verificationGateBlockers({
+    verification: {
+      headSha,
+      mergeReady: true,
+      dirty: false,
+      profile: 'merge',
+      profileVersion: PROFILE_VERSION,
+      diffFingerprint: expectedFingerprint(headSha),
+    },
+    headSha,
+  }), []);
+});
+
+test('verificationGateBlockers refuses a head with no local verification', () => {
+  const blocks = verificationGateBlockers({ verification: undefined, headSha: 'b'.repeat(40) });
+
+  assert.equal(blocks.length, 1);
+  assert.match(blocks[0], /no local verification receipt for bbbbbbbbbbbb/);
+  assert.match(blocks[0], /verify:local/);
+});
+
+test('verificationGateBlockers reports every reason a receipt cannot gate a review', () => {
+  const receiptHead = 'c'.repeat(40);
+  const blocks = verificationGateBlockers({
+    verification: {
+      headSha: receiptHead,
+      mergeReady: false,
+      dirty: true,
+      profile: 'targeted',
+      profileVersion: PROFILE_VERSION - 1,
+      diffFingerprint: expectedFingerprint(receiptHead),
+    },
+    headSha: 'd'.repeat(40),
+  });
+
+  assert.deepEqual(blocks, [
+    'verification receipt was produced for a different head',
+    'verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`',
+    'verification receipt was produced from a dirty worktree',
+    "verification receipt used the 'targeted' profile, not 'merge'",
+    `verification receipt used profile version ${PROFILE_VERSION - 1}, current is ${PROFILE_VERSION}`,
+    'verification receipt fingerprint does not match the head',
+  ]);
+});
+
+test('verificationGateBlockers refuses a receipt from an older profile version', () => {
+  const headSha = 'a'.repeat(40);
+  const blocks = verificationGateBlockers({
+    verification: {
+      headSha,
+      mergeReady: true,
+      dirty: false,
+      profile: 'merge',
+      profileVersion: PROFILE_VERSION - 1,
+      diffFingerprint: expectedFingerprint(headSha),
+    },
+    headSha,
+  });
+
+  assert.deepEqual(blocks, [`verification receipt used profile version ${PROFILE_VERSION - 1}, current is ${PROFILE_VERSION}`]);
+});
+
+test('verificationGateBlockers refuses a receipt whose fingerprint does not match the head', () => {
+  const headSha = 'a'.repeat(40);
+  const blocks = verificationGateBlockers({
+    verification: {
+      headSha,
+      mergeReady: true,
+      dirty: false,
+      profile: 'merge',
+      profileVersion: PROFILE_VERSION,
+      diffFingerprint: expectedFingerprint('b'.repeat(40)),
+    },
+    headSha,
+  });
+
+  assert.deepEqual(blocks, ['verification receipt fingerprint does not match the head']);
 });

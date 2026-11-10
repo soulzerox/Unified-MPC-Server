@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 
 /**
  * Exact-head review gate (#144).
@@ -31,6 +32,7 @@ export const SKILL_RELATIVE_PATH = `.agents/skills/${SKILL_ID}/SKILL.md`;
 export const SKILL_PATH = path.join(ROOT, SKILL_RELATIVE_PATH);
 export const WORKFLOW_VERSION = 1;
 export const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
 export const SEVERITIES = ['blocking', 'nonblocking'];
 export const CATEGORIES = [
   'correctness',
@@ -476,16 +478,45 @@ export async function readReviewReceipts() {
   return readJsonDirectory(RECEIPT_ROOT);
 }
 
-async function findMergeVerificationReceipt(headSha) {
+async function findVerificationReceipt(headSha) {
   const { records: receipts } = await readJsonDirectory(VERIFICATION_ROOT);
-  const matches = receipts.filter((receipt) => receipt?.headSha === headSha
-    && receipt?.profile === 'merge'
-    && receipt?.dirty === false
-    && receipt?.mergeReady === true);
+  const matches = receipts.filter((receipt) => receipt?.headSha === headSha);
   if (matches.length === 0) return undefined;
   return matches.reduce((latest, receipt) => (
     String(receipt.completedAt ?? '') >= String(latest.completedAt ?? '') ? receipt : latest
   ));
+}
+
+/**
+ * #142 `before_review` gate: a review is only worth starting once local
+ * verification has produced a merge-ready receipt for the exact head. The merge
+ * guard enforces that before integration, so a review that runs first spends a
+ * reviewer on a head that cannot land, and the capsule ends up documenting a
+ * verification that never happened. The blockers are reported instead of the
+ * first one so one run tells an operator everything the head is missing.
+ */
+export function verificationGateBlockers({ verification, headSha }) {
+  if (verification === undefined) {
+    return [`no local verification receipt for ${headSha.slice(0, 12)}; run \`corepack pnpm@10.15.0 verify:local\` on that commit before freezing a capsule`];
+  }
+  const blockers = [];
+  if (verification.headSha !== headSha) blockers.push('verification receipt was produced for a different head');
+  if (verification.mergeReady !== true) blockers.push('verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`');
+  if (verification.dirty !== false) blockers.push('verification receipt was produced from a dirty worktree');
+  if (verification.profile !== 'merge') blockers.push(`verification receipt used the '${String(verification.profile)}' profile, not 'merge'`);
+  // A bumped PROFILE_VERSION means the step set changed, so an older receipt
+  // vouched for steps this profile no longer runs. The merge guard refuses it,
+  // so a review started on it would only be spent on a head that cannot land.
+  if (verification.profileVersion !== PROFILE_VERSION) {
+    blockers.push(`verification receipt used profile version ${String(verification.profileVersion)}, current is ${PROFILE_VERSION}`);
+  }
+  // The fingerprint binds the receipt to one head on a clean tree. A receipt
+  // that failed this check cannot authorize a merge, so it cannot authorize a
+  // review either.
+  if (verification.diffFingerprint !== expectedFingerprint(headSha)) {
+    blockers.push('verification receipt fingerprint does not match the head');
+  }
+  return blockers;
 }
 
 function capsuleDirectory(headSha, prNumber) {
@@ -726,8 +757,13 @@ async function capsuleCommand(options) {
     readPullDiff(repository, options.pr),
     readPullFiles(repository, options.pr),
     readSkillIdentity(),
-    findMergeVerificationReceipt(pr.headRefOid),
+    findVerificationReceipt(pr.headRefOid),
   ]);
+
+  const verificationBlockers = verificationGateBlockers({ verification, headSha: pr.headRefOid });
+  if (verificationBlockers.length > 0) {
+    throw new Error(`cannot freeze a capsule for this head:\n  - ${verificationBlockers.join('\n  - ')}`);
+  }
 
   const capsule = {
     capsuleId: randomUUID(),
@@ -793,10 +829,17 @@ async function recordCommand(options) {
     throw new Error(`no capsule for ${pr.headRefOid.slice(0, 12)}; run \`pnpm review:pr capsule --pr ${options.pr}\` first`);
   }
 
-  const skill = await readSkillIdentity();
-  const diff = await readPullDiff(repository, pr.number);
+  const [skill, diff, verification] = await Promise.all([
+    readSkillIdentity(),
+    readPullDiff(repository, pr.number),
+    findVerificationReceipt(pr.headRefOid),
+  ]);
   const fingerprint = reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff });
-  const blockers = [];
+  // A capsule can outlive the gate that froze it: one written before this check
+  // existed is still on disk and still readable. Recording is the last write
+  // before the merge guard, so the same predicate is applied here instead of
+  // trusting whatever the capsule froze.
+  const blockers = verificationGateBlockers({ verification, headSha: pr.headRefOid });
 
   if (submitted.head_sha !== pr.headRefOid) {
     blockers.push(`findings were written for ${String(submitted.head_sha).slice(0, 12)}, current PR head is ${pr.headRefOid.slice(0, 12)}; run a fresh review`);
@@ -893,10 +936,11 @@ async function recordCommand(options) {
 async function statusCommand(options) {
   const repository = await resolveRepository(options.repo);
   const pr = await readPullRequest(repository, options.pr);
-  const [capsule, skill, diff] = await Promise.all([
+  const [capsule, skill, diff, verification] = await Promise.all([
     readCapsule(pr.headRefOid, pr.number),
     readSkillIdentity(),
     readPullDiff(repository, pr.number),
+    findVerificationReceipt(pr.headRefOid),
   ]);
   const store = await readReviewReceipts();
   const receipt = findReviewReceipt(store.records, pr.headRefOid);
@@ -909,16 +953,23 @@ async function statusCommand(options) {
     skill,
     fingerprint,
   });
+  // The capsule gate and this report must agree, so a head that cannot be
+  // reviewed yet reports review-ready: no instead of a green light.
+  const blockers = [
+    ...verificationGateBlockers({ verification, headSha: pr.headRefOid }),
+    ...evaluation.blockers,
+  ];
 
   console.log(`review-gate ${repository}#${options.pr} head ${pr.headRefOid.slice(0, 12)} base ${String(pr.baseRefOid).slice(0, 12)}`);
   console.log(`  capsule: ${capsule === undefined ? 'missing' : capsule.capsuleId}`);
   console.log(`  skill: ${skill.skillId} v${skill.skillVersion} ${skill.skillSha256.slice(0, 20)}…`);
+  console.log(`  verification: ${verification === undefined ? 'none for this head' : `${String(verification.verificationId)} mergeReady=${String(verification.mergeReady)}`}`);
   if (receipt !== undefined) {
     console.log(`  receipt: ${receipt.reviewId} verdict=${receipt.verdict} blockingOpen=${receipt.blockingOpenCount}`);
   }
-  console.log(evaluation.eligible ? 'review-ready: yes' : 'review-ready: no');
-  for (const blocker of evaluation.blockers) console.log(`  - ${blocker}`);
-  return evaluation.eligible ? 0 : 1;
+  console.log(blockers.length === 0 ? 'review-ready: yes' : 'review-ready: no');
+  for (const blocker of blockers) console.log(`  - ${blocker}`);
+  return blockers.length === 0 ? 0 : 1;
 }
 
 async function backlogCommand(options) {

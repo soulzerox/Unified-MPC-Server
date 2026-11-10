@@ -309,6 +309,27 @@ The receipt name is one per head and `record` creates it with a hard link, so
 two concurrent recorders cannot both write: the filesystem refuses the second
 create and that recorder gets the uniqueness refusal instead of a second receipt.
 
+### Status
+
+`status` answers what the guard would decide right now for one pull request,
+without writing anything:
+
+```sh
+$ corepack pnpm@10.15.0 review:pr status --pr 534
+review-gate owner/repo#534 head 1a2b3c4d5e6f base 7f8e9d0c1b2a
+  capsule: 5d2e1f0a-9b8c-4d3e-8f7a-6b5c4d3e2f10
+  skill: unified-code-review v1 sha256:e48ff9b24971a…
+  receipt: 9c8b7a65-4d3e-2f1a-0b9c-8d7e6f5a4b3c verdict=clean blockingOpen=0
+review-ready: yes
+```
+
+It prints `capsule: missing` when the head was never frozen, lists every blocker
+that keeps the verdict at `no`, and exits `1` in that case. It evaluates the same
+skill identity, diff fingerprint and review receipt the merge guard evaluates, so
+`review-ready: yes` is the gate's own verdict rather than a summary of the files
+on disk. The capsule line only reports which frozen capsule exists for that head;
+the merge guard itself never reads it.
+
 ### Capsule
 
 `capsule.json` holds the full head SHA, base SHA, PR title/body, issue refs,
@@ -339,6 +360,7 @@ finding blocks while `status === "open"` and `required_fix === true`.
 | `SKILL.md` edited | `skillSha256` mismatch |
 | Tree dirty or HEAD moved at freeze/record time | refused |
 | Second receipt for the same head | refused; review evidence is unique per head |
+| New capsule for a head that already has a receipt | refused with `a new capsule needs a new head`; the capsule is what that receipt stands on, so replacing it would orphan the reviewed evidence |
 
 A fix therefore starts a new review generation. The previous receipt stays on
 disk as history; it is never edited.
@@ -372,6 +394,46 @@ yet is an empty backlog, but one this run cannot read exits `1` instead of
 printing `receipts 0` and "nothing blocks". An unreadable receipt is counted as
 `corrupt` rather than skipped, and a receipt written before receipts recorded
 `repository` still counts instead of vanishing.
+
+### Retention
+
+Both stores are audit evidence, and neither `verify:local` nor `review:pr` ever
+collects them: a long-lived checkout grows by roughly a megabyte per verification
+run plus a capsule per review, forever. `pnpm evidence:prune` is the opt-in
+cleanup.
+
+```sh
+GIT_HEAD_SHA=$(git rev-parse HEAD) corepack pnpm@10.15.0 evidence:prune            # dry run
+GIT_HEAD_SHA=$(git rev-parse HEAD) corepack pnpm@10.15.0 evidence:prune --apply    # delete
+```
+
+It is a dry run unless `--apply` is passed, and it requires `GIT_HEAD_SHA`
+because keeping the current head's evidence is the whole point.
+
+Kept, in both stores:
+
+- the current HEAD and every head still named by a branch, tag or worktree tip —
+  that is what protects an unmerged but already verified pull request, whose
+  receipt is the one `merge:pr` will look up;
+- every receipt and review a merge record spent;
+- the receipt `latest.json` names;
+- the newest `--keep` runs of each kind (default 5);
+- any head passed with `--protect <sha>`.
+
+Removed: every other verification receipt with its log directory, every other
+capsule with its receipt, and log directories that no receipt references at all.
+A verification that was killed leaves one of those, and it is collected only when
+it carries no fresh `active.json` heartbeat (`local-verify` refreshes that file
+every 15 seconds and records its pid, and that pid is gone), is older than every
+run the plan keeps, and no merge record or `latest.json` names it.
+
+Both stores are planned before either one is touched, so a refusal leaves both
+intact. `latest.json` and `merges/` are never deleted, a deletion root that is
+replaced, created or removed between planning and deleting is refused, the
+evidence roots and their `merges/`, `logs/`, `capsules/` and `receipts/`
+subdirectories must be real directories, and deletion never follows a symlink. It
+refuses rather than guessing when a branch ref, merge record, receipt, capsule or
+latest pointer cannot be read.
 
 ### What this does not prove
 

@@ -134,6 +134,58 @@ describe('formatSkillInventoryAudit', () => {
     expect(lines).toContain('use --json for the full inventory, including identical and unique names');
   });
 
+  it('lists a canonical-absent name so the operator can import it', () => {
+    const report: SkillInventoryAuditReport = {
+      ...emptyReport({ declaredNames: 2, uniqueNames: 1, identicalNames: 1, canonicalAbsentNames: 1, canonicalMatchNames: 1 }),
+      names: [
+        {
+          name: 'clean-match',
+          canonicalId: 'skill:clean-match',
+          classification: 'identical',
+          canonicalState: 'matches',
+          variantFingerprints: ['cccccccccccccccc'],
+          canonicalFingerprints: ['cccccccccccccccc'],
+          entries: [
+            {
+              source: 'claude-skills',
+              rootPath: '/home/user/.claude/skills',
+              skillPath: '/home/user/.claude/skills/clean-match/SKILL.md',
+              isCanonical: false,
+              fingerprint: 'cccccccccccccccc',
+            },
+            {
+              source: 'unified-mpc-skills',
+              rootPath: '/data/extensions/skills',
+              skillPath: '/data/extensions/skills/clean-match/SKILL.md',
+              isCanonical: true,
+              fingerprint: 'cccccccccccccccc',
+            },
+          ],
+        },
+        {
+          name: 'legacy-only',
+          canonicalId: 'skill:legacy-only',
+          classification: 'unique',
+          canonicalState: 'absent',
+          variantFingerprints: ['dddddddddddddddd'],
+          canonicalFingerprints: [],
+          entries: [{
+            source: 'claude-skills',
+            rootPath: '/home/user/.claude/skills',
+            skillPath: '/home/user/.claude/skills/legacy-only/SKILL.md',
+            isCanonical: false,
+            fingerprint: 'dddddddddddddddd',
+          }],
+        },
+      ],
+    };
+    const lines = formatSkillInventoryAudit(report);
+    expect(lines).toContain('names needing a decision (1):');
+    expect(lines).toContain('  legacy-only  [unique] canonical absent  variants 1');
+    expect(lines).toMatch(/dddddddddddd\s+claude-skills\s+\/home\/user\/\.claude\/skills\/legacy-only\/SKILL\.md/);
+    expect(lines).not.toContain('clean-match');
+  });
+
   it('reports copies the audit could not fingerprint', () => {
     const report: SkillInventoryAuditReport = {
       ...emptyReport({ unverifiedNames: 1 }),

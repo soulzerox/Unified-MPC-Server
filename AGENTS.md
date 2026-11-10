@@ -51,8 +51,10 @@ the receipt `latest.json` names, and the newest `--keep` runs (default 5) of eac
 kind. A verification that is killed leaves a `logs/<id>` directory no receipt
 references, so those are collected too, but only when the directory carries no
 fresh `active.json` heartbeat (the running `local-verify` refreshes it every
-15 seconds) and is older than every run the plan keeps: that is what proves it
-is not still being written, and with no kept run nothing is collected. Both
+15 seconds, and its recorded pid is gone), is older than every run the plan
+keeps, and its id is not named by a merge record or `latest.json`: together
+that proves it is not still being written, and with no kept run nothing is
+collected. Both
 stores are planned
 before either one is touched, so a refusal leaves
 both intact, and a deletion root that is replaced, created or removed between

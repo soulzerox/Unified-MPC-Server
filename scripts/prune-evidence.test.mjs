@@ -1,6 +1,6 @@
 /* global process */
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -298,15 +298,16 @@ test('keeps an orphan log with a fresh heartbeat even when the directory is old'
   }
 });
 
-test('collects an orphan log whose heartbeat stopped', async () => {
+test('collects an orphan log whose heartbeat stopped and whose process is gone', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-stopped-'));
   try {
     const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
     await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
     const orphan = path.join(receiptRoot, 'logs', UUID_2);
     await mkdir(orphan, { recursive: true });
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
     const marker = path.join(orphan, 'active.json');
-    await writeFile(marker, '{"pid":1}\n', 'utf8');
+    await writeFile(marker, `${JSON.stringify({ pid: dead })}\n`, 'utf8');
     await utimes(marker, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
     await utimes(orphan, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
 
@@ -315,6 +316,50 @@ test('collects an orphan log whose heartbeat stopped', async () => {
     assert.equal(result.status, 'pruned');
     assert.deepEqual(result.remove, [{ kind: 'log', verificationId: UUID_2, reason: 'orphan-log' }]);
     assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps a stale heartbeat whose recorded process is still alive', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-live-pid-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const orphan = path.join(receiptRoot, 'logs', UUID_2);
+    await mkdir(orphan, { recursive: true });
+    const marker = path.join(orphan, 'active.json');
+    await writeFile(marker, `${JSON.stringify({ pid: 1 })}\n`, 'utf8');
+    await utimes(marker, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+    await utimes(orphan, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 5, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove, []);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), [UUID_2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps a stale heartbeat it cannot read', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-unreadable-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const orphan = path.join(receiptRoot, 'logs', UUID_2);
+    await mkdir(orphan, { recursive: true });
+    const marker = path.join(orphan, 'active.json');
+    await writeFile(marker, '', 'utf8');
+    await utimes(marker, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+    await utimes(orphan, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 5, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove, []);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), [UUID_2]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

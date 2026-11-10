@@ -376,8 +376,10 @@ export async function planLocalVerifyEvidence({
  * no receipt. The log directory's own mtime does not advance while a step runs
  * (step logs are written when the step ends), so it is not proof on its own:
  * `local-verify` keeps `active.json` fresh inside the directory for as long as
- * the process lives, and a fresh marker always keeps the directory. Beyond that
- * marker, the newest `keepRecent` receipts are the most recent runs that did
+ * the process lives, and a fresh marker always keeps the directory. A stale
+ * marker is decided by the pid it records, not by its age alone, because a
+ * heartbeat write can fail while its run continues. Beyond that marker, the
+ * newest `keepRecent` receipts are the most recent runs that did
  * finish, so a directory older than all of them cannot belong to a run that is
  * still writing. With no kept run there is no such proof and nothing is
  * collected. A log whose id a merge record or `latest.json` still names is kept
@@ -413,10 +415,33 @@ async function planOrphanLogs({
       // guess and keep the directory.
       if (!marker.isFile()) continue;
       if (Date.now() - marker.mtimeMs <= ACTIVE_MARKER_GRACE_MS) continue;
+      // A heartbeat can stop advancing while its run lives (a failed write, a
+      // paused process), so a stale mtime alone does not prove the run is gone.
+      // The recorded pid decides, and anything this tool cannot read or probe
+      // keeps the directory.
+      const beat = await readJson(path.join(directory, ACTIVE_MARKER));
+      if (!beat.ok) continue;
+      const pid = beat.value?.pid;
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      if (processIsAlive(pid)) continue;
     }
     orphans.push({ kind: 'log', verificationId: entry.name, reason: 'orphan-log' });
   }
   return orphans;
+}
+
+/**
+ * `kill(pid, 0)` probes without signalling. Only `ESRCH` proves the process is
+ * gone; a permission error means it exists but belongs to another user, and
+ * keeping the directory is the safe answer.
+ */
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
 }
 
 /**

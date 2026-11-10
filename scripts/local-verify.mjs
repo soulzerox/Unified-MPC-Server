@@ -321,7 +321,11 @@ async function startHeartbeat(logDirectory, { verificationId, startedAt }) {
   };
   await beat();
   const timer = setInterval(() => {
-    beat().catch(() => {});
+    beat().catch((error) => {
+      // The pruner probes the pid recorded in the marker, so a failed beat is no
+      // longer proof that the run is gone; say so instead of hiding it.
+      process.stderr.write(`verification heartbeat failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
   }, HEARTBEAT_INTERVAL_MS);
   timer.unref();
   return async () => {

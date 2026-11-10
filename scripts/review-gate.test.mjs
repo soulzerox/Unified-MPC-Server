@@ -29,7 +29,7 @@ import {
   verificationGateBlockers,
   writeReviewReceipt,
 } from './review-gate.mjs';
-import { PROFILE_VERSION } from './local-verify.mjs';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -579,7 +579,14 @@ test('the backlog gate fails closed on evidence it cannot read or resolve', () =
 test('verificationGateBlockers accepts a merge-ready receipt for the exact head', () => {
   const headSha = 'a'.repeat(40);
   assert.deepEqual(verificationGateBlockers({
-    verification: { headSha, mergeReady: true, dirty: false, profile: 'merge', profileVersion: PROFILE_VERSION },
+    verification: {
+      headSha,
+      mergeReady: true,
+      dirty: false,
+      profile: 'merge',
+      profileVersion: PROFILE_VERSION,
+      diffFingerprint: expectedFingerprint(headSha),
+    },
     headSha,
   }), []);
 });
@@ -593,8 +600,16 @@ test('verificationGateBlockers refuses a head with no local verification', () =>
 });
 
 test('verificationGateBlockers reports every reason a receipt cannot gate a review', () => {
+  const receiptHead = 'c'.repeat(40);
   const blocks = verificationGateBlockers({
-    verification: { headSha: 'c'.repeat(40), mergeReady: false, dirty: true, profile: 'targeted', profileVersion: PROFILE_VERSION - 1 },
+    verification: {
+      headSha: receiptHead,
+      mergeReady: false,
+      dirty: true,
+      profile: 'targeted',
+      profileVersion: PROFILE_VERSION - 1,
+      diffFingerprint: expectedFingerprint(receiptHead),
+    },
     headSha: 'd'.repeat(40),
   });
 
@@ -604,15 +619,40 @@ test('verificationGateBlockers reports every reason a receipt cannot gate a revi
     'verification receipt was produced from a dirty worktree',
     "verification receipt used the 'targeted' profile, not 'merge'",
     `verification receipt used profile version ${PROFILE_VERSION - 1}, current is ${PROFILE_VERSION}`,
+    'verification receipt fingerprint does not match the head',
   ]);
 });
 
 test('verificationGateBlockers refuses a receipt from an older profile version', () => {
   const headSha = 'a'.repeat(40);
   const blocks = verificationGateBlockers({
-    verification: { headSha, mergeReady: true, dirty: false, profile: 'merge', profileVersion: PROFILE_VERSION - 1 },
+    verification: {
+      headSha,
+      mergeReady: true,
+      dirty: false,
+      profile: 'merge',
+      profileVersion: PROFILE_VERSION - 1,
+      diffFingerprint: expectedFingerprint(headSha),
+    },
     headSha,
   });
 
   assert.deepEqual(blocks, [`verification receipt used profile version ${PROFILE_VERSION - 1}, current is ${PROFILE_VERSION}`]);
+});
+
+test('verificationGateBlockers refuses a receipt whose fingerprint does not match the head', () => {
+  const headSha = 'a'.repeat(40);
+  const blocks = verificationGateBlockers({
+    verification: {
+      headSha,
+      mergeReady: true,
+      dirty: false,
+      profile: 'merge',
+      profileVersion: PROFILE_VERSION,
+      diffFingerprint: expectedFingerprint('b'.repeat(40)),
+    },
+    headSha,
+  });
+
+  assert.deepEqual(blocks, ['verification receipt fingerprint does not match the head']);
 });

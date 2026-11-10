@@ -235,6 +235,15 @@ export function diffFingerprint({ headSha, status, diff }) {
   return `sha256:${createHash('sha256').update(headSha).update('\n').update(status).update('\n').update(diff).digest('hex')}`;
 }
 
+/**
+ * The fingerprint a merge-ready receipt must carry: the head alone, on a clean
+ * tree with no local delta. Both guards compare against this, so a receipt whose
+ * fingerprint was produced any other way fails the same way in both.
+ */
+export function expectedFingerprint(headSha) {
+  return diffFingerprint({ headSha, status: '', diff: '' });
+}
+
 /** Keep the tail: test failures and stack traces are at the end of a log. */
 export function truncateLog(text, limit = MAX_LOG_CHARS) {
   if (text.length <= limit) return { text, truncated: false };

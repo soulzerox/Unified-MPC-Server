@@ -310,12 +310,12 @@ record --findings  validate identity, skill hash, file anchors, severities,
 
 `capsule` refuses a head with no merge-ready verification receipt, and reports
 every reason the receipt it found cannot gate a review (another head, not
-merge-ready, produced from a dirty tree, wrong profile or an older profile
-version). The merge guard requires that receipt anyway, so a review that runs
-first spends a reviewer on a head that cannot land. `record` applies the same
-predicate, because a capsule frozen before this check existed is still on disk
-and still recordable, and `status` reports the same blockers, so no two commands
-give different answers.
+merge-ready, produced from a dirty tree, wrong profile, an older profile version,
+or a fingerprint from another tree). The merge guard requires that receipt
+anyway, so a review that runs first spends a reviewer on a head that cannot land.
+`record` applies the same predicate, because a capsule frozen before this check
+existed is still on disk and still recordable, and `status` reports the same
+blockers, so no two commands give different answers.
 
 The receipt name is one per head and `record` creates it with a hard link, so
 two concurrent recorders cannot both write: the filesystem refuses the second

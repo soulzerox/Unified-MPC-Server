@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROFILE_VERSION } from './local-verify.mjs';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 
 /**
  * Exact-head review gate (#144).
@@ -509,6 +509,12 @@ export function verificationGateBlockers({ verification, headSha }) {
   // so a review started on it would only be spent on a head that cannot land.
   if (verification.profileVersion !== PROFILE_VERSION) {
     blockers.push(`verification receipt used profile version ${String(verification.profileVersion)}, current is ${PROFILE_VERSION}`);
+  }
+  // The fingerprint binds the receipt to one head on a clean tree. A receipt
+  // that failed this check cannot authorize a merge, so it cannot authorize a
+  // review either.
+  if (verification.diffFingerprint !== expectedFingerprint(headSha)) {
+    blockers.push('verification receipt fingerprint does not match the head');
   }
   return blockers;
 }

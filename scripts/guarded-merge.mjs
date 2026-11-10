@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
-import { PROFILE_VERSION, diffFingerprint } from './local-verify.mjs';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint } from './review-gate.mjs';
 
 /**
@@ -98,9 +98,9 @@ export function findReceipt(receipts, headSha) {
   ));
 }
 
-export function expectedFingerprint(headSha) {
-  return diffFingerprint({ headSha, status: '', diff: '' });
-}
+// Defined next to `diffFingerprint` so the review gate can share the same rule
+// without importing this module, which already imports it.
+export { expectedFingerprint };
 
 /**
  * Every blocker is reported, not just the first, so one run tells the operator

@@ -230,6 +230,10 @@ describe('PrunerService - Skill Pruning Pipeline', () => {
     });
 
     expect(result.ok).toBe(false);
+    // A corrupt local registry is server state, not caller input: the endpoint
+    // behind this must answer 5xx, not 400.
+    if (result.ok) throw new Error('expected the malformed registry to fail the prune');
+    expect(result.error.code).toBe('INTERNAL_ERROR');
     await expect(stat(parentSkill)).resolves.toBeDefined();
     expect(await readFile(registryFile, 'utf8')).toContain('"generation":"bad"');
   });
@@ -414,6 +418,8 @@ describe('PrunerService - Server Pruning Pipeline', () => {
     });
 
     expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected the malformed registry to fail the server prune');
+    expect(result.error.code).toBe('INTERNAL_ERROR');
     expect(await readFile(configFile, 'utf8')).toBe(originalConfig);
     await expect(stat(managedServerRoot)).resolves.toBeDefined();
     expect(await readFile(registryFile, 'utf8')).toContain('"generation":"bad"');

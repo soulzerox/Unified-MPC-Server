@@ -127,7 +127,12 @@ export class CanonicalExtensionRegistry {
     try {
       const parsed = JSON.parse(await readFile(this.registryPath, 'utf8')) as unknown;
       if (!isRegistrySnapshot(parsed)) {
-        return err(appError('INVALID_INPUT', 'Canonical extension registry is malformed: ' + this.registryPath));
+        // The registry is local on-disk state, not caller input: a corrupt or
+        // old-schema file is a server fault. Reporting INVALID_INPUT made the
+        // Skill prune endpoint answer 400 for a registry the caller never sent,
+        // and disagreed with the Server prune path, which calls the same
+        // condition INTERNAL_ERROR.
+        return err(appError('INTERNAL_ERROR', 'Canonical extension registry is malformed: ' + this.registryPath));
       }
       return ok(parsed);
     } catch (error: unknown) {

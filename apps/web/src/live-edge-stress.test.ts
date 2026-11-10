@@ -1,4 +1,7 @@
 import { request as httpRequest } from 'node:http';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ControlPlaneServer } from './web-server.js';
 import { GatewayService } from '@unified-mpc/cf-gateway';
@@ -175,6 +178,37 @@ describe('ControlPlaneServer - live edge and stress smoke', () => {
       expect(body.error.code).toBe('INTERNAL_ERROR');
     } finally {
       await failingServer.close();
+    }
+  });
+
+  it('reports a corrupt local extension registry as a server fault on skill prune', async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), 'prune-corrupt-registry-'));
+    try {
+      const registryFile = path.join(dataDir, 'extensions', 'state', 'registry.json');
+      await mkdir(path.dirname(registryFile), { recursive: true });
+      await writeFile(registryFile, '{"schemaVersion":1,"generation":"bad","entries":[]}\n', 'utf8');
+      const corruptServer = new ControlPlaneServer({ port: 0, gateway, capabilityToken, dataDir });
+      await corruptServer.listen();
+      try {
+        const response = await fetch(`http://127.0.0.1:${corruptServer.port}/api/skills/prune`, {
+          method: 'POST',
+          headers: {
+            Origin: origin(corruptServer.port),
+            'x-unified-mpc-capability': capabilityToken,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: 'anything' }),
+        });
+        // The caller never sent this registry, so a corrupt one is not its fault.
+        expect(response.status).toBe(500);
+        const body = await response.json();
+        expect(body.ok).toBe(false);
+        expect(body.error.code).toBe('INTERNAL_ERROR');
+      } finally {
+        await corruptServer.close();
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 

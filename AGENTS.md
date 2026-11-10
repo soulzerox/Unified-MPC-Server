@@ -82,7 +82,10 @@ are structured (`severity`, `category`, `file`, `line`, `claim`,
 
 A fix is a new commit, which is a new head: run `review:pr capsule` again and
 review again. One head has at most one review receipt, so a second opinion
-without a new commit is refused. A reviewer never marks its own findings fixed, and nothing reads
+without a new commit is refused. A head whose receipt exists cannot be frozen
+again either: re-running `review:pr capsule` would replace the capsule that
+receipt stands on, so a fresh capsule also needs a new head. A reviewer never
+marks its own findings fixed, and nothing reads
 its transcript after `record` — the receipt is the handoff, so the reviewer
 context can be recycled immediately.
 

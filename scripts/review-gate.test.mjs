@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   CATEGORIES,
   SKILL_ID,
+  capsuleFreezeBlockers,
   capsuleIntegrityBlockers,
   cleanTreeBlockers,
   createExclusiveFile,
@@ -286,6 +287,23 @@ test('a capsule whose files were edited after freeze is refused', () => {
   assert.match(
     capsuleIntegrityBlockers({ capsule: { ...capsule, workflowVersion: 0 }, patch: DIFF, filesText: 'a.ts\nb.ts' }).join('\n'),
     /workflow version/,
+  );
+});
+
+test('capsuleFreezeBlockers refuses a head whose review receipt already stands on a capsule', () => {
+  const headSha = 'a'.repeat(40);
+  assert.deepEqual(capsuleFreezeBlockers({ headSha }), []);
+  assert.deepEqual(
+    capsuleFreezeBlockers({ headSha, corruptReceiptNames: [`${'b'.repeat(12)}-9.json`] }),
+    [],
+  );
+  assert.match(
+    capsuleFreezeBlockers({ headSha, receipt: { reviewId: 'r1', capsuleId: 'c1' } }).join('\n'),
+    /review receipt \(r1\) already stands on capsule c1/,
+  );
+  assert.match(
+    capsuleFreezeBlockers({ headSha, corruptReceiptNames: [`${'a'.repeat(12)}-9.json`] }).join('\n'),
+    /unreadable review receipt\(s\) for this head/,
   );
 });
 

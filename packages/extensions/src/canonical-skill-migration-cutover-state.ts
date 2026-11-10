@@ -555,7 +555,7 @@ async function verifyPersistedGeneration(
     const generationInfo = await stat(generationPath);
     if (!generationInfo.isDirectory()) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical Skill cutover state points to a non-directory generation',
       ));
     }
@@ -567,7 +567,7 @@ async function verifyPersistedGeneration(
       .digest('hex');
     if (manifestSha256 !== state.activeGenerationId) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical Skill generation manifest hash does not match the active generation id',
       ));
     }
@@ -581,7 +581,7 @@ async function verifyPersistedGeneration(
       || snapshot.value.manifestSha256 !== state.activeGenerationId
     ) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical Skill stage metadata does not match the active generation id',
       ));
     }
@@ -603,11 +603,19 @@ async function verifyPersistedGeneration(
       );
     } catch {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical Skill generation manifest is structurally invalid',
       ));
     }
-    if (!proof.ok) return err(proof.error);
+    // The dry-run verifier classifies a caller-supplied staged generation, where
+    // a mismatch is the caller's fault. Here the generation came from disk, so the
+    // same mismatch means the persisted state drifted after activation.
+    if (!proof.ok) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Persisted canonical Skill generation failed revalidation: ${proof.error.message}`,
+      ));
+    }
 
     return ok({
       generation: {
@@ -622,7 +630,7 @@ async function verifyPersistedGeneration(
   } catch (error: unknown) {
     if (isMissingPath(error) || error instanceof SyntaxError) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical Skill active generation is missing or corrupt',
       ));
     }
@@ -636,7 +644,7 @@ async function verifyPersistedGeneration(
 
 function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill stage metadata must be an object'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill stage metadata must be an object'));
   }
   const record = value as Record<string, unknown>;
   const allowedKeys = new Set([
@@ -647,7 +655,7 @@ function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
     'skipped',
   ]);
   if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill stage metadata contains unknown fields'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill stage metadata contains unknown fields'));
   }
   if (
     record.schemaVersion !== 1
@@ -656,7 +664,7 @@ function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
     || !Array.isArray(record.stagedSkills)
     || !Array.isArray(record.skipped)
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill stage metadata is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill stage metadata is invalid'));
   }
 
   const stagedSkills: CanonicalSkillMigrationStagedSkill[] = [];
@@ -664,7 +672,7 @@ function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
   const relativePaths = new Set<string>();
   for (const value of record.stagedSkills) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical Skill staged entry is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill staged entry is invalid'));
     }
     const skill = value as Record<string, unknown>;
     const allowedSkillKeys = new Set(['id', 'name', 'fingerprint', 'sourcePath', 'relativePath']);
@@ -682,7 +690,7 @@ function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
       || ids.has(skill.id)
       || relativePaths.has(skill.relativePath)
     ) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical Skill staged entry is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill staged entry is invalid'));
     }
     ids.add(skill.id);
     relativePaths.add(skill.relativePath);
@@ -698,7 +706,7 @@ function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
   const skipped: CanonicalSkillMigrationSkippedEntry[] = [];
   for (const value of record.skipped) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical Skill skipped entry is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill skipped entry is invalid'));
     }
     const skippedEntry = value as Record<string, unknown>;
     if (
@@ -710,7 +718,7 @@ function decodeStageSnapshot(value: unknown): Result<PersistedStageSnapshot> {
         && skippedEntry.reason !== 'not_skill'
       )
     ) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical Skill skipped entry is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill skipped entry is invalid'));
     }
     skipped.push({
       id: skippedEntry.id,
@@ -746,7 +754,7 @@ async function loadCutoverState(
   try {
     parsed = JSON.parse(content);
   } catch {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state is invalid JSON'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state is invalid JSON'));
   }
 
   return decodeCutoverState(parsed);
@@ -756,28 +764,28 @@ function decodeCutoverState(
   value: unknown,
 ): Result<CanonicalSkillMigrationCutoverState> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state must be an object'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state must be an object'));
   }
 
   const record = value as Record<string, unknown>;
   const allowedKeys = new Set(['schemaVersion', 'activeGenerationId', 'previousGenerationId']);
   if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state contains unknown fields'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state contains unknown fields'));
   }
   if (record.schemaVersion !== CUTOVER_STATE_SCHEMA_VERSION) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state has an unsupported schema version'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state has an unsupported schema version'));
   }
   if (!isGenerationId(record.activeGenerationId)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state has an invalid active generation id'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state has an invalid active generation id'));
   }
   if (
     record.previousGenerationId !== undefined
     && !isGenerationId(record.previousGenerationId)
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state has an invalid previous generation id'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state has an invalid previous generation id'));
   }
   if (record.previousGenerationId === record.activeGenerationId) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical Skill cutover state cannot point active and previous to the same generation'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical Skill cutover state cannot point active and previous to the same generation'));
   }
 
   return ok({

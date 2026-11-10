@@ -593,7 +593,7 @@ describe('LocalExtensionsService MCP bridge', () => {
       const listed = await service.listSkills({});
       expect(listed.ok).toBe(false);
       if (!listed.ok) {
-        expect(listed.error.code).toBe('INVALID_INPUT');
+        expect(listed.error.code).toBe('INTERNAL_ERROR');
         expect(listed.error.message).toContain('fingerprint');
       }
       await service.close();
@@ -729,7 +729,7 @@ describe('LocalExtensionsService MCP bridge', () => {
       const listed = await service.listMcpServers();
       expect(listed.ok).toBe(false);
       if (!listed.ok) {
-        expect(listed.error.code).toBe('INVALID_INPUT');
+        expect(listed.error.code).toBe('INTERNAL_ERROR');
         expect(listed.error.message).toContain('registry');
       }
       await service.close();

@@ -437,7 +437,7 @@ async function verifyPersistedGeneration(
     const generationInfo = await stat(generationPath);
     if (!generationInfo.isDirectory()) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical MCP cutover state points to a non-directory generation',
       ));
     }
@@ -448,7 +448,7 @@ async function verifyPersistedGeneration(
     if (!snapshot.ok) return err(snapshot.error);
     if (snapshot.value.generationId !== state.activeGenerationId) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical MCP stage metadata does not match the active generation id',
       ));
     }
@@ -464,7 +464,7 @@ async function verifyPersistedGeneration(
       .digest('hex');
     if (generationId !== state.activeGenerationId) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical MCP generation hash does not match the active generation id',
       ));
     }
@@ -473,21 +473,21 @@ async function verifyPersistedGeneration(
     for (const server of snapshot.value.stagedServers) {
       if (fingerprintExternalMcpValue(server.config) !== server.fingerprint) {
         return err(appError(
-          'INVALID_INPUT',
+          'INTERNAL_ERROR',
           `Persisted canonical MCP launch config fingerprint mismatch for ${server.id}`,
         ));
       }
       const exclusion = exclusionReason(server.name, server.config);
       if (exclusion !== undefined) {
         return err(appError(
-          'INVALID_INPUT',
+          'INTERNAL_ERROR',
           `Persisted canonical MCP server is not runtime-safe: ${server.id}: ${exclusion}`,
         ));
       }
       const runtimeName = server.name.toLowerCase();
       if (runtimeNames.has(runtimeName)) {
         return err(appError(
-          'INVALID_INPUT',
+          'INTERNAL_ERROR',
           `Persisted canonical MCP runtime name is ambiguous: ${server.name}`,
         ));
       }
@@ -498,7 +498,7 @@ async function verifyPersistedGeneration(
     const registryContent = await readFile(registryPath, 'utf8');
     if (registryContent !== serializeRegistry(snapshot.value.stagedServers)) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical MCP registry does not match the active staged generation',
       ));
     }
@@ -514,7 +514,7 @@ async function verifyPersistedGeneration(
   } catch (error: unknown) {
     if (isMissingPath(error) || error instanceof SyntaxError) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         'Persisted canonical MCP active generation is missing or corrupt',
       ));
     }
@@ -528,12 +528,12 @@ async function verifyPersistedGeneration(
 
 function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP stage metadata must be an object'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP stage metadata must be an object'));
   }
   const record = value as Record<string, unknown>;
   const allowedKeys = new Set(['schemaVersion', 'generationId', 'stagedServers', 'skipped']);
   if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP stage metadata contains unknown fields'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP stage metadata contains unknown fields'));
   }
   const schemaVersion = record.schemaVersion;
   if (
@@ -542,7 +542,7 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
     || !Array.isArray(record.stagedServers)
     || !Array.isArray(record.skipped)
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP stage metadata is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP stage metadata is invalid'));
   }
 
   const stagedServers: CanonicalMcpMigrationStagedServer[] = [];
@@ -553,7 +553,7 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
     if (!server.ok) return err(server.error);
     const runtimeName = server.value.name.toLowerCase();
     if (ids.has(server.value.id) || names.has(runtimeName)) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged entry is duplicated'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP staged entry is duplicated'));
     }
     ids.add(server.value.id);
     names.add(runtimeName);
@@ -564,7 +564,7 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
   const skippedIds = new Set<string>();
   for (const value of record.skipped) {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical MCP skipped entry is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP skipped entry is invalid'));
     }
     const skippedEntry = value as Record<string, unknown>;
     const allowedSkippedKeys = new Set(['id', 'reason']);
@@ -579,7 +579,7 @@ function decodeStageSnapshot(value: unknown): Result<McpStageSnapshot> {
         && skippedEntry.reason !== 'not_mcp_server'
       )
     ) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical MCP skipped entry is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP skipped entry is invalid'));
     }
     skippedIds.add(skippedEntry.id);
     skipped.push({
@@ -601,7 +601,7 @@ function decodeStagedServer(
   schemaVersion: 1 | 2,
 ): Result<CanonicalMcpMigrationStagedServer> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged entry is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP staged entry is invalid'));
   }
   const record = value as Record<string, unknown>;
   const allowedKeys = schemaVersion === 1
@@ -616,7 +616,7 @@ function decodeStagedServer(
     || !isGenerationId(record.fingerprint)
     || !Array.isArray(record.provenance)
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged entry is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP staged entry is invalid'));
   }
 
   const config = decodeLaunchConfig(record.config);
@@ -635,7 +635,7 @@ function decodeStagedServer(
   }
 
   if (!isCanonicalExtensionEntry(record.canonicalEntry)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged canonical metadata is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP staged canonical metadata is invalid'));
   }
   const canonicalEntry = record.canonicalEntry;
   if (
@@ -650,7 +650,7 @@ function decodeStagedServer(
     || canonicalEntry.missingCommands !== undefined
     || !sameProvenance(canonicalEntry.provenance, provenance.value)
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP staged canonical metadata is inconsistent'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP staged canonical metadata is inconsistent'));
   }
 
   return ok({
@@ -665,7 +665,7 @@ function decodeStagedServer(
 
 function decodeLaunchConfig(value: unknown): Result<McpServerLaunchConfig> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP launch config is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP launch config is invalid'));
   }
   const record = value as Record<string, unknown>;
   const allowedKeys = new Set(['command', 'args', 'env', 'cwd', 'type', 'url']);
@@ -682,7 +682,7 @@ function decodeLaunchConfig(value: unknown): Result<McpServerLaunchConfig> {
     || (record.type !== undefined && typeof record.type !== 'string')
     || (record.url !== undefined && typeof record.url !== 'string')
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP launch config is invalid'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP launch config is invalid'));
   }
 
   return ok({
@@ -699,7 +699,7 @@ function decodeProvenance(value: readonly unknown[]): Result<readonly CanonicalE
   const provenance: CanonicalExtensionProvenance[] = [];
   for (const item of value) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical MCP provenance is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP provenance is invalid'));
     }
     const record = item as Record<string, unknown>;
     const allowedKeys = new Set([
@@ -722,7 +722,7 @@ function decodeProvenance(value: readonly unknown[]): Result<readonly CanonicalE
       || (record.contentSha256 !== undefined && typeof record.contentSha256 !== 'string')
       || (record.importedAt !== undefined && typeof record.importedAt !== 'string')
     ) {
-      return err(appError('INVALID_INPUT', 'Persisted canonical MCP provenance is invalid'));
+      return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP provenance is invalid'));
     }
     provenance.push({
       originType: record.originType,
@@ -780,35 +780,35 @@ async function loadCutoverState(
   try {
     parsed = JSON.parse(content);
   } catch {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP cutover state is invalid JSON'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP cutover state is invalid JSON'));
   }
   return decodeCutoverState(parsed);
 }
 
 function decodeCutoverState(value: unknown): Result<CanonicalMcpMigrationCutoverState> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP cutover state must be an object'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP cutover state must be an object'));
   }
   const record = value as Record<string, unknown>;
   const allowedKeys = new Set(['schemaVersion', 'activeGenerationId', 'previousGenerationId']);
   if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP cutover state contains unknown fields'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP cutover state contains unknown fields'));
   }
   if (record.schemaVersion !== CUTOVER_STATE_SCHEMA_VERSION) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP cutover state has an unsupported schema version'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP cutover state has an unsupported schema version'));
   }
   if (!isGenerationId(record.activeGenerationId)) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP cutover state has an invalid active generation id'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP cutover state has an invalid active generation id'));
   }
   if (
     record.previousGenerationId !== undefined
     && !isGenerationId(record.previousGenerationId)
   ) {
-    return err(appError('INVALID_INPUT', 'Persisted canonical MCP cutover state has an invalid previous generation id'));
+    return err(appError('INTERNAL_ERROR', 'Persisted canonical MCP cutover state has an invalid previous generation id'));
   }
   if (record.previousGenerationId === record.activeGenerationId) {
     return err(appError(
-      'INVALID_INPUT',
+      'INTERNAL_ERROR',
       'Persisted canonical MCP cutover state cannot point active and previous to the same generation',
     ));
   }

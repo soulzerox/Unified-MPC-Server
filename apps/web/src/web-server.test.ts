@@ -1812,7 +1812,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(skillsBody).toMatchObject({
         ok: false,
         error: {
-          code: 'INVALID_INPUT',
+          code: 'INTERNAL_ERROR',
           message: expect.stringContaining('fingerprint'),
         },
       });
@@ -1841,7 +1841,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(diagnosticsBody).toMatchObject({
         ok: false,
         error: {
-          code: 'INVALID_INPUT',
+          code: 'INTERNAL_ERROR',
           message: expect.stringContaining('fingerprint'),
         },
       });
@@ -2063,7 +2063,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(serversBody).toMatchObject({
         ok: false,
         error: {
-          code: 'INVALID_INPUT',
+          code: 'INTERNAL_ERROR',
           message: expect.stringContaining('registry'),
         },
       });
@@ -2088,7 +2088,7 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
       expect(diagnosticsBody).toMatchObject({
         ok: false,
         error: {
-          code: 'INVALID_INPUT',
+          code: 'INTERNAL_ERROR',
           message: expect.stringContaining('registry'),
         },
       });

@@ -324,7 +324,13 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
 
     const activation = await store.activate(secondManifest, secondStage);
     expect(activation.ok).toBe(false);
-    if (!activation.ok) expect(activation.error.message).toContain('fingerprint');
+    if (!activation.ok) {
+      // The caller handed this generation to activate(), so drift here is the
+      // caller's fault. Only a generation re-read from disk after activation is a
+      // server fault (see the corrupt-active-generation test below).
+      expect(activation.error.code).toBe('INVALID_INPUT');
+      expect(activation.error.message).toContain('fingerprint');
+    }
 
     const loaded = await store.load();
     expect(loaded.ok).toBe(true);
@@ -354,7 +360,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     const activation = await store.activate(manifest, staged);
     expect(activation.ok).toBe(false);
     if (!activation.ok) {
-      expect(activation.error.code).toBe('INVALID_INPUT');
+      expect(activation.error.code).toBe('INTERNAL_ERROR');
       expect(activation.error.message).toContain('cutover state');
     }
     expect(await readFile(statePath, 'utf8')).toContain('not-a-sha');
@@ -519,7 +525,7 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     const resolved = await store.resolveActiveGeneration();
     expect(resolved.ok).toBe(false);
     if (!resolved.ok) {
-      expect(resolved.error.code).toBe('INVALID_INPUT');
+      expect(resolved.error.code).toBe('INTERNAL_ERROR');
       expect(resolved.error.message).toContain('fingerprint');
     }
   });
@@ -750,14 +756,14 @@ describe('CanonicalSkillMigrationCutoverStateStore', () => {
     const target = await store.resolveRollbackTarget();
     expect(target.ok).toBe(false);
     if (!target.ok) {
-      expect(target.error.code).toBe('INVALID_INPUT');
+      expect(target.error.code).toBe('INTERNAL_ERROR');
       expect(target.error.message).toContain('fingerprint');
     }
 
     const rolledBack = await store.rollback(secondStage.generationId);
     expect(rolledBack.ok).toBe(false);
     if (!rolledBack.ok) {
-      expect(rolledBack.error.code).toBe('INVALID_INPUT');
+      expect(rolledBack.error.code).toBe('INTERNAL_ERROR');
       expect(rolledBack.error.message).toContain('fingerprint');
     }
     const loaded = await store.load();

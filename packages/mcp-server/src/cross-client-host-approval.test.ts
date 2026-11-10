@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +12,18 @@ import { createTrustedHostMutationApprovalProvider } from './trusted-host-approv
 
 const temporaryRoots: string[] = [];
 const workers: CrossClientHostApprovalWorker[] = [];
+
+async function delay(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition was not reached before the timeout');
+    await delay(5);
+  }
+}
 
 function scopedRequest(scopeId: string = 'scope-a'): HostMutationApprovalRequest {
   return {
@@ -78,5 +90,45 @@ describe('cross-client host approval broker', () => {
     workers.push(worker);
     const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 500, pollMs: 10 });
     await expect(provider(scopedRequest())).resolves.toBe(false);
+  });
+
+  it('drains in-flight broker work before close resolves so nothing is recreated afterwards', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-approval-close-'));
+    temporaryRoots.push(directory);
+    let releaseProvider: () => void = () => undefined;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    let prompts = 0;
+    const worker = startCrossClientHostApprovalWorker({
+      directory,
+      provider: async (): Promise<boolean> => {
+        prompts += 1;
+        await providerGate;
+        return true;
+      },
+      workerId: 'trusted-stdio-close',
+      pollMs: 10,
+      heartbeatMs: 10,
+      workerFreshMs: 100,
+    });
+    workers.push(worker);
+    const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 5_000, pollMs: 10 });
+    const request = provider(scopedRequest('scope-close'));
+
+    await waitFor(() => prompts === 1);
+    let closedResolved = false;
+    const closing = worker.close().then(() => { closedResolved = true; });
+
+    // Heartbeats keep firing while the scan is parked inside the provider.
+    await delay(60);
+    expect(closedResolved).toBe(false);
+
+    releaseProvider();
+    await closing;
+    await expect(request).resolves.toBe(true);
+
+    // Nothing may be recreated after close resolved, which is what the temporary
+    // root teardown relies on.
+    await delay(40);
+    await expect(readdir(path.join(directory, 'workers'))).resolves.toEqual([]);
   });
 });

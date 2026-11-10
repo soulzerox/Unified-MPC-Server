@@ -268,10 +268,13 @@ async function verifyExistingGeneration(
   registryJson: string,
   expected: McpStageSnapshot,
 ): Promise<Result<undefined>> {
+  // An existing generation was written by an earlier stage run; a mismatch is
+  // corrupt host state, not caller input (the registry argument only decides
+  // whether the existing generation may be reused).
   try {
     if (await readFile(path.join(generationPath, 'registry.json'), 'utf8') !== registryJson) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         `Existing canonical MCP migration registry is corrupt: ${generationPath}`,
       ));
     }
@@ -279,7 +282,7 @@ async function verifyExistingGeneration(
     const parsed: unknown = JSON.parse(stageContent);
     if (JSON.stringify(parsed) !== JSON.stringify(expected)) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         `Existing canonical MCP migration metadata is corrupt: ${generationPath}`,
       ));
     }
@@ -287,7 +290,7 @@ async function verifyExistingGeneration(
   } catch (error: unknown) {
     if (isMissingPath(error) || error instanceof SyntaxError) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         `Existing canonical MCP migration generation is incomplete or corrupt: ${generationPath}`,
       ));
     }

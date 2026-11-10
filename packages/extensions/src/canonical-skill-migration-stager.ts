@@ -363,10 +363,14 @@ async function verifyExistingGeneration(
   manifestJson: string,
   expected: MigrationStageSnapshot,
 ): Promise<Result<undefined>> {
+  // The generation directory lives in the data dir and was written by an earlier
+  // stage run, so a mismatch here is corrupt host state, not caller input. The
+  // comment does not apply to the manifest argument: it only decides whether the
+  // existing generation may be reused.
   try {
     if (await readFile(path.join(generationPath, 'manifest.json'), 'utf8') !== manifestJson) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         `Existing canonical skill migration generation manifest is corrupt: ${generationPath}`,
       ));
     }
@@ -374,7 +378,7 @@ async function verifyExistingGeneration(
     const parsed: unknown = JSON.parse(stageContent);
     if (JSON.stringify(parsed) !== JSON.stringify(expected)) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         `Existing canonical skill migration generation metadata is corrupt: ${generationPath}`,
       ));
     }
@@ -382,24 +386,34 @@ async function verifyExistingGeneration(
     for (const skill of expected.stagedSkills) {
       const skillPath = path.resolve(generationPath, skill.relativePath);
       if (!isPathInside(generationPath, skillPath)) {
-        return err(appError('INVALID_INPUT', `Staged canonical skill path escapes generation root: ${skill.id}`));
+        return err(appError('INTERNAL_ERROR', `Staged canonical skill path escapes generation root: ${skill.id}`));
       }
       const fingerprint = await fingerprintCanonicalSkillDirectory(skillPath);
-      if (!fingerprint.ok) return err(fingerprint.error);
+      if (!fingerprint.ok) {
+        return err(appError(
+          'INTERNAL_ERROR',
+          `Existing staged canonical skill is unreadable: ${skill.id}: ${fingerprint.error.message}`,
+        ));
+      }
       if (fingerprint.value !== skill.fingerprint) {
         return err(appError(
-          'INVALID_INPUT',
+          'INTERNAL_ERROR',
           `Existing staged canonical skill fingerprint is corrupt: ${skill.id}`,
         ));
       }
       const markdown = await validateSkillMarkdown(skillPath, skill.name, skill.id);
-      if (!markdown.ok) return err(markdown.error);
+      if (!markdown.ok) {
+        return err(appError(
+          'INTERNAL_ERROR',
+          `Existing staged canonical skill markdown is corrupt: ${skill.id}: ${markdown.error.message}`,
+        ));
+      }
     }
     return ok(undefined);
   } catch (error: unknown) {
     if (isMissingPath(error) || error instanceof SyntaxError) {
       return err(appError(
-        'INVALID_INPUT',
+        'INTERNAL_ERROR',
         `Existing canonical skill migration generation is incomplete or corrupt: ${generationPath}`,
       ));
     }

@@ -158,7 +158,7 @@ describe('CanonicalSkillMigrationStager', () => {
     const again = await stager.stage(manifest);
     expect(again.ok).toBe(false);
     if (!again.ok) {
-      expect(again.error.code).toBe('INVALID_INPUT');
+      expect(again.error.code).toBe('INTERNAL_ERROR');
       expect(again.error.message).toContain('fingerprint');
     }
     expect(await readFile(

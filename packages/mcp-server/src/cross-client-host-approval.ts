@@ -109,13 +109,29 @@ export function startCrossClientHostApprovalWorker(
   const resolved = resolveOptions(options);
   const workerId = options.workerId ?? randomUUID();
   const heartbeatMs = positiveInteger(options.heartbeatMs, DEFAULT_HEARTBEAT_MS);
+  const heartbeatPath = path.join(resolved.directory, 'workers', `${workerId}.json`);
   let closed = false;
   let scanning = false;
+  const inFlight = new Set<Promise<void>>();
+  let signalClose: () => void = () => undefined;
+  const closeSignal = new Promise<void>((resolve) => { signalClose = resolve; });
+
+  /**
+   * Registers broker work so `close()` can wait for it. The `closed` check and
+   * the registration happen in one synchronous step, so a later close always
+   * sees the promise it has to drain.
+   */
+  const track = (task: () => Promise<void>): void => {
+    if (closed) return;
+    const running = task().catch(() => undefined);
+    inFlight.add(running);
+    void running.finally(() => { inFlight.delete(running); });
+  };
 
   const heartbeat = async (): Promise<void> => {
     if (closed) return;
     await ensureBrokerDirectories(resolved.directory);
-    const heartbeatPath = path.join(resolved.directory, 'workers', `${workerId}.json`);
+    if (closed) return;
     await writeJsonAtomic(heartbeatPath, { version: 1, workerId, updatedAt: resolved.now() } satisfies BrokerHeartbeat);
   };
 
@@ -150,7 +166,18 @@ export function startCrossClientHostApprovalWorker(
         }
         let approved = false;
         try {
-          approved = await options.provider(payload.request);
+          // A close must not wait for a human answering the prompt, so the
+          // provider is abandoned when the worker is asked to stop. The answer
+          // cannot be delivered anymore either: close() already stopped the
+          // worker and the requester will time out on its own.
+          approved = await Promise.race([
+            options.provider(payload.request),
+            closeSignal.then(() => false),
+          ]);
+          if (closed) {
+            await rm(claimedPath, { force: true }).catch(() => undefined);
+            break;
+          }
           if (approved && payload.request.approvalScope !== undefined) {
             await writeRoute(resolved.directory, payload.request.approvalScope.id, workerId, resolved.now());
           }
@@ -172,20 +199,27 @@ export function startCrossClientHostApprovalWorker(
     }
   };
 
-  void scan();
-  const scanTimer = setInterval(() => { void scan(); }, resolved.pollMs);
-  const heartbeatTimer = setInterval(() => { void heartbeat(); }, heartbeatMs);
+  track(scan);
+  const scanTimer = setInterval(() => track(scan), resolved.pollMs);
+  const heartbeatTimer = setInterval(() => track(heartbeat), heartbeatMs);
   scanTimer.unref?.();
   heartbeatTimer.unref?.();
 
+  const closeWorker = async (): Promise<void> => {
+    closed = true;
+    signalClose();
+    clearInterval(scanTimer);
+    clearInterval(heartbeatTimer);
+    while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+    await rm(heartbeatPath, { force: true }).catch(() => undefined);
+  };
+  let closing: Promise<void> | undefined;
+
   return {
     workerId,
-    close: async (): Promise<void> => {
-      if (closed) return;
-      closed = true;
-      clearInterval(scanTimer);
-      clearInterval(heartbeatTimer);
-      await rm(path.join(resolved.directory, 'workers', `${workerId}.json`), { force: true }).catch(() => undefined);
+    close: (): Promise<void> => {
+      if (closing === undefined) closing = closeWorker();
+      return closing;
     },
   };
 }

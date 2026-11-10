@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -127,7 +127,7 @@ test('a dry run reports the plan and deletes nothing', async () => {
     const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
     await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
     await writeReceipt(receiptRoot, `bbbbbbbbbbbb-${UUID_2}.json`, 'bbbbbbbbbbbb', '2026-02-01T00:00:00.000Z');
-    await writeFile(path.join(receiptRoot, 'latest.json'), '{"headSha":"bbbbbbbbbbbb"}\n', 'utf8');
+    await writeFile(path.join(receiptRoot, 'latest.json'), `{"headSha":"bbbbbbbbbbbb","verificationId":"${UUID_2}"}\n`, 'utf8');
     await mkdir(path.join(receiptRoot, 'logs', UUID_1), { recursive: true });
     await writeFile(path.join(receiptRoot, 'logs', UUID_1, 'step.log'), 'log\n', 'utf8');
 
@@ -160,7 +160,7 @@ test('applying deletes superseded receipts and their log directories only', asyn
     await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
     await writeReceipt(receiptRoot, `bbbbbbbbbbbb-${UUID_2}.json`, 'bbbbbbbbbbbb', '2026-02-01T00:00:00.000Z');
     await writeReceipt(receiptRoot, `cccccccccccc-${UUID_3}.json`, 'cccccccccccc', '2026-03-01T00:00:00.000Z');
-    await writeFile(path.join(receiptRoot, 'latest.json'), '{"headSha":"cccccccccccc"}\n', 'utf8');
+    await writeFile(path.join(receiptRoot, 'latest.json'), `{"headSha":"cccccccccccc","verificationId":"${UUID_3}"}\n`, 'utf8');
     await mkdir(path.join(receiptRoot, 'merges'), { recursive: true });
     await writeFile(
       path.join(receiptRoot, 'merges', 'bbbbbbbbbbbb-1.json'),
@@ -223,6 +223,114 @@ test('prunes receipts whose log directory was never written', async () => {
     assert.deepEqual((await readdir(receiptRoot)).sort(), []);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps the receipt latest.json points at even when it is superseded', () => {
+  const plan = planEvidencePrune({
+    receipts: [
+      receipt(`aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', UUID_1, '2026-01-01T00:00:00.000Z'),
+      receipt(`bbbbbbbbbbbb-${UUID_2}.json`, 'bbbbbbbbbbbb', UUID_2, '2026-02-01T00:00:00.000Z'),
+    ],
+    mergeVerificationIds: new Set(),
+    latestVerificationId: UUID_1,
+    currentHeadSha: 'bbbbbbbbbbbb',
+    keepRecent: 0,
+  });
+
+  assert.deepEqual(plan.keep.map((entry) => entry.reason), ['latest', 'current-head']);
+  assert.deepEqual(plan.remove, []);
+});
+
+test('applying keeps the latest receipt and its log directory', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-latest-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await writeReceipt(receiptRoot, `bbbbbbbbbbbb-${UUID_2}.json`, 'bbbbbbbbbbbb', '2026-02-01T00:00:00.000Z');
+    await writeFile(
+      path.join(receiptRoot, 'latest.json'),
+      `{"headSha":"aaaaaaaaaaaa","verificationId":"${UUID_1}"}\n`,
+      'utf8',
+    );
+    await mkdir(path.join(receiptRoot, 'logs', UUID_1), { recursive: true });
+    await writeFile(path.join(receiptRoot, 'logs', UUID_1, 'step.log'), 'log\n', 'utf8');
+
+    const result = await pruneLocalVerifyEvidence({
+      root,
+      headSha: 'bbbbbbbbbbbb',
+      keepRecent: 0,
+      dryRun: false,
+    });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.keep.map((entry) => entry.reason).sort(), ['current-head', 'latest']);
+    assert.deepEqual(result.remove, []);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), [UUID_1]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('refuses when latest.json is unreadable', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-bad-latest-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await writeFile(path.join(receiptRoot, 'latest.json'), '{not json', 'utf8');
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /latest receipt pointer/);
+    assert.equal((await readdir(receiptRoot)).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('refuses to delete through a symlinked logs root', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-root-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-outside-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await mkdir(path.join(outside, UUID_1), { recursive: true });
+    await writeFile(path.join(outside, UUID_1, 'keep.log'), 'keep\n', 'utf8');
+    await symlink(outside, path.join(receiptRoot, 'logs'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /log root is not a real directory/);
+    assert.equal((await readdir(receiptRoot)).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
+    assert.deepEqual(await readdir(path.join(outside, UUID_1)), ['keep.log']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('unlinks a symlinked log entry instead of following it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-entry-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-target-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await mkdir(path.join(outside, UUID_1), { recursive: true });
+    await writeFile(path.join(outside, UUID_1, 'keep.log'), 'keep\n', 'utf8');
+    await mkdir(path.join(receiptRoot, 'logs'), { recursive: true });
+    await symlink(path.join(outside, UUID_1), path.join(receiptRoot, 'logs', UUID_1));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove.map((entry) => entry.verificationId), [UUID_1]);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), []);
+    assert.deepEqual(await readdir(path.join(outside, UUID_1)), ['keep.log']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

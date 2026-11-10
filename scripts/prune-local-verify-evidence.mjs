@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* global process, console */
-import { readdir, readFile, rm } from 'node:fs/promises';
+import { lstat, readdir, readFile, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,22 +12,29 @@ import { fileURLToPath } from 'node:url';
  *
  * This script is the opt-in answer. It never runs from `verify:local`, it is a
  * dry run unless `--apply` is passed, and it deletes only receipts whose head is
- * neither the current HEAD nor named by a merge record and that are not among
- * the newest `--keep` runs. `latest.json`, `merges/` and the review capsules are
- * never touched. An unreadable merge record or receipt makes it refuse instead
- * of guessing, because the keep-set is the only thing that makes the deletion
- * safe.
+ * neither the current HEAD nor named by a merge record or `latest.json` and that
+ * are not among the newest `--keep` runs. `latest.json`, `merges/` and the review
+ * capsules are never touched. An unreadable merge record, receipt or latest
+ * pointer makes it refuse instead of guessing, because the keep-set is the only
+ * thing that makes the deletion safe.
  */
 
 const RECEIPT_PATTERN = /^(?<head>[0-9a-f]{12})-(?<verificationId>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
 
 /**
  * Splits receipts into what may stay and what is superseded. A receipt is kept
- * when its head is the current HEAD, when a merge record spent it, or when it is
- * one of the newest `keepRecent` runs. `keepRecent` is a floor, not a target: a
- * protected receipt is kept even when it is older than the newest runs.
+ * when its head is the current HEAD, when a merge record spent it, when
+ * `latest.json` points at it, or when it is one of the newest `keepRecent` runs.
+ * `keepRecent` is a floor, not a target: a protected receipt is kept even when
+ * it is older than the newest runs.
  */
-export function planEvidencePrune({ receipts, mergeVerificationIds, currentHeadSha, keepRecent = 5 }) {
+export function planEvidencePrune({
+  receipts,
+  mergeVerificationIds,
+  latestVerificationId,
+  currentHeadSha,
+  keepRecent = 5,
+}) {
   const ordered = [...receipts].sort((left, right) => right.completedAt.localeCompare(left.completedAt));
   const recent = new Set(ordered.slice(0, Math.max(0, keepRecent)).map((receipt) => receipt.fileName));
   const keep = [];
@@ -36,6 +43,7 @@ export function planEvidencePrune({ receipts, mergeVerificationIds, currentHeadS
     let reason;
     if (receipt.headSha === currentHeadSha) reason = 'current-head';
     else if (mergeVerificationIds.has(receipt.verificationId)) reason = 'merge-record';
+    else if (receipt.verificationId === latestVerificationId) reason = 'latest';
     else if (recent.has(receipt.fileName)) reason = 'recent';
     const entry = {
       fileName: receipt.fileName,
@@ -66,6 +74,31 @@ async function readJson(filePath) {
   }
 }
 
+async function lstatOrUndefined(filePath) {
+  try {
+    return await lstat(filePath);
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Removes one `logs/<verificationId>` entry. A symlink is unlinked rather than
+ * followed, so a planted link cannot redirect a recursive delete outside the
+ * evidence root.
+ */
+async function removeLogDirectory(logRoot, verificationId) {
+  const target = path.join(logRoot, verificationId);
+  const stats = await lstatOrUndefined(target);
+  if (stats === undefined) return;
+  if (stats.isSymbolicLink()) {
+    await unlink(target);
+    return;
+  }
+  if (stats.isDirectory()) await rm(target, { recursive: true, force: true });
+}
+
 /**
  * Plans and, unless `dryRun`, deletes superseded receipts and their log
  * directories under `<root>/.unified-mpc/local-verify`.
@@ -87,6 +120,23 @@ export async function pruneLocalVerifyEvidence({ root, headSha, keepRecent = 5, 
     mergeVerificationIds.add(record.value.verificationId);
   }
 
+  const latest = await readJson(path.join(receiptRoot, 'latest.json'));
+  let latestVerificationId;
+  if (!latest.ok) {
+    if (await lstatOrUndefined(path.join(receiptRoot, 'latest.json')) !== undefined) {
+      return { status: 'refused', reason: 'unreadable latest receipt pointer', keep: [], remove: [], dryRun };
+    }
+  } else if (typeof latest.value?.verificationId === 'string') {
+    latestVerificationId = latest.value.verificationId;
+  } else {
+    return { status: 'refused', reason: 'unreadable latest receipt pointer', keep: [], remove: [], dryRun };
+  }
+
+  const logRootStats = await lstatOrUndefined(logRoot);
+  if (logRootStats !== undefined && !logRootStats.isDirectory()) {
+    return { status: 'refused', reason: 'local verification log root is not a real directory', keep: [], remove: [], dryRun };
+  }
+
   const receipts = [];
   for (const entry of entries) {
     if (!entry.isFile()) continue;
@@ -104,11 +154,17 @@ export async function pruneLocalVerifyEvidence({ root, headSha, keepRecent = 5, 
     });
   }
 
-  const plan = planEvidencePrune({ receipts, mergeVerificationIds, currentHeadSha: headSha, keepRecent });
+  const plan = planEvidencePrune({
+    receipts,
+    mergeVerificationIds,
+    latestVerificationId,
+    currentHeadSha: headSha,
+    keepRecent,
+  });
   if (!dryRun) {
     for (const entry of plan.remove) {
       await rm(path.join(receiptRoot, entry.fileName), { force: true });
-      await rm(path.join(logRoot, entry.verificationId), { recursive: true, force: true });
+      await removeLogDirectory(logRoot, entry.verificationId);
     }
   }
   return { status: 'pruned', ...plan, dryRun };

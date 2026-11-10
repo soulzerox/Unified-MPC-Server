@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  applyEvidencePlan,
   planEvidencePrune,
+  planReviewEvidence,
   planReviewEvidencePrune,
   pruneLocalVerifyEvidence,
   pruneReviewEvidence,
@@ -743,6 +745,26 @@ test('applying removes a superseded capsule and its receipt together', async () 
     assert.deepEqual(result.remove.map((entry) => entry.kind), ['capsule', 'receipt']);
     assert.deepEqual(await readdir(path.join(reviewRoot, 'capsules')), [`${HEAD_CURRENT.slice(0, 12)}-2`]);
     assert.deepEqual(await readdir(path.join(reviewRoot, 'receipts')), [`${HEAD_CURRENT.slice(0, 12)}-2.json`]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('applying a plan deletes exactly what it reported, even when the store changes first', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'review-prune-plan-pinned-'));
+  try {
+    const reviewRoot = path.join(root, '.unified-mpc', 'reviews');
+    await writeCapsule(reviewRoot, HEAD_OLD, 1, '2026-01-01T00:00:00.000Z');
+    await writeReviewReceipt(reviewRoot, HEAD_OLD, 1, '2026-01-01T00:00:00.000Z', UUID_1);
+
+    const plan = await planReviewEvidence({ root, headSha: HEAD_CURRENT, keepRecent: 0 });
+    // Planning again here would refuse on this receipt; applying the plan must not.
+    await writeFile(path.join(reviewRoot, 'receipts', 'late.json'), '{not json', 'utf8');
+
+    await applyEvidencePlan(plan);
+
+    assert.deepEqual(await readdir(path.join(reviewRoot, 'capsules')), []);
+    assert.deepEqual(await readdir(path.join(reviewRoot, 'receipts')), ['late.json']);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

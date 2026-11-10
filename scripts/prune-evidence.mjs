@@ -24,13 +24,15 @@ const execFileAsync = promisify(execFile);
  * receipt is the one `merge:pr` will look up when the merge finally happens, and
  * its capsule is the review evidence that receipt already stands on.
  *
- * Both stores are planned before either one is touched, so a refusal in one
- * stops the run before the other loses anything. `latest.json` and `merges/` are
- * never deleted. The evidence roots, plus `merges/`, `logs/`, `capsules/` and
- * `receipts/`, must be real directories and deletion never follows a symlink. An
- * unreadable branch ref, merge record, receipt, capsule or latest pointer makes
- * it refuse instead of guessing, because the keep-set is the only thing that
- * makes the deletion safe.
+ * Both stores are planned before either one is touched, and `--apply` deletes
+ * exactly the entries that were planned, so a refusal in one store stops the run
+ * before the other loses anything and there is no second planning pass that could
+ * discover a new reason to refuse after the first store is already pruned.
+ * `latest.json` and `merges/` are never deleted. The evidence roots, plus
+ * `merges/`, `logs/`, `capsules/` and `receipts/`, must be real directories and
+ * deletion never follows a symlink. An unreadable branch ref, merge record,
+ * receipt, capsule or latest pointer makes it refuse instead of guessing, because
+ * the keep-set is the only thing that makes the deletion safe.
  */
 
 const VERIFICATION_RECEIPT_PATTERN = /^(?<head>[0-9a-f]{12})-(?<verificationId>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
@@ -258,44 +260,44 @@ async function readMergeProtectionFrom(mergesRoot) {
 const EMPTY_PROTECTION = { verificationIds: new Set(), reviewIds: new Set(), heads: new Set() };
 
 /**
- * Plans and, unless `dryRun`, deletes superseded receipts and their log
- * directories under `<root>/.unified-mpc/local-verify`.
+ * Plans which receipts and log directories under
+ * `<root>/.unified-mpc/local-verify` may go. Planning is separate from deleting
+ * because the command decides both stores before touching either one.
  */
-export async function pruneLocalVerifyEvidence({
+export async function planLocalVerifyEvidence({
   root,
   headSha,
   protectedHeadShas = [],
   keepRecent = 5,
-  dryRun = false,
 }) {
   const protectedHeads = protectedHeadShas instanceof Set ? protectedHeadShas : new Set(protectedHeadShas);
   const resolved = await resolveStoreRoot(root, ['.unified-mpc', 'local-verify'], 'local verification');
   if (resolved.status !== 'ok') {
-    return { status: resolved.status, ...(resolved.reason === undefined ? {} : { reason: resolved.reason }), keep: [], remove: [], dryRun };
+    return { status: resolved.status, ...(resolved.reason === undefined ? {} : { reason: resolved.reason }), keep: [], remove: [] };
   }
   const receiptRoot = resolved.path;
   const logRoot = path.join(receiptRoot, 'logs');
 
   const protection = await readMergeProtectionFrom(path.join(receiptRoot, 'merges'));
   if (protection.status !== 'ok') {
-    return { status: 'refused', reason: protection.reason, keep: [], remove: [], dryRun };
+    return { status: 'refused', reason: protection.reason, keep: [], remove: [] };
   }
 
   const latest = await readJson(path.join(receiptRoot, 'latest.json'));
   let latestVerificationId;
   if (!latest.ok) {
     if (await lstatOrUndefined(path.join(receiptRoot, 'latest.json')) !== undefined) {
-      return { status: 'refused', reason: 'unreadable latest receipt pointer', keep: [], remove: [], dryRun };
+      return { status: 'refused', reason: 'unreadable latest receipt pointer', keep: [], remove: [] };
     }
   } else if (typeof latest.value?.verificationId === 'string') {
     latestVerificationId = latest.value.verificationId;
   } else {
-    return { status: 'refused', reason: 'unreadable latest receipt pointer', keep: [], remove: [], dryRun };
+    return { status: 'refused', reason: 'unreadable latest receipt pointer', keep: [], remove: [] };
   }
 
   const logRootStats = await lstatOrUndefined(logRoot);
   if (logRootStats !== undefined && !logRootStats.isDirectory()) {
-    return { status: 'refused', reason: 'local verification log root is not a real directory', keep: [], remove: [], dryRun };
+    return { status: 'refused', reason: 'local verification log root is not a real directory', keep: [], remove: [] };
   }
 
   let entries;
@@ -307,7 +309,6 @@ export async function pruneLocalVerifyEvidence({
       reason: `cannot read local verification evidence root: ${message(error)}`,
       keep: [],
       remove: [],
-      dryRun,
     };
   }
 
@@ -318,7 +319,7 @@ export async function pruneLocalVerifyEvidence({
     if (match === null) continue;
     const parsed = await readJson(path.join(receiptRoot, entry.name));
     if (!parsed.ok || typeof parsed.value?.headSha !== 'string' || typeof parsed.value?.completedAt !== 'string') {
-      return { status: 'refused', reason: `unreadable receipt: ${entry.name}`, keep: [], remove: [], dryRun };
+      return { status: 'refused', reason: `unreadable receipt: ${entry.name}`, keep: [], remove: [] };
     }
     receipts.push({
       fileName: entry.name,
@@ -336,32 +337,53 @@ export async function pruneLocalVerifyEvidence({
     currentHeadSha: headSha,
     keepRecent,
   });
-  if (!dryRun) {
-    for (const entry of plan.remove) {
-      await rm(path.join(receiptRoot, entry.fileName), { force: true });
-      await removeDirectoryEntry(logRoot, entry.verificationId);
-    }
-  }
-  return { status: 'pruned', ...plan, dryRun };
+  return { status: 'pruned', store: 'verification', targets: { receiptRoot, logRoot }, ...plan };
 }
 
 /**
- * Plans and, unless `dryRun`, deletes superseded capsules and receipts under
- * `<root>/.unified-mpc/reviews`. Merge records live in the verification store, so
- * an unreadable verification store is a refusal here too: without it this run
- * cannot tell which reviews a merge spent.
+ * Deletes exactly the entries a planner reported. Applying never reads the store
+ * again: a change that lands between planning and applying cannot turn a safe
+ * plan into a half-finished one, and cannot produce a refusal after another
+ * store was already pruned.
  */
-export async function pruneReviewEvidence({
+export async function applyEvidencePlan(plan) {
+  if (plan === undefined || plan.status !== 'pruned') return;
+  if (plan.store === 'verification') {
+    for (const entry of plan.remove) {
+      await rm(path.join(plan.targets.receiptRoot, entry.fileName), { force: true });
+      await removeDirectoryEntry(plan.targets.logRoot, entry.verificationId);
+    }
+    return;
+  }
+  for (const entry of plan.remove) {
+    if (entry.kind === 'capsule') await removeDirectoryEntry(plan.targets.capsuleRoot, entry.name);
+    else await rm(path.join(plan.targets.receiptRoot, entry.name), { force: true });
+  }
+}
+
+/** Plans, and unless `dryRun` applies, the verification store cleanup. */
+export async function pruneLocalVerifyEvidence({ dryRun = false, ...options }) {
+  const plan = await planLocalVerifyEvidence(options);
+  if (!dryRun) await applyEvidencePlan(plan);
+  return { ...plan, dryRun };
+}
+
+/**
+ * Plans which capsules and receipts under `<root>/.unified-mpc/reviews` may go.
+ * Merge records live in the verification store, so an unreadable verification
+ * store is a refusal here too: without it this run cannot tell which reviews a
+ * merge spent.
+ */
+export async function planReviewEvidence({
   root,
   headSha,
   protectedHeadShas = [],
   keepRecent = 5,
-  dryRun = false,
 }) {
   const protectedHeads = protectedHeadShas instanceof Set ? protectedHeadShas : new Set(protectedHeadShas);
   const resolved = await resolveStoreRoot(root, ['.unified-mpc', 'reviews'], 'exact-head review');
   if (resolved.status !== 'ok') {
-    return { status: resolved.status, ...(resolved.reason === undefined ? {} : { reason: resolved.reason }), keep: [], remove: [], dryRun };
+    return { status: resolved.status, ...(resolved.reason === undefined ? {} : { reason: resolved.reason }), keep: [], remove: [] };
   }
   const reviewRoot = resolved.path;
   const capsuleRoot = path.join(reviewRoot, 'capsules');
@@ -369,19 +391,19 @@ export async function pruneReviewEvidence({
   for (const [directory, label] of [[capsuleRoot, 'review capsule root'], [receiptRoot, 'review receipt root']]) {
     const stats = await lstatOrUndefined(directory);
     if (stats !== undefined && !stats.isDirectory()) {
-      return { status: 'refused', reason: `${label} is not a real directory`, keep: [], remove: [], dryRun };
+      return { status: 'refused', reason: `${label} is not a real directory`, keep: [], remove: [] };
     }
   }
 
   const verification = await resolveStoreRoot(root, ['.unified-mpc', 'local-verify'], 'local verification');
   let protection = EMPTY_PROTECTION;
   if (verification.status === 'refused') {
-    return { status: 'refused', reason: verification.reason, keep: [], remove: [], dryRun };
+    return { status: 'refused', reason: verification.reason, keep: [], remove: [] };
   }
   if (verification.status === 'ok') {
     protection = await readMergeProtectionFrom(path.join(verification.path, 'merges'));
     if (protection.status !== 'ok') {
-      return { status: 'refused', reason: protection.reason, keep: [], remove: [], dryRun };
+      return { status: 'refused', reason: protection.reason, keep: [], remove: [] };
     }
   }
 
@@ -393,7 +415,7 @@ export async function pruneReviewEvidence({
       || typeof parsed.value?.headSha !== 'string'
       || !Number.isSafeInteger(parsed.value?.prNumber)
       || typeof parsed.value?.createdAt !== 'string') {
-      return { status: 'refused', reason: `unreadable review capsule: ${entry.name}`, keep: [], remove: [], dryRun };
+      return { status: 'refused', reason: `unreadable review capsule: ${entry.name}`, keep: [], remove: [] };
     }
     capsules.push({
       name: entry.name,
@@ -412,7 +434,7 @@ export async function pruneReviewEvidence({
       || typeof parsed.value?.headSha !== 'string'
       || !Number.isSafeInteger(parsed.value?.prNumber)
       || typeof parsed.value?.createdAt !== 'string') {
-      return { status: 'refused', reason: `unreadable review receipt: ${entry.name}`, keep: [], remove: [], dryRun };
+      return { status: 'refused', reason: `unreadable review receipt: ${entry.name}`, keep: [], remove: [] };
     }
     receipts.push({
       name: entry.name,
@@ -433,13 +455,14 @@ export async function pruneReviewEvidence({
     currentHeadSha: headSha,
     keepRecent,
   });
-  if (!dryRun) {
-    for (const entry of plan.remove) {
-      if (entry.kind === 'capsule') await removeDirectoryEntry(capsuleRoot, entry.name);
-      else await rm(path.join(receiptRoot, entry.name), { force: true });
-    }
-  }
-  return { status: 'pruned', ...plan, dryRun };
+  return { status: 'pruned', store: 'review', targets: { capsuleRoot, receiptRoot }, ...plan };
+}
+
+/** Plans, and unless `dryRun` applies, the review store cleanup. */
+export async function pruneReviewEvidence({ dryRun = false, ...options }) {
+  const plan = await planReviewEvidence(options);
+  if (!dryRun) await applyEvidencePlan(plan);
+  return { ...plan, dryRun };
 }
 
 function parseArguments(argv) {
@@ -482,12 +505,12 @@ function describeCounts(entries) {
   return `${counts.capsule} capsule(s) and ${counts.receipt} receipt(s)`;
 }
 
-function report(label, result) {
+function report(label, result, dryRun) {
   if (result.status === 'missing') {
     console.log(`${label}: no evidence to prune`);
     return;
   }
-  const verb = result.dryRun ? 'would remove' : 'removed';
+  const verb = dryRun ? 'would remove' : 'removed';
   for (const entry of result.remove) {
     console.log(`${verb} [${label}] ${entry.fileName ?? entry.name} (${entry.reason})`);
   }
@@ -505,27 +528,26 @@ async function main() {
   }
   const protectedHeadShas = await resolveProtectedHeads(options.root);
   for (const sha of options.protect) protectedHeadShas.add(sha);
-  const planStores = (dryRun) => Promise.all([
-    pruneLocalVerifyEvidence({ ...options, headSha, protectedHeadShas, dryRun }),
-    pruneReviewEvidence({ ...options, headSha, protectedHeadShas, dryRun }),
-  ]);
 
-  // Plan both stores before deleting in either one, so a refusal never leaves the
-  // other store pruned and this one intact.
-  const planned = await planStores(true);
-  const refused = planned.find((result) => result.status === 'refused');
+  // Plan both stores before deleting in either one. `--apply` deletes exactly
+  // what was planned, so no second pass can find a new reason to refuse after the
+  // other store is already pruned.
+  const stores = { root: options.root, headSha, protectedHeadShas, keepRecent: options.keepRecent };
+  const [verification, review] = await Promise.all([
+    planLocalVerifyEvidence(stores),
+    planReviewEvidence(stores),
+  ]);
+  const refused = [verification, review].find((result) => result.status === 'refused');
   if (refused !== undefined) {
     console.error(`evidence prune refused: ${refused.reason}`);
     return 1;
   }
-  const results = options.dryRun ? planned : await planStores(false);
-  const stopped = results.find((result) => result.status === 'refused');
-  if (stopped !== undefined) {
-    console.error(`evidence prune stopped: ${stopped.reason}`);
-    return 1;
+  if (!options.dryRun) {
+    await applyEvidencePlan(verification);
+    await applyEvidencePlan(review);
   }
-  report('local verification', results[0]);
-  report('exact-head review', results[1]);
+  report('local verification', verification, options.dryRun);
+  report('exact-head review', review, options.dryRun);
   if (options.dryRun) console.log('dry run, pass --apply to delete');
   return 0;
 }

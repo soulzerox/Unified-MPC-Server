@@ -22,6 +22,7 @@ import {
   reviewBacklogNeedsAttention,
   reviewFingerprint,
   reviewVerdict,
+  skillVersionBlocker,
   summarizeReviewBacklog,
   validateFindings,
   writeReviewReceipt,
@@ -202,6 +203,19 @@ test('reviewVerdict is derived from open required fixes only', () => {
     reviewVerdict([{ ...FINDING, severity: 'blocking', required_fix: true }]),
     { verdict: 'blocked', blockingOpenCount: 1 },
   );
+});
+
+test('skillVersionBlocker accepts the bundled number and its numeric string', () => {
+  assert.equal(skillVersionBlocker(1, 1), undefined);
+  assert.equal(skillVersionBlocker('1', 1), undefined);
+  assert.equal(skillVersionBlocker(' 1 ', 1), undefined);
+});
+
+test('skillVersionBlocker refuses another version and quotes the submitted value', () => {
+  assert.match(skillVersionBlocker('2', 1), /used skill version "2", bundled version is 1/);
+  assert.match(skillVersionBlocker(2, 1), /used skill version 2, bundled version is 1/);
+  assert.match(skillVersionBlocker(undefined, 1), /used skill version undefined/);
+  assert.match(skillVersionBlocker('v1', 1), /used skill version "v1"/);
 });
 
 test('findReviewReceipt returns the latest reviewer receipt for the exact head', () => {

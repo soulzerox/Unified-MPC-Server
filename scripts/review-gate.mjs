@@ -485,11 +485,25 @@ export async function readReviewReceipts() {
 
 async function findVerificationReceipt(headSha) {
   const { records: receipts } = await readJsonDirectory(VERIFICATION_ROOT);
+  return selectVerificationReceipt(receipts, headSha);
+}
+
+/**
+ * A head is immutable, so one fully valid receipt is enough forever. Newest-wins
+ * would let a later weaker run revoke it: running `verify:targeted` for fast
+ * iteration after a merge-ready `verify:local` on the same commit would make the
+ * head unacceptable and force a full re-verification of an unchanged tree. So the
+ * newest receipt the gate accepts is selected; when none qualifies the newest
+ * receipt is returned anyway, so the blockers explain why the head is refused.
+ */
+export function selectVerificationReceipt(receipts, headSha) {
   const matches = receipts.filter((receipt) => receipt?.headSha === headSha);
   if (matches.length === 0) return undefined;
-  return matches.reduce((latest, receipt) => (
-    String(receipt.completedAt ?? '') >= String(latest.completedAt ?? '') ? receipt : latest
+  const newestFirst = [...matches].sort((left, right) => (
+    String(right.completedAt ?? '').localeCompare(String(left.completedAt ?? ''))
   ));
+  return newestFirst.find((receipt) => verificationGateBlockers({ verification: receipt, headSha }).length === 0)
+    ?? newestFirst[0];
 }
 
 /**

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
 import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
-import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint } from './review-gate.mjs';
+import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint, selectVerificationReceipt } from './review-gate.mjs';
 
 /**
  * Repository-level guarded merge (#144).
@@ -89,13 +89,9 @@ export function parseRepositoryFromRemote(remoteUrl) {
   return `${owner}/${repository}`;
 }
 
-/** Latest receipt for the head, if the store has one. */
+/** The receipt that authorizes this head: see `selectVerificationReceipt`. */
 export function findReceipt(receipts, headSha) {
-  const matches = receipts.filter((receipt) => receipt?.headSha === headSha);
-  if (matches.length === 0) return undefined;
-  return matches.reduce((latest, receipt) => (
-    String(receipt.completedAt ?? '') >= String(latest.completedAt ?? '') ? receipt : latest
-  ));
+  return selectVerificationReceipt(receipts, headSha);
 }
 
 // Defined next to `diffFingerprint` so the review gate can share the same rule

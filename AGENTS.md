@@ -38,18 +38,22 @@ Copy the `mergeReady` verdict and the failing step names into the PR body. Never
 claim local CI passed without a receipt for the current head. The unit tests for
 the profile runner are `node --test scripts/local-verify.test.mjs`.
 
-Receipts and their logs are audit evidence and are never collected
-automatically, so a long-lived checkout grows by roughly a megabyte per run.
-`pnpm evidence:prune` is the opt-in cleanup: it is a dry run unless you pass
-`--apply`, it requires `GIT_HEAD_SHA`, and it keeps every receipt for the current
-head, every receipt whose head is still a branch, tag or worktree tip (so an
-unmerged but already verified PR keeps the receipt `merge:pr` will look up), any
-head passed with `--protect <sha>`, every receipt a merge record spent, the
-receipt `latest.json` names, and the newest `--keep` runs (default 5).
-`latest.json`, `merges/` and review capsules are never touched. The evidence
-root, `merges/` and `logs/` must be real directories and deletion never follows a
-symlink. It refuses instead of guessing when branch refs, merge records, receipts
-or `latest.json` cannot be read.
+Verification receipts, their logs, and exact-head review capsules and receipts
+are audit evidence and are never collected automatically, so a long-lived
+checkout grows by roughly a megabyte per verification run plus a capsule per
+review. `pnpm evidence:prune` is the opt-in cleanup for both stores: it is a dry
+run unless you pass `--apply`, it requires `GIT_HEAD_SHA`, and it keeps every
+entry for the current head, every entry whose head is still a branch, tag or
+worktree tip (so an unmerged but already verified PR keeps the receipt `merge:pr`
+will look up and the capsule its review stands on), any head passed with
+`--protect <sha>`, every verification receipt and review a merge record spent,
+the receipt `latest.json` names, and the newest `--keep` runs (default 5) of each
+kind. Both stores are planned before either one is touched, so a refusal leaves
+both intact, and a deletion root that is replaced, created or removed between
+planning and deleting is refused. `latest.json` and `merges/` are never deleted. The evidence roots,
+`merges/`, `logs/`, `capsules/` and `receipts/` must be real directories and
+deletion never follows a symlink. It refuses instead of guessing when branch refs,
+merge records, receipts, capsules or `latest.json` cannot be read.
 
 ## Exact-head review before merge
 

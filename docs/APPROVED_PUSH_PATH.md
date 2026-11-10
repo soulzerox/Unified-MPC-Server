@@ -77,7 +77,13 @@ Every argument is first resolved as a remote name through
 broader than the adapter's (`foo+bar` and `foo@bar` are valid names). Only an
 argument Git does not resolve is treated as a positional target (`git push
 file:///tmp/bare.git main`, `git push /tmp/bare.git main`), and then the target
-itself is classified by the table above. An argument with no scheme and no path
+itself is classified by the table above. Those positional examples describe the
+guard's classification, not a push the `git` tool will execute: the service
+resolves the remote's default branches before every push and denies with
+`Repository default branch could not be resolved safely` when the argument is
+not a configured remote. Use a configured remote for `git` tool pushes; a
+positional target is classified by the guard but never becomes a successful
+tool push. An argument with no scheme and no path
 separator is treated as a name, so it stays reported when it does not resolve:
 that covers a bare name, a slashless local path such as `sibling.git`, and a
 slashless scp-like target such as `git@host:repo.git`. Those pushes are denied

@@ -26,6 +26,7 @@ import {
   skillVersionBlocker,
   summarizeReviewBacklog,
   validateFindings,
+  verificationGateBlockers,
   writeReviewReceipt,
 } from './review-gate.mjs';
 
@@ -572,4 +573,34 @@ test('the backlog gate fails closed on evidence it cannot read or resolve', () =
   assert.equal(reviewBacklogNeedsAttention(unresolved), true);
   assert.match(formatReviewBacklog(corrupt), /WARN 1 unreadable receipt/);
   assert.match(formatReviewBacklog(unresolved), /WARN 1 receipt\(s\) name a PR that is not in the listing/);
+});
+
+test('verificationGateBlockers accepts a merge-ready receipt for the exact head', () => {
+  const headSha = 'a'.repeat(40);
+  assert.deepEqual(verificationGateBlockers({
+    verification: { headSha, mergeReady: true, dirty: false, profile: 'merge' },
+    headSha,
+  }), []);
+});
+
+test('verificationGateBlockers refuses a head with no local verification', () => {
+  const blocks = verificationGateBlockers({ verification: undefined, headSha: 'b'.repeat(40) });
+
+  assert.equal(blocks.length, 1);
+  assert.match(blocks[0], /no local verification receipt for bbbbbbbbbbbb/);
+  assert.match(blocks[0], /verify:local/);
+});
+
+test('verificationGateBlockers reports every reason a receipt cannot gate a review', () => {
+  const blocks = verificationGateBlockers({
+    verification: { headSha: 'c'.repeat(40), mergeReady: false, dirty: true, profile: 'targeted' },
+    headSha: 'd'.repeat(40),
+  });
+
+  assert.deepEqual(blocks, [
+    'verification receipt was produced for a different head',
+    'verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`',
+    'verification receipt was produced from a dirty worktree',
+    "verification receipt used the 'targeted' profile, not 'merge'",
+  ]);
 });

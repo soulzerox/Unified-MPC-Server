@@ -293,6 +293,9 @@ anything itself: it freezes the reviewer's input, validates the reviewer's
 findings, and turns a clean generation into a receipt the merge guard accepts.
 
 ```text
+verify:local       merge-ready receipt for the exact head
+        |
+        v
 capsule --pr N     freeze head/base/diff + skill + verification into
                    .unified-mpc/reviews/capsules/<head12>-<N>/
         |
@@ -304,6 +307,13 @@ record --findings  validate identity, skill hash, file anchors, severities,
                    recompute the verdict, write
                    .unified-mpc/reviews/receipts/<head12>-<N>.json
 ```
+
+`capsule` refuses a head with no merge-ready verification receipt, and reports
+every reason the receipt it found cannot gate a review (another head, not
+merge-ready, produced from a dirty tree, wrong profile). The merge guard requires
+that receipt anyway, so a review that runs first spends a reviewer on a head that
+cannot land. `status` reports the same blockers, so the two commands never give
+different answers.
 
 The receipt name is one per head and `record` creates it with a hard link, so
 two concurrent recorders cannot both write: the filesystem refuses the second
@@ -319,6 +329,7 @@ $ corepack pnpm@10.15.0 review:pr status --pr 534
 review-gate owner/repo#534 head 1a2b3c4d5e6f base 7f8e9d0c1b2a
   capsule: 5d2e1f0a-9b8c-4d3e-8f7a-6b5c4d3e2f10
   skill: unified-code-review v1 sha256:e48ff9b24971a…
+  verification: 8f1c2d3e-4b5a-4c6d-9e8f-0a1b2c3d4e5f mergeReady=true
   receipt: 9c8b7a65-4d3e-2f1a-0b9c-8d7e6f5a4b3c verdict=clean blockingOpen=0
 review-ready: yes
 ```

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -15,6 +15,7 @@ import {
   formatReviewBacklog,
   issueRefsFrom,
   parseArgs,
+  readJsonDirectory,
   readSkillIdentity,
   receiptUniquenessBlockers,
   renderCapsuleMarkdown,
@@ -445,6 +446,31 @@ test('a legacy receipt without a repository still counts', () => {
   });
   assert.equal(summary.receipts, 1);
   assert.equal(summary.blockingNow.length, 1);
+});
+
+test('only a missing receipts directory reads as an empty backlog', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'review-gate-readdir-'));
+  assert.deepEqual(await readJsonDirectory(path.join(root, 'missing')), { records: [], corrupt: [] });
+
+  const valid = path.join(root, 'valid');
+  await mkdir(valid);
+  await writeFile(path.join(valid, 'aaaaaaaaaaaa-536.json'), JSON.stringify(receipt()), 'utf8');
+  await writeFile(path.join(valid, 'broken.json'), '{not json', 'utf8');
+  await writeFile(path.join(valid, 'latest.json'), '{"ignored":true}', 'utf8');
+  const store = await readJsonDirectory(valid);
+  assert.equal(store.records.length, 1);
+  assert.deepEqual(store.corrupt, ['broken.json']);
+
+  // An existing directory this run cannot read is missing evidence, not an
+  // empty backlog: the report must fail instead of saying "nothing blocks".
+  const locked = path.join(root, 'locked');
+  await mkdir(locked);
+  await chmod(locked, 0o000);
+  try {
+    await assert.rejects(() => readJsonDirectory(locked), /EACCES|EPERM/);
+  } finally {
+    await chmod(locked, 0o755);
+  }
 });
 
 test('summarizeReviewBacklog uses the merge predicate, not severity alone', () => {

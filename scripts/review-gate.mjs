@@ -429,12 +429,18 @@ export async function readPullDiff(repository, prNumber) {
   return run(['gh', 'pr', 'diff', String(prNumber), '--repo', repository]);
 }
 
-async function readJsonDirectory(directory) {
+/**
+ * A missing directory is a young checkout with no receipts yet; any other
+ * readdir failure means this run cannot see the evidence, so it must throw and
+ * let the gate fail closed rather than report an empty backlog.
+ */
+export async function readJsonDirectory(directory) {
   let names;
   try {
     names = await readdir(directory);
-  } catch {
-    return { records: [], corrupt: [] };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { records: [], corrupt: [] };
+    throw error;
   }
   const records = [];
   const corrupt = [];

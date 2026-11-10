@@ -362,12 +362,16 @@ and applies the same predicate as the merge guard (`status === "open"` and
 `required_fix === true`). A finding counts as **blocking now** only when its
 receipt's head is still the PR's head; a newer head makes it **superseded** and a
 merged or closed PR makes it **history**. The exit code is `1` when a finding
-blocks now, a receipt is unreadable, or a receipt names a PR the listing did not
-return — the merge guard's fail-closed posture, so a routine cannot pass on
-evidence this run could not read. `--json` prints the same summary with every row.
+blocks now, a receipt is unreadable, or a receipt with a blocking finding names a
+PR the listing did not return — the merge guard's fail-closed posture, so a
+routine cannot pass on evidence this run could not read. `--json` prints the same
+summary with every row.
 
-An unreadable receipt is counted as `corrupt` rather than skipped, and a receipt
-written before receipts recorded `repository` still counts instead of vanishing.
+The receipts directory is held to the same rule: a directory that does not exist
+yet is an empty backlog, but one this run cannot read exits `1` instead of
+printing `receipts 0` and "nothing blocks". An unreadable receipt is counted as
+`corrupt` rather than skipped, and a receipt written before receipts recorded
+`repository` still counts instead of vanishing.
 
 ### What this does not prove
 

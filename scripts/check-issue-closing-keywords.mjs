@@ -28,10 +28,12 @@ const PARENTHETICAL_RETRACTION_PATTERN = new RegExp(
  * common retractions "does not, however, close", "never closes", "Nothing here
  * closes" and "not a PR that closes". GitHub still parses the keyword in each
  * of them, so the rest of the sentence is scanned too. `not only` is skipped
- * because it names a real closing rather than a retraction.
+ * because it names a real closing rather than a retraction, and the scan never
+ * crosses a line break: a bullet "Nothing here" on one line does not retract a
+ * "Closes #N" on the next one.
  */
 const SENTENCE_NEGATED_CLOSING_PATTERN = new RegExp(
-  String.raw`\b(?:not|never|nothing|none)\b(?!\s+only\b)[^.!?;\n]*?\b(close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)\b`,
+  String.raw`\b(?:not|never|nothing|none)\b(?!\s+only\b)(?:(?!\bnot\s+only\b)[^.!?;\n])*?\b(close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\s+((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+)\b`,
   'gi',
 );
 
@@ -43,6 +45,42 @@ function normalizeForScan(value) {
     .replace(/[*_~`]+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * The sentence-bounded scan needs real sentence boundaries. A hard-wrapped
+ * paragraph is one sentence, so its line breaks are joined; a line that starts
+ * a new Markdown block (list item, heading, quote, table row) or a blank line
+ * stays a boundary, so a bullet "Nothing here" does not retract a "Closes #N"
+ * on the next line.
+ */
+function normalizeSentenceForScan(value) {
+  const lines = String(value ?? '')
+    .normalize('NFKC')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[*_~`]+/g, '')
+    .split('\n')
+    .map((line) => {
+      const text = line.trim().replace(/[^\S\n]+/g, ' ');
+      return {
+        text,
+        indented: /^\s+\S/.test(line),
+        block: text === '' || /^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>|\|)/.test(text),
+      };
+    });
+
+  let normalized = '';
+  for (const [index, line] of lines.entries()) {
+    if (index === 0) {
+      normalized = line.text;
+      continue;
+    }
+    const previous = lines[index - 1];
+    const hardBoundary = line.text === '' || line.block || (previous.block && !line.indented);
+    normalized += `${hardBoundary ? '\n' : ' '}${line.text}`;
+  }
+
+  return normalized.replace(/\n{2,}/g, '\n').trim();
 }
 
 function canonicalKeyword(value) {
@@ -63,7 +101,7 @@ export function findNegatedClosingKeywordHazards(metadata) {
         source,
         keyword: canonicalKeyword(match[1]),
         issueRef: match[2],
-        excerpt: match[0].trim(),
+        excerpt: match[0].replace(/\s+/g, ' ').trim(),
       };
       // One issue can be retracted more than once; the first wording is the
       // excerpt worth reporting.
@@ -79,7 +117,7 @@ export function findNegatedClosingKeywordHazards(metadata) {
     collect(source, normalized, NEGATED_CLOSING_PATTERN);
     collect(source, normalized, RETRACTED_CLOSING_PATTERN);
     collect(source, normalized, PARENTHETICAL_RETRACTION_PATTERN);
-    collect(source, normalized, SENTENCE_NEGATED_CLOSING_PATTERN);
+    collect(source, normalizeSentenceForScan(metadata?.[source] ?? ''), SENTENCE_NEGATED_CLOSING_PATTERN);
   }
 
   return hazards;

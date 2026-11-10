@@ -218,3 +218,46 @@ test('does not flag a real closure that follows "not only"', () => {
 
   assert.deepEqual(hazards, []);
 });
+
+test('does not read a negation on one line as retracting a keyword on the next', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: ['- Nothing here', '- Closes #91', 'Never mind the details.', 'Closes #92'].join('\n'),
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('does not scan past an intervening "not only" closure from an earlier negation', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'Nothing here, not only fixes #93 but also resolves #94.',
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('keeps the excerpt on one line for a multi-line retraction', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'This does not,\nhowever, close #95.',
+  });
+
+  assert.deepEqual(
+    hazards.map(({ source, keyword, issueRef, excerpt }) => ({ source, keyword, issueRef, excerpt })),
+    [{ source: 'body', keyword: 'close', issueRef: '#95', excerpt: 'not, however, close #95' }],
+  );
+});
+
+test('does not cross a blank line from a negation to a later closure', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: 'Nothing here\n\nCloses #96',
+  });
+
+  assert.deepEqual(hazards, []);
+});
+
+test('treats a heading line as its own block when the next line closes an issue', () => {
+  const hazards = findNegatedClosingKeywordHazards({
+    body: '## Nothing here\nCloses #97',
+  });
+
+  assert.deepEqual(hazards, []);
+});

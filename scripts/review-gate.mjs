@@ -194,6 +194,22 @@ export function reviewVerdict(findings) {
   };
 }
 
+/**
+ * A reviewer reads the skill version from prose and may write `"1"` where the
+ * skill's own example shows `1`. The number still has to match exactly, so a
+ * numeric string is read as its number and every other value is compared as-is.
+ * The refusal quotes the value as JSON: the old `String(...)` form rendered a
+ * string `"1"` and a number `1` identically, which made a type mismatch look
+ * like "used version 1, bundled version is 1".
+ */
+export function skillVersionBlocker(submittedSkillVersion, bundledSkillVersion) {
+  const numeric = typeof submittedSkillVersion === 'string' && /^\d+$/.test(submittedSkillVersion.trim())
+    ? Number(submittedSkillVersion)
+    : submittedSkillVersion;
+  if (numeric === bundledSkillVersion) return undefined;
+  return `findings used skill version ${JSON.stringify(submittedSkillVersion)}, bundled version is ${bundledSkillVersion}`;
+}
+
 export function findReviewReceipt(receipts, headSha) {
   const matches = receipts.filter((receipt) => receipt?.headSha === headSha && receipt?.role === 'reviewer');
   if (matches.length === 0) return undefined;
@@ -756,7 +772,8 @@ async function recordCommand(options) {
   }
   if (submitted.capsule_id !== capsule.capsuleId) blockers.push('findings do not reference the frozen capsule for this head');
   if (submitted.skill_id !== skill.skillId) blockers.push(`findings used skill '${String(submitted.skill_id)}'`);
-  if (submitted.skill_version !== skill.skillVersion) blockers.push(`findings used skill version ${String(submitted.skill_version)}, bundled version is ${skill.skillVersion}`);
+  const skillVersionMessage = skillVersionBlocker(submitted.skill_version, skill.skillVersion);
+  if (skillVersionMessage !== undefined) blockers.push(skillVersionMessage);
   if (submitted.skill_sha256 !== skill.skillSha256) blockers.push('findings were produced with a different version of the bundled review skill');
   if (submitted.diff_fingerprint !== capsule.diffFingerprint) blockers.push('findings fingerprint does not match the frozen capsule');
   if (fingerprint !== capsule.diffFingerprint) blockers.push('the PR diff changed after the capsule was frozen; run a fresh review');

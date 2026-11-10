@@ -323,7 +323,7 @@ export function formatReviewBacklog(summary) {
  * is a file on disk: the verdict is recomputed here so an edited receipt cannot
  * claim a review that its own findings do not support.
  */
-export function evaluateReviewEvidence({ receipt, headReceiptCount, corruptReceiptCount, pr, skill, fingerprint }) {
+export function evaluateReviewEvidence({ receipt, capsule, headReceiptCount, corruptReceiptCount, pr, skill, fingerprint }) {
   const blockers = [];
   if (corruptReceiptCount !== undefined && corruptReceiptCount > 0) {
     blockers.push(`${corruptReceiptCount} review receipt file(s) cannot be read; inspect or remove them`);
@@ -332,7 +332,12 @@ export function evaluateReviewEvidence({ receipt, headReceiptCount, corruptRecei
     blockers.push(`${headReceiptCount} review receipts exist for this head; review evidence must be unique`);
   }
   if (receipt === undefined) {
-    blockers.push(`no exact-head review receipt for ${String(pr.headRefOid).slice(0, 12)}; run \`pnpm review:pr capsule --pr ${String(pr.number)}\` and record a reviewer finding set`);
+    // Freezing a capsule that already exists is refused, and so is re-freezing
+    // from a head with a receipt, so the advice has to match what is still
+    // possible for this head: only `record` remains once a capsule is frozen.
+    blockers.push(capsule === undefined
+      ? `no exact-head review receipt for ${String(pr.headRefOid).slice(0, 12)}; run \`pnpm review:pr capsule --pr ${String(pr.number)}\` and record a reviewer finding set`
+      : `capsule ${String(capsule.capsuleId)} is frozen for ${String(pr.headRefOid).slice(0, 12)} but no review receipt exists; hand the capsule to a reviewer and run \`pnpm review:pr record --pr ${String(pr.number)} --findings <file>\``);
     return { eligible: false, blockers };
   }
 
@@ -539,11 +544,20 @@ async function readCapsule(headSha, prNumber) {
  * the only way to a new capsule is a new head. A receipt named for this head
  * that cannot be read is the same refusal, because nothing can prove which
  * capsule it stands on.
+ *
+ * A capsule without a receipt is refused for the same reason one step earlier:
+ * the reviewer reads `capsule.json`/`diff.patch` and the recorder refuses
+ * findings that name another `capsuleId`, so overwriting the directory silently
+ * spends the review round. The refusal reports the capsule that is already
+ * there, so an operator can hand it to a reviewer instead of freezing again.
  */
-export function capsuleFreezeBlockers({ receipt, corruptReceiptNames = [], headSha }) {
+export function capsuleFreezeBlockers({ receipt, capsule, corruptReceiptNames = [], headSha }) {
   const blockers = [];
   if (receipt !== undefined) {
     blockers.push(`a review receipt (${String(receipt.reviewId)}) already stands on capsule ${String(receipt.capsuleId)} for ${headSha.slice(0, 12)}; a new capsule needs a new head`);
+  }
+  if (capsule !== undefined && receipt === undefined) {
+    blockers.push(`a capsule (${String(capsule.capsuleId)}) is already frozen for ${headSha.slice(0, 12)}; hand it to a reviewer and record the findings with \`pnpm review:pr record\` — a new capsule needs a new head`);
   }
   const prefix = `${headSha.slice(0, 12)}-`;
   const corruptForHead = corruptReceiptNames.filter((name) => name.startsWith(prefix));
@@ -743,9 +757,13 @@ async function capsuleCommand(options) {
     throw new Error(`cannot freeze a capsule from this checkout:\n  - ${treeBlockers.join('\n  - ')}`);
   }
 
-  const store = await readReviewReceipts();
+  const [store, existingCapsule] = await Promise.all([
+    readReviewReceipts(),
+    readCapsule(pr.headRefOid, pr.number),
+  ]);
   const freezeBlockers = capsuleFreezeBlockers({
     receipt: findReviewReceipt(store.records, pr.headRefOid),
+    capsule: existingCapsule,
     corruptReceiptNames: store.corrupt,
     headSha: pr.headRefOid,
   });
@@ -947,6 +965,7 @@ async function statusCommand(options) {
   const fingerprint = reviewFingerprint({ baseSha: pr.baseRefOid, headSha: pr.headRefOid, diff });
   const evaluation = evaluateReviewEvidence({
     receipt,
+    capsule,
     headReceiptCount: store.records.filter((record) => record?.headSha === pr.headRefOid).length,
     corruptReceiptCount: store.corrupt.length,
     pr,

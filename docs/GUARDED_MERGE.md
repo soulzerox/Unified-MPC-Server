@@ -341,7 +341,9 @@ that keeps the verdict at `no`, and exits `1` in that case. It evaluates the sam
 skill identity, diff fingerprint and review receipt the merge guard evaluates, so
 `review-ready: yes` is the gate's own verdict rather than a summary of the files
 on disk. The capsule line only reports which frozen capsule exists for that head;
-the merge guard itself never reads it.
+the merge guard itself never reads it. When a capsule is frozen but no receipt
+exists, the blocker names `record` instead of `capsule`, because a second freeze
+for the same head is refused.
 
 ### Capsule
 
@@ -374,6 +376,7 @@ finding blocks while `status === "open"` and `required_fix === true`.
 | Tree dirty or HEAD moved at freeze/record time | refused |
 | Second receipt for the same head | refused; review evidence is unique per head |
 | New capsule for a head that already has a receipt | refused with `a new capsule needs a new head`; the capsule is what that receipt stands on, so replacing it would orphan the reviewed evidence |
+| New capsule for a head whose capsule exists but has no receipt | refused; the frozen capsule is the reviewer's input, and overwriting it would make their findings unrecordable |
 
 A fix therefore starts a new review generation. The previous receipt stays on
 disk as history; it is never edited.

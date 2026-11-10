@@ -80,6 +80,7 @@ const PR = {
 function evaluate(overrides = {}) {
   return evaluateReviewEvidence({
     receipt: 'receipt' in overrides ? overrides.receipt : receipt(),
+    capsule: overrides.capsule,
     headReceiptCount: overrides.headReceiptCount ?? 1,
     corruptReceiptCount: overrides.corruptReceiptCount ?? 0,
     pr: { ...PR, ...(overrides.pr ?? {}) },
@@ -244,6 +245,16 @@ test('a missing review blocks the merge with the recovery command', () => {
   assert.match(result.blockers.join('\n'), /review:pr capsule --pr 536/);
 });
 
+test('a frozen capsule with no receipt is reported with record, not another freeze', () => {
+  const result = evaluate({ receipt: undefined, capsule: { capsuleId: 'c1' } });
+  const message = result.blockers.join('\n');
+
+  assert.equal(result.eligible, false);
+  assert.match(message, /capsule c1 is frozen for/);
+  assert.match(message, /review:pr record --pr 536 --findings/);
+  assert.doesNotMatch(message, /review:pr capsule --pr 536/);
+});
+
 test('a review bound to another head, base or PR blocks the merge', () => {
   assert.match(evaluate({ pr: { headRefOid: 'd'.repeat(40) } }).blockers.join('\n'), /different head/);
   assert.match(evaluate({ pr: { baseRefOid: 'd'.repeat(40) } }).blockers.join('\n'), /different base/);
@@ -307,6 +318,16 @@ test('capsuleFreezeBlockers refuses a head whose review receipt already stands o
     capsuleFreezeBlockers({ headSha, corruptReceiptNames: [`${'a'.repeat(12)}-9.json`] }).join('\n'),
     /unreadable review receipt\(s\) for this head/,
   );
+});
+
+test('capsuleFreezeBlockers refuses a head that already has a capsule', () => {
+  const headSha = 'a'.repeat(40);
+  const blockers = capsuleFreezeBlockers({ headSha, capsule: { capsuleId: 'c1' } });
+
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0], /a capsule \(c1\) is already frozen for aaaaaaaaaaaa/);
+  assert.match(blockers[0], /review:pr record/);
+  assert.match(blockers[0], /a new capsule needs a new head/);
 });
 
 test('record refuses a second review for the same head', () => {

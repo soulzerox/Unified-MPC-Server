@@ -42,6 +42,13 @@ const execFileAsync = promisify(execFile);
 
 const VERIFICATION_RECEIPT_PATTERN = /^(?<head>[0-9a-f]{12})-(?<verificationId>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
 const VERIFICATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// `local-verify` refreshes this file inside its log directory every 15 seconds
+// while it runs, so its mtime tells a live step from a run that was killed.
+// A run that lost its process cannot keep the marker fresh; ten minutes of
+// silence is far beyond a scheduling hiccup and still collects the directory
+// on the next prune.
+const ACTIVE_MARKER = 'active.json';
+const ACTIVE_MARKER_GRACE_MS = 10 * 60_000;
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /**
@@ -366,9 +373,13 @@ export async function planLocalVerifyEvidence({
  * those directories immortal.
  *
  * An orphan is collectable only when an in-flight run cannot be the reason it has
- * no receipt. The newest `keepRecent` receipts are the most recent runs that did
- * finish, so a log directory older than all of them cannot belong to a run that
- * is still writing. With no kept run there is no such proof and nothing is
+ * no receipt. The log directory's own mtime does not advance while a step runs
+ * (step logs are written when the step ends), so it is not proof on its own:
+ * `local-verify` keeps `active.json` fresh inside the directory for as long as
+ * the process lives, and a fresh marker always keeps the directory. Beyond that
+ * marker, the newest `keepRecent` receipts are the most recent runs that did
+ * finish, so a directory older than all of them cannot belong to a run that is
+ * still writing. With no kept run there is no such proof and nothing is
  * collected. A log whose id a merge record or `latest.json` still names is kept
  * even without its receipt: the record is then the only evidence left.
  */
@@ -391,10 +402,18 @@ async function planOrphanLogs({
     if (knownIds.has(entry.name)) continue;
     if (mergeVerificationIds.has(entry.name)) continue;
     if (entry.name === latestVerificationId) continue;
-    const stats = await lstatOrUndefined(path.join(logRoot, entry.name));
+    const directory = path.join(logRoot, entry.name);
+    const stats = await lstatOrUndefined(directory);
     if (stats === undefined) continue;
     if (!stats.isDirectory() && !stats.isSymbolicLink()) continue;
     if (stats.mtime.toISOString() >= cutoff) continue;
+    const marker = await lstatOrUndefined(path.join(directory, ACTIVE_MARKER));
+    if (marker !== undefined) {
+      // Anything but a plain file is not a marker this tool wrote: refuse to
+      // guess and keep the directory.
+      if (!marker.isFile()) continue;
+      if (Date.now() - marker.mtimeMs <= ACTIVE_MARKER_GRACE_MS) continue;
+    }
     orphans.push({ kind: 'log', verificationId: entry.name, reason: 'orphan-log' });
   }
   return orphans;

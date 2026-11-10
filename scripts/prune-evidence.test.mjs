@@ -278,6 +278,67 @@ test('keeps a log directory younger than the newest kept run', async () => {
   }
 });
 
+test('keeps an orphan log with a fresh heartbeat even when the directory is old', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-live-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const orphan = path.join(receiptRoot, 'logs', UUID_2);
+    await mkdir(orphan, { recursive: true });
+    await writeFile(path.join(orphan, 'active.json'), '{"pid":1}\n', 'utf8');
+    await utimes(orphan, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 5, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove, []);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), [UUID_2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('collects an orphan log whose heartbeat stopped', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-stopped-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const orphan = path.join(receiptRoot, 'logs', UUID_2);
+    await mkdir(orphan, { recursive: true });
+    const marker = path.join(orphan, 'active.json');
+    await writeFile(marker, '{"pid":1}\n', 'utf8');
+    await utimes(marker, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+    await utimes(orphan, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 5, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove, [{ kind: 'log', verificationId: UUID_2, reason: 'orphan-log' }]);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps an orphan log whose heartbeat marker is not a plain file', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-odd-marker-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    const orphan = path.join(receiptRoot, 'logs', UUID_2);
+    await mkdir(path.join(orphan, 'active.json'), { recursive: true });
+    await utimes(orphan, new Date('2025-12-01T00:00:00.000Z'), new Date('2025-12-01T00:00:00.000Z'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 5, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove, []);
+    assert.deepEqual(await readdir(path.join(receiptRoot, 'logs')), [UUID_2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('collects no orphan log when no run is kept to prove it is not in flight', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-orphan-nocutoff-'));
   try {

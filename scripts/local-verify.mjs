@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-/* global process, console, Buffer */
+/* global process, console, Buffer, setInterval, clearInterval */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,6 +24,15 @@ const RECEIPT_ROOT = path.join(ROOT, '.unified-mpc', 'local-verify');
 const MAX_LOG_CHARS = 2 * 1024 * 1024;
 const PNPM = 'corepack';
 const PNPM_PREFIX = ['pnpm@10.15.0'];
+
+// `evidence:prune` collects log directories that no receipt references, which
+// are exactly the runs that were killed before they could write one. A running
+// verification writes nothing inside its log directory between two steps (step
+// logs are written when a step finishes), so the directory mtime cannot tell a
+// long step from a dead run. The heartbeat file advances while the process
+// lives; its mtime is the signal the pruner reads.
+const ACTIVE_MARKER = 'active.json';
+const HEARTBEAT_INTERVAL_MS = 15_000;
 
 // Bump when a profile's step set changes, so a durable receipt names the exact
 // set of steps it vouches for. The number alone is not evidence: every version
@@ -297,6 +306,30 @@ async function readTreeIdentity() {
   };
 }
 
+/**
+ * Starts the liveness marker `evidence:prune` reads, and returns the function
+ * that stops it once the receipt exists. The marker is removed only after the
+ * receipt is written, so there is no moment where a finished run looks like an
+ * orphan. A run that dies never reaches the cleanup, and its stale marker is
+ * what lets the pruner collect the directory later.
+ */
+async function startHeartbeat(logDirectory, { verificationId, startedAt }) {
+  const markerPath = path.join(logDirectory, ACTIVE_MARKER);
+  const beat = async () => {
+    const now = new Date().toISOString();
+    await writeFile(markerPath, `${JSON.stringify({ verificationId, pid: process.pid, startedAt, updatedAt: now })}\n`, 'utf8');
+  };
+  await beat();
+  const timer = setInterval(() => {
+    beat().catch(() => {});
+  }, HEARTBEAT_INTERVAL_MS);
+  timer.unref();
+  return async () => {
+    clearInterval(timer);
+    await rm(markerPath, { force: true });
+  };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help === true) {
@@ -317,6 +350,7 @@ async function main() {
   const startedAt = new Date().toISOString();
   const logDirectory = path.join(RECEIPT_ROOT, 'logs', verificationId);
   await mkdir(logDirectory, { recursive: true });
+  const stopHeartbeat = await startHeartbeat(logDirectory, { verificationId, startedAt });
 
   const steps = [];
   for (const step of profileSteps(options.profile)) {
@@ -364,6 +398,7 @@ async function main() {
   const receiptPath = path.join(RECEIPT_ROOT, `${identity.headSha.slice(0, 12)}-${verificationId}.json`);
   await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
   await writeFile(path.join(RECEIPT_ROOT, 'latest.json'), `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+  await stopHeartbeat();
 
   if (options.json) {
     console.log(JSON.stringify({ receiptPath, receipt }));

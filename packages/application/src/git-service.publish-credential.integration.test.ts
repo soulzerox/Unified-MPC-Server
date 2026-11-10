@@ -128,6 +128,11 @@ async function startPrivateRemote(
         response.writeHead(status, headers);
         response.end(bodyBytes);
       });
+      // `git http-backend` can exit before it drains stdin, and even an empty
+      // body races an already-exited child. That surfaces as an asynchronous
+      // EPIPE on the parent end; the callback above already reports the exit,
+      // so the expected pipe error must not crash the test runner.
+      child.stdin?.on('error', () => {});
       child.stdin?.end(body);
     })();
   });

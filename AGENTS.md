@@ -48,7 +48,15 @@ worktree tip (so an unmerged but already verified PR keeps the receipt `merge:pr
 will look up and the capsule its review stands on), any head passed with
 `--protect <sha>`, every verification receipt and review a merge record spent,
 the receipt `latest.json` names, and the newest `--keep` runs (default 5) of each
-kind. Both stores are planned before either one is touched, so a refusal leaves
+kind. A verification that is killed leaves a `logs/<id>` directory no receipt
+references, so those are collected too, but only when the directory carries no
+fresh `active.json` heartbeat (the running `local-verify` refreshes it every
+15 seconds, and its recorded pid is gone), is older than every run the plan
+keeps, and its id is not named by a merge record or `latest.json`: together
+that proves it is not still being written, and with no kept run nothing is
+collected. Both
+stores are planned
+before either one is touched, so a refusal leaves
 both intact, and a deletion root that is replaced, created or removed between
 planning and deleting is refused. `latest.json` and `merges/` are never deleted. The evidence roots,
 `merges/`, `logs/`, `capsules/` and `receipts/` must be real directories and

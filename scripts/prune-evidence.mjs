@@ -22,7 +22,10 @@ const execFileAsync = promisify(execFile);
  * nor named by a merge record, and that are not among the newest `--keep` runs.
  * Keeping branch tips is what protects an unmerged but already verified PR: its
  * receipt is the one `merge:pr` will look up when the merge finally happens, and
- * its capsule is the review evidence that receipt already stands on.
+ * its capsule is the review evidence that receipt already stands on. A
+ * verification that was killed leaves a log directory with no receipt at all;
+ * those are collected too, but only when the directory is older than every run
+ * the plan keeps, so a verification that is still writing is never deleted.
  *
  * Both stores are planned before either one is touched, and `--apply` deletes
  * exactly the entries that were planned, so a refusal in one store stops the run
@@ -38,6 +41,14 @@ const execFileAsync = promisify(execFile);
  */
 
 const VERIFICATION_RECEIPT_PATTERN = /^(?<head>[0-9a-f]{12})-(?<verificationId>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
+const VERIFICATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// `local-verify` refreshes this file inside its log directory every 15 seconds
+// while it runs, so its mtime tells a live step from a run that was killed.
+// A run that lost its process cannot keep the marker fresh; ten minutes of
+// silence is far beyond a scheduling hiccup and still collects the directory
+// on the next prune.
+const ACTIVE_MARKER = 'active.json';
+const ACTIVE_MARKER_GRACE_MS = 10 * 60_000;
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 /**
@@ -344,8 +355,93 @@ export async function planLocalVerifyEvidence({
     store: 'verification',
     targets: { receiptRoot, logRoot },
     guards: [await identityGuard(receiptRoot), await identityGuard(logRoot)],
-    ...plan,
+    keep: plan.keep,
+    remove: [...plan.remove, ...await planOrphanLogs({
+      logRoot,
+      receipts,
+      mergeVerificationIds: protection.verificationIds,
+      latestVerificationId,
+      keepRecent,
+    })].sort((left, right) => (left.fileName ?? left.verificationId).localeCompare(right.fileName ?? right.verificationId)),
   };
+}
+
+/**
+ * A verification writes `logs/<verificationId>` while it runs and the receipt
+ * when it finishes, so a run that is killed leaves a log directory nothing
+ * references. Deleting a log only together with its receipt therefore leaves
+ * those directories immortal.
+ *
+ * An orphan is collectable only when an in-flight run cannot be the reason it has
+ * no receipt. The log directory's own mtime does not advance while a step runs
+ * (step logs are written when the step ends), so it is not proof on its own:
+ * `local-verify` keeps `active.json` fresh inside the directory for as long as
+ * the process lives, and a fresh marker always keeps the directory. A stale
+ * marker is decided by the pid it records, not by its age alone, because a
+ * heartbeat write can fail while its run continues. Beyond that marker, the
+ * newest `keepRecent` receipts are the most recent runs that did
+ * finish, so a directory older than all of them cannot belong to a run that is
+ * still writing. With no kept run there is no such proof and nothing is
+ * collected. A log whose id a merge record or `latest.json` still names is kept
+ * even without its receipt: the record is then the only evidence left.
+ */
+async function planOrphanLogs({
+  logRoot,
+  receipts,
+  mergeVerificationIds,
+  latestVerificationId,
+  keepRecent,
+}) {
+  const newest = [...receipts]
+    .sort((left, right) => right.completedAt.localeCompare(left.completedAt))
+    .slice(0, Math.max(0, keepRecent));
+  if (newest.length === 0) return [];
+  const cutoff = newest.reduce((oldest, receipt) => (receipt.completedAt < oldest ? receipt.completedAt : oldest), newest[0].completedAt);
+  const knownIds = new Set(receipts.map((receipt) => receipt.verificationId));
+  const orphans = [];
+  for (const entry of await listDirectory(logRoot) ?? []) {
+    if (!VERIFICATION_ID_PATTERN.test(entry.name)) continue;
+    if (knownIds.has(entry.name)) continue;
+    if (mergeVerificationIds.has(entry.name)) continue;
+    if (entry.name === latestVerificationId) continue;
+    const directory = path.join(logRoot, entry.name);
+    const stats = await lstatOrUndefined(directory);
+    if (stats === undefined) continue;
+    if (!stats.isDirectory() && !stats.isSymbolicLink()) continue;
+    if (stats.mtime.toISOString() >= cutoff) continue;
+    const marker = await lstatOrUndefined(path.join(directory, ACTIVE_MARKER));
+    if (marker !== undefined) {
+      // Anything but a plain file is not a marker this tool wrote: refuse to
+      // guess and keep the directory.
+      if (!marker.isFile()) continue;
+      if (Date.now() - marker.mtimeMs <= ACTIVE_MARKER_GRACE_MS) continue;
+      // A heartbeat can stop advancing while its run lives (a failed write, a
+      // paused process), so a stale mtime alone does not prove the run is gone.
+      // The recorded pid decides, and anything this tool cannot read or probe
+      // keeps the directory.
+      const beat = await readJson(path.join(directory, ACTIVE_MARKER));
+      if (!beat.ok) continue;
+      const pid = beat.value?.pid;
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      if (processIsAlive(pid)) continue;
+    }
+    orphans.push({ kind: 'log', verificationId: entry.name, reason: 'orphan-log' });
+  }
+  return orphans;
+}
+
+/**
+ * `kill(pid, 0)` probes without signalling. Only `ESRCH` proves the process is
+ * gone; a permission error means it exists but belongs to another user, and
+ * keeping the directory is the safe answer.
+ */
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
 }
 
 /**
@@ -402,7 +498,7 @@ export async function applyEvidencePlan(plan) {
   if (blocker !== undefined) throw new Error(blocker);
   if (plan.store === 'verification') {
     for (const entry of plan.remove) {
-      await rm(path.join(plan.targets.receiptRoot, entry.fileName), { force: true });
+      if (entry.fileName !== undefined) await rm(path.join(plan.targets.receiptRoot, entry.fileName), { force: true });
       await removeDirectoryEntry(plan.targets.logRoot, entry.verificationId);
     }
     return;
@@ -552,15 +648,22 @@ function parseArguments(argv) {
 }
 
 function countByKind(entries) {
-  const counts = { capsule: 0, receipt: 0 };
-  for (const entry of entries) counts[entry.kind === 'capsule' ? 'capsule' : 'receipt'] += 1;
+  const counts = { capsule: 0, receipt: 0, log: 0 };
+  for (const entry of entries) {
+    if (entry.kind === 'capsule') counts.capsule += 1;
+    else if (entry.kind === 'log') counts.log += 1;
+    else counts.receipt += 1;
+  }
   return counts;
 }
 
 function describeCounts(entries) {
   const counts = countByKind(entries);
-  if (counts.capsule === 0) return `${counts.receipt} receipt(s)`;
-  return `${counts.capsule} capsule(s) and ${counts.receipt} receipt(s)`;
+  const parts = [];
+  if (counts.capsule > 0) parts.push(`${counts.capsule} capsule(s)`);
+  if (counts.receipt > 0) parts.push(`${counts.receipt} receipt(s)`);
+  if (counts.log > 0) parts.push(`${counts.log} log director${counts.log === 1 ? 'y' : 'ies'}`);
+  return parts.length === 0 ? `${counts.receipt} receipt(s)` : parts.join(' and ');
 }
 
 function report(label, result, dryRun) {
@@ -570,7 +673,7 @@ function report(label, result, dryRun) {
   }
   const verb = dryRun ? 'would remove' : 'removed';
   for (const entry of result.remove) {
-    console.log(`${verb} [${label}] ${entry.fileName ?? entry.name} (${entry.reason})`);
+    console.log(`${verb} [${label}] ${entry.fileName ?? entry.name ?? `logs/${entry.verificationId}`} (${entry.reason})`);
   }
   console.log(`${label}: ${verb} ${describeCounts(result.remove)}; kept ${describeCounts(result.keep)}`);
 }

@@ -343,6 +343,32 @@ finding blocks while `status === "open"` and `required_fix === true`.
 A fix therefore starts a new review generation. The previous receipt stays on
 disk as history; it is never edited.
 
+### Backlog
+
+Receipts accumulate, so `review:pr backlog` answers the only question history
+raises: does any of it still block something?
+
+```bash
+$ corepack pnpm@10.15.0 review:pr backlog
+review backlog — owner/repo
+  receipts 174 (corrupt 0)
+  open findings 184, blocking open 4
+  blocking now 0 · superseded head 0 · merged/closed 4 · unknown PR 0
+nothing blocks an open PR right now
+```
+
+It reads every receipt, resolves PR state and current head in one `gh pr list`,
+and applies the same predicate as the merge guard (`status === "open"` and
+`required_fix === true`). A finding counts as **blocking now** only when its
+receipt's head is still the PR's head; a newer head makes it **superseded** and a
+merged or closed PR makes it **history**. The exit code is `1` when a finding
+blocks now, a receipt is unreadable, or a receipt names a PR the listing did not
+return — the merge guard's fail-closed posture, so a routine cannot pass on
+evidence this run could not read. `--json` prints the same summary with every row.
+
+An unreadable receipt is counted as `corrupt` rather than skipped, and a receipt
+written before receipts recorded `repository` still counts instead of vanishing.
+
 ### What this does not prove
 
 The reviewer is a role contract, not an OS sandbox, and a receipt is a file that

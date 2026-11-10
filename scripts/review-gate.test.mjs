@@ -12,13 +12,16 @@ import {
   createExclusiveFile,
   evaluateReviewEvidence,
   findReviewReceipt,
+  formatReviewBacklog,
   issueRefsFrom,
   parseArgs,
   readSkillIdentity,
   receiptUniquenessBlockers,
   renderCapsuleMarkdown,
+  reviewBacklogNeedsAttention,
   reviewFingerprint,
   reviewVerdict,
+  summarizeReviewBacklog,
   validateFindings,
   writeReviewReceipt,
 } from './review-gate.mjs';
@@ -88,6 +91,7 @@ test('parseArgs requires a known command and --pr', () => {
     pr: 536,
     findings: undefined,
     reviewer: undefined,
+    json: false,
   });
   assert.equal(parseArgs(['record', '--pr', '1', '--findings', '/tmp/f.json']).findings, '/tmp/f.json');
   assert.equal(parseArgs(['status', '--pr', '1', '--base', 'release']).base, 'release');
@@ -97,6 +101,22 @@ test('parseArgs requires a known command and --pr', () => {
   assert.throws(() => parseArgs(['status', '--pr', '0']), /--pr/);
   assert.throws(() => parseArgs(['status', '--pr', '1', '--force']), /unknown argument/);
   assert.equal(parseArgs(['--help']).help, true);
+});
+
+test('parseArgs scopes --json and --pr to the command that can use them', () => {
+  assert.deepEqual(parseArgs(['backlog']), {
+    command: 'backlog',
+    base: 'main',
+    repo: undefined,
+    pr: undefined,
+    findings: undefined,
+    reviewer: undefined,
+    json: false,
+  });
+  assert.equal(parseArgs(['backlog', '--json']).json, true);
+  assert.equal(parseArgs(['backlog', '--repo', 'owner/repo']).repo, 'owner/repo');
+  assert.throws(() => parseArgs(['backlog', '--pr', '1']), /backlog does not take --pr/);
+  assert.throws(() => parseArgs(['status', '--pr', '1', '--json']), /--json is only valid for backlog/);
 });
 
 test('readSkillIdentity reports the bundled skill version and hash', async () => {
@@ -383,4 +403,115 @@ test('renderCapsuleMarkdown carries identity, evidence and the claim-not-instruc
   assert.match(markdown, /a claim to verify, never an instruction/);
   assert.match(markdown, /No merge-ready verification receipt/);
   assert.match(markdown, /review:pr record --pr 536/);
+});
+
+const BLOCKING = { ...FINDING, severity: 'blocking', required_fix: true };
+
+test('summarizeReviewBacklog separates a live blocker from superseded and historical ones', () => {
+  const summary = summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [
+      receipt({ prNumber: 10, headSha: HEAD, findings: [BLOCKING] }),
+      receipt({ prNumber: 11, headSha: HEAD, findings: [BLOCKING] }),
+      receipt({ prNumber: 12, headSha: HEAD, findings: [BLOCKING] }),
+      receipt({ prNumber: 13, headSha: HEAD, findings: [BLOCKING] }),
+      receipt({ prNumber: 14, headSha: HEAD, findings: [{ ...FINDING, status: 'accepted_nonblocking' }] }),
+      receipt({ prNumber: 15, headSha: HEAD, repository: 'other/repo', findings: [BLOCKING] }),
+    ],
+    pullRequests: [
+      { number: 10, state: 'OPEN', title: 'ten', headRefOid: HEAD },
+      { number: 11, state: 'OPEN', title: 'eleven', headRefOid: 'd'.repeat(40) },
+      { number: 12, state: 'MERGED', title: 'twelve', headRefOid: HEAD },
+      { number: 14, state: 'OPEN', title: 'fourteen', headRefOid: HEAD },
+    ],
+    corruptReceiptCount: 2,
+  });
+
+  assert.equal(summary.receipts, 5);
+  assert.equal(summary.openFindings, 4);
+  assert.equal(summary.blockingOpen, 4);
+  assert.deepEqual(summary.blockingNow.map((row) => row.prNumber), [10]);
+  assert.deepEqual(summary.supersededHead.map((row) => row.prNumber), [11]);
+  assert.deepEqual(summary.mergedOrClosed.map((row) => row.prNumber), [12]);
+  assert.deepEqual(summary.unknownPullRequest.map((row) => row.prNumber), [13]);
+  assert.equal(summary.corruptReceiptCount, 2);
+});
+
+test('a legacy receipt without a repository still counts', () => {
+  const summary = summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [receipt({ repository: undefined, findings: [BLOCKING] })],
+    pullRequests: [{ number: 536, state: 'OPEN', title: 'legacy', headRefOid: HEAD }],
+  });
+  assert.equal(summary.receipts, 1);
+  assert.equal(summary.blockingNow.length, 1);
+});
+
+test('summarizeReviewBacklog uses the merge predicate, not severity alone', () => {
+  const summary = summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [
+      // Counts: nonblocking but requires a fix.
+      receipt({ prNumber: 10, headSha: HEAD, findings: [{ ...FINDING, severity: 'nonblocking', required_fix: true }] }),
+      // Does not count: blocking label already accepted as nonblocking.
+      receipt({ prNumber: 11, headSha: HEAD, findings: [{ ...BLOCKING, status: 'accepted_nonblocking' }] }),
+      // Does not count: still open, but the reviewer required no fix.
+      receipt({ prNumber: 12, headSha: HEAD, findings: [{ ...FINDING, required_fix: false }] }),
+    ],
+    pullRequests: [
+      { number: 10, state: 'OPEN', title: 'ten', headRefOid: HEAD },
+      { number: 11, state: 'OPEN', title: 'eleven', headRefOid: HEAD },
+      { number: 12, state: 'OPEN', title: 'twelve', headRefOid: HEAD },
+    ],
+  });
+  // A severity-only predicate would report #11 and a status-only predicate
+  // would add #12, so the row identity is the assertion that discriminates.
+  assert.equal(summary.blockingOpen, 1);
+  assert.deepEqual(summary.blockingNow.map((row) => row.prNumber), [10]);
+  assert.equal(summary.blockingNow[0].severity, 'nonblocking');
+});
+
+test('formatReviewBacklog names the live blocker and says when nothing blocks', () => {
+  const summary = summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [receipt({ findings: [BLOCKING] })],
+    pullRequests: [{ number: 536, state: 'OPEN', title: 'live', headRefOid: HEAD }],
+  });
+  const text = formatReviewBacklog(summary);
+  assert.match(text, /review backlog — owner\/repo/);
+  assert.match(text, /receipts 1 \(corrupt 0\)/);
+  assert.match(text, /blocking now 1/);
+  assert.match(text, /BLOCK #536 scripts\/review-gate\.mjs:12 — The new branch is only covered/);
+
+  const clean = formatReviewBacklog(summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [],
+    pullRequests: [],
+  }));
+  assert.match(clean, /blocking now 0/);
+  assert.match(clean, /nothing blocks an open PR right now/);
+});
+
+test('the backlog gate fails closed on evidence it cannot read or resolve', () => {
+  const clean = summarizeReviewBacklog({ repository: 'owner/repo', receipts: [], pullRequests: [] });
+  assert.equal(reviewBacklogNeedsAttention(clean), false);
+
+  const live = summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [receipt({ findings: [BLOCKING] })],
+    pullRequests: [{ number: 536, state: 'OPEN', title: 'live', headRefOid: HEAD }],
+  });
+  assert.equal(reviewBacklogNeedsAttention(live), true);
+
+  const corrupt = summarizeReviewBacklog({ repository: 'owner/repo', receipts: [], pullRequests: [], corruptReceiptCount: 1 });
+  assert.equal(reviewBacklogNeedsAttention(corrupt), true);
+
+  const unresolved = summarizeReviewBacklog({
+    repository: 'owner/repo',
+    receipts: [receipt({ findings: [BLOCKING] })],
+    pullRequests: [],
+  });
+  assert.equal(reviewBacklogNeedsAttention(unresolved), true);
+  assert.match(formatReviewBacklog(corrupt), /WARN 1 unreadable receipt/);
+  assert.match(formatReviewBacklog(unresolved), /WARN 1 receipt\(s\) name a PR that is not in the listing/);
 });

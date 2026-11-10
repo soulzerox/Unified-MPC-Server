@@ -297,6 +297,96 @@ test('resolveProtectedHeads returns every branch and tag tip', async () => {
   }
 });
 
+test('resolveProtectedHeads includes detached worktree heads', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-worktree-'));
+  const worktree = await mkdtemp(path.join(tmpdir(), 'evidence-prune-worktree-linked-'));
+  try {
+    const git = (...args) => execFileAsync('git', ['-C', root, ...args]);
+    const identity = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false'];
+    await git('init', '-q', '-b', 'main');
+    await writeFile(path.join(root, 'a.txt'), 'a\n', 'utf8');
+    await git('add', 'a.txt');
+    await git(...identity, 'commit', '-q', '-m', 'one');
+    const first = (await git('rev-parse', 'HEAD')).stdout.trim();
+    await git('checkout', '-q', '-b', 'feature');
+    await writeFile(path.join(root, 'b.txt'), 'b\n', 'utf8');
+    await git('add', 'b.txt');
+    await git(...identity, 'commit', '-q', '-m', 'two');
+    const second = (await git('rev-parse', 'HEAD')).stdout.trim();
+    await git('checkout', '-q', 'main');
+    await git('worktree', 'add', '--detach', worktree, second);
+    await git('branch', '-f', 'feature', first);
+
+    const heads = await resolveProtectedHeads(root);
+
+    assert.equal(heads.has(first), true);
+    assert.equal(heads.has(second), true);
+  } finally {
+    try {
+      await execFileAsync('git', ['-C', root, 'worktree', 'remove', '--force', worktree]);
+    } catch {
+      await rm(worktree, { recursive: true, force: true });
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('refuses to prune through a symlinked evidence root', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-evidence-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-evidence-target-'));
+  try {
+    await mkdir(path.join(root, '.unified-mpc'), { recursive: true });
+    await writeReceipt(path.join(outside, 'local-verify'), `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await symlink(path.join(outside, 'local-verify'), path.join(root, '.unified-mpc', 'local-verify'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /evidence root is a symlink/);
+    assert.equal((await readdir(path.join(outside, 'local-verify'))).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('refuses to prune when the metadata directory is a symlink', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-meta-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-meta-target-'));
+  try {
+    await writeReceipt(path.join(outside, 'local-verify'), `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await symlink(outside, path.join(root, '.unified-mpc'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /evidence root is a symlink/);
+    assert.equal((await readdir(path.join(outside, 'local-verify'))).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('refuses to read merge records through a symlink', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-merges-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-merges-target-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await symlink(outside, path.join(receiptRoot, 'merges'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /merge records directory is not a real directory/);
+    assert.equal((await readdir(receiptRoot)).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test('keeps the receipt latest.json points at even when it is superseded', () => {
   const plan = planEvidencePrune({
     receipts: [

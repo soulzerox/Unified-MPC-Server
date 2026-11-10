@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* global process, console */
 import { execFile } from 'node:child_process';
-import { lstat, readdir, readFile, rm, unlink } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -109,12 +109,19 @@ async function removeLogDirectory(logRoot, verificationId) {
 }
 
 export async function resolveProtectedHeads(root) {
-  const { stdout } = await execFileAsync(
-    'git',
-    ['-C', root, 'for-each-ref', '--format=%(objectname)'],
-    { maxBuffer: 8 * 1024 * 1024 },
+  const [refs, worktrees] = await Promise.all([
+    execFileAsync('git', ['-C', root, 'for-each-ref', '--format=%(objectname)'], { maxBuffer: 8 * 1024 * 1024 }),
+    execFileAsync('git', ['-C', root, 'worktree', 'list', '--porcelain'], { maxBuffer: 8 * 1024 * 1024 }),
+  ]);
+  const heads = new Set(
+    refs.stdout.split('\n').map((line) => line.trim()).filter((line) => FULL_SHA_PATTERN.test(line)),
   );
-  return new Set(stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0));
+  for (const line of worktrees.stdout.split('\n')) {
+    if (!line.startsWith('HEAD ')) continue;
+    const sha = line.slice('HEAD '.length).trim();
+    if (FULL_SHA_PATTERN.test(sha)) heads.add(sha);
+  }
+  return heads;
 }
 
 /**
@@ -128,17 +135,42 @@ export async function pruneLocalVerifyEvidence({
   keepRecent = 5,
   dryRun = false,
 }) {
-  const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
-  const logRoot = path.join(receiptRoot, 'logs');
+  const requestedRoot = path.join(root, '.unified-mpc', 'local-verify');
   const protectedHeads = protectedHeadShas instanceof Set ? protectedHeadShas : new Set(protectedHeadShas);
-  const entries = await listDirectory(receiptRoot);
+  const entries = await listDirectory(requestedRoot);
   if (entries === undefined) return { status: 'missing', keep: [], remove: [], dryRun };
 
-  const mergeEntries = await listDirectory(path.join(receiptRoot, 'merges'));
+  // Deleting through a symlinked evidence root would remove files outside the
+  // checkout, so require the root to resolve to the literal path under `root`
+  // and do every deletion through that resolved path.
+  let receiptRoot;
+  try {
+    const resolvedRoot = await realpath(root);
+    receiptRoot = await realpath(requestedRoot);
+    if (receiptRoot !== path.join(resolvedRoot, '.unified-mpc', 'local-verify')) {
+      return { status: 'refused', reason: 'local verification evidence root is a symlink', keep: [], remove: [], dryRun };
+    }
+  } catch (error) {
+    return {
+      status: 'refused',
+      reason: `cannot resolve local verification evidence root: ${error instanceof Error ? error.message : String(error)}`,
+      keep: [],
+      remove: [],
+      dryRun,
+    };
+  }
+  const logRoot = path.join(receiptRoot, 'logs');
+
+  const mergesRoot = path.join(receiptRoot, 'merges');
+  const mergesStats = await lstatOrUndefined(mergesRoot);
+  if (mergesStats !== undefined && !mergesStats.isDirectory()) {
+    return { status: 'refused', reason: 'merge records directory is not a real directory', keep: [], remove: [], dryRun };
+  }
+  const mergeEntries = await listDirectory(mergesRoot);
   const mergeVerificationIds = new Set();
   for (const entry of mergeEntries ?? []) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const record = await readJson(path.join(receiptRoot, 'merges', entry.name));
+    const record = await readJson(path.join(mergesRoot, entry.name));
     if (!record.ok || typeof record.value?.verificationId !== 'string') {
       return { status: 'refused', reason: `unreadable merge record: ${entry.name}`, keep: [], remove: [], dryRun };
     }

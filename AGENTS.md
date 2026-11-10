@@ -42,13 +42,14 @@ Receipts and their logs are audit evidence and are never collected
 automatically, so a long-lived checkout grows by roughly a megabyte per run.
 `pnpm evidence:prune` is the opt-in cleanup: it is a dry run unless you pass
 `--apply`, it requires `GIT_HEAD_SHA`, and it keeps every receipt for the current
-head, every receipt whose head is still a branch or tag tip (so an unmerged but
-already verified PR keeps the receipt `merge:pr` will look up), any head passed
-with `--protect <sha>`, every receipt a merge record spent, the receipt
-`latest.json` names, and the newest `--keep` runs (default 5). `latest.json`,
-`merges/` and review capsules are never touched, and log deletion never follows a
-symlink out of the evidence root. It refuses instead of guessing when a branch
-ref, merge record, receipt or `latest.json` is unreadable.
+head, every receipt whose head is still a branch, tag or worktree tip (so an
+unmerged but already verified PR keeps the receipt `merge:pr` will look up), any
+head passed with `--protect <sha>`, every receipt a merge record spent, the
+receipt `latest.json` names, and the newest `--keep` runs (default 5).
+`latest.json`, `merges/` and review capsules are never touched. The evidence
+root, `merges/` and `logs/` must be real directories and deletion never follows a
+symlink. It refuses instead of guessing when branch refs, merge records, receipts
+or `latest.json` cannot be read.
 
 ## Exact-head review before merge
 

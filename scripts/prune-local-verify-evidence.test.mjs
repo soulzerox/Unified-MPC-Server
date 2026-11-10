@@ -387,6 +387,46 @@ test('refuses to read merge records through a symlink', async () => {
   }
 });
 
+test('reads a symlinked merge record instead of skipping it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-record-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'evidence-prune-symlink-record-target-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await mkdir(path.join(receiptRoot, 'merges'), { recursive: true });
+    const recordPath = path.join(outside, 'record.json');
+    await writeFile(recordPath, `${JSON.stringify({ headSha: 'aaaaaaaaaaaa', verificationId: UUID_1, state: 'MERGED' })}\n`, 'utf8');
+    await symlink(recordPath, path.join(receiptRoot, 'merges', 'aaaaaaaaaaaa-1.json'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.keep.map((entry) => entry.reason), ['merge-record']);
+    assert.deepEqual(result.remove, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('refuses when a merge record symlink is broken', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'evidence-prune-broken-record-'));
+  try {
+    const receiptRoot = path.join(root, '.unified-mpc', 'local-verify');
+    await writeReceipt(receiptRoot, `aaaaaaaaaaaa-${UUID_1}.json`, 'aaaaaaaaaaaa', '2026-01-01T00:00:00.000Z');
+    await mkdir(path.join(receiptRoot, 'merges'), { recursive: true });
+    await symlink(path.join(root, 'gone.json'), path.join(receiptRoot, 'merges', 'gone.json'));
+
+    const result = await pruneLocalVerifyEvidence({ root, headSha: 'bbbbbbbbbbbb', keepRecent: 0, dryRun: false });
+
+    assert.equal(result.status, 'refused');
+    assert.match(result.reason, /unreadable merge record/);
+    assert.equal((await readdir(receiptRoot)).includes(`aaaaaaaaaaaa-${UUID_1}.json`), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('keeps the receipt latest.json points at even when it is superseded', () => {
   const plan = planEvidencePrune({
     receipts: [

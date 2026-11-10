@@ -169,7 +169,7 @@ export async function pruneLocalVerifyEvidence({
   const mergeEntries = await listDirectory(mergesRoot);
   const mergeVerificationIds = new Set();
   for (const entry of mergeEntries ?? []) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    if (!entry.name.endsWith('.json')) continue;
     const record = await readJson(path.join(mergesRoot, entry.name));
     if (!record.ok || typeof record.value?.verificationId !== 'string') {
       return { status: 'refused', reason: `unreadable merge record: ${entry.name}`, keep: [], remove: [], dryRun };
@@ -196,7 +196,7 @@ export async function pruneLocalVerifyEvidence({
 
   const receipts = [];
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
+    if (entry.isDirectory()) continue;
     const match = RECEIPT_PATTERN.exec(entry.name);
     if (match === null) continue;
     const parsed = await readJson(path.join(receiptRoot, entry.name));

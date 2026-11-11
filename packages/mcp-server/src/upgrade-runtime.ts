@@ -12,7 +12,7 @@ import {
   type InvocationAuthorization,
   type Result,
 } from '@unified-mpc/domain';
-import type { FileActor } from '@unified-mpc/application';
+import type { FileActor, GoalWorktreeBlocker } from '@unified-mpc/application';
 import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescriptor } from '@unified-mpc/capabilities';
 import { skillQueryIsRanked } from '@unified-mpc/extensions';
 import { createProcessTreeTerminator } from '@unified-mpc/process';
@@ -228,6 +228,27 @@ export interface UpgradeRuntimeOptions {
   readonly resourceAdmissionController?: ResourceAdmissionController;
   readonly resourceAdmissionSessionId?: string;
   readonly lspProcessAdmissionCost?: number;
+}
+
+/**
+ * Removing a worktree destroys whatever is still inside it, so recoverable
+ * work, a live goal lease and an unverifiable probe all refuse the removal.
+ * `unintegrated_head` stays advisory because squash merges never leave the
+ * worktree HEAD as an ancestor of `origin/main`, and `path_missing` has no
+ * work left to lose.
+ */
+const WORKTREE_REMOVAL_BLOCKERS: ReadonlySet<GoalWorktreeBlocker> = new Set([
+  'externally_owned',
+  'active_lease',
+  'dirty',
+  'unmerged_changes',
+  'probe_failed',
+]);
+
+interface WorktreeCleanupSafety {
+  readonly status: 'clean' | 'blocked' | 'unavailable';
+  readonly blockers: readonly GoalWorktreeBlocker[];
+  readonly blockerDetails: readonly string[];
 }
 
 export class UpgradeRuntimeService {
@@ -1841,16 +1862,38 @@ export class UpgradeRuntimeService {
       return err(appError('PERMISSION_DENIED', 'Worktree is owned by another client session'));
     }
     const cleanupBlocker = await this.runtimeDeploymentCleanupBlocker(workspaceId, worktreePath);
+    const worktreeSafety = await this.worktreeCleanupSafety(workspaceId, worktreePath);
+    if (!worktreeSafety.ok) return worktreeSafety;
     const plan = {
       tool: 'git_worktree_remove', workspaceId, worktreePath,
       owner: entry.owner,
       mutationPolicy: 'explicit-confirmation-and-dry-run',
       dependencyPolicy: entry.dependencyPolicy,
       cleanupBlocker,
+      worktreeSafety: worktreeSafety.value,
     };
     if (input.dryRun !== false && input.dry_run !== false) return ok({ ...plan, dryRun: true });
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Removing a Git worktree requires explicit user confirmation'));
     if (this.services.git === undefined) return ok({ ...plan, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
+    // A dry run may report that safety is unavailable, but the destructive
+    // call must never fall back to the old ownership-only check.
+    if (worktreeSafety.value.status === 'unavailable') {
+      return err(appError(
+        'CONFLICT',
+        'Goal worktree reconciliation is unavailable; refusing to remove a worktree whose safety cannot be verified',
+        true,
+      ));
+    }
+    if (worktreeSafety.value.status === 'blocked') {
+      const details = worktreeSafety.value.blockerDetails.length === 0
+        ? worktreeSafety.value.blockers.join(', ')
+        : worktreeSafety.value.blockerDetails.join('; ');
+      return err(appError(
+        'CONFLICT',
+        `Worktree ${worktreePath} still holds work that removal would discard or cannot verify: ${details}`,
+        true,
+      ));
+    }
     if (cleanupBlocker.blocked) {
       const details = cleanupBlocker.reason === 'active_runtime_reference'
         ? cleanupBlocker.references.map((reference) => `${reference.kind}:${reference.path}`).join(', ')
@@ -1872,6 +1915,47 @@ export class UpgradeRuntimeService {
       if (index !== -1) worktrees.splice(index, 1);
     });
     return ok({ ...plan, dryRun: false, sideEffectsStarted: true, status: 'completed', result: result.value });
+  }
+
+  /**
+   * A removal is irreversible for uncommitted or conflicted work, so ask the
+   * same reconciliation the lifecycle report and goal completion use. An
+   * unverifiable classification fails the removal closed instead of assuming
+   * the worktree is clean.
+   */
+  private async worktreeCleanupSafety(
+    workspaceId: string,
+    worktreePath: string,
+  ): Promise<Result<WorktreeCleanupSafety>> {
+    const goalWorktrees = this.services.goalWorktrees;
+    if (goalWorktrees === undefined) {
+      return ok({ status: 'unavailable', blockers: [], blockerDetails: [] });
+    }
+    const classified = await goalWorktrees.classify({
+      workspaceId,
+      actor: { clientId: this.actor.clientId, sessionId: actorSessionId(this.actor) },
+    });
+    if (!classified.ok) {
+      return err(appError(
+        'CONFLICT',
+        `Worktree safety could not be verified: ${classified.error.message}`,
+        true,
+      ));
+    }
+    const entry = classified.value.entries.find((candidate) => candidate.worktreePath === worktreePath);
+    if (entry === undefined) {
+      return err(appError(
+        'CONFLICT',
+        `Worktree ${worktreePath} is in the ownership ledger but the reconciler did not classify it; refusing to remove unverified work`,
+        true,
+      ));
+    }
+    const blockers = entry.blockers.filter((blocker) => WORKTREE_REMOVAL_BLOCKERS.has(blocker));
+    return ok({
+      status: blockers.length === 0 ? 'clean' : 'blocked',
+      blockers,
+      blockerDetails: entry.blockerDetails,
+    });
   }
 
   private async runtimeDeploymentCleanupBlocker(

@@ -1,4 +1,5 @@
-import { ok } from '@unified-mpc/domain';
+import { ok, type Result } from '@unified-mpc/domain';
+import type { GoalWorktreeClassificationReport } from '@unified-mpc/application';
 import { hashHarnessText } from './harness-runtime.js';
 import type { McpApplicationServices } from './tools/tool-types.js';
 
@@ -30,6 +31,34 @@ function fixtureFileContent(filePath: string, startLine = 1): string {
       : filePath.toLowerCase().endsWith('skill.md')
         ? '---\nname: smoke-skill\ndescription: Smoke skill\n---\n\n# Smoke\n'
         : paged && startLine === 1 ? 'one\ntwo' : paged ? 'two' : 'export const smoke = true;\n';
+}
+
+/**
+ * Fixture classifier for destructive worktree removal: it reports exactly the
+ * given paths as clean and leaves every other path unclassified.
+ */
+export function cleanGoalWorktreeClassifier(
+  worktreePaths: readonly string[],
+  owner: string,
+): NonNullable<McpApplicationServices['goalWorktrees']> {
+  return {
+    async classify(): Promise<Result<GoalWorktreeClassificationReport>> {
+      const entries = worktreePaths.map((worktreePath) => ({
+        worktreePath,
+        ref: 'main',
+        owner,
+        disposition: 'safe_to_clean' as const,
+        blockers: [],
+        blockerDetails: [],
+      }));
+      return ok({
+        integrationBase: 'origin/main',
+        entries,
+        safeToCleanCount: entries.length,
+        keepCount: 0,
+      });
+    },
+  };
 }
 
 export function runtimeRecord(value: unknown): Record<string, unknown> {
@@ -86,8 +115,15 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     },
     goalWorktrees: serviceProxy('goalWorktrees', calls, () => ({
       integrationBase: 'origin/main',
-      entries: [],
-      safeToCleanCount: 0,
+      entries: [{
+        worktreePath: '.worktrees/runtime-contract',
+        ref: 'HEAD',
+        owner: 'runtime-contract-test',
+        disposition: 'safe_to_clean' as const,
+        blockers: [],
+        blockerDetails: [],
+      }],
+      safeToCleanCount: 1,
       keepCount: 0,
     })),
     thaiRag: {

@@ -41,6 +41,7 @@ import {
   GoalWorkspaceRetentionEvidenceSealingService,
   createGoalWorktreeReconciliationPort,
   type GoalCanonicalAdmissionOutcome,
+  type GoalWorktreeClassificationReport,
 } from '@unified-mpc/application';
 import { GitAdapter, type GitPublishCredentialDeployment } from '@unified-mpc/git';
 import { AuditService, decodeActivityTargetReference } from '@unified-mpc/audit';
@@ -1302,6 +1303,7 @@ export function createStdioMcpRuntime(
     validateAdmission: goalRuntimeControlPlane.validateWorkspaceAdmission.bind(goalRuntimeControlPlane),
     recordSuccessfulMutation: goalRuntimeControlPlane.recordSuccessfulWorkspaceMutation.bind(goalRuntimeControlPlane),
   });
+  const goalWorktreeClassifier: { current?: NonNullable<McpApplicationServices['goalWorktrees']> } = {};
   const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {
     scheduledContinuations: goalRepository,
     workerLiveness: goalMutationFence,
@@ -1310,6 +1312,16 @@ export function createStdioMcpRuntime(
     goalExecutions: goalRepository,
     executionCancellation: goalRepository,
     runtimeEvents: goalRuntimeControlPlane,
+    // The reconciler is constructed below with the full runtime services; the
+    // delegate keeps this seam typed without reordering the runtime graph.
+    goalWorktrees: {
+      async classify(request): Promise<Result<GoalWorktreeClassificationReport>> {
+        const classifier = goalWorktreeClassifier.current;
+        return classifier === undefined
+          ? err(appError('INTERNAL_ERROR', 'Goal worktree classification is unavailable'))
+          : classifier.classify(request);
+      },
+    },
   });
   const scheduledContinuationService = new ScheduledContinuationService(goalRepository, {
     workerLiveness: goalMutationFence,
@@ -1432,6 +1444,7 @@ export function createStdioMcpRuntime(
         .map((goal) => goal.workspaceId))];
     },
   });
+  goalWorktreeClassifier.current = goalWorktrees;
   const services: McpApplicationServices = {
     platform: process.platform,
     runtimeStatePath: path.join(dataPath, 'upgrade-runtime.json'),

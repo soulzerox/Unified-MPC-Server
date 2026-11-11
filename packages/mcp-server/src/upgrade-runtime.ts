@@ -234,6 +234,12 @@ interface WorktreeCleanupSafety {
   readonly status: 'clean' | 'blocked' | 'unavailable';
   readonly blockers: readonly GoalWorktreeBlocker[];
   readonly blockerDetails: readonly string[];
+  /**
+   * The reconciler found no directory at the recorded path. This alone does not
+   * block removal, but it is the only classification where a Git refusal can
+   * mean the worktree is already reconciled rather than not removed at all.
+   */
+  readonly pathMissing: boolean;
 }
 
 export class UpgradeRuntimeService {
@@ -1895,11 +1901,35 @@ export class UpgradeRuntimeService {
       ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
     }, undefined, authorization);
     if (!result.ok) return result;
+    // Git reports a refusal as an ordinary command result, so the exit code is
+    // the only evidence that the worktree was really removed. The one benign
+    // refusal is a path that is already gone and already unregistered: a
+    // registration Git has pruned cannot be removed again, and the ownership
+    // record is stale rather than wrong. Every other refusal keeps the ledger
+    // entry so the failure stays visible instead of echoing a success that
+    // never happened.
+    const alreadyReconciled = result.value.exitCode !== 0
+      && worktreeSafety.value.pathMissing
+      && /is not a working tree/i.test(result.value.stderr);
+    if (result.value.exitCode !== 0 && !alreadyReconciled) {
+      const detail = result.value.stderr.trim();
+      return err(appError(
+        'CONFLICT',
+        `Git refused to remove worktree ${worktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`,
+        true,
+      ));
+    }
     await this.mutateSharedState((_plugins, worktrees) => {
       const index = worktrees.findIndex((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === worktreePath);
       if (index !== -1) worktrees.splice(index, 1);
     });
-    return ok({ ...plan, dryRun: false, sideEffectsStarted: true, status: 'completed', result: result.value });
+    return ok({
+      ...plan,
+      dryRun: false,
+      sideEffectsStarted: true,
+      status: alreadyReconciled ? 'already_absent' : 'completed',
+      result: result.value,
+    });
   }
 
   /**
@@ -1914,7 +1944,7 @@ export class UpgradeRuntimeService {
   ): Promise<Result<WorktreeCleanupSafety>> {
     const goalWorktrees = this.services.goalWorktrees;
     if (goalWorktrees === undefined) {
-      return ok({ status: 'unavailable', blockers: [], blockerDetails: [] });
+      return ok({ status: 'unavailable', blockers: [], blockerDetails: [], pathMissing: false });
     }
     const classified = await goalWorktrees.classify({
       workspaceId,
@@ -1940,6 +1970,9 @@ export class UpgradeRuntimeService {
       status: blockers.length === 0 ? 'clean' : 'blocked',
       blockers,
       blockerDetails: entry.blockerDetails,
+      // `path_missing` returns before any removal blocker is derived, so a
+      // missing path never weakens a refusal that holds recoverable work.
+      pathMissing: entry.blockers.includes('path_missing'),
     });
   }
 

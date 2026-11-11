@@ -55,13 +55,25 @@ interface Fixture {
   readonly state: UpgradeRuntimeStateStore;
 }
 
+interface FixtureOptions {
+  /** Exit code and output the Git stub reports, so a refusal can be modelled. */
+  readonly git?: { readonly exitCode: number; readonly stdout?: string; readonly stderr?: string };
+  /** Skip creating the recorded directory to model a path the reconciler calls missing. */
+  readonly materializePath?: boolean;
+}
+
 async function fixture(
   classify?: (request: GoalWorktreeReconciliationRequest) => Promise<Result<GoalWorktreeClassificationReport>>,
+  options: FixtureOptions = {},
 ): Promise<Fixture> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-safety-'));
   temporaryRoots.push(root);
   const workspaceRoot = path.join(root, 'repo');
-  await mkdir(path.join(workspaceRoot, worktreePath), { recursive: true });
+  if (options.materializePath !== false) {
+    await mkdir(path.join(workspaceRoot, worktreePath), { recursive: true });
+  } else {
+    await mkdir(workspaceRoot, { recursive: true });
+  }
   const runtimeStatePath = path.join(root, 'upgrade-runtime.json');
   const state = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
   await state.updateShared(() => ({
@@ -103,7 +115,11 @@ async function fixture(
     git: {
       async run(_actor, request): Promise<ReturnType<typeof ok>> {
         gitCalls.push(request);
-        return ok({ exitCode: 0, stdout: 'removed', stderr: '' });
+        return ok({
+          exitCode: options.git?.exitCode ?? 0,
+          stdout: options.git?.stdout ?? 'removed',
+          stderr: options.git?.stderr ?? '',
+        });
       },
     },
   } as unknown as McpApplicationServices, actor);
@@ -144,10 +160,13 @@ describe('git_worktree_remove worktree safety gate', () => {
     const leased = await fixture(async () => ok(report([entry({ blockers: ['active_lease'] })])));
     await expect(remove(leased.runtime)).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
 
-    const vanished = await fixture(async () => ok(report([entry({ blockers: ['path_missing'] })])));
+    // A missing directory whose registration still exists is removable: Git
+    // prunes the stale registration and exits 0, so the ledger entry goes too.
+    const vanished = await fixture(async () => ok(report([entry({ blockers: ['path_missing'] })])), { materializePath: false });
     const removed = await remove(vanished.runtime);
     expect(removed).toMatchObject({ ok: true, value: { status: 'completed' } });
     expect(vanished.gitCalls).toHaveLength(1);
+    expect((await vanished.state.readShared()).worktrees).toEqual([]);
   });
 
   it('does not block on the advisory unintegrated head that a squash merge leaves behind', async () => {
@@ -217,5 +236,47 @@ describe('git_worktree_remove worktree safety gate', () => {
     });
     expect(gitCalls).toEqual([{ workspaceId, args: ['worktree', 'remove', worktreePath] }]);
     expect((await state.readShared()).worktrees).toEqual([]);
+  });
+
+  it('reconciles an already-unregistered missing path without claiming a removal', async () => {
+    const { runtime, gitCalls, state } = await fixture(
+      async () => ok(report([entry({ blockers: ['path_missing'] })])),
+      {
+        materializePath: false,
+        git: { exitCode: 128, stderr: "fatal: '.worktrees/agent-1' is not a working tree\n" },
+      },
+    );
+
+    const reconciled = await remove(runtime);
+
+    expect(reconciled).toMatchObject({ ok: true, value: { status: 'already_absent' } });
+    expect(gitCalls).toHaveLength(1);
+    expect((await state.readShared()).worktrees).toEqual([]);
+  });
+
+  it('reports a Git refusal as a conflict and keeps the ownership record', async () => {
+    const { runtime, gitCalls, state } = await fixture(
+      async () => ok(report([entry()])),
+      { git: { exitCode: 128, stdout: '', stderr: 'fatal: cannot remove worktree: Permission denied\n' } },
+    );
+
+    const refused = await remove(runtime);
+
+    expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+    if (!refused.ok) expect(refused.error.message).toContain('Permission denied');
+    expect(gitCalls).toHaveLength(1);
+    expect((await state.readShared()).worktrees).toHaveLength(1);
+  });
+
+  it('never reconciles "not a working tree" while the path is still registered', async () => {
+    const { runtime, state } = await fixture(
+      async () => ok(report([entry()])),
+      { git: { exitCode: 128, stderr: "fatal: '.worktrees/agent-1' is not a working tree\n" } },
+    );
+
+    const refused = await remove(runtime);
+
+    expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect((await state.readShared()).worktrees).toHaveLength(1);
   });
 });

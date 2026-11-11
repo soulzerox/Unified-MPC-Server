@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { ok } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
 import { UpgradeRuntimeService } from './upgrade-runtime.js';
+import { cleanGoalWorktreeClassifier } from './tool-runtime-test-harness.js';
 
 const actor: FileActor = { clientId: 'admin-recovery', clientName: 'admin-recovery-test', sessionId: 'session-a' };
 
@@ -43,6 +44,7 @@ describe('upgrade administrative recovery snapshots', () => {
           return ok({ id: 'ws-1', rootPath: directory, realRootPath: directory });
         },
       },
+      goalWorktrees: cleanGoalWorktreeClassifier(['.worktrees/agent-1'], actor.clientId),
     }, actor);
 
     await expect(runtime.execute('git_worktree_spawn', {

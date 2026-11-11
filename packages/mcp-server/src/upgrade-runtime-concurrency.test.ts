@@ -6,6 +6,7 @@ import { ok } from '@unified-mpc/domain';
 import type { FileActor } from '@unified-mpc/application';
 import { UpgradeRuntimeService } from './upgrade-runtime.js';
 import { UpgradeRuntimeStateStore } from './upgrade-runtime-state-store.js';
+import { cleanGoalWorktreeClassifier } from './tool-runtime-test-harness.js';
 
 const actorA: FileActor = { clientId: 'client', clientName: 'test', sessionId: 'session-a' };
 const actorB: FileActor = { clientId: 'client', clientName: 'test', sessionId: 'session-b' };
@@ -157,6 +158,7 @@ describe('upgrade runtime multi-session persistence', () => {
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
       },
+      goalWorktrees: cleanGoalWorktreeClassifier(['.worktrees/session-a', '.worktrees/session-b'], actorA.clientId),
     };
     const first = new UpgradeRuntimeService(services, actorA);
     const second = new UpgradeRuntimeService(services, actorB);
@@ -216,6 +218,7 @@ describe('upgrade runtime multi-session persistence', () => {
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
       },
+      goalWorktrees: cleanGoalWorktreeClassifier(['.worktrees/runtime-bound', '.worktrees/materializing'], actorA.clientId),
     };
 
     try {
@@ -321,6 +324,7 @@ describe('upgrade runtime multi-session persistence', () => {
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
       },
+      goalWorktrees: cleanGoalWorktreeClassifier(['.worktrees/runtime-bound', '.worktrees/materializing'], actorA.clientId),
     };
 
     try {

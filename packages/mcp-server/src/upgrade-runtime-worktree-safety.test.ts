@@ -56,7 +56,7 @@ interface Fixture {
 }
 
 async function fixture(
-  classify: (request: GoalWorktreeReconciliationRequest) => Promise<Result<GoalWorktreeClassificationReport>>,
+  classify?: (request: GoalWorktreeReconciliationRequest) => Promise<Result<GoalWorktreeClassificationReport>>,
 ): Promise<Fixture> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-safety-'));
   temporaryRoots.push(root);
@@ -81,6 +81,14 @@ async function fixture(
   const runtime = new UpgradeRuntimeService({
     runtimeStatePath,
     platform: 'linux',
+    ...(classify === undefined ? {} : {
+      goalWorktrees: {
+        async classify(request: GoalWorktreeReconciliationRequest): Promise<Result<GoalWorktreeClassificationReport>> {
+          requests.push(request);
+          return classify(request);
+        },
+      },
+    }),
     workspaceInfo: {
       async info(): Promise<ReturnType<typeof ok>> {
         return ok({
@@ -96,12 +104,6 @@ async function fixture(
       async run(_actor, request): Promise<ReturnType<typeof ok>> {
         gitCalls.push(request);
         return ok({ exitCode: 0, stdout: 'removed', stderr: '' });
-      },
-    },
-    goalWorktrees: {
-      async classify(request): Promise<Result<GoalWorktreeClassificationReport>> {
-        requests.push(request);
-        return classify(request);
       },
     },
   } as unknown as McpApplicationServices, actor);
@@ -182,6 +184,19 @@ describe('git_worktree_remove worktree safety gate', () => {
         worktreeSafety: { status: 'blocked', blockers: ['dirty'] },
       },
     });
+    expect(gitCalls).toEqual([]);
+    expect((await state.readShared()).worktrees).toHaveLength(1);
+  });
+
+  it('refuses a real removal when the reconciler is unavailable but still previews it', async () => {
+    const { runtime, gitCalls, state } = await fixture();
+
+    const preview = await remove(runtime, { dryRun: true });
+    expect(preview).toMatchObject({ ok: true, value: { worktreeSafety: { status: 'unavailable' } } });
+
+    const refused = await remove(runtime);
+    expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    if (!refused.ok) expect(refused.error.message).toContain('reconciliation is unavailable');
     expect(gitCalls).toEqual([]);
     expect((await state.readShared()).worktrees).toHaveLength(1);
   });

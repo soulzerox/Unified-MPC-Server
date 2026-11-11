@@ -1875,6 +1875,15 @@ export class UpgradeRuntimeService {
     if (input.dryRun !== false && input.dry_run !== false) return ok({ ...plan, dryRun: true });
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Removing a Git worktree requires explicit user confirmation'));
     if (this.services.git === undefined) return ok({ ...plan, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
+    // A dry run may report that safety is unavailable, but the destructive
+    // call must never fall back to the old ownership-only check.
+    if (worktreeSafety.value.status === 'unavailable') {
+      return err(appError(
+        'CONFLICT',
+        'Goal worktree reconciliation is unavailable; refusing to remove a worktree whose safety cannot be verified',
+        true,
+      ));
+    }
     if (worktreeSafety.value.status === 'blocked') {
       const details = worktreeSafety.value.blockerDetails.length === 0
         ? worktreeSafety.value.blockers.join(', ')

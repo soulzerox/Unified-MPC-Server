@@ -1,4 +1,4 @@
-import { appError, err, ok } from '@unified-mpc/domain';
+import { appError, err, ok, type MergeEvidenceBlocker } from '@unified-mpc/domain';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 import { guardedPrMergeSchema, mergePolicyGetSchema, mergeReconcileSchema, mergeVerificationRunSchema, mergeVerificationStatusSchema } from './schemas.js';
 
@@ -125,7 +125,10 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
           receiptRef: input.receiptRef,
         });
         if (result.status === 'blocked') {
-          return err(appError('PERMISSION_DENIED', 'Guarded merge was blocked by verification or review policy'));
+          return err(appError(
+            'PERMISSION_DENIED',
+            `Guarded merge was blocked by verification or review policy${blockerDetail(result.decision.blockers)}`,
+          ));
         }
         if (result.status === 'inspect_required') {
           const detail = result.detail === undefined ? '' : ` (${result.detail})`;
@@ -185,4 +188,24 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
       },
     }),
   ];
+}
+
+const MAX_BLOCKER_DETAIL_CHARS = 400;
+
+/**
+ * A blocked merge returns one MCP error, so a blanket refusal cannot tell a
+ * moved head apart from a missing review. The blocker codes are the only
+ * explanation the caller gets; gate-scoped blockers also name the gate, which
+ * the caller can already read from `merge_policy_get`. Keep it bounded: a
+ * pathological receipt must not produce an unbounded error message.
+ */
+function blockerDetail(blockers: readonly MergeEvidenceBlocker[]): string {
+  if (blockers.length === 0) return '';
+  const codes = blockers.map((blocker) => (
+    blocker.gate === undefined ? blocker.code : `${blocker.code}:${blocker.gate}`
+  ));
+  const detail = `: ${codes.join(', ')}`;
+  return detail.length <= MAX_BLOCKER_DETAIL_CHARS
+    ? detail
+    : `${detail.slice(0, MAX_BLOCKER_DETAIL_CHARS - 1)}…`;
 }

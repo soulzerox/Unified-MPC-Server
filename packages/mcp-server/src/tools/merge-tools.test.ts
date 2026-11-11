@@ -185,6 +185,69 @@ describe('mergeTools', () => {
     });
   });
 
+  it('names the blockers that refused a guarded merge', async () => {
+    const dispatch = vi.fn(async () => ({
+      status: 'blocked' as const,
+      receiptRef: 'receipt-278',
+      decision: {
+        status: 'MERGE_BLOCKED' as const,
+        blockers: [
+          { code: 'receipt_head_stale' as const, expected: '1'.repeat(40), observed: '2'.repeat(40) },
+          { code: 'required_gate_missing' as const, gate: 'ci' },
+        ],
+      },
+    }));
+    const tool = mergeTools(context({
+      mergePolicy: { async getByRepository(): Promise<RepositoryMergePolicy> { return policy; } },
+      guardedMerge: { dispatch },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'guarded_pr_merge');
+    if (tool === undefined) throw new Error('missing guarded_pr_merge');
+
+    const result = await tool.execute({
+      repository: policy.repository,
+      pullRequest: 278,
+      headSha: '1'.repeat(40),
+      baseBranch: 'main',
+      receiptRef: 'receipt-278',
+    }, new AbortController().signal);
+
+    const message = result.ok === false ? result.error.message : '';
+    expect(message).toContain('receipt_head_stale');
+    expect(message).toContain('required_gate_missing:ci');
+  });
+
+  it('bounds the blocker detail in the refusal message', async () => {
+    const dispatch = vi.fn(async () => ({
+      status: 'blocked' as const,
+      receiptRef: 'receipt-278',
+      decision: {
+        status: 'MERGE_BLOCKED' as const,
+        blockers: Array.from({ length: 100 }, () => ({
+          code: 'receipt_head_stale' as const,
+          expected: '1'.repeat(40),
+          observed: '2'.repeat(40),
+        })),
+      },
+    }));
+    const tool = mergeTools(context({
+      mergePolicy: { async getByRepository(): Promise<RepositoryMergePolicy> { return policy; } },
+      guardedMerge: { dispatch },
+    } as unknown as McpToolContext['services'])).find((candidate) => candidate.name === 'guarded_pr_merge');
+    if (tool === undefined) throw new Error('missing guarded_pr_merge');
+
+    const result = await tool.execute({
+      repository: policy.repository,
+      pullRequest: 278,
+      headSha: '1'.repeat(40),
+      baseBranch: 'main',
+      receiptRef: 'receipt-278',
+    }, new AbortController().signal);
+
+    const message = result.ok === false ? result.error.message : '';
+    expect(message.length).toBeLessThan(500);
+    expect(message.endsWith('…')).toBe(true);
+  });
+
   it('returns a recoverable conflict when merge state requires inspection', async () => {
     const dispatch = vi.fn(async () => ({
       status: 'inspect_required' as const,

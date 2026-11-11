@@ -255,6 +255,8 @@ export class UpgradeRuntimeService {
   private readonly incrementalVerifier: IncrementalVerifier;
   private readonly session = new Map<string, unknown>();
   private readonly worktrees: WorktreeLedgerEntry[] = [];
+  /** Per managed worktree path, so two spawns of one path cannot interleave. */
+  private readonly worktreeSpawnLocks = new Map<string, Promise<void>>();
   private readonly eventLog: EventLogCapabilityBackend;
   private readonly database: DatabaseRuntimeService;
   private readonly lsp: LspRuntimeService;
@@ -1657,55 +1659,36 @@ export class UpgradeRuntimeService {
       return err(appError('INVALID_INPUT', 'Git worktree path is already present in the shared ownership ledger'));
     }
     if (this.services.git === undefined) return ok({ ...plan, worktreePath: managedWorktreePath, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
-    // A failed `git worktree add` can leave the path registered, and a retry
-    // then fails with "already exists". The only evidence that such a
-    // registration was created by this attempt is the state before it, so it is
-    // captured before the mutation instead of guessed from the failure.
-    const registrationsBefore = await this.registeredWorktreePaths(workspaceId, authorization, input.userConfirmed === true, signal);
-    const registeredBefore = registrationsBefore?.some(
-      (candidate) => sameHostPath(candidate, managedWorktree.absolutePath, platform),
-    ) === true;
-    const result = await this.services.git.run(this.actor, {
-      workspaceId,
-      args: ['worktree', 'add', '--detach', managedWorktreePath, ref],
-      ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
-    }, undefined, authorization);
-    if (!result.ok) return result;
-    // `git worktree add` reports a refusal as an ordinary result, so the exit
-    // code is the only evidence the directory exists. Registering ownership for
-    // a worktree Git never created would make every later reconcile trust a
-    // path that was never there, and would hide the real failure from callers.
-    if (result.value.exitCode !== 0) {
-      const detail = result.value.stderr.trim();
-      // A failed `git worktree add` can leave the path registered even though
-      // the command reported failure, which is why a retry then fails with
-      // "already exists" instead of the original cause. The listing is
-      // read-only, so naming the leftover only explains the refusal and never
-      // claims ownership of a path this invocation may not have created.
-      const registered = await this.registeredWorktreePaths(workspaceId, authorization, input.userConfirmed === true, signal);
-      const leftRegistered = registered?.some(
-        (candidate) => sameHostPath(candidate, managedWorktree.absolutePath, platform),
-      ) === true;
-      // Only a registration that appeared during this attempt is ours to clear.
-      // A path that was already registered stays untouched even when the add
-      // failed, because removing it would delete another owner's worktree; an
-      // unreadable listing keeps the conservative report-only behaviour too.
-      const cleared = leftRegistered && registrationsBefore !== undefined && !registeredBefore
-        ? await this.clearSpawnLeftover(workspaceId, managedWorktreePath)
-        : false;
-      const leftoverNote = leftRegistered
-        ? cleared
-          ? '. This attempt left a registration behind and it was cleared, so a retry can reuse the path.'
-          : registeredBefore
-            ? `. The path was already registered before this attempt, so a retry stays blocked until its owner clears it (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
-            : `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
-        : '';
+    // Two spawns of the same managed path must not interleave. Without this,
+    // both can read the pre-state before either `git worktree add` registers the
+    // path, and the loser then sees the winner's fresh registration as its own
+    // leftover and removes the winner's worktree. The lock is keyed by the host
+    // path identity (case-folded on win32, like `sameHostPath`) and lives in the
+    // shared runtime state directory, so it also covers the per-request,
+    // per-session and per-connection runtime instances.
+    const spawnLockKey = `${workspaceId}\0${comparableHostPath(managedWorktree.absolutePath, platform) ?? managedWorktree.absolutePath}`;
+    let result: Result<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>;
+    try {
+      result = await this.withWorktreeSpawnLock(spawnLockKey, () =>
+        this.addManagedWorktree({
+          workspaceId,
+          managedWorktreePath,
+          absolutePath: managedWorktree.absolutePath,
+          ref,
+          userConfirmed: input.userConfirmed === true,
+          candidateTimeoutMs: typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined,
+          signal,
+          authorization,
+        }));
+    } catch (error) {
+      if (!isRuntimeLockTimeout(error)) throw error;
       return err(appError(
         'CONFLICT',
-        `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}${leftoverNote}`,
+        `Another session is already creating ${managedWorktreePath}, so this attempt did not start. Retry after that spawn finishes.`,
         true,
       ));
     }
+    if (!result.ok) return result;
 
     const ledgerEntry: WorktreeLedgerEntry = {
       workspaceId,
@@ -1758,8 +1741,10 @@ export class UpgradeRuntimeService {
 
   /**
    * Worktree paths Git currently registers, or `undefined` when the listing is
-   * unavailable. Only a refusal explanation consults this, so an unavailable
-   * listing must stay silent instead of inventing a leftover.
+   * unavailable. This is the ownership evidence for spawn cleanup: the pre-add
+   * list plus the post-failure list prove whether a registration appeared
+   * during the attempt, so an unavailable listing must stay silent instead of
+   * inventing a leftover.
    */
   private async registeredWorktreePaths(
     workspaceId: string,
@@ -1786,15 +1771,129 @@ export class UpgradeRuntimeService {
   }
 
   /**
+   * Run the `git worktree add` attempt for one managed path and clear a
+   * registration that the attempt itself left behind.
+   *
+   * The pre-state is the only evidence that separates "this attempt created the
+   * registration" from "another owner's worktree is already at that path", so it
+   * is captured before the mutation instead of guessed from the failure. The
+   * caller holds the per-path lock, so a second spawn of the same path cannot
+   * observe this attempt's registration as its own leftover.
+   */
+  private async addManagedWorktree(params: {
+    readonly workspaceId: string;
+    readonly managedWorktreePath: string;
+    readonly absolutePath: string;
+    readonly ref: string;
+    readonly userConfirmed: boolean;
+    readonly candidateTimeoutMs: number | undefined;
+    readonly signal: AbortSignal | undefined;
+    readonly authorization: InvocationAuthorization | undefined;
+  }): Promise<Result<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>> {
+    const { workspaceId, managedWorktreePath, absolutePath, ref } = params;
+    const git = this.services.git;
+    if (git === undefined) return err(appError('INTERNAL_ERROR', 'Git service is not configured', true));
+    const platform = this.diagnostics.platform;
+    const registrationsBefore = await this.registeredWorktreePaths(
+      workspaceId,
+      params.authorization,
+      params.userConfirmed,
+      params.signal,
+    );
+    const registeredBefore = registrationsBefore?.some(
+      (candidate) => sameHostPath(candidate, absolutePath, platform),
+    ) === true;
+    const result = await git.run(this.actor, {
+      workspaceId,
+      args: ['worktree', 'add', '--detach', managedWorktreePath, ref],
+      ...(params.candidateTimeoutMs === undefined ? {} : { timeoutMs: params.candidateTimeoutMs }),
+    }, undefined, params.authorization);
+    if (!result.ok) return result;
+    // `git worktree add` reports a refusal as an ordinary result, so the exit
+    // code is the only evidence the directory exists. Registering ownership for
+    // a worktree Git never created would make every later reconcile trust a
+    // path that was never there, and would hide the real failure from callers.
+    if (result.value.exitCode === 0) return ok(result.value);
+    // A failed add can leave the path registered even though the command
+    // reported failure, which is why a retry then fails with "already exists"
+    // instead of the original cause.
+    //
+    // The post-list deliberately does not reuse the caller's signal: a
+    // cancelled add still needs to be observed, because Git can leave the path
+    // registered when it is terminated mid-checkout, and the next attempt would
+    // then classify that registration as someone else's and refuse to clear it.
+    const registered = await this.registeredWorktreePaths(
+      workspaceId,
+      params.authorization,
+      params.userConfirmed,
+      undefined,
+    );
+    const leftRegistered = registered?.some(
+      (candidate) => sameHostPath(candidate, absolutePath, platform),
+    ) === true;
+    // Only a registration that appeared during this attempt is ours to clear.
+    // A path that was already registered stays untouched even when the add
+    // failed, because removing it would delete another owner's worktree; an
+    // unreadable listing keeps the conservative report-only behaviour too.
+    const cleanup = leftRegistered && registrationsBefore !== undefined && !registeredBefore
+      ? await this.clearSpawnLeftover(workspaceId, managedWorktreePath)
+      : undefined;
+    const detail = result.value.stderr.trim();
+    return err(appError(
+      'CONFLICT',
+      `Git refused to create worktree ${managedWorktreePath}`
+        + (detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`)
+        + describeSpawnLeftover({ leftRegistered, registeredBefore, cleanup, worktreePath: managedWorktreePath }),
+      true,
+    ));
+  }
+
+  /**
+   * Serialize work on one managed worktree path while leaving different paths
+   * parallel. With durable state the lock is a shared file lock, so it also
+   * covers the other runtime instances the server builds per request, session
+   * and connection; without durable state only this instance can collide, and
+   * the in-process chain is enough. `run` still executes when the previous
+   * holder failed, so one broken spawn cannot deadlock the path.
+   */
+  private async withWorktreeSpawnLock<T>(key: string, run: () => Promise<T>): Promise<T> {
+    if (this.stateStore !== undefined) return this.stateStore.withSpawnLock(key, run);
+    const previous = this.worktreeSpawnLocks.get(key);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const queued = (previous ?? Promise.resolve()).then(() => held, () => held);
+    this.worktreeSpawnLocks.set(key, queued);
+    if (previous !== undefined) await previous.catch(() => undefined);
+    try {
+      return await run();
+    } finally {
+      release();
+      if (this.worktreeSpawnLocks.get(key) === queued) this.worktreeSpawnLocks.delete(key);
+    }
+  }
+
+  /**
    * Clear a registration that this failed spawn created. The caller has already
    * proven it appeared during the attempt; a pre-existing registration is never
    * passed here, and no ledger entry is written for a worktree that was never
-   * created.
+   * created. A refused removal reports Git's own reason instead of a hint that
+   * cannot work for that state.
    */
-  private async clearSpawnLeftover(workspaceId: string, worktreePath: string): Promise<boolean> {
-    if (this.services.git === undefined) return false;
-    const removed = await this.services.git.removeLedgerOwnedWorktree(this.actor, workspaceId, { worktreePath });
-    return removed.ok && removed.value.exitCode === 0;
+  private async clearSpawnLeftover(
+    workspaceId: string,
+    worktreePath: string,
+  ): Promise<{ readonly cleared: boolean; readonly reason?: string }> {
+    if (this.services.git === undefined) return { cleared: false, reason: 'Git service is not configured' };
+    const removed = await this.services.git.removeManagedWorktree(this.actor, workspaceId, { worktreePath });
+    if (!removed.ok) return { cleared: false, reason: summarizeGitFailure(removed.error.message) };
+    if (removed.value.exitCode !== 0) {
+      const reason = summarizeGitFailure(removed.value.stderr);
+      return {
+        cleared: false,
+        reason: reason.length === 0 ? `git worktree remove exited with code ${removed.value.exitCode}` : reason,
+      };
+    }
+    return { cleared: true };
   }
 
   private async resolveManagedWorktreePath(
@@ -1985,9 +2084,10 @@ export class UpgradeRuntimeService {
     }
     // Removal goes through the purpose-scoped capability, not the agent-facing
     // `git_run` gate: that gate keeps its blanket refusal of `git worktree
-    // remove`, while this path can only ever target a managed path the caller
-    // already proved it owns in the ledger.
-    const result = await this.services.git.removeLedgerOwnedWorktree(this.actor, workspaceId, {
+    // remove`, while this capability only ever targets a managed path. This
+    // caller's ownership evidence is ledger ownership; spawn cleanup passes the
+    // pre-state proof instead.
+    const result = await this.services.git.removeManagedWorktree(this.actor, workspaceId, {
       worktreePath,
       ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
     });
@@ -3915,6 +4015,46 @@ function normalizePlugin(value: unknown): RuntimePluginDescriptor | undefined {
  */
 function shellSuggestedPath(value: string): string {
   return /^[A-Za-z0-9._/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Explain a leftover registration to the caller. A refusal to remove it has to
+ * surface Git's own reason: the state that makes `git worktree remove` fail
+ * (local changes inside the leftover directory) also makes the generic hint
+ * fail, so an operator needs the verbatim cause and the force variant.
+ */
+function describeSpawnLeftover(outcome: {
+  readonly leftRegistered: boolean;
+  readonly registeredBefore: boolean;
+  readonly cleanup: { readonly cleared: boolean; readonly reason?: string } | undefined;
+  readonly worktreePath: string;
+}): string {
+  if (!outcome.leftRegistered) return '';
+  if (outcome.cleanup?.cleared === true) {
+    return '. This attempt left a registration behind and it was cleared, so a retry can reuse the path.';
+  }
+  const suggested = shellSuggestedPath(outcome.worktreePath);
+  if (outcome.cleanup !== undefined) {
+    return `. The registration this attempt left behind could not be cleared (${outcome.cleanup.reason ?? 'git refused the removal'}), so a retry stays blocked until it is removed (\`git worktree remove --force ${suggested}\` when the directory has local changes, or \`git worktree prune\` when it is already gone).`;
+  }
+  if (outcome.registeredBefore) {
+    return `. The path was already registered before this attempt, so a retry stays blocked until its owner clears it (\`git worktree remove ${suggested}\`, or \`git worktree prune\` when the directory is already gone).`;
+  }
+  return `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${suggested}\`, or \`git worktree prune\` when the directory is already gone).`;
+}
+
+function summarizeGitFailure(text: string): string {
+  const firstLine = text.trim().split('\n')[0]?.trim() ?? '';
+  return firstLine.length > 200 ? `${firstLine.slice(0, 197)}...` : firstLine;
+}
+
+/**
+ * The state store signals a lock wait timeout with this message. Spawn turns it
+ * into a retryable conflict instead of an internal error, because the holder is
+ * simply another spawn of the same path.
+ */
+function isRuntimeLockTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('Timed out waiting for runtime state lock');
 }
 
 function sameHostPath(left: string, right: string, platform: NodeJS.Platform): boolean {

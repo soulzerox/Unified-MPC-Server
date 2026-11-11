@@ -535,7 +535,7 @@ describe('GitService', () => {
     const service = new GitService(repository(workspace), undefined, adapter);
     const signal = new AbortController().signal;
 
-    const removed = await service.removeLedgerOwnedWorktree(
+    const removed = await service.removeManagedWorktree(
       { clientId: 'test', clientName: 'test' },
       workspace.id,
       { worktreePath: '.unified-mpc/worktrees/goal-1', timeoutMs: 5_000 },
@@ -565,13 +565,13 @@ describe('GitService', () => {
     } as unknown as GitAdapter);
     const actor = { clientId: 'test', clientName: 'test' };
 
-    await expect(service.removeLedgerOwnedWorktree(actor, workspace.id, { worktreePath: path.join('src', 'file.ts') }))
+    await expect(service.removeManagedWorktree(actor, workspace.id, { worktreePath: path.join('src', 'file.ts') }))
       .resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
-    await expect(service.removeLedgerOwnedWorktree(actor, workspace.id, { worktreePath: path.join('.worktrees', '..', 'outside') }))
+    await expect(service.removeManagedWorktree(actor, workspace.id, { worktreePath: path.join('.worktrees', '..', 'outside') }))
       .resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
-    await expect(service.removeLedgerOwnedWorktree(actor, workspace.id, { worktreePath: path.join(workspace.realRootPath, '.worktrees', 'agent-1') }))
+    await expect(service.removeManagedWorktree(actor, workspace.id, { worktreePath: path.join(workspace.realRootPath, '.worktrees', 'agent-1') }))
       .resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
-    await expect(service.removeLedgerOwnedWorktree(actor, 'missing-workspace', { worktreePath: '.worktrees/agent-1' }))
+    await expect(service.removeManagedWorktree(actor, 'missing-workspace', { worktreePath: '.worktrees/agent-1' }))
       .resolves.toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
     expect(calls).toEqual([]);
   });

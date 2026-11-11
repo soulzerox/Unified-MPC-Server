@@ -52,8 +52,8 @@ export interface GitRunRequest {
   readonly userConfirmed?: boolean;
 }
 
-/** A managed worktree path the caller has already proven it owns in the runtime ledger. */
-export interface RemoveLedgerOwnedWorktreeRequest {
+/** A managed worktree path whose ownership evidence the caller has already established. */
+export interface RemoveManagedWorktreeRequest {
   readonly worktreePath: string;
   readonly timeoutMs?: number;
 }
@@ -795,15 +795,22 @@ export class GitService {
   }
 
   /**
-   * Remove one managed worktree after the caller proved ledger ownership. The
-   * argv is built here, so this is not a second way to run an arbitrary
-   * `git worktree remove`: the agent-facing `run` gate keeps its blanket
-   * denial and this capability only expresses "remove this managed path".
+   * Remove one managed worktree under `.worktrees/` or
+   * `.unified-mpc/worktrees/`. The argv is built here and the target is
+   * confined to those prefixes, so this is not a second way to run an
+   * arbitrary `git worktree remove`: the agent-facing `run` gate keeps its
+   * blanket denial and this capability only expresses "remove this managed
+   * path".
+   *
+   * Ownership evidence is the caller's responsibility, because only the caller
+   * knows why the path is disposable. Ledger ownership is one such proof; a
+   * failed `git worktree add` is the other, and it proves it by recording that
+   * the registration appeared during its own attempt.
    */
-  public async removeLedgerOwnedWorktree(
+  public async removeManagedWorktree(
     actor: FileActor,
     workspaceId: string,
-    request: RemoveLedgerOwnedWorktreeRequest,
+    request: RemoveManagedWorktreeRequest,
     signal?: AbortSignal,
   ): Promise<Result<GitCommandResult>> {
     void actor;

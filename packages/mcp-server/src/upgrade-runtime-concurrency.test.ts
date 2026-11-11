@@ -157,7 +157,7 @@ describe('upgrade runtime multi-session persistence', () => {
           calls.push(request);
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
-        async removeLedgerOwnedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { worktreePath: string }): Promise<ReturnType<typeof ok>> {
+        async removeManagedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { worktreePath: string }): Promise<ReturnType<typeof ok>> {
           calls.push({ workspaceId: targetWorkspaceId, args: ['worktree', 'remove', request.worktreePath] });
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
@@ -221,7 +221,7 @@ describe('upgrade runtime multi-session persistence', () => {
           calls.push(request);
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
-        async removeLedgerOwnedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { worktreePath: string }): Promise<ReturnType<typeof ok>> {
+        async removeManagedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { worktreePath: string }): Promise<ReturnType<typeof ok>> {
           calls.push({ workspaceId: targetWorkspaceId, args: ['worktree', 'remove', request.worktreePath] });
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
@@ -331,7 +331,7 @@ describe('upgrade runtime multi-session persistence', () => {
           calls.push(request);
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
-        async removeLedgerOwnedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { worktreePath: string }): Promise<ReturnType<typeof ok>> {
+        async removeManagedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { worktreePath: string }): Promise<ReturnType<typeof ok>> {
           calls.push({ workspaceId: targetWorkspaceId, args: ['worktree', 'remove', request.worktreePath] });
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },

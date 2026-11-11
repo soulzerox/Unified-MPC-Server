@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const STATE_VERSION = 2;
 const LOCK_WAIT_MS = 10_000;
 const LOCK_STALE_MS = 30_000;
+const LOCK_HEARTBEAT_MS = Math.floor(LOCK_STALE_MS / 3);
+/** A managed worktree add can take a while, so its holder waits longer and keeps the lock fresh. */
+const SPAWN_LOCK_WAIT_MS = 120_000;
 const IO_RETRY_ATTEMPTS = 6;
 const IO_RETRY_BASE_MS = 15;
 
@@ -108,6 +111,20 @@ export class UpgradeRuntimeStateStore {
 
   public sharedStatePath(): string {
     return this.sharedFile;
+  }
+
+  /**
+   * Serialize an operation on one named resource across every runtime instance
+   * and every process that shares this state directory. The holder keeps the
+   * lock file's mtime fresh, so a slow worktree creation is not mistaken for a
+   * crashed holder and stolen after `LOCK_STALE_MS`.
+   */
+  public async withSpawnLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const digest = createHash('sha256').update(key).digest('hex').slice(0, 32);
+    return withFileLock(path.join(this.stateDirectory, 'locks', `spawn-${digest}.lock`), operation, {
+      waitMs: SPAWN_LOCK_WAIT_MS,
+      heartbeatMs: LOCK_HEARTBEAT_MS,
+    });
   }
 
   private async readSession(): Promise<UpgradeRuntimeSessionState> {
@@ -224,11 +241,16 @@ async function atomicWriteJson(filePath: string, value: unknown): Promise<void> 
   }
 }
 
-async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+async function withFileLock<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+  options: { readonly waitMs?: number; readonly heartbeatMs?: number } = {},
+): Promise<T> {
+  const waitMs = options.waitMs ?? LOCK_WAIT_MS;
   return withProcessLock(lockPath, async () => {
     await mkdir(path.dirname(lockPath), { recursive: true });
     const token = randomUUID();
-    const deadline = Date.now() + LOCK_WAIT_MS;
+    const deadline = Date.now() + waitMs;
     for (;;) {
       try {
         const lock: LockRecord = { token, createdAt: new Date().toISOString() };
@@ -242,9 +264,20 @@ async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): P
       }
     }
 
+    // A holder that outlives `LOCK_STALE_MS` must prove it is alive, otherwise a
+    // waiter quarantines a live lock and both operations run at once.
+    const heartbeat = options.heartbeatMs === undefined
+      ? undefined
+      : setInterval(() => {
+        const now = new Date();
+        void utimes(lockPath, now, now).catch(() => undefined);
+      }, options.heartbeatMs);
+    heartbeat?.unref?.();
+
     try {
       return await operation();
     } finally {
+      if (heartbeat !== undefined) clearInterval(heartbeat);
       await releaseLock(lockPath, token);
     }
   });

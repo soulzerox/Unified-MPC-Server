@@ -112,6 +112,29 @@ describe('createGoalWorktreeReconciliationPort', () => {
     });
   });
 
+  it('forwards client scope so a worktree from an earlier session is still the goal own work', async () => {
+    const earlierSessionLedger: readonly GoalWorktreeReconciliationLedgerEntry[] = [{
+      workspaceId: 'ws-1',
+      worktreePath: path.join(root, 'wt-a'),
+      ref: 'main',
+      owner: actor.clientId,
+      ownerSessionId: 'session-earlier',
+    }];
+    const clientScoped = await port({ git: { status: ' M tracked.txt\u0000' }, ledger: earlierSessionLedger }).port
+      .classify({ workspaceId: 'ws-1', actor, ownershipScope: 'client' });
+    expect(clientScoped).toMatchObject({
+      ok: true,
+      value: { entries: [{ disposition: 'keep', blockers: ['dirty'] }] },
+    });
+
+    const sessionScoped = await port({ git: { status: ' M tracked.txt\u0000' }, ledger: earlierSessionLedger }).port
+      .classify({ workspaceId: 'ws-1', actor });
+    expect(sessionScoped).toMatchObject({
+      ok: true,
+      value: { entries: [{ disposition: 'keep', blockers: ['externally_owned', 'dirty'] }] },
+    });
+  });
+
   it('classifies only the requested workspace and never probes the others', async () => {
     const scoped = port();
     const result = await scoped.port.classify({ workspaceId: 'ws-1', actor });

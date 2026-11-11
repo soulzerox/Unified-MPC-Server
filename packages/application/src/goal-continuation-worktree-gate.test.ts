@@ -1,13 +1,18 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { GitAdapter, type GitRunResult } from '@unified-mpc/git';
 import type { FileActor } from './file-service.js';
 import {
   GoalContinuationService,
   goalCompletionWorktreeBlockers,
 } from './goal-continuation-service.js';
+import {
+  createGoalWorktreeReconciliationPort,
+  type GoalWorktreeReconciliationRequest,
+} from './goal-worktree-reconciliation-port.js';
 import type {
   GoalWorktreeBlocker,
   GoalWorktreeClassificationEntry,
@@ -59,7 +64,7 @@ interface GateClassifyRequest {
 }
 
 async function fixture(
-  classify: (request: GateClassifyRequest) => Promise<Result<GoalWorktreeClassificationReport>>,
+  classify: (request: GoalWorktreeReconciliationRequest) => Promise<Result<GoalWorktreeClassificationReport>>,
 ): Promise<GoalContinuationService> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-worktree-gate-'));
   temporaryRoots.push(root);
@@ -195,5 +200,46 @@ describe('goal completion worktree gate', () => {
       ownershipScope: 'client',
       workspaceId: 'workspace-1',
     });
+  });
+
+  it('refuses completion when an earlier session of the same client left dirty work', async () => {
+    const worktreeRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-gate-worktree-'));
+    temporaryRoots.push(worktreeRoot);
+    const worktreePath = path.join(worktreeRoot, 'agent-earlier');
+    await mkdir(worktreePath);
+    const port = createGoalWorktreeReconciliationPort({
+      git: new GitAdapter({
+        async run(args): Promise<GitRunResult> {
+          if (args[0] === 'status') return { exitCode: 0, stdout: ' M tracked.txt\u0000', stderr: '' };
+          if (args[0] === 'rev-parse') return { exitCode: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' };
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+      }),
+      listLedgerEntries: async () => [{
+        workspaceId: 'workspace-1',
+        worktreePath,
+        ref: 'main',
+        owner: actor.clientId,
+        ownerSessionId: 'session-earlier',
+      }],
+      listActivelyLeasedWorkspaceIds: async () => [],
+    });
+    const service = await fixture(port.classify);
+    const started = await startedGoal(service);
+
+    const refused = await service.finishGoal(actor, {
+      goalId: started.goalId,
+      leaseToken: started.leaseToken,
+      expectedRevision: started.revision,
+      status: 'completed',
+      summary: 'Done.',
+      evidence: [],
+    });
+
+    // End-to-end through the real port: the worktree belongs to an earlier
+    // session of this client, so client scope turns it into `dirty` instead of
+    // `externally_owned` and completion is refused.
+    expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    if (!refused.ok) expect(refused.error.message).toContain(worktreePath);
   });
 });

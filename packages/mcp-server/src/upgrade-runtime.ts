@@ -1662,18 +1662,32 @@ export class UpgradeRuntimeService {
     // Two spawns of the same managed path must not interleave. Without this,
     // both can read the pre-state before either `git worktree add` registers the
     // path, and the loser then sees the winner's fresh registration as its own
-    // leftover and removes the winner's worktree.
-    const result = await this.withWorktreeSpawnLock(`${workspaceId}\0${managedWorktree.absolutePath}`, () =>
-      this.addManagedWorktree({
-        workspaceId,
-        managedWorktreePath,
-        absolutePath: managedWorktree.absolutePath,
-        ref,
-        userConfirmed: input.userConfirmed === true,
-        candidateTimeoutMs: typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined,
-        signal,
-        authorization,
-      }));
+    // leftover and removes the winner's worktree. The lock is keyed by the host
+    // path identity (case-folded on win32, like `sameHostPath`) and lives in the
+    // shared runtime state directory, so it also covers the per-request,
+    // per-session and per-connection runtime instances.
+    const spawnLockKey = `${workspaceId}\0${comparableHostPath(managedWorktree.absolutePath, platform) ?? managedWorktree.absolutePath}`;
+    let result: Result<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>;
+    try {
+      result = await this.withWorktreeSpawnLock(spawnLockKey, () =>
+        this.addManagedWorktree({
+          workspaceId,
+          managedWorktreePath,
+          absolutePath: managedWorktree.absolutePath,
+          ref,
+          userConfirmed: input.userConfirmed === true,
+          candidateTimeoutMs: typeof input.timeoutMs === 'number' ? input.timeoutMs : undefined,
+          signal,
+          authorization,
+        }));
+    } catch (error) {
+      if (!isRuntimeLockTimeout(error)) throw error;
+      return err(appError(
+        'CONFLICT',
+        `Another session is already creating ${managedWorktreePath}, so this attempt did not start. Retry after that spawn finishes.`,
+        true,
+      ));
+    }
     if (!result.ok) return result;
 
     const ledgerEntry: WorktreeLedgerEntry = {
@@ -1836,10 +1850,14 @@ export class UpgradeRuntimeService {
 
   /**
    * Serialize work on one managed worktree path while leaving different paths
-   * parallel. `run` is awaited even when the previous holder failed, so one
-   * failed spawn cannot deadlock the next attempt at the same path.
+   * parallel. With durable state the lock is a shared file lock, so it also
+   * covers the other runtime instances the server builds per request, session
+   * and connection; without durable state only this instance can collide, and
+   * the in-process chain is enough. `run` still executes when the previous
+   * holder failed, so one broken spawn cannot deadlock the path.
    */
   private async withWorktreeSpawnLock<T>(key: string, run: () => Promise<T>): Promise<T> {
+    if (this.stateStore !== undefined) return this.stateStore.withSpawnLock(key, run);
     const previous = this.worktreeSpawnLocks.get(key);
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
@@ -4028,6 +4046,15 @@ function describeSpawnLeftover(outcome: {
 function summarizeGitFailure(text: string): string {
   const firstLine = text.trim().split('\n')[0]?.trim() ?? '';
   return firstLine.length > 200 ? `${firstLine.slice(0, 197)}...` : firstLine;
+}
+
+/**
+ * The state store signals a lock wait timeout with this message. Spawn turns it
+ * into a retryable conflict instead of an internal error, because the holder is
+ * simply another spawn of the same path.
+ */
+function isRuntimeLockTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('Timed out waiting for runtime state lock');
 }
 
 function sameHostPath(left: string, right: string, platform: NodeJS.Platform): boolean {

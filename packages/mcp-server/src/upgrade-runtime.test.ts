@@ -1210,6 +1210,100 @@ describe('upgrade runtime', () => {
     }
   });
 
+  it('serializes same-path spawns across runtime instances that share one state path', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-cross-instance-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    const removals: unknown[] = [];
+    let registered = false;
+    let addCalls = 0;
+    let listingsSeen = 0;
+    let addInFlight = false;
+    let interleaved = false;
+    let releaseAdd!: () => void;
+    const addGate = new Promise<void>((resolve) => { releaseAdd = resolve; });
+    let addStarted!: () => void;
+    const addReached = new Promise<void>((resolve) => { addStarted = resolve; });
+    let secondPreList!: () => void;
+    const secondPreListDone = new Promise<void>((resolve) => { secondPreList = resolve; });
+    try {
+      const git = {
+        async run(_actor: FileActor, request: { readonly args: readonly string[] }): Promise<ReturnType<typeof ok>> {
+          if (request.args[1] === 'list') {
+            listingsSeen += 1;
+            if (addInFlight) interleaved = true;
+            if (listingsSeen === 2) secondPreList();
+            return ok({
+              exitCode: 0,
+              stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0${
+                registered
+                  ? `\0\0worktree ${path.join(workspaceRoot, '.worktrees', 'shared')}\0HEAD 2222222222222222222222222222222222222222\0detached\0`
+                  : ''
+              }\0`,
+              stderr: '',
+            });
+          }
+          addCalls += 1;
+          if (registered) return ok({ exitCode: 128, stdout: '', stderr: 'fatal: already exists\n' });
+          addInFlight = true;
+          await Promise.race([secondPreListDone, new Promise((resolve) => setTimeout(resolve, 250))]);
+          registered = true;
+          addStarted();
+          await addGate;
+          addInFlight = false;
+          return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+        },
+        async removeManagedWorktree(_actor: FileActor, targetWorkspaceId: string, request: { readonly worktreePath: string }): Promise<ReturnType<typeof ok>> {
+          removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
+          return ok({ exitCode: 0, stdout: '', stderr: '' });
+        },
+      };
+      const makeRuntime = (): UpgradeRuntimeService => new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-cross-instance',
+              displayName: 'cross instance fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git,
+      }, actor);
+      const spawn = (runtime: UpgradeRuntimeService): Promise<{ readonly ok: boolean }> => runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-cross-instance',
+        worktreePath: '.worktrees/shared',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dependencyEmergencyOverride: true,
+        dryRun: false,
+        userConfirmed: true,
+      }) as Promise<{ readonly ok: boolean }>;
+
+      // The server builds one runtime per request, session and connection, so the
+      // serialization has to live in the shared state directory, not in this
+      // object.
+      const first = spawn(makeRuntime());
+      const second = spawn(makeRuntime());
+      await addReached;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      releaseAdd();
+      const results = await Promise.all([first, second]);
+
+      expect(results.filter((candidate) => candidate.ok)).toHaveLength(1);
+      expect(interleaved).toBe(false);
+      expect(addCalls).toBe(2);
+      expect(removals).toEqual([]);
+      expect((await store.readShared()).worktrees).toHaveLength(1);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('never clears a registration that existed before the failed attempt', async () => {
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-pre-registered-'));
     const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');

@@ -1657,6 +1657,14 @@ export class UpgradeRuntimeService {
       return err(appError('INVALID_INPUT', 'Git worktree path is already present in the shared ownership ledger'));
     }
     if (this.services.git === undefined) return ok({ ...plan, worktreePath: managedWorktreePath, dryRun: false, status: 'optional', available: false, reason: 'Git service is not configured' });
+    // A failed `git worktree add` can leave the path registered, and a retry
+    // then fails with "already exists". The only evidence that such a
+    // registration was created by this attempt is the state before it, so it is
+    // captured before the mutation instead of guessed from the failure.
+    const registrationsBefore = await this.registeredWorktreePaths(workspaceId, authorization, input.userConfirmed === true, signal);
+    const registeredBefore = registrationsBefore?.some(
+      (candidate) => sameHostPath(candidate, managedWorktree.absolutePath, platform),
+    ) === true;
     const result = await this.services.git.run(this.actor, {
       workspaceId,
       args: ['worktree', 'add', '--detach', managedWorktreePath, ref],
@@ -1678,12 +1686,23 @@ export class UpgradeRuntimeService {
       const leftRegistered = registered?.some(
         (candidate) => sameHostPath(candidate, managedWorktree.absolutePath, platform),
       ) === true;
+      // Only a registration that appeared during this attempt is ours to clear.
+      // A path that was already registered stays untouched even when the add
+      // failed, because removing it would delete another owner's worktree; an
+      // unreadable listing keeps the conservative report-only behaviour too.
+      const cleared = leftRegistered && registrationsBefore !== undefined && !registeredBefore
+        ? await this.clearSpawnLeftover(workspaceId, managedWorktreePath)
+        : false;
+      const leftoverNote = leftRegistered
+        ? cleared
+          ? '. This attempt left a registration behind and it was cleared, so a retry can reuse the path.'
+          : registeredBefore
+            ? `. The path was already registered before this attempt, so a retry stays blocked until its owner clears it (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
+            : `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
+        : '';
       return err(appError(
         'CONFLICT',
-        `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`
-          + (leftRegistered
-            ? `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
-            : ''),
+        `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}${leftoverNote}`,
         true,
       ));
     }
@@ -1764,6 +1783,18 @@ export class UpgradeRuntimeService {
       .filter((record) => record.startsWith('worktree '))
       .map((record) => record.slice('worktree '.length))
       .filter((candidate) => candidate.length > 0);
+  }
+
+  /**
+   * Clear a registration that this failed spawn created. The caller has already
+   * proven it appeared during the attempt; a pre-existing registration is never
+   * passed here, and no ledger entry is written for a worktree that was never
+   * created.
+   */
+  private async clearSpawnLeftover(workspaceId: string, worktreePath: string): Promise<boolean> {
+    if (this.services.git === undefined) return false;
+    const removed = await this.services.git.removeLedgerOwnedWorktree(this.actor, workspaceId, { worktreePath });
+    return removed.ok && removed.value.exitCode === 0;
   }
 
   private async resolveManagedWorktreePath(

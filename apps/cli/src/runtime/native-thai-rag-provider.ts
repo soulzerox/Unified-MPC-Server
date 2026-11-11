@@ -5,6 +5,7 @@ import {
   classifyWorkspaceSourceEvidence,
   err,
   ok,
+  type AppError,
   type Result,
   type ResultBudget,
   type WorkspaceSourceEvidenceIdentity,
@@ -81,6 +82,14 @@ export function codeIndexVectorsFromEnv(value: string | null | undefined): boole
 // but the follow-up status/often-blocking calls must survive the publish.
 const INDEX_CALL_TIMEOUT_MS = 3_600_000;
 const INDEX_ADMISSION_WAIT_MS = 5_000;
+/**
+ * A terminal admission failure is surfaced for this long before an automatic
+ * retry re-arms the same pass. A mandatory pre-edit check that starts a fresh
+ * multi-minute provider build on every read hides the provider's real reason
+ * behind "indexing started" and can never make progress while the cause
+ * persists (issue #762). An explicit `code_index` clears the window.
+ */
+const ADMISSION_FAILURE_COOLDOWN_MS = 5 * 60_000;
 /**
  * A status read answers from the worker's in-memory job registry; it never
  * waits for publishing. Bounding it separately keeps the #407 deadline real:
@@ -167,6 +176,12 @@ export interface NativeThaiRagProviderDriverOptions {
   /** Required for strict mode: admission-checked, host-owned workspace scopes; legacy uses workspacesProvider. */
   readonly strictWorkerAuthorizedWorkspacesProvider?: () => Promise<readonly NativeThaiRagWorkspace[]>;
   readonly callTimeoutMs?: number;
+  /**
+   * How long a terminal admission failure is surfaced before an automatic retry
+   * re-arms it (issue #762). `0` retries on the next read; an explicit
+   * `code_index` clears the window regardless.
+   */
+  readonly admissionFailureCooldownMs?: number;
   /** Per-session timeout for the isolated admission snapshot probe (issue #422). */
   readonly snapshotProbeTimeoutMs?: number;
   readonly healthRefreshMs?: number;
@@ -259,6 +274,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private expectedHashFenceSupported = false;
   private readonly healthRefreshMs: number;
   private readonly indexJobPollMs: number;
+  private readonly admissionFailureCooldownMs: number;
   private readonly indexStatusTimeoutMs: number;
   private readonly indexStatusTimeoutCap: number;
   private readonly codeIndexVectors: boolean;
@@ -274,6 +290,16 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly queuedAdmissionWorkspaceIds = new Set<string>();
   private readonly workspaceIndexJobIds = new Map<string, string>();
   private readonly workspaceIndexMonitors = new Map<string, Promise<Result<void>>>();
+  /**
+   * Last terminal admission failure per workspace, so the next read surfaces it
+   * instead of re-arming the same pass (issue #762).
+   */
+  private readonly admissionFailures = new Map<string, {
+    readonly jobId: string;
+    readonly message: string;
+    readonly failedAt: number;
+    readonly providerReason?: string;
+  }>();
   private indexingWorkspaceId: string | undefined;
   private expectedEmbeddingIndexGeneration = 1;
   private started = false;
@@ -355,6 +381,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.providerGenerations = new ProviderGenerationLedger(canonicalRoot);
     this.healthRefreshMs = options.healthRefreshMs ?? 5_000;
     this.indexJobPollMs = Math.max(10, Math.floor(options.indexJobPollMs ?? 500));
+    this.admissionFailureCooldownMs = Math.max(0, Math.floor(options.admissionFailureCooldownMs ?? ADMISSION_FAILURE_COOLDOWN_MS));
     this.indexStatusTimeoutMs = Math.max(1_000, Math.floor(options.indexStatusTimeoutMs ?? DEFAULT_INDEX_STATUS_TIMEOUT_MS));
     this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? DEFAULT_INDEX_STATUS_TIMEOUT_POLLS));
     this.codeIndexVectors = options.codeIndexVectors ?? DEFAULT_CODE_INDEX_VECTORS;
@@ -565,6 +592,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       || ((tool === 'pre_edit_context' || READY_WORKSPACE_READ_TOOLS.has(tool))
         && await this.canServeReadyWorkspaceDuringIndex(args));
     const workspaceId = typeof args.workspace_id === 'string' ? args.workspace_id : undefined;
+    // An explicit code_index is caller intent to rebuild; it may retry even
+    // while a failed admission is still cooling down (issue #762).
+    if (tool === 'code_index' && workspaceId !== undefined) this.admissionFailures.delete(workspaceId);
     const refreshed = tool === 'cancel_index' || bypassBusyRefresh
       ? ok(undefined)
       : await this.refreshWorkspaceRoots(this.lifecycleGeneration, workspaceId);
@@ -621,6 +651,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.shuttingDown = true;
     this.lifecycleGeneration += 1;
     this.queuedAdmissionWorkspaceIds.clear();
+    this.admissionFailures.clear();
     if (this.cancellableIndexJobs) await this.cancelActiveProviderIndexJobs();
     await this.jobs.interruptRunning(this.ownerId ?? '');
     await this.waitForOperations();
@@ -1552,9 +1583,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           // child cannot re-enqueue the same no-op pass (issue #422).
           this.pendingReindexIds.delete(workspace.id);
           this.pendingReindexReasons.delete(workspace.id);
+          this.admissionFailures.delete(workspace.id);
           continue;
         }
         if (!this.refreshIsCurrent(generation) || !this.started) return ok(undefined);
+        // Issue #762: do not re-arm a pass that just failed. Surface the
+        // provider's terminal reason for the cooldown window so the mandatory
+        // pre-edit gate names the real cause instead of "indexing started".
+        const coolingDown = this.admissionFailureCooldown(workspace.id);
+        if (coolingDown !== undefined) return coolingDown;
         return this.startWorkspaceAdmissionIndex(
           workspace,
           false, // Preserve provider-side validated incremental reuse on admission.
@@ -1701,6 +1738,51 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     });
   }
 
+  /**
+   * Remembers why an automatic admission ended so the next read reports the
+   * provider's own reason instead of starting the same failing pass again
+   * (issue #762). Cleared by a success, a verified skip or an explicit
+   * `code_index`.
+   */
+  private recordAdmissionFailure(workspaceId: string, jobId: string, error: AppError): void {
+    this.admissionFailures.set(workspaceId, {
+      jobId,
+      message: error.message,
+      failedAt: Date.now(),
+      ...(typeof error.details?.reason === 'string' ? { providerReason: error.details.reason } : {}),
+    });
+  }
+
+  /**
+   * Fails a read closed with the reason the last admission actually ended.
+   * Returns `undefined` once the cooldown elapsed (or was never set), which is
+   * the only path that may re-arm the pass.
+   */
+  private admissionFailureCooldown(workspaceId: string): Result<void> | undefined {
+    const failure = this.admissionFailures.get(workspaceId);
+    if (failure === undefined) return undefined;
+    const retryAt = failure.failedAt + this.admissionFailureCooldownMs;
+    if (Date.now() >= retryAt) {
+      this.admissionFailures.delete(workspaceId);
+      return undefined;
+    }
+    const failedAt = new Date(failure.failedAt).toISOString();
+    const retryAfter = new Date(retryAt).toISOString();
+    return err(appError(
+      'CONFLICT',
+      `Native Thai-RAG workspace ${workspaceId} admission failed at ${failedAt}: ${failure.message}; automatic retry at ${retryAfter}`,
+      true,
+      {
+        reason: 'workspace-indexing-failed',
+        workspaceId,
+        jobId: failure.jobId,
+        failedAt,
+        retryAfter,
+        ...(failure.providerReason === undefined ? {} : { providerReason: failure.providerReason }),
+      },
+    ));
+  }
+
   /** Keeps the durable job row alive while a synchronous provider call is in flight (issue #445). */
   private async withJobHeartbeat<T>(
     jobId: string,
@@ -1746,6 +1828,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }, []);
         if (!canonical.ok) {
           await this.jobs.fail(job.jobId, canonical.error.message, ownerId);
+          this.recordAdmissionFailure(workspace.id, job.jobId, canonical.error);
           await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
           return canonical;
         }
@@ -1782,6 +1865,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           else indexed = { ok: true as const, value: undefined };
           if (!trial.ok) {
             await this.jobs.fail(job.jobId, trial.error.message, ownerId);
+            this.recordAdmissionFailure(workspace.id, job.jobId, trial.error);
             await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
             // The trial error already carries the provider's classification.
             // Rebuilding it with a hard-coded `true` advertised an unmapped
@@ -1848,6 +1932,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           await this.jobs.complete(job.jobId, this.mergeCanonicalJobResult(job.jobId, indexed.value), ownerId);
         } else {
           await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
+          this.recordAdmissionFailure(workspace.id, job.jobId, indexed.error);
         }
 
         if (!this.refreshIsCurrent(generation) || !this.started || !indexed.ok) {
@@ -1876,6 +1961,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }
         this.pendingReindexIds.delete(workspace.id);
         this.pendingReindexReasons.delete(workspace.id);
+        this.admissionFailures.delete(workspace.id);
         // A legacy 1.0 provider returns from the background-start call before
         // the pass is terminal. Recording freshness there would authorize a
         // permanent skip while the pass may still fail or be running.
@@ -1885,6 +1971,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         return ok(undefined);
       } catch (error: unknown) {
         await this.jobs.fail(job.jobId, errorMessage(error), ownerId).catch(() => undefined);
+        this.recordAdmissionFailure(workspace.id, job.jobId, appError('CONFLICT', errorMessage(error), true));
         await this.restoreRefreshState(sourcesRoot, previousWorkspaces, previousRoots, previousRootIds);
         return err(appError('CONFLICT', `Native Thai-RAG reindex failed for workspace ${workspace.id}: ${errorMessage(error)}`, true));
       } finally {

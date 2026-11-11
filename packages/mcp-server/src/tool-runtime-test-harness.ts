@@ -86,8 +86,15 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     },
     goalWorktrees: serviceProxy('goalWorktrees', calls, () => ({
       integrationBase: 'origin/main',
-      entries: [],
-      safeToCleanCount: 0,
+      entries: [{
+        worktreePath: '.worktrees/runtime-contract',
+        ref: 'HEAD',
+        owner: 'runtime-contract-test',
+        disposition: 'safe_to_clean' as const,
+        blockers: [],
+        blockerDetails: [],
+      }],
+      safeToCleanCount: 1,
       keepCount: 0,
     })),
     thaiRag: {

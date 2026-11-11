@@ -69,7 +69,16 @@ export interface GoalWorktreeReconcilerActor {
   readonly sessionId?: string;
 }
 
-export interface GoalWorktreeClassificationOptions {
+export interface GoalWorktreeClassificationOwnership {
+  /**
+   * `session` (default) requires the actor's session to match. `client`
+   * treats every session of the same client as owned, which is what a durable
+   * goal needs because it outlives the session that spawned a worktree.
+   */
+  readonly ownershipScope?: 'session' | 'client';
+}
+
+export interface GoalWorktreeClassificationOptions extends GoalWorktreeClassificationOwnership {
   /** Worktree paths currently claimed by a live goal lease. */
   readonly activeLeaseWorktreePaths?: ReadonlySet<string>;
   /** Integration ref that proves a head was merged (default `origin/main`). */
@@ -122,7 +131,7 @@ export class GoalWorktreeReconciliationService {
   ): Promise<GoalWorktreeClassificationReport> {
     const integrationBase = options.integrationBase ?? this.defaultIntegrationBase;
     const classified = await Promise.all(entries.map(async (entry) => {
-      return this.classifyEntry(entry, options.actor, options.activeLeaseWorktreePaths, integrationBase);
+      return this.classifyEntry(entry, options.actor, options.activeLeaseWorktreePaths, integrationBase, options.ownershipScope ?? 'session');
     }));
     return {
       integrationBase,
@@ -137,13 +146,18 @@ export class GoalWorktreeReconciliationService {
     actor: GoalWorktreeReconcilerActor,
     activeLeaseWorktreePaths: ReadonlySet<string> | undefined,
     integrationBase: string,
+    ownershipScope: 'session' | 'client',
   ): Promise<GoalWorktreeClassificationEntry> {
     const blockers = new Set<GoalWorktreeBlocker>();
     const blockerDetails: string[] = [];
 
     if (entry.owner !== actor.clientId) {
       blockers.add('externally_owned');
-    } else if (entry.ownerSessionId !== undefined && entry.ownerSessionId !== actor.sessionId) {
+    } else if (
+      ownershipScope === 'session'
+      && entry.ownerSessionId !== undefined
+      && entry.ownerSessionId !== actor.sessionId
+    ) {
       blockers.add('externally_owned');
     }
 

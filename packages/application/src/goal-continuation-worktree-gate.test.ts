@@ -52,8 +52,14 @@ function report(entries: readonly GoalWorktreeClassificationEntry[]): GoalWorktr
   };
 }
 
+interface GateClassifyRequest {
+  readonly actor: { readonly clientId: string; readonly sessionId?: string };
+  readonly ownershipScope?: 'session' | 'client';
+  readonly workspaceId?: string;
+}
+
 async function fixture(
-  classify: () => Promise<Result<GoalWorktreeClassificationReport>>,
+  classify: (request: GateClassifyRequest) => Promise<Result<GoalWorktreeClassificationReport>>,
 ): Promise<GoalContinuationService> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-worktree-gate-'));
   temporaryRoots.push(root);
@@ -69,8 +75,8 @@ async function fixture(
   const goals = new SqliteGoalRepository(database);
   return new GoalContinuationService(workspaces, goals, {
     goalWorktrees: {
-      async classify(): Promise<Result<GoalWorktreeClassificationReport>> {
-        return classify();
+      async classify(request): Promise<Result<GoalWorktreeClassificationReport>> {
+        return classify(request);
       },
     },
   });
@@ -161,5 +167,33 @@ describe('goal completion worktree gate', () => {
 
     expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
     if (!refused.ok) expect(refused.error.message).toContain('could not be verified');
+  });
+
+  it('classifies with client-scoped ownership so an earlier session still counts', async () => {
+    let observed: GateClassifyRequest | undefined;
+    const service = await fixture(async (request) => {
+      observed = request;
+      return ok(report([]));
+    });
+    const started = await startedGoal(service);
+
+    const completed = await service.finishGoal(actor, {
+      goalId: started.goalId,
+      leaseToken: started.leaseToken,
+      expectedRevision: started.revision,
+      status: 'completed',
+      summary: 'Done.',
+      evidence: [],
+    });
+
+    expect(completed).toMatchObject({ ok: true, value: { status: 'completed' } });
+    // Client scope: the classifier treats every session of this client as the
+    // goal's own work, so a worktree spawned before a continuation rollover is
+    // still gated. Cleanup keeps the default session scope.
+    expect(observed).toEqual({
+      actor: { clientId: 'client', sessionId: 'session-a' },
+      ownershipScope: 'client',
+      workspaceId: 'workspace-1',
+    });
   });
 });

@@ -660,6 +660,9 @@ export class GoalContinuationService {
           clientId: stableOwnerClientId(actor),
           sessionId: stableOwnerSessionId(actor),
         },
+        // A durable goal outlives the session that spawned a worktree, so the
+        // completion gate is client-scoped while cleanup stays session-strict.
+        ownershipScope: 'client',
         workspaceId: goal.workspaceId,
       });
       if (!classified.ok) {

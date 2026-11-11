@@ -50,9 +50,18 @@ function actor(): { readonly clientId: string; readonly sessionId?: string } {
   return { clientId: 'client-a', sessionId: 'session-1' };
 }
 
-async function classifyOne(entry: GoalWorktreeDescriptor, port: GoalWorktreeGitPort, leasePaths: ReadonlySet<string> = new Set<string>()): Promise<ReturnType<GoalWorktreeReconciliationService['classify']>> {
+async function classifyOne(
+  entry: GoalWorktreeDescriptor,
+  port: GoalWorktreeGitPort,
+  leasePaths: ReadonlySet<string> = new Set<string>(),
+  optionsOverride: { readonly ownershipScope?: 'session' | 'client' } = {},
+): Promise<ReturnType<GoalWorktreeReconciliationService['classify']>> {
   const service = new GoalWorktreeReconciliationService({ git: port });
-  return service.classify([entry], { actor: actor(), activeLeaseWorktreePaths: leasePaths });
+  return service.classify([entry], {
+    actor: actor(),
+    activeLeaseWorktreePaths: leasePaths,
+    ...optionsOverride,
+  });
 }
 
 describe('GoalWorktreeReconciliationService classification', () => {
@@ -114,6 +123,17 @@ describe('GoalWorktreeReconciliationService classification', () => {
     const report = await classifyOne(ledgerEntry({ ownerSessionId: 'session-42' }), gitPort());
     expect(report.entries[0]?.disposition).toBe('keep');
     expect(report.entries[0]?.blockers).toEqual(['externally_owned']);
+  });
+
+  it('treats another session of the same client as owned under client scope', async () => {
+    const report = await classifyOne(
+      ledgerEntry({ ownerSessionId: 'session-42' }),
+      gitPort({ probe: { dirtyEntries: 1, unmergedEntries: 0 } }),
+      new Set<string>(),
+      { ownershipScope: 'client' },
+    );
+    expect(report.entries[0]?.disposition).toBe('keep');
+    expect(report.entries[0]?.blockers).toEqual(['dirty']);
   });
 
   it('keeps a worktree whose filesystem path vanished and skips content probes', async () => {

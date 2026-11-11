@@ -5,6 +5,7 @@ import {
   GoalWorktreeReconciliationService,
   type GoalWorktreeClassificationReport,
   type GoalWorktreeDescriptor,
+  type GoalWorktreeReconcilerActor,
 } from './goal-worktree-reconciliation-service.js';
 
 /**
@@ -26,9 +27,15 @@ export interface GoalWorktreeReconciliationLedgerEntry {
 }
 
 export interface GoalWorktreeReconciliationRequest {
-  readonly actor: { readonly clientId: string; readonly sessionId?: string };
+  readonly actor: GoalWorktreeReconcilerActor;
   /** Restrict the report to one workspace; omitted means the whole owned ledger. */
   readonly workspaceId?: string;
+  /**
+   * Ownership scope for the classification. Cleanup callers keep the default
+   * `session`; the goal completion gate uses `client` because a durable goal
+   * outlives the session that spawned a worktree.
+   */
+  readonly ownershipScope?: 'session' | 'client';
 }
 
 export interface GoalWorktreeReconciliationPort {
@@ -86,6 +93,7 @@ export function createGoalWorktreeReconciliationPort(
       }));
       return ok(await reconciler.classify(descriptors, {
         actor: request.actor,
+        ...(request.ownershipScope === undefined ? {} : { ownershipScope: request.ownershipScope }),
         ...(activeLeaseWorktreePaths.size === 0 ? {} : { activeLeaseWorktreePaths }),
         ...(options.integrationBase === undefined ? {} : { integrationBase: options.integrationBase }),
       }));

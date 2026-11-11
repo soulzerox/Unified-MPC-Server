@@ -900,7 +900,7 @@ describe('upgrade runtime', () => {
     const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
     const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
     const calls: unknown[] = [];
-    const leftoverPath = path.join(workspaceRoot, '.worktrees', 'leftover-agent');
+    const leftoverPath = path.join(workspaceRoot, '.worktrees', 'leftover agent');
     try {
       const runtime = new UpgradeRuntimeService({
         platform: 'linux',
@@ -933,7 +933,7 @@ describe('upgrade runtime', () => {
 
       const refused = await runtime.execute('git_worktree_spawn', {
         workspaceId: 'ws-leftover',
-        worktreePath: '.worktrees/leftover-agent',
+        worktreePath: '.worktrees/leftover agent',
         ref: 'main',
         dryRun: false,
         userConfirmed: true,
@@ -943,10 +943,10 @@ describe('upgrade runtime', () => {
       if (!refused.ok) {
         expect(refused.error.message).toContain('post-checkout hook failed');
         expect(refused.error.message).toContain('Git still registers that path');
-        expect(refused.error.message).toContain('git worktree remove .worktrees/leftover-agent');
+        expect(refused.error.message).toContain("git worktree remove '.worktrees/leftover agent'");
       }
       expect(calls).toEqual([
-        ['worktree', 'add', '--detach', '.worktrees/leftover-agent', 'main'],
+        ['worktree', 'add', '--detach', '.worktrees/leftover agent', 'main'],
         ['worktree', 'list', '--porcelain', '-z'],
       ]);
       expect((await store.readShared()).worktrees).toEqual([]);

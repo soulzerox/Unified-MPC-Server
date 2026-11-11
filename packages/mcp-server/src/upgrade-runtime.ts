@@ -1682,7 +1682,7 @@ export class UpgradeRuntimeService {
         'CONFLICT',
         `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`
           + (leftRegistered
-            ? `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${managedWorktreePath}\`, or \`git worktree prune\` when the directory is already gone).`
+            ? `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
             : ''),
         true,
       ));
@@ -3872,6 +3872,15 @@ function normalizePlugin(value: unknown): RuntimePluginDescriptor | undefined {
     trustTier: 'external',
     namespace: `plugin:${name}`,
   };
+}
+
+/**
+ * Quote a path for a suggested shell command only when the plain form is not
+ * safe to paste: a path with a space, a quote or a metacharacter would either
+ * fail or run something the reader did not intend.
+ */
+function shellSuggestedPath(value: string): string {
+  return /^[A-Za-z0-9._/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function sameHostPath(left: string, right: string, platform: NodeJS.Platform): boolean {

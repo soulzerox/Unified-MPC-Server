@@ -5,7 +5,6 @@ import path from 'node:path';
 const STATE_VERSION = 2;
 const LOCK_WAIT_MS = 10_000;
 const LOCK_STALE_MS = 30_000;
-const LOCK_HEARTBEAT_MS = Math.floor(LOCK_STALE_MS / 3);
 /** A managed worktree add can take a while, so its holder waits longer and keeps the lock fresh. */
 const SPAWN_LOCK_WAIT_MS = 120_000;
 const IO_RETRY_ATTEMPTS = 6;
@@ -45,7 +44,16 @@ interface LockRecord {
 const EMPTY_SESSION_STATE: UpgradeRuntimeSessionState = Object.freeze({ tasks: [], checkpoints: [], session: [] });
 const EMPTY_SHARED_STATE: UpgradeRuntimeSharedState = Object.freeze({ plugins: [], worktrees: [] });
 
+/** Timing knobs for {@link UpgradeRuntimeStateStore.withSpawnLock}; tests shorten them. */
+export interface SpawnLockOptions {
+  /** How long a waiter blocks for the holder before giving up. Defaults to two minutes. */
+  readonly waitMs?: number;
+  /** Age after which a lock without a refresh is treated as abandoned. Defaults to 30s. */
+  readonly staleMs?: number;
+}
+
 export class UpgradeRuntimeStateStore {
+  private readonly legacyStatePath: string;
   private readonly stateDirectory: string;
   private readonly sessionsDirectory: string;
   private readonly recoveryDirectory: string;
@@ -55,7 +63,8 @@ export class UpgradeRuntimeStateStore {
   private readonly migrationLockFile: string;
   private readonly sessionKey: string;
 
-  public constructor(private readonly legacyStatePath: string, ownerKey: string) {
+  public constructor(legacyStatePath: string, ownerKey: string) {
+    this.legacyStatePath = legacyStatePath;
     const normalizedOwner = ownerKey.trim() || 'legacy-owner';
     const basename = path.basename(legacyStatePath, path.extname(legacyStatePath));
     this.stateDirectory = path.join(path.dirname(legacyStatePath), `${basename}.state-v2`);
@@ -117,13 +126,15 @@ export class UpgradeRuntimeStateStore {
    * Serialize an operation on one named resource across every runtime instance
    * and every process that shares this state directory. The holder keeps the
    * lock file's mtime fresh, so a slow worktree creation is not mistaken for a
-   * crashed holder and stolen after `LOCK_STALE_MS`.
+   * crashed holder and stolen after `staleMs`.
    */
-  public async withSpawnLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  public async withSpawnLock<T>(key: string, operation: () => Promise<T>, options: SpawnLockOptions = {}): Promise<T> {
     const digest = createHash('sha256').update(key).digest('hex').slice(0, 32);
+    const staleMs = options.staleMs ?? LOCK_STALE_MS;
     return withFileLock(path.join(this.stateDirectory, 'locks', `spawn-${digest}.lock`), operation, {
-      waitMs: SPAWN_LOCK_WAIT_MS,
-      heartbeatMs: LOCK_HEARTBEAT_MS,
+      waitMs: options.waitMs ?? SPAWN_LOCK_WAIT_MS,
+      staleMs,
+      heartbeatMs: Math.max(1, Math.floor(staleMs / 3)),
     });
   }
 
@@ -244,9 +255,10 @@ async function atomicWriteJson(filePath: string, value: unknown): Promise<void> 
 async function withFileLock<T>(
   lockPath: string,
   operation: () => Promise<T>,
-  options: { readonly waitMs?: number; readonly heartbeatMs?: number } = {},
+  options: { readonly waitMs?: number; readonly staleMs?: number; readonly heartbeatMs?: number } = {},
 ): Promise<T> {
   const waitMs = options.waitMs ?? LOCK_WAIT_MS;
+  const staleMs = options.staleMs ?? LOCK_STALE_MS;
   return withProcessLock(lockPath, async () => {
     await mkdir(path.dirname(lockPath), { recursive: true });
     const token = randomUUID();
@@ -258,13 +270,13 @@ async function withFileLock<T>(
         break;
       } catch (error: unknown) {
         if (!hasCode(error, 'EEXIST')) throw error;
-        await recoverStaleLock(lockPath);
+        await recoverStaleLock(lockPath, staleMs);
         if (Date.now() >= deadline) throw new Error(`Timed out waiting for runtime state lock: ${path.basename(lockPath)}`);
         await delay(20);
       }
     }
 
-    // A holder that outlives `LOCK_STALE_MS` must prove it is alive, otherwise a
+    // A holder that outlives `staleMs` must prove it is alive, otherwise a
     // waiter quarantines a live lock and both operations run at once.
     const heartbeat = options.heartbeatMs === undefined
       ? undefined
@@ -298,10 +310,10 @@ async function withProcessLock<T>(lockPath: string, operation: () => Promise<T>)
   }
 }
 
-async function recoverStaleLock(lockPath: string): Promise<void> {
+async function recoverStaleLock(lockPath: string, staleMs: number): Promise<void> {
   try {
     const details = await stat(lockPath);
-    if (Date.now() - details.mtimeMs <= LOCK_STALE_MS) return;
+    if (Date.now() - details.mtimeMs <= staleMs) return;
     const quarantine = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
     try {
       await rename(lockPath, quarantine);

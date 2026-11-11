@@ -23,6 +23,7 @@ import {
   type GoalStepUpdate,
   type GoalTrackedTask,
   type GoalTerminalStatus,
+  type AppError,
   type Result,
   type ScheduledContinuationRecord,
   type ScheduledContinuationRepository,
@@ -40,6 +41,11 @@ import {
 } from './goal-task-cancellation-service.js';
 import type { GoalRequestCancellationPort, GoalRequestCancellationResult } from './goal-request-cancellation-service.js';
 import type { GoalRuntimeEventPublisher } from './goal-runtime-control-plane-service.js';
+import type { GoalWorktreeReconciliationPort } from './goal-worktree-reconciliation-port.js';
+import type {
+  GoalWorktreeBlocker,
+  GoalWorktreeClassificationEntry,
+} from './goal-worktree-reconciliation-service.js';
 
 export const DEFAULT_GOAL_LEASE_SECONDS = 600;
 export const MIN_GOAL_LEASE_SECONDS = 30;
@@ -249,6 +255,39 @@ export interface GoalContinuationServiceOptions {
   readonly goalExecutions?: Pick<GoalExecutionRepository, 'getExecutionById'>;
   readonly executionCancellation?: Pick<GoalExecutionCancellationRepository, 'cancelExecution'>;
   readonly runtimeEvents?: GoalRuntimeEventPublisher;
+  /** Read-only worktree reconciliation used by the CLOSE gate on completion. */
+  readonly goalWorktrees?: Pick<GoalWorktreeReconciliationPort, 'classify'>;
+}
+
+const COMPLETION_BLOCKING_WORKTREE_BLOCKERS: ReadonlySet<GoalWorktreeBlocker> = new Set([
+  'dirty',
+  'unmerged_changes',
+  'probe_failed',
+]);
+
+export interface GoalCompletionWorktreeBlocker {
+  readonly worktreePath: string;
+  readonly blockers: readonly GoalWorktreeBlocker[];
+}
+
+/**
+ * A completed goal must not leave recoverable work behind in a worktree it
+ * owns. `unintegrated_head` is deliberately not blocking: the documented merge
+ * flow squash-merges pull requests, so a worktree HEAD is normally not an
+ * ancestor of `origin/main` even after its work is integrated. `active_lease`
+ * describes the finishing goal's own live lease, and `externally_owned` entries
+ * belong to another client and are not this goal's responsibility.
+ */
+export function goalCompletionWorktreeBlockers(
+  entries: readonly GoalWorktreeClassificationEntry[],
+): readonly GoalCompletionWorktreeBlocker[] {
+  const blocking: GoalCompletionWorktreeBlocker[] = [];
+  for (const entry of entries) {
+    if (entry.blockers.includes('externally_owned')) continue;
+    const blockers = entry.blockers.filter((blocker) => COMPLETION_BLOCKING_WORKTREE_BLOCKERS.has(blocker));
+    if (blockers.length > 0) blocking.push({ worktreePath: entry.worktreePath, blockers });
+  }
+  return blocking;
 }
 
 export class GoalContinuationService {
@@ -260,6 +299,7 @@ export class GoalContinuationService {
   private readonly goalExecutions: Pick<GoalExecutionRepository, 'getExecutionById'> | undefined;
   private readonly executionCancellation: Pick<GoalExecutionCancellationRepository, 'cancelExecution'> | undefined;
   private readonly runtimeEvents: GoalRuntimeEventPublisher | undefined;
+  private readonly goalWorktrees: Pick<GoalWorktreeReconciliationPort, 'classify'> | undefined;
 
   public constructor(
     private readonly workspaces: WorkspaceRepository,
@@ -274,6 +314,7 @@ export class GoalContinuationService {
     this.goalExecutions = options.goalExecutions;
     this.executionCancellation = options.executionCancellation;
     this.runtimeEvents = options.runtimeEvents;
+    this.goalWorktrees = options.goalWorktrees;
   }
 
   public async runGoal(actor: FileActor, request: RunGoalRequest): Promise<Result<RunGoalResult>> {
@@ -523,16 +564,21 @@ export class GoalContinuationService {
         now,
       } as const;
 
+      try {
+        await this.goals.validateFinish(finishRequest);
+      } catch (error: unknown) {
+        return this.mapError(error);
+      }
+      if (request.status === 'completed') {
+        const worktreeBlocker = await this.goalCompletionWorktreeBlocker(actor, current);
+        if (worktreeBlocker !== undefined) return err(worktreeBlocker);
+      }
+
       let scheduledTaskCancellation: ScheduledTaskCancellationInstruction = {
         action: 'none',
         reason: 'no_live_task',
       };
       if (this.scheduledContinuations !== undefined) {
-        try {
-          await this.goals.validateFinish(finishRequest);
-        } catch (error: unknown) {
-          return this.mapError(error);
-        }
         try {
           const marked = await this.scheduledContinuations.markGoalFinishedForScheduledContinuation(goalId, now);
           scheduledTaskCancellation = cancellationInstruction(marked.continuation);
@@ -598,6 +644,39 @@ export class GoalContinuationService {
       return ok({ ...toSnapshot(goal), completionState: 'completed', scheduledTaskCancellation });
     } catch (error: unknown) {
       return this.mapError(error);
+    }
+  }
+
+  /**
+   * CLOSE gate for epic #142: a completed goal must not abandon recoverable
+   * work in a worktree it owns. The reconciler stays the single owner of the
+   * classification; this method only turns its verdict into a refusal.
+   */
+  private async goalCompletionWorktreeBlocker(actor: FileActor, goal: GoalRecord): Promise<AppError | undefined> {
+    if (this.goalWorktrees === undefined) return undefined;
+    try {
+      const classified = await this.goalWorktrees.classify({
+        actor: {
+          clientId: stableOwnerClientId(actor),
+          sessionId: stableOwnerSessionId(actor),
+        },
+        workspaceId: goal.workspaceId,
+      });
+      if (!classified.ok) {
+        return appError('CONFLICT', 'Goal completion is blocked because goal worktree safety could not be verified', true);
+      }
+      const blocking = goalCompletionWorktreeBlockers(classified.value.entries);
+      if (blocking.length === 0) return undefined;
+      const detail = blocking
+        .map((entry) => `${entry.worktreePath} (${entry.blockers.join(', ')})`)
+        .join('; ');
+      return appError(
+        'CONFLICT',
+        `Goal cannot be completed while goal-owned worktrees contain uncommitted, conflicted, or unverifiable work: ${detail}`,
+        true,
+      );
+    } catch {
+      return appError('CONFLICT', 'Goal completion is blocked because goal worktree safety could not be verified', true);
     }
   }
 

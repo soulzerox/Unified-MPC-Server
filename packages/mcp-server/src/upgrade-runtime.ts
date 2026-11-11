@@ -1952,11 +1952,14 @@ export class UpgradeRuntimeService {
         true,
       ));
     }
-    const result = await this.services.git.run(this.actor, {
-      workspaceId,
-      args: ['worktree', 'remove', worktreePath],
+    // Removal goes through the purpose-scoped capability, not the agent-facing
+    // `git_run` gate: that gate keeps its blanket refusal of `git worktree
+    // remove`, while this path can only ever target a managed path the caller
+    // already proved it owns in the ledger.
+    const result = await this.services.git.removeLedgerOwnedWorktree(this.actor, workspaceId, {
+      worktreePath,
       ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
-    }, undefined, authorization);
+    });
     if (!result.ok) return result;
     // Git reports a refusal as an ordinary command result, so the exit code is
     // the only evidence that the worktree was really removed. The one benign

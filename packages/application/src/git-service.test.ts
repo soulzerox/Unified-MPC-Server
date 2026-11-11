@@ -499,6 +499,83 @@ describe('GitService', () => {
     });
   });
 
+  it('keeps the agent-facing gate closed for worktree removal even after confirmation', async () => {
+    const workspace = await createWorkspace();
+    let calls = 0;
+    const service = new GitService(repository(workspace), undefined, {
+      async status(): Promise<never> { throw new Error('not used'); },
+      async diff(): Promise<never> { throw new Error('not used'); },
+      async log(): Promise<never> { throw new Error('not used'); },
+      async run() {
+        calls += 1;
+        return { ok: true as const, value: { exitCode: 0, stdout: '', stderr: '' } };
+      },
+    } as unknown as GitAdapter);
+
+    await expect(service.run({ clientId: 'test', clientName: 'test' }, {
+      args: ['worktree', 'remove', '.worktrees/agent-1'],
+      workspaceId: workspace.id,
+      userConfirmed: true,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(calls).toBe(0);
+  });
+
+  it('removes one ledger-owned managed worktree with an argv it builds itself', async () => {
+    const workspace = await createWorkspace();
+    const calls: unknown[][] = [];
+    const adapter = {
+      async status(): Promise<never> { throw new Error('not used'); },
+      async diff(): Promise<never> { throw new Error('not used'); },
+      async log(): Promise<never> { throw new Error('not used'); },
+      async run(cwd: string, args: readonly string[], timeoutMs?: number, signal?: AbortSignal) {
+        calls.push([cwd, args, timeoutMs, signal]);
+        return { ok: true as const, value: { exitCode: 0, stdout: '', stderr: '' } };
+      },
+    } as unknown as GitAdapter;
+    const service = new GitService(repository(workspace), undefined, adapter);
+    const signal = new AbortController().signal;
+
+    const removed = await service.removeLedgerOwnedWorktree(
+      { clientId: 'test', clientName: 'test' },
+      workspace.id,
+      { worktreePath: '.unified-mpc/worktrees/goal-1', timeoutMs: 5_000 },
+      signal,
+    );
+
+    expect(removed).toEqual({ ok: true, value: { exitCode: 0, stdout: '', stderr: '' } });
+    expect(calls).toEqual([[
+      workspace.realRootPath,
+      ['worktree', 'remove', '.unified-mpc/worktrees/goal-1'],
+      5_000,
+      signal,
+    ]]);
+  });
+
+  it('refuses a purpose-scoped removal that is not a managed worktree path', async () => {
+    const workspace = await createWorkspace();
+    const calls: unknown[][] = [];
+    const service = new GitService(repository(workspace), undefined, {
+      async status(): Promise<never> { throw new Error('not used'); },
+      async diff(): Promise<never> { throw new Error('not used'); },
+      async log(): Promise<never> { throw new Error('not used'); },
+      async run(...args: unknown[]) {
+        calls.push(args);
+        return { ok: true as const, value: { exitCode: 0, stdout: '', stderr: '' } };
+      },
+    } as unknown as GitAdapter);
+    const actor = { clientId: 'test', clientName: 'test' };
+
+    await expect(service.removeLedgerOwnedWorktree(actor, workspace.id, { worktreePath: path.join('src', 'file.ts') }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+    await expect(service.removeLedgerOwnedWorktree(actor, workspace.id, { worktreePath: path.join('.worktrees', '..', 'outside') }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+    await expect(service.removeLedgerOwnedWorktree(actor, workspace.id, { worktreePath: path.join(workspace.realRootPath, '.worktrees', 'agent-1') }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+    await expect(service.removeLedgerOwnedWorktree(actor, 'missing-workspace', { worktreePath: '.worktrees/agent-1' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
+    expect(calls).toEqual([]);
+  });
+
   it.each([
     ['global option', ['-C', 'C:\\outside', 'status']],
     ['repository mutation', ['init']],

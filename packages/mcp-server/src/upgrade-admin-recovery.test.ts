@@ -38,6 +38,10 @@ describe('upgrade administrative recovery snapshots', () => {
           mutableCalls.push([...(request as { args?: readonly string[] }).args ?? []]);
           return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
         },
+        async removeLedgerOwnedWorktree(_actor, _workspaceId, request): Promise<ReturnType<typeof ok>> {
+          mutableCalls.push(['worktree', 'remove', (request as { worktreePath: string }).worktreePath]);
+          return ok({ exitCode: 0, stdout: 'ok', stderr: '' });
+        },
       },
       workspaceInfo: {
         async info(): Promise<ReturnType<typeof ok>> {

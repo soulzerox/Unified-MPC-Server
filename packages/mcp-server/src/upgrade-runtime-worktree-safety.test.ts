@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { GitService } from '@unified-mpc/application';
 import type {
   FileActor,
   GoalWorktreeBlocker,
@@ -60,6 +61,8 @@ interface FixtureOptions {
   readonly git?: { readonly exitCode: number; readonly stdout?: string; readonly stderr?: string };
   /** Skip creating the recorded directory to model a path the reconciler calls missing. */
   readonly materializePath?: boolean;
+  /** Replace the Git port, e.g. to run the real service against a stub adapter. */
+  readonly gitService?: (workspaceRoot: string) => McpApplicationServices['git'];
 }
 
 async function fixture(
@@ -112,16 +115,29 @@ async function fixture(
         });
       },
     },
-    git: {
-      async run(_actor, request): Promise<ReturnType<typeof ok>> {
-        gitCalls.push(request);
-        return ok({
-          exitCode: options.git?.exitCode ?? 0,
-          stdout: options.git?.stdout ?? 'removed',
-          stderr: options.git?.stderr ?? '',
-        });
-      },
-    },
+    git: options.gitService === undefined
+      ? {
+        // Removal must reach the purpose-scoped capability. `run` stays wired
+        // to the same recorder so an accidental fallback to the agent-facing
+        // gate still shows up in the assertions instead of throwing silently.
+        async run(_actor, request): Promise<ReturnType<typeof ok>> {
+          gitCalls.push({ ...request, viaRun: true });
+          return ok({
+            exitCode: options.git?.exitCode ?? 0,
+            stdout: options.git?.stdout ?? 'removed',
+            stderr: options.git?.stderr ?? '',
+          });
+        },
+        async removeLedgerOwnedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+          gitCalls.push({ workspaceId: targetWorkspaceId, args: ['worktree', 'remove', request.worktreePath] });
+          return ok({
+            exitCode: options.git?.exitCode ?? 0,
+            stdout: options.git?.stdout ?? 'removed',
+            stderr: options.git?.stderr ?? '',
+          });
+        },
+      }
+      : options.gitService(workspaceRoot),
   } as unknown as McpApplicationServices, actor);
   return { runtime, gitCalls, requests, state };
 }
@@ -266,6 +282,44 @@ describe('git_worktree_remove worktree safety gate', () => {
     if (!refused.ok) expect(refused.error.message).toContain('Permission denied');
     expect(gitCalls).toHaveLength(1);
     expect((await state.readShared()).worktrees).toHaveLength(1);
+  });
+
+  it('removes a clean ledger-owned worktree in standard mode through the purpose-scoped capability', async () => {
+    let workspaceRoot = '';
+    const calls: unknown[][] = [];
+    const { runtime } = await fixture(
+      async () => ok(report([entry()])),
+      {
+        gitService: (root) => {
+          workspaceRoot = root;
+          const workspace = {
+            id: workspaceId,
+            displayName: 'fixture',
+            rootPath: root,
+            realRootPath: root,
+            createdAt: '2026-11-11T00:00:00.000Z',
+          };
+          return new GitService({
+            async list(): Promise<Array<typeof workspace>> { return [workspace]; },
+            async get(id: string): Promise<typeof workspace | null> { return id === workspaceId ? workspace : null; },
+            async insert(): Promise<void> {},
+            async delete(): Promise<void> {},
+          }, undefined, {
+            async run(cwd: string, args: readonly string[]) {
+              calls.push([cwd, args]);
+              return ok({ exitCode: 0, stdout: 'removed', stderr: '' });
+            },
+          } as unknown as ConstructorParameters<typeof GitService>[2]);
+        },
+      },
+    );
+
+    // No Full Bypass authorization is passed: this is the standard-mode path
+    // that the agent-facing `git_run` gate keeps refusing.
+    const removed = await remove(runtime);
+
+    expect(removed).toMatchObject({ ok: true, value: { status: 'completed' } });
+    expect(calls).toEqual([[workspaceRoot, ['worktree', 'remove', worktreePath]]]);
   });
 
   it('never reconciles "not a working tree" while the path is still registered', async () => {

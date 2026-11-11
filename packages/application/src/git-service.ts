@@ -39,7 +39,7 @@ import {
   type GitWorkspaceSnapshotOptions,
 } from '@unified-mpc/git';
 import type { PublishAuditInput, PublishAuditSink } from '@unified-mpc/audit';
-import { WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
+import { WorkspacePathGuard, resolveManagedWorktreePath, type Workspace, type WorkspaceRepository } from '@unified-mpc/workspace';
 import { isProvablyReadOnlyGitInvocation, parseGitInvocation, parseGitPushArguments, prohibitedAgentGitInvocationReason, prohibitedDefaultBranchPushReason, prohibitedGitConfigMutationReason, prohibitedGitPushConfigOverrideReason, prohibitedGitPushGlobalOptionReason, prohibitedGitSubcommandReason } from '@unified-mpc/shared';
 import type { FileActor } from './file-service.js';
 import { isAbsoluteFsPath, resolveWorkspaceForPath } from './workspace-locator.js';
@@ -50,6 +50,12 @@ export interface GitRunRequest {
   readonly cwd?: string;
   readonly timeoutMs?: number;
   readonly userConfirmed?: boolean;
+}
+
+/** A managed worktree path the caller has already proven it owns in the runtime ledger. */
+export interface RemoveLedgerOwnedWorktreeRequest {
+  readonly worktreePath: string;
+  readonly timeoutMs?: number;
 }
 
 export interface RefreshedAdmissionRef {
@@ -786,6 +792,31 @@ export class GitService {
     const workspace = await this.getWorkspace(workspaceId);
     if (!workspace.ok) return workspace;
     return this.adapter.log(workspace.value.realRootPath, request, signal);
+  }
+
+  /**
+   * Remove one managed worktree after the caller proved ledger ownership. The
+   * argv is built here, so this is not a second way to run an arbitrary
+   * `git worktree remove`: the agent-facing `run` gate keeps its blanket
+   * denial and this capability only expresses "remove this managed path".
+   */
+  public async removeLedgerOwnedWorktree(
+    actor: FileActor,
+    workspaceId: string,
+    request: RemoveLedgerOwnedWorktreeRequest,
+    signal?: AbortSignal,
+  ): Promise<Result<GitCommandResult>> {
+    void actor;
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
+    const managed = await resolveManagedWorktreePath(workspace.value, request.worktreePath);
+    if (!managed.ok) return managed;
+    return this.adapter.run(
+      workspace.value.realRootPath,
+      ['worktree', 'remove', managed.value.relativePath],
+      request.timeoutMs,
+      signal,
+    );
   }
 
   public async run(actor: FileActor, request: GitRunRequest, signal?: AbortSignal, authorization?: InvocationAuthorization): Promise<Result<GitCommandResult>> {

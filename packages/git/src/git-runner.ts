@@ -50,7 +50,10 @@ export class DirectGitRunner implements GitRunner {
       try {
         child = spawn('git', [...args], {
           cwd,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...options.env },
+          // Callers parse Git's machine-readable output and its refusal
+          // messages, so the child must not answer in the host locale. The
+          // explicit `options.env` still wins for the credential-helper path.
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', LANG: 'C', ...options.env },
           shell: false,
           detached: true,
           // fd 3 exists only for a helper-scoped invocation: it is the pipe the

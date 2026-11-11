@@ -140,6 +140,38 @@ describe('DirectGitRunner cancellation', () => {
     expect(spawnMock).toHaveBeenCalledWith('git', ['status'], expect.not.objectContaining({ stdio: expect.anything() }));
   });
 
+  it('pins the C locale so parsed refusals never arrive in the host language', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+    const terminator: ProcessTreeTerminator = { stop: vi.fn(async () => undefined) };
+
+    const running = new DirectGitRunner(terminator).run(['worktree', 'remove', '.worktrees/agent-1'], 'C:\\workspace');
+    closeChild(child, 128);
+
+    await expect(running).resolves.toMatchObject({ exitCode: 128 });
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '.worktrees/agent-1'],
+      expect.objectContaining({ env: expect.objectContaining({ LC_ALL: 'C', LANG: 'C', GIT_TERMINAL_PROMPT: '0' }) }),
+    );
+  });
+
+  it('lets a caller override the pinned locale for its own child', async () => {
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+    const terminator: ProcessTreeTerminator = { stop: vi.fn(async () => undefined) };
+
+    const running = new DirectGitRunner(terminator).run(['status'], 'C:\\workspace', { env: { LC_ALL: 'th_TH.UTF-8' } });
+    closeChild(child, 0);
+
+    await expect(running).resolves.toEqual({ exitCode: 0, stdout: '', stderr: '' });
+    expect(spawnMock).toHaveBeenCalledWith(
+      'git',
+      ['status'],
+      expect.objectContaining({ env: expect.objectContaining({ LC_ALL: 'th_TH.UTF-8' }) }),
+    );
+  });
+
   it('keeps the run unsettled after a failed tree stop and retries until verification succeeds', async () => {
     const child = fakeChild();
     spawnMock.mockReturnValue(child);

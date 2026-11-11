@@ -166,6 +166,7 @@ describe('git_worktree_remove worktree safety gate', () => {
     const removed = await remove(vanished.runtime);
     expect(removed).toMatchObject({ ok: true, value: { status: 'completed' } });
     expect(vanished.gitCalls).toHaveLength(1);
+    expect((await vanished.state.readShared()).worktrees).toEqual([]);
   });
 
   it('does not block on the advisory unintegrated head that a squash merge leaves behind', async () => {

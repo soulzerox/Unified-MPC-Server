@@ -181,7 +181,7 @@ describe('upgrade runtime multi-session persistence', () => {
     await expect(other.execute('git_worktree_remove', {
       workspaceId: 'ws-1', worktreePath: '.worktrees/session-a', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
 
     await expect(new UpgradeRuntimeService(services, actorA).execute('git_worktree_remove', {
       workspaceId: 'ws-1', worktreePath: '.worktrees/session-a', dryRun: false, userConfirmed: true,
@@ -189,7 +189,7 @@ describe('upgrade runtime multi-session persistence', () => {
     await expect(new UpgradeRuntimeService(services, actorB).execute('git_worktree_remove', {
       workspaceId: 'ws-1', worktreePath: '.worktrees/session-b', dryRun: false, userConfirmed: true,
     })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(6);
   });
 
   it('blocks runtime-referenced worktree cleanup across runtime restart until the reference is removed', async () => {
@@ -240,7 +240,7 @@ describe('upgrade runtime multi-session persistence', () => {
         dryRun: false,
         userConfirmed: true,
       })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
 
       await expect(owner.execute('git_worktree_remove', {
         workspaceId: 'ws-runtime',
@@ -266,7 +266,7 @@ describe('upgrade runtime multi-session persistence', () => {
         ok: false,
         error: { code: 'CONFLICT', message: expect.stringContaining('active_runtime_reference') },
       });
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
 
       const restarted = new UpgradeRuntimeService(services, actorA);
       await expect(restarted.execute('git_worktree_remove', {
@@ -275,7 +275,7 @@ describe('upgrade runtime multi-session persistence', () => {
         dryRun: false,
         userConfirmed: true,
       })).resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
 
       await unlink(path.join(runtimeDir, 'current'));
       await expect(restarted.execute('git_worktree_remove', {
@@ -290,7 +290,7 @@ describe('upgrade runtime multi-session persistence', () => {
           cleanupBlocker: { blocked: false, reason: null },
         },
       });
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(3);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -350,7 +350,7 @@ describe('upgrade runtime multi-session persistence', () => {
         dryRun: false,
         userConfirmed: true,
       })).resolves.toMatchObject({ ok: true, value: { status: 'completed' } });
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
 
       await expect(owner.execute('git_worktree_remove', {
         workspaceId: 'ws-materializing',
@@ -364,7 +364,7 @@ describe('upgrade runtime multi-session persistence', () => {
           message: expect.stringContaining('materialization_source'),
         },
       });
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
 
       await writeFile(path.join(recordDir, 'status'), 'published\n', 'utf8');
       await expect(owner.execute('git_worktree_remove', {
@@ -379,7 +379,7 @@ describe('upgrade runtime multi-session persistence', () => {
           cleanupBlocker: { blocked: false, reason: null },
         },
       });
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(3);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

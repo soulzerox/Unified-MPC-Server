@@ -839,7 +839,10 @@ describe('upgrade runtime', () => {
       await expect(runtime.execute('git_worktree_spawn', {
         workspaceId: 'ws-linux', worktreePath: '.worktrees/agent-1', ref: 'main', dryRun: false, userConfirmed: true,
       })).resolves.toMatchObject({ ok: true, value: { status: 'completed', worktreePath: '.worktrees/agent-1' } });
-      expect(calls).toEqual([{ workspaceId: 'ws-linux', args: ['worktree', 'add', '--detach', '.worktrees/agent-1', 'main'] }]);
+      expect(calls).toEqual([
+        { workspaceId: 'ws-linux', args: ['worktree', 'list', '--porcelain', '-z'], userConfirmed: true },
+        { workspaceId: 'ws-linux', args: ['worktree', 'add', '--detach', '.worktrees/agent-1', 'main'] },
+      ]);
       await expect(runtime.execute('git_worktree_remove', {
         workspaceId: 'ws-linux', worktreePath: '.worktrees\\agent-1', dryRun: false, userConfirmed: true,
       })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
@@ -895,12 +898,14 @@ describe('upgrade runtime', () => {
     }
   });
 
-  it('names the registration a failed worktree creation left behind', async () => {
+  it('clears the registration a failed worktree creation left behind', async () => {
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-leftover-'));
     const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
     const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
     const calls: unknown[] = [];
+    const removals: unknown[] = [];
     const leftoverPath = path.join(workspaceRoot, '.worktrees', 'leftover agent');
+    let listCalls = 0;
     try {
       const runtime = new UpgradeRuntimeService({
         platform: 'linux',
@@ -920,13 +925,21 @@ describe('upgrade runtime', () => {
           async run(_actor, request): Promise<ReturnType<typeof ok>> {
             calls.push(request.args);
             if (request.args[1] === 'list') {
+              listCalls += 1;
+              const leftover = listCalls === 1
+                ? ''
+                : `\0\0worktree ${leftoverPath}\0HEAD 2222222222222222222222222222222222222222\0detached\0`;
               return ok({
                 exitCode: 0,
-                stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0worktree ${leftoverPath}\0HEAD 2222222222222222222222222222222222222222\0detached\0\0`,
+                stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0${leftover}\0`,
                 stderr: '',
               });
             }
             return ok({ exitCode: 1, stdout: '', stderr: 'fatal: post-checkout hook failed\n' });
+          },
+          async removeLedgerOwnedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+            removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
+            return ok({ exitCode: 0, stdout: '', stderr: '' });
           },
         },
       }, actor);
@@ -942,13 +955,76 @@ describe('upgrade runtime', () => {
       expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
       if (!refused.ok) {
         expect(refused.error.message).toContain('post-checkout hook failed');
-        expect(refused.error.message).toContain('Git still registers that path');
-        expect(refused.error.message).toContain("git worktree remove '.worktrees/leftover agent'");
+        expect(refused.error.message).toContain('was cleared, so a retry can reuse the path');
+        expect(refused.error.message).not.toContain('Git still registers that path');
       }
+      expect(removals).toEqual([{ workspaceId: 'ws-leftover', worktreePath: '.worktrees/leftover agent' }]);
       expect(calls).toEqual([
+        ['worktree', 'list', '--porcelain', '-z'],
         ['worktree', 'add', '--detach', '.worktrees/leftover agent', 'main'],
         ['worktree', 'list', '--porcelain', '-z'],
       ]);
+      expect((await store.readShared()).worktrees).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('never clears a registration that existed before the failed attempt', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-pre-registered-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    const calls: unknown[] = [];
+    const removals: unknown[] = [];
+    const leftoverPath = path.join(workspaceRoot, '.worktrees', 'other-owner');
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-pre-registered',
+              displayName: 'pre-registered fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request.args);
+            if (request.args[1] === 'list') {
+              return ok({
+                exitCode: 0,
+                stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0worktree ${leftoverPath}\0HEAD 2222222222222222222222222222222222222222\0detached\0\0`,
+                stderr: '',
+              });
+            }
+            return ok({ exitCode: 128, stdout: '', stderr: 'fatal: already exists\n' });
+          },
+          async removeLedgerOwnedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+            removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
+            return ok({ exitCode: 0, stdout: '', stderr: '' });
+          },
+        },
+      }, actor);
+
+      const refused = await runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-pre-registered',
+        worktreePath: '.worktrees/other-owner',
+        ref: 'main',
+        dryRun: false,
+        userConfirmed: true,
+      });
+
+      expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+      if (!refused.ok) {
+        expect(refused.error.message).toContain('already registered before this attempt');
+        expect(refused.error.message).toContain('`git worktree remove .worktrees/other-owner`');
+      }
+      expect(removals).toEqual([]);
       expect((await store.readShared()).worktrees).toEqual([]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
@@ -1003,6 +1079,7 @@ describe('upgrade runtime', () => {
         expect(refused.error.message).not.toContain('Git still registers that path');
       }
       expect(calls).toEqual([
+        ['worktree', 'list', '--porcelain', '-z'],
         ['worktree', 'add', '--detach', '.worktrees/refused-agent', 'missing-ref'],
         ['worktree', 'list', '--porcelain', '-z'],
       ]);
@@ -1119,10 +1196,10 @@ describe('upgrade runtime', () => {
         ok: true,
         value: { status: 'completed', worktreePath: '.worktrees/full-bypass-agent' },
       });
-      expect(calls).toEqual([{
-        workspaceId: 'ws-canonical',
-        args: ['worktree', 'add', '--detach', '.worktrees/full-bypass-agent', 'main'],
-      }]);
+      expect(calls).toEqual([
+        { workspaceId: 'ws-canonical', args: ['worktree', 'list', '--porcelain', '-z'], userConfirmed: false },
+        { workspaceId: 'ws-canonical', args: ['worktree', 'add', '--detach', '.worktrees/full-bypass-agent', 'main'] },
+      ]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }

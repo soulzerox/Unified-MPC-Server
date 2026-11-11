@@ -26,6 +26,34 @@ export const GOAL_WORKTREE_BLOCKER_ORDER: readonly GoalWorktreeBlocker[] = [
   'probe_failed',
 ];
 
+/**
+ * Removing a worktree destroys what is inside it, so recoverable work, a live
+ * goal lease, an active owner and an unverifiable probe all refuse it.
+ * `unintegrated_head` stays advisory because a squash merge never leaves the
+ * worktree HEAD as an ancestor of `origin/main`, and `path_missing` has no work
+ * left to lose.
+ */
+export const GOAL_WORKTREE_REMOVAL_BLOCKERS: readonly GoalWorktreeBlocker[] = [
+  'externally_owned',
+  'active_lease',
+  'dirty',
+  'unmerged_changes',
+  'probe_failed',
+];
+
+/** Blockers that would make a destructive worktree removal refuse. */
+export function goalWorktreeRemovalBlockers(
+  blockers: readonly GoalWorktreeBlocker[],
+): GoalWorktreeBlocker[] {
+  const removal = new Set(GOAL_WORKTREE_REMOVAL_BLOCKERS);
+  return blockers.filter((blocker) => removal.has(blocker));
+}
+
+/** Whether a destructive worktree removal would refuse for this entry. */
+export function goalWorktreeRemovalBlocked(blockers: readonly GoalWorktreeBlocker[]): boolean {
+  return goalWorktreeRemovalBlockers(blockers).length > 0;
+}
+
 export type GoalWorktreeDisposition = 'safe_to_clean' | 'keep';
 
 export interface GoalWorktreeDescriptor {

@@ -817,7 +817,14 @@ describe('durable goal MCP tools', () => {
 
     const result = await tool(context, 'reconcile_goal_worktrees').execute({ workspaceId: 'workspace-1' }, new AbortController().signal);
     expect(requests).toEqual([{ actor: { clientId: actor.clientId, sessionId: actor.sessionId }, workspaceId: 'workspace-1' }]);
-    expect(result).toMatchObject({ ok: true, value: { keepCount: 1, entries: [{ blockers: ['dirty'], disposition: 'keep' }] } });
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        keepCount: 1,
+        removalBlockedCount: 1,
+        entries: [{ blockers: ['dirty'], disposition: 'keep', removalBlocked: true, removalBlockers: ['dirty'] }],
+      },
+    });
 
     const unscoped = await tool(context, 'reconcile_goal_worktrees').execute({}, new AbortController().signal);
     expect(unscoped).toMatchObject({ ok: true });

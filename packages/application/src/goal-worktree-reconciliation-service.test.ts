@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   GoalWorktreeReconciliationService,
+  goalWorktreeRemovalBlocked,
+  goalWorktreeRemovalBlockers,
   type GoalWorktreeDescriptor,
   type GoalWorktreeGitPort,
   type GoalWorktreeStatusProbe,
@@ -180,5 +182,26 @@ describe('GoalWorktreeReconciliationService classification', () => {
     expect(report.keepCount).toBe(1);
     expect(report.entries.map((row) => row.worktreePath)).toEqual([clean.worktreePath, dirty.worktreePath]);
     expect(report.entries[1]?.blockers).toEqual(['dirty']);
+  });
+});
+
+describe('worktree removal policy', () => {
+  it('refuses every blocker that loses recoverable work or an active owner', () => {
+    for (const blocker of ['externally_owned', 'active_lease', 'dirty', 'unmerged_changes', 'probe_failed'] as const) {
+      expect(goalWorktreeRemovalBlocked([blocker])).toBe(true);
+      expect(goalWorktreeRemovalBlockers([blocker])).toEqual([blocker]);
+    }
+  });
+
+  it('leaves a squash-merged or vanished worktree removable', () => {
+    expect(goalWorktreeRemovalBlocked(['unintegrated_head'])).toBe(false);
+    expect(goalWorktreeRemovalBlocked(['path_missing'])).toBe(false);
+    expect(goalWorktreeRemovalBlocked(['unintegrated_head', 'path_missing'])).toBe(false);
+    expect(goalWorktreeRemovalBlockers(['unintegrated_head', 'path_missing'])).toEqual([]);
+  });
+
+  it('keeps only the blocking subset of a mixed classification in report order', () => {
+    expect(goalWorktreeRemovalBlockers(['unintegrated_head', 'dirty', 'path_missing', 'probe_failed']))
+      .toEqual(['dirty', 'probe_failed']);
   });
 });

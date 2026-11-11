@@ -12,7 +12,7 @@ import {
   type InvocationAuthorization,
   type Result,
 } from '@unified-mpc/domain';
-import type { FileActor, GoalWorktreeBlocker } from '@unified-mpc/application';
+import { goalWorktreeRemovalBlockers, type FileActor, type GoalWorktreeBlocker } from '@unified-mpc/application';
 import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescriptor } from '@unified-mpc/capabilities';
 import { skillQueryIsRanked } from '@unified-mpc/extensions';
 import { createProcessTreeTerminator } from '@unified-mpc/process';
@@ -229,21 +229,6 @@ export interface UpgradeRuntimeOptions {
   readonly resourceAdmissionSessionId?: string;
   readonly lspProcessAdmissionCost?: number;
 }
-
-/**
- * Removing a worktree destroys whatever is still inside it, so recoverable
- * work, a live goal lease and an unverifiable probe all refuse the removal.
- * `unintegrated_head` stays advisory because squash merges never leave the
- * worktree HEAD as an ancestor of `origin/main`, and `path_missing` has no
- * work left to lose.
- */
-const WORKTREE_REMOVAL_BLOCKERS: ReadonlySet<GoalWorktreeBlocker> = new Set([
-  'externally_owned',
-  'active_lease',
-  'dirty',
-  'unmerged_changes',
-  'probe_failed',
-]);
 
 interface WorktreeCleanupSafety {
   readonly status: 'clean' | 'blocked' | 'unavailable';
@@ -1950,7 +1935,7 @@ export class UpgradeRuntimeService {
         true,
       ));
     }
-    const blockers = entry.blockers.filter((blocker) => WORKTREE_REMOVAL_BLOCKERS.has(blocker));
+    const blockers = goalWorktreeRemovalBlockers(entry.blockers);
     return ok({
       status: blockers.length === 0 ? 'clean' : 'blocked',
       blockers,

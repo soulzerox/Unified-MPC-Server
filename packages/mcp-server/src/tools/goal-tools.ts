@@ -3,6 +3,8 @@ import {
   DEFAULT_GOAL_LEASE_SECONDS,
   MAX_GOAL_LEASE_SECONDS,
   MIN_GOAL_LEASE_SECONDS,
+  goalWorktreeRemovalBlocked,
+  goalWorktreeRemovalBlockers,
   type GoalSnapshot,
   type GoalCanonicalAdmissionOutcome,
   type ListGoalsResult,
@@ -407,19 +409,29 @@ export function goalTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'reconcile_goal_worktrees',
-      description: 'Read-only lifecycle inspection of Unified-owned goal worktrees. Classifies every ledger entry for the caller as safe_to_clean or keep and reports the exact blocker codes (externally_owned, active_lease, path_missing, dirty, unmerged_changes, unintegrated_head, probe_failed) with probe details. Needs no confirmation because it never deletes, archives or rewrites a worktree; removal stays a separate confirmed operation, and an unprovable entry is always kept.',
+      description: 'Read-only lifecycle inspection of Unified-owned goal worktrees. Classifies every ledger entry for the caller as safe_to_clean or keep and reports the exact blocker codes (externally_owned, active_lease, path_missing, dirty, unmerged_changes, unintegrated_head, probe_failed) with probe details, plus removalBlocked using the same policy the destructive removal applies (dirty, unmerged_changes, probe_failed, active_lease, externally_owned; path_missing and unintegrated_head stay removable). Needs no confirmation because it never deletes, archives or rewrites a worktree; removal stays a separate confirmed operation, and an unprovable entry is always kept.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: reconcileGoalWorktreesSchema,
       handler: async (input) => {
         const goalWorktrees = context.services.goalWorktrees;
         if (goalWorktrees === undefined) return missingService();
-        return goalWorktrees.classify({
+        const classified = await goalWorktrees.classify({
           actor: {
             clientId: context.actor.clientId,
             ...(context.actor.sessionId === undefined ? {} : { sessionId: context.actor.sessionId }),
           },
           ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
+        });
+        if (!classified.ok) return classified;
+        return ok({
+          ...classified.value,
+          entries: classified.value.entries.map((entry) => ({
+            ...entry,
+            removalBlocked: goalWorktreeRemovalBlocked(entry.blockers),
+            removalBlockers: goalWorktreeRemovalBlockers(entry.blockers),
+          })),
+          removalBlockedCount: classified.value.entries.filter((entry) => goalWorktreeRemovalBlocked(entry.blockers)).length,
         });
       },
     }),

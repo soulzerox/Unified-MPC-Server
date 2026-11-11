@@ -890,6 +890,122 @@ describe('upgrade runtime', () => {
     }
   });
 
+  it('names the registration a failed worktree creation left behind', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-leftover-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    const calls: unknown[] = [];
+    const leftoverPath = path.join(workspaceRoot, '.worktrees', 'leftover-agent');
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-leftover',
+              displayName: 'leftover fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request.args);
+            if (request.args[1] === 'list') {
+              return ok({
+                exitCode: 0,
+                stdout: `worktree ${workspaceRoot}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\nworktree ${leftoverPath}\nHEAD 2222222222222222222222222222222222222222\ndetached\n\n`,
+                stderr: '',
+              });
+            }
+            return ok({ exitCode: 1, stdout: '', stderr: 'fatal: post-checkout hook failed\n' });
+          },
+        },
+      }, actor);
+
+      const refused = await runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-leftover',
+        worktreePath: '.worktrees/leftover-agent',
+        ref: 'main',
+        dryRun: false,
+        userConfirmed: true,
+      });
+
+      expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+      if (!refused.ok) {
+        expect(refused.error.message).toContain('post-checkout hook failed');
+        expect(refused.error.message).toContain('Git still registers that path');
+        expect(refused.error.message).toContain('git worktree remove .worktrees/leftover-agent');
+      }
+      expect(calls).toEqual([
+        ['worktree', 'add', '--detach', '.worktrees/leftover-agent', 'main'],
+        ['worktree', 'list', '--porcelain'],
+      ]);
+      expect((await store.readShared()).worktrees).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not claim a leftover registration when Git lists none', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-clean-refusal-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const calls: unknown[] = [];
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-clean-refusal',
+              displayName: 'clean refusal fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            calls.push(request.args);
+            if (request.args[1] === 'list') {
+              return ok({
+                exitCode: 0,
+                stdout: `worktree ${workspaceRoot}\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\n`,
+                stderr: '',
+              });
+            }
+            return ok({ exitCode: 128, stdout: '', stderr: 'fatal: invalid reference: missing-ref\n' });
+          },
+        },
+      }, actor);
+
+      const refused = await runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-clean-refusal',
+        worktreePath: '.worktrees/refused-agent',
+        ref: 'missing-ref',
+        dryRun: false,
+        userConfirmed: true,
+      });
+
+      expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+      if (!refused.ok) {
+        expect(refused.error.message).toContain('invalid reference: missing-ref');
+        expect(refused.error.message).not.toContain('Git still registers that path');
+      }
+      expect(calls).toEqual([
+        ['worktree', 'add', '--detach', '.worktrees/refused-agent', 'missing-ref'],
+        ['worktree', 'list', '--porcelain'],
+      ]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when actual managed worktree creation cannot resolve its owning workspace', async () => {
     const calls: unknown[] = [];
     const runtime = new UpgradeRuntimeService({

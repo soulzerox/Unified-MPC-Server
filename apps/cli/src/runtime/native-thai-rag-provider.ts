@@ -1835,6 +1835,12 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         this.canonicalIndexRecords.set(job.jobId, canonical.value);
         const canonicalArgs = canonicalChildArgs(canonical.value);
         let indexed: Result<unknown>;
+        // Issue #407 keeps its promise: a pass that actually started and then
+        // terminalized already spent its provider work, so failing the read and
+        // releasing the gate is the documented recovery and the next read may
+        // re-admit at once. Only a refusal to start is cooled down (issue #762),
+        // because that one re-arms cheaply and can loop unnoticed.
+        let passTerminalized = false;
         // issue-202: trial-first — bounded foreground probe proves the
         // pipeline before full admission. Trial failure takes the same
         // fail-closed path below; pending stays set for a later retry.
@@ -1909,6 +1915,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
                 indexed = err(appError('CONFLICT', 'Native Thai-RAG workspace indexing was interrupted during shutdown', true));
               } else {
                 indexed = await this.waitForWorkspaceAdmissionIndex(job.jobId, providerJobId, workspace.id, ownerId);
+                passTerminalized = true;
               }
             }
           }
@@ -1932,7 +1939,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           await this.jobs.complete(job.jobId, this.mergeCanonicalJobResult(job.jobId, indexed.value), ownerId);
         } else {
           await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
-          this.recordAdmissionFailure(workspace.id, job.jobId, indexed.error);
+          if (!passTerminalized) this.recordAdmissionFailure(workspace.id, job.jobId, indexed.error);
         }
 
         if (!this.refreshIsCurrent(generation) || !this.started || !indexed.ok) {

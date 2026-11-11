@@ -128,7 +128,7 @@ async function fixture(
             stderr: options.git?.stderr ?? '',
           });
         },
-        async removeLedgerOwnedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+        async removeManagedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
           gitCalls.push({ workspaceId: targetWorkspaceId, args: ['worktree', 'remove', request.worktreePath] });
           return ok({
             exitCode: options.git?.exitCode ?? 0,

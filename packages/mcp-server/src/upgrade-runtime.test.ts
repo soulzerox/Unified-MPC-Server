@@ -937,7 +937,7 @@ describe('upgrade runtime', () => {
             }
             return ok({ exitCode: 1, stdout: '', stderr: 'fatal: post-checkout hook failed\n' });
           },
-          async removeLedgerOwnedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+          async removeManagedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
             removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
             return ok({ exitCode: 0, stdout: '', stderr: '' });
           },
@@ -965,6 +965,246 @@ describe('upgrade runtime', () => {
         ['worktree', 'list', '--porcelain', '-z'],
       ]);
       expect((await store.readShared()).worktrees).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports why a leftover registration could not be cleared', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-leftover-dirty-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    const removals: unknown[] = [];
+    const leftoverPath = path.join(workspaceRoot, '.worktrees', 'dirty agent');
+    let listCalls = 0;
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-leftover-dirty',
+              displayName: 'dirty leftover fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            if (request.args[1] === 'list') {
+              listCalls += 1;
+              const leftover = listCalls === 1
+                ? ''
+                : `\0\0worktree ${leftoverPath}\0HEAD 2222222222222222222222222222222222222222\0detached\0`;
+              return ok({
+                exitCode: 0,
+                stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0${leftover}\0`,
+                stderr: '',
+              });
+            }
+            return ok({ exitCode: 128, stdout: '', stderr: 'fatal: post-checkout hook failed\n' });
+          },
+          async removeManagedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+            removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
+            return ok({
+              exitCode: 128,
+              stdout: '',
+              stderr: 'fatal: contains modified or untracked files, use --force to delete it\n',
+            });
+          },
+        },
+      }, actor);
+
+      const refused = await runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-leftover-dirty',
+        worktreePath: '.worktrees/dirty agent',
+        ref: 'main',
+        dryRun: false,
+        userConfirmed: true,
+      });
+
+      expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+      if (!refused.ok) {
+        expect(refused.error.message).toContain('could not be cleared');
+        expect(refused.error.message).toContain('contains modified or untracked files');
+        expect(refused.error.message).toContain("git worktree remove --force '.worktrees/dirty agent'");
+        expect(refused.error.message).not.toContain('was cleared, so a retry can reuse the path');
+      }
+      expect(removals).toEqual([{ workspaceId: 'ws-leftover-dirty', worktreePath: '.worktrees/dirty agent' }]);
+      expect((await store.readShared()).worktrees).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans up a cancelled spawn instead of leaving the registration for the next attempt', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-cancelled-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    const removals: unknown[] = [];
+    const leftoverPath = path.join(workspaceRoot, '.worktrees', 'cancelled agent');
+    const controller = new AbortController();
+    let listCalls = 0;
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-cancelled',
+              displayName: 'cancelled fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request, runSignal): Promise<ReturnType<typeof ok>> {
+            if (request.args[1] === 'list') {
+              // The real runner refuses to start once the caller's signal is
+              // aborted, so a post-list bound to that signal cannot observe the
+              // registration the cancelled add left behind.
+              if (runSignal?.aborted === true) {
+                return ok({ exitCode: -1, stdout: '', stderr: 'Git command cancelled\n' });
+              }
+              listCalls += 1;
+              const leftover = listCalls === 1
+                ? ''
+                : `\0\0worktree ${leftoverPath}\0HEAD 2222222222222222222222222222222222222222\0detached\0`;
+              return ok({
+                exitCode: 0,
+                stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0${leftover}\0`,
+                stderr: '',
+              });
+            }
+            controller.abort();
+            return ok({ exitCode: -1, stdout: '', stderr: 'Git command cancelled\n' });
+          },
+          async removeManagedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+            removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
+            return ok({ exitCode: 0, stdout: '', stderr: '' });
+          },
+        },
+      }, actor);
+
+      const refused = await runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-cancelled',
+        worktreePath: '.worktrees/cancelled agent',
+        ref: 'main',
+        dryRun: false,
+        userConfirmed: true,
+      }, controller.signal);
+
+      expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+      if (!refused.ok) {
+        expect(refused.error.message).toContain('Git command cancelled');
+        expect(refused.error.message).toContain('was cleared, so a retry can reuse the path');
+      }
+      expect(removals).toEqual([{ workspaceId: 'ws-cancelled', worktreePath: '.worktrees/cancelled agent' }]);
+      expect((await store.readShared()).worktrees).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes two spawns of the same managed path so the loser cannot delete the winner', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-same-path-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    const removals: unknown[] = [];
+    let registered = false;
+    let addCalls = 0;
+    let listingsSeen = 0;
+    let addInFlight = false;
+    let interleaved = false;
+    let releaseAdd!: () => void;
+    const addGate = new Promise<void>((resolve) => { releaseAdd = resolve; });
+    let addStarted!: () => void;
+    const addReached = new Promise<void>((resolve) => { addStarted = resolve; });
+    let secondPreList!: () => void;
+    const secondPreListDone = new Promise<void>((resolve) => { secondPreList = resolve; });
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-same-path',
+              displayName: 'same path fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(_actor, request): Promise<ReturnType<typeof ok>> {
+            if (request.args[1] === 'list') {
+              listingsSeen += 1;
+              // A listing that runs while the only add is still in flight is the
+              // interleaving that lets the loser treat the winner's registration
+              // as its own leftover.
+              if (addInFlight) interleaved = true;
+              if (listingsSeen === 2) secondPreList();
+              return ok({
+                exitCode: 0,
+                stdout: `worktree ${workspaceRoot}\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0${
+                  registered
+                    ? `\0\0worktree ${path.join(workspaceRoot, '.worktrees', 'shared')}\0HEAD 2222222222222222222222222222222222222222\0detached\0`
+                    : ''
+                }\0`,
+                stderr: '',
+              });
+            }
+            addCalls += 1;
+            if (registered) return ok({ exitCode: 128, stdout: '', stderr: 'fatal: already exists\n' });
+            addInFlight = true;
+            // Without the per-path lock the second spawn completes its pre-list
+            // here, and the wait below is what lets it do so.
+            await Promise.race([secondPreListDone, new Promise((resolve) => setTimeout(resolve, 250))]);
+            // Real Git registers the worktree before the hook that fails, so the
+            // registration is visible while the add is still running.
+            registered = true;
+            addStarted();
+            await addGate;
+            addInFlight = false;
+            return ok({ exitCode: 0, stdout: 'worktree ready', stderr: '' });
+          },
+          async removeManagedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+            removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
+            return ok({ exitCode: 0, stdout: '', stderr: '' });
+          },
+        },
+      }, actor);
+
+      const spawn = (): Promise<{ readonly ok: boolean }> => runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-same-path',
+        worktreePath: '.worktrees/shared',
+        ref: 'main',
+        bootstrapDependencies: false,
+        dependencyEmergencyOverride: true,
+        dryRun: false,
+        userConfirmed: true,
+      }) as Promise<{ readonly ok: boolean }>;
+
+      const first = spawn();
+      const second = spawn();
+      await addReached;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      releaseAdd();
+      const results = await Promise.all([first, second]);
+
+      expect(results.filter((candidate) => candidate.ok)).toHaveLength(1);
+      expect(interleaved).toBe(false);
+      expect(addCalls).toBe(2);
+      expect(removals).toEqual([]);
+      expect((await store.readShared()).worktrees).toHaveLength(1);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -1004,7 +1244,7 @@ describe('upgrade runtime', () => {
             }
             return ok({ exitCode: 128, stdout: '', stderr: 'fatal: already exists\n' });
           },
-          async removeLedgerOwnedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
+          async removeManagedWorktree(_actor, targetWorkspaceId, request): Promise<ReturnType<typeof ok>> {
             removals.push({ workspaceId: targetWorkspaceId, worktreePath: request.worktreePath });
             return ok({ exitCode: 0, stdout: '', stderr: '' });
           },

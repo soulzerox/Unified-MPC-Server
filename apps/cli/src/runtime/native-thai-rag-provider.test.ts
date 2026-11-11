@@ -1335,6 +1335,111 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('surfaces a failed admission instead of re-arming it while the cooldown is warm (issue #762)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: Array<{ readonly tool: string; readonly args: Readonly<Record<string, unknown>> }> = [];
+    let failAdmission = true;
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 5_000,
+      admissionFailureCooldownMs: 60_000,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          calls.push({ tool, args });
+          if (tool === 'code_index' && failAdmission) {
+            return {
+              structuredContent: {
+                data: {
+                  status: 'error',
+                  errors: [{
+                    code: 'data_owner_unavailable',
+                    message: 'data-owner unavailable after bounded retry: timed out',
+                    details: { retryable: true },
+                  }],
+                },
+              },
+            };
+          }
+          return success('ok');
+        },
+      }),
+    });
+    const admissionCalls = (): number => calls.filter(({ tool, args }) => tool === 'code_index' && args.max_files !== undefined).length;
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    const first = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    expect(first).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', message: expect.stringContaining('data-owner unavailable after bounded retry: timed out') },
+    });
+    expect(admissionCalls()).toBe(1);
+
+    const second = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' });
+    expect(second).toMatchObject({
+      ok: false,
+      error: {
+        code: 'CONFLICT',
+        details: {
+          reason: 'workspace-indexing-failed',
+          workspaceId,
+          jobId: expect.any(String),
+          failedAt: expect.any(String),
+          retryAfter: expect.any(String),
+          providerReason: 'data_owner_unavailable',
+        },
+      },
+    });
+    if (!second.ok) {
+      expect(second.error.message).toContain('data-owner unavailable after bounded retry: timed out');
+      expect(second.error.message).toContain('automatic retry at');
+    }
+    // The failed pass is surfaced, not started again: no second trial ran.
+    expect(admissionCalls()).toBe(1);
+
+    // An explicit code_index is caller intent and may retry immediately.
+    failAdmission = false;
+    await expect(driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId })).resolves.toMatchObject({ ok: true });
+    await driver.stop();
+  });
+
+  it('re-arms a failed admission once the cooldown has elapsed (issue #762)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 5_000,
+      admissionFailureCooldownMs: 0,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') calls.push(args.max_files === undefined ? 'background' : 'trial');
+          if (tool === 'code_index') {
+            return {
+              structuredContent: {
+                data: {
+                  status: 'error',
+                  errors: [{ code: 'data_owner_unavailable', message: 'data-owner unavailable after bounded retry: timed out', details: { retryable: true } }],
+                },
+              },
+            };
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: false });
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: false });
+    expect(calls.filter((call) => call === 'trial')).toHaveLength(2);
+    await driver.stop();
+  });
+
   it('uses the provider-owned background index job for cold workspace admission', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

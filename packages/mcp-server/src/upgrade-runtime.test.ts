@@ -848,6 +848,48 @@ describe('upgrade runtime', () => {
     }
   });
 
+  it('does not register ownership when Git refuses to create the worktree', async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-worktree-refusal-'));
+    const runtimeStatePath = path.join(workspaceRoot, 'upgrade-runtime.json');
+    const store = new UpgradeRuntimeStateStore(runtimeStatePath, 'seed');
+    try {
+      const runtime = new UpgradeRuntimeService({
+        platform: 'linux',
+        runtimeStatePath,
+        workspaceInfo: {
+          async info(): Promise<ReturnType<typeof ok>> {
+            return ok({
+              id: 'ws-1',
+              displayName: 'refusal fixture',
+              rootPath: workspaceRoot,
+              realRootPath: workspaceRoot,
+              createdAt: '2026-10-05T00:00:00.000Z',
+            });
+          },
+        },
+        git: {
+          async run(): Promise<ReturnType<typeof ok>> {
+            return ok({ exitCode: 128, stdout: '', stderr: 'fatal: invalid reference: missing-ref\n' });
+          },
+        },
+      }, actor);
+
+      const refused = await runtime.execute('git_worktree_spawn', {
+        workspaceId: 'ws-1',
+        worktreePath: '.worktrees/refused-agent',
+        ref: 'missing-ref',
+        dryRun: false,
+        userConfirmed: true,
+      });
+
+      expect(refused).toMatchObject({ ok: false, error: { code: 'CONFLICT', recoverable: true } });
+      if (!refused.ok) expect(refused.error.message).toContain('invalid reference: missing-ref');
+      expect((await store.readShared()).worktrees).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when actual managed worktree creation cannot resolve its owning workspace', async () => {
     const calls: unknown[] = [];
     const runtime = new UpgradeRuntimeService({

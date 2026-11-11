@@ -1661,6 +1661,18 @@ export class UpgradeRuntimeService {
       ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
     }, undefined, authorization);
     if (!result.ok) return result;
+    // `git worktree add` reports a refusal as an ordinary result, so the exit
+    // code is the only evidence the directory exists. Registering ownership for
+    // a worktree Git never created would make every later reconcile trust a
+    // path that was never there, and would hide the real failure from callers.
+    if (result.value.exitCode !== 0) {
+      const detail = result.value.stderr.trim();
+      return err(appError(
+        'CONFLICT',
+        `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`,
+        true,
+      ));
+    }
 
     const ledgerEntry: WorktreeLedgerEntry = {
       workspaceId,

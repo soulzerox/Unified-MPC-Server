@@ -19,6 +19,7 @@ import { createProcessTreeTerminator } from '@unified-mpc/process';
 import { normalizeProjectProfile } from '@unified-mpc/shared';
 import {
   WORKTREE_DEPENDENCY_POLICY_VERSION,
+  comparableHostPath,
   hostPathApi,
   isAbsoluteHostPath,
   normalizeHostPath,
@@ -1649,7 +1650,8 @@ export class UpgradeRuntimeService {
     if (!isApplicationAuthorized(authorization, input.userConfirmed === true)) return err(appError('PERMISSION_REQUIRED', 'Creating a Git worktree requires explicit user confirmation'));
     const resolvedWorktreePath = await this.resolveManagedWorktreePath(workspaceId, normalizedPath);
     if (!resolvedWorktreePath.ok) return resolvedWorktreePath;
-    const managedWorktreePath = resolvedWorktreePath.value;
+    const managedWorktree = resolvedWorktreePath.value;
+    const managedWorktreePath = managedWorktree.relativePath;
     await this.refreshSharedState();
     if (this.worktrees.some((candidate) => candidate.workspaceId === workspaceId && candidate.worktreePath === managedWorktreePath)) {
       return err(appError('INVALID_INPUT', 'Git worktree path is already present in the shared ownership ledger'));
@@ -1667,9 +1669,21 @@ export class UpgradeRuntimeService {
     // path that was never there, and would hide the real failure from callers.
     if (result.value.exitCode !== 0) {
       const detail = result.value.stderr.trim();
+      // A failed `git worktree add` can leave the path registered even though
+      // the command reported failure, which is why a retry then fails with
+      // "already exists" instead of the original cause. The listing is
+      // read-only, so naming the leftover only explains the refusal and never
+      // claims ownership of a path this invocation may not have created.
+      const registered = await this.registeredWorktreePaths(workspaceId, authorization, input.userConfirmed === true, signal);
+      const leftRegistered = registered?.some(
+        (candidate) => sameHostPath(candidate, managedWorktree.absolutePath, platform),
+      ) === true;
       return err(appError(
         'CONFLICT',
-        `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`,
+        `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`
+          + (leftRegistered
+            ? `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${shellSuggestedPath(managedWorktreePath)}\`, or \`git worktree prune\` when the directory is already gone).`
+            : ''),
         true,
       ));
     }
@@ -1723,10 +1737,39 @@ export class UpgradeRuntimeService {
     });
   }
 
+  /**
+   * Worktree paths Git currently registers, or `undefined` when the listing is
+   * unavailable. Only a refusal explanation consults this, so an unavailable
+   * listing must stay silent instead of inventing a leftover.
+   */
+  private async registeredWorktreePaths(
+    workspaceId: string,
+    authorization: InvocationAuthorization | undefined,
+    userConfirmed: boolean,
+    signal?: AbortSignal,
+  ): Promise<readonly string[] | undefined> {
+    if (this.services.git === undefined) return undefined;
+    const listing = await this.services.git.run(this.actor, {
+      workspaceId,
+      args: ['worktree', 'list', '--porcelain', '-z'],
+      userConfirmed,
+    }, signal, authorization);
+    if (!listing.ok || listing.value.exitCode !== 0) return undefined;
+    // `-z` separates fields with NUL instead of newline and never quotes a
+    // path, so a path that contains a newline or a quote still compares as the
+    // exact bytes Git stores. An older Git that rejects `-z` fails the listing,
+    // which stays silent rather than guessing.
+    return listing.value.stdout
+      .split('\0')
+      .filter((record) => record.startsWith('worktree '))
+      .map((record) => record.slice('worktree '.length))
+      .filter((candidate) => candidate.length > 0);
+  }
+
   private async resolveManagedWorktreePath(
     workspaceId: string,
     worktreePath: string,
-  ): Promise<Result<string>> {
+  ): Promise<Result<{ readonly relativePath: string; readonly absolutePath: string }>> {
     if (this.services.workspaceInfo === undefined) {
       return err(appError('INTERNAL_ERROR', 'Managed worktree creation requires workspace metadata to resolve the owning root', true));
     }
@@ -1739,7 +1782,9 @@ export class UpgradeRuntimeService {
     }
 
     const resolved = await resolveManagedWorktreePath(workspace, worktreePath, this.diagnostics.platform);
-    return resolved.ok ? ok(resolved.value.relativePath) : err(resolved.error);
+    return resolved.ok
+      ? ok({ relativePath: resolved.value.relativePath, absolutePath: resolved.value.absolutePath })
+      : err(resolved.error);
   }
 
   private async bootstrapNewWorktreeDependencies(
@@ -3827,6 +3872,21 @@ function normalizePlugin(value: unknown): RuntimePluginDescriptor | undefined {
     trustTier: 'external',
     namespace: `plugin:${name}`,
   };
+}
+
+/**
+ * Quote a path for a suggested shell command only when the plain form is not
+ * safe to paste: a path with a space, a quote or a metacharacter would either
+ * fail or run something the reader did not intend.
+ */
+function shellSuggestedPath(value: string): string {
+  return /^[A-Za-z0-9._/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function sameHostPath(left: string, right: string, platform: NodeJS.Platform): boolean {
+  const normalizedLeft = comparableHostPath(left, platform);
+  const normalizedRight = comparableHostPath(right, platform);
+  return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }
 
 export function upgradeCatalogByName(name: string): UpgradeToolCatalogEntry | undefined {

@@ -19,6 +19,7 @@ import { createProcessTreeTerminator } from '@unified-mpc/process';
 import { normalizeProjectProfile } from '@unified-mpc/shared';
 import {
   WORKTREE_DEPENDENCY_POLICY_VERSION,
+  comparableHostPath,
   hostPathApi,
   isAbsoluteHostPath,
   normalizeHostPath,
@@ -1681,7 +1682,7 @@ export class UpgradeRuntimeService {
         'CONFLICT',
         `Git refused to create worktree ${managedWorktreePath}${detail.length === 0 ? ` with exit code ${result.value.exitCode}` : `: ${detail}`}`
           + (leftRegistered
-            ? `. Git still registers that path, so a retry fails until it is cleared with \`git worktree remove ${managedWorktreePath}\`.`
+            ? `. Git still registers that path, so a retry fails until it is cleared (\`git worktree remove ${managedWorktreePath}\`, or \`git worktree prune\` when the directory is already gone).`
             : ''),
         true,
       ));
@@ -1750,14 +1751,18 @@ export class UpgradeRuntimeService {
     if (this.services.git === undefined) return undefined;
     const listing = await this.services.git.run(this.actor, {
       workspaceId,
-      args: ['worktree', 'list', '--porcelain'],
+      args: ['worktree', 'list', '--porcelain', '-z'],
       userConfirmed,
     }, signal, authorization);
     if (!listing.ok || listing.value.exitCode !== 0) return undefined;
+    // `-z` separates fields with NUL instead of newline and never quotes a
+    // path, so a path that contains a newline or a quote still compares as the
+    // exact bytes Git stores. An older Git that rejects `-z` fails the listing,
+    // which stays silent rather than guessing.
     return listing.value.stdout
-      .split('\n')
-      .filter((line) => line.startsWith('worktree '))
-      .map((line) => unquoteGitWorktreePath(line.slice('worktree '.length).trim()))
+      .split('\0')
+      .filter((record) => record.startsWith('worktree '))
+      .map((record) => record.slice('worktree '.length))
       .filter((candidate) => candidate.length > 0);
   }
 
@@ -3869,24 +3874,10 @@ function normalizePlugin(value: unknown): RuntimePluginDescriptor | undefined {
   };
 }
 
-/**
- * `git worktree list --porcelain` quotes a path that needs C-style escaping.
- * Only the quoting wrapper and the escaped quote/backslash pairs are reversed
- * here: an unrecognized escape simply fails to match, which keeps the refusal
- * unexplained instead of naming a path Git never printed.
- */
-function unquoteGitWorktreePath(value: string): string {
-  if (value.length < 2 || !value.startsWith('"') || !value.endsWith('"')) return value;
-  return value.slice(1, -1).replace(/\\(["\\])/g, '$1');
-}
-
 function sameHostPath(left: string, right: string, platform: NodeJS.Platform): boolean {
-  const pathApi = hostPathApi(platform);
-  const normalizedLeft = pathApi.resolve(left);
-  const normalizedRight = pathApi.resolve(right);
-  return platform === 'win32'
-    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-    : normalizedLeft === normalizedRight;
+  const normalizedLeft = comparableHostPath(left, platform);
+  const normalizedRight = comparableHostPath(right, platform);
+  return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }
 
 export function upgradeCatalogByName(name: string): UpgradeToolCatalogEntry | undefined {

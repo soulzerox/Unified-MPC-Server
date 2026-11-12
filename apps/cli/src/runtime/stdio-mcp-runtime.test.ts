@@ -962,7 +962,7 @@ describe('stdio MCP runtime', () => {
     expect(Object.hasOwn(blank, 'THAI_RAG_LLAMACPP_SERVER_CMD')).toBe(false);
   });
 
-  it('forwards tuned llama.cpp lifecycle timings so a slow host can cold start (#328)', () => {
+  it('forwards tuned llama.cpp lifecycle timings so a slow host can cold start (soulzerox/thai-rag-mcp#328)', () => {
     // The launch env is an allowlist, so a host that raised the provider's 60s
     // startup or 30s health default would otherwise cold start against that
     // default and fail closed on slow CPU-only hardware.
@@ -979,6 +979,18 @@ describe('stdio MCP runtime', () => {
     // A blank value is unset, so the provider's own default still applies.
     const blank = thaiRagProviderLaunchEnv({ THAI_RAG_LLAMACPP_STARTUP_TIMEOUT: '  ' });
     expect(Object.hasOwn(blank, 'THAI_RAG_LLAMACPP_STARTUP_TIMEOUT')).toBe(false);
+    // The launcher must not invent a default for any of them: an absent host
+    // value has to reach the provider as absent, otherwise a future launcher
+    // default would silently override the provider's own timing.
+    const empty = thaiRagProviderLaunchEnv({});
+    for (const key of [
+      'THAI_RAG_LLAMACPP_STARTUP_TIMEOUT',
+      'THAI_RAG_LLAMACPP_HEALTH_TIMEOUT',
+      'THAI_RAG_LLAMACPP_IDLE_SHUTDOWN_SECONDS',
+      'THAI_RAG_LLAMACPP_FORCE_CLEANUP_TIMEOUT',
+    ]) {
+      expect(Object.hasOwn(empty, key)).toBe(false);
+    }
   });
 
   it('keeps an explicitly configured embedding environment authoritative (#413)', () => {

@@ -1692,7 +1692,7 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
     // hardware (the CPU-only deployment is the reference) must keep them.
     // Without them a cold start silently runs against the provider's 60s
     // startup / 30s health default and fails closed, exactly like a missing
-    // spawn command (#328). Values stay provider-owned: only an explicit host
+    // spawn command (soulzerox/thai-rag-mcp#328). Values stay provider-owned: only an explicit host
     // value is forwarded, and a blank one is unset like every other key.
     // `THAI_RAG_CACHE_DIR` is deliberately absent (the driver redirects it into
     // the provider root) and so are the search-rescue knobs, which are

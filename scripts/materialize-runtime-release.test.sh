@@ -4,41 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
-# Keep the hidden source at a known path instead of inside $TMP_ROOT: a run
-# killed before its trap can fire then leaves `apps/` and `packages/` next to
-# each other where the next run can recover them.
-hidden_root="$REPO_ROOT/.unified-mpc/materialize-source-hidden"
+hidden_root="$TMP_ROOT/source-hidden"
 source_hidden=false
 
 restore_source() {
   if [[ "$source_hidden" == "true" ]]; then
     mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
     mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
-    rmdir -- "$hidden_root" 2>/dev/null || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
 trap restore_source EXIT
-# SIGINT/SIGTERM still unwind through the EXIT trap, so `apps/` and `packages/`
-# always come back. SIGKILL cannot be caught; the preflight below recovers the
-# debris it leaves.
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-for required in apps packages; do
-  if [[ ! -d "$REPO_ROOT/$required" ]]; then
-    if [[ -d "$hidden_root/apps" && -d "$hidden_root/packages" ]]; then
-      printf 'restoring source %s/ left hidden by a killed run\n' "$required" >&2
-      mkdir -p -- "$REPO_ROOT/.unified-mpc"
-      [[ -d "$REPO_ROOT/apps" ]] || mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
-      [[ -d "$REPO_ROOT/packages" ]] || mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
-      rmdir -- "$hidden_root" 2>/dev/null || true
-    else
-      printf 'source %s is missing and no hidden copy exists at %s\n' "$required" "$hidden_root" >&2
-      exit 1
-    fi
-  fi
-done
 
 export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/runtime"
 export UNIFIED_MPC_MATERIALIZE_STATE_DIR="$TMP_ROOT/materializations"
@@ -110,7 +86,6 @@ node "$SCRIPT_DIR/smoke-materialized-runtime.mjs" "$release"
 mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
 mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
 source_hidden=false
-rmdir -- "$hidden_root" 2>/dev/null || true
 
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]]
 printf 'runtime release portability regression: passed\n'

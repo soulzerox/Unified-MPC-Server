@@ -892,10 +892,11 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('llamacpp');
     expect(env.THAI_RAG_LLAMACPP_MODEL).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('900');
-    // The provider already defaults the response budget for long-running
-    // forwarded methods; the launcher must not duplicate that default, it only
-    // passes an explicit host value through (#764).
-    expect(Object.hasOwn(env, 'THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT')).toBe(false);
+    // The driver derives its request deadline from the same env it hands the
+    // child, so the response budget is attested too: leaving it unset would make
+    // the driver rely on the provider's default, and a provider default change
+    // would silently reintroduce the undercut (#770).
+    expect(env.THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT).toBe('3600');
     // One index batch embeds a whole file at once, so the deployment default
     // has to outlast the provider's 60s per-request default (#439) and the
     // whole-file time of the largest file on a slow CPU host (~1120s measured).
@@ -929,9 +930,11 @@ describe('stdio MCP runtime', () => {
     // forwarded long-running call is budgeted separately by the provider.
     const explicit = thaiRagProviderLaunchEnv({ THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: '7200' });
     expect(explicit.THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT).toBe('7200');
-    // A blank value is unset, exactly like the other forwarded keys.
+    // A blank value is unset, exactly like the other forwarded keys, so the
+    // attested default is what the child receives — and what the driver derives
+    // its deadline from (#770).
     const blank = thaiRagProviderLaunchEnv({ THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: '   ' });
-    expect(Object.hasOwn(blank, 'THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT')).toBe(false);
+    expect(blank.THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT).toBe('3600');
   });
 
   it('forwards tuned llama.cpp server arguments so long chunks are not rejected (#438)', () => {

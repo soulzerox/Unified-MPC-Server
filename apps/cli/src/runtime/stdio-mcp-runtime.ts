@@ -1685,6 +1685,22 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
     // Phase A start fails closed on the first cold request. Only an explicit
     // host value is forwarded; the provider owns the default.
     ...(authoritative('THAI_RAG_LLAMACPP_SERVER_CMD') === undefined ? {} : { THAI_RAG_LLAMACPP_SERVER_CMD: authoritative('THAI_RAG_LLAMACPP_SERVER_CMD') as string }),
+    // This launch environment is an allowlist, not a copy of the host env: a
+    // key the launcher does not name here never reaches the provider. The
+    // timings below decide whether an on-demand llama.cpp start can succeed and
+    // how long the server stays warm, so a host tuned for slow CPU-only
+    // hardware (the CPU-only deployment is the reference) must keep them.
+    // Without them a cold start silently runs against the provider's 60s
+    // startup / 30s health default and fails closed, exactly like a missing
+    // spawn command (#328). Values stay provider-owned: only an explicit host
+    // value is forwarded, and a blank one is unset like every other key.
+    // `THAI_RAG_CACHE_DIR` is deliberately absent (the driver redirects it into
+    // the provider root) and so are the search-rescue knobs, which are
+    // retrieval policy rather than launch configuration.
+    ...(authoritative('THAI_RAG_LLAMACPP_STARTUP_TIMEOUT') === undefined ? {} : { THAI_RAG_LLAMACPP_STARTUP_TIMEOUT: authoritative('THAI_RAG_LLAMACPP_STARTUP_TIMEOUT') as string }),
+    ...(authoritative('THAI_RAG_LLAMACPP_HEALTH_TIMEOUT') === undefined ? {} : { THAI_RAG_LLAMACPP_HEALTH_TIMEOUT: authoritative('THAI_RAG_LLAMACPP_HEALTH_TIMEOUT') as string }),
+    ...(authoritative('THAI_RAG_LLAMACPP_IDLE_SHUTDOWN_SECONDS') === undefined ? {} : { THAI_RAG_LLAMACPP_IDLE_SHUTDOWN_SECONDS: authoritative('THAI_RAG_LLAMACPP_IDLE_SHUTDOWN_SECONDS') as string }),
+    ...(authoritative('THAI_RAG_LLAMACPP_FORCE_CLEANUP_TIMEOUT') === undefined ? {} : { THAI_RAG_LLAMACPP_FORCE_CLEANUP_TIMEOUT: authoritative('THAI_RAG_LLAMACPP_FORCE_CLEANUP_TIMEOUT') as string }),
   };
 }
 

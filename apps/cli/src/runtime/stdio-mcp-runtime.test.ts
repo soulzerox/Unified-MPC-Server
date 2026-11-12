@@ -962,6 +962,25 @@ describe('stdio MCP runtime', () => {
     expect(Object.hasOwn(blank, 'THAI_RAG_LLAMACPP_SERVER_CMD')).toBe(false);
   });
 
+  it('forwards tuned llama.cpp lifecycle timings so a slow host can cold start (#328)', () => {
+    // The launch env is an allowlist, so a host that raised the provider's 60s
+    // startup or 30s health default would otherwise cold start against that
+    // default and fail closed on slow CPU-only hardware.
+    const env = thaiRagProviderLaunchEnv({
+      THAI_RAG_LLAMACPP_STARTUP_TIMEOUT: '180',
+      THAI_RAG_LLAMACPP_HEALTH_TIMEOUT: '90',
+      THAI_RAG_LLAMACPP_IDLE_SHUTDOWN_SECONDS: '1800',
+      THAI_RAG_LLAMACPP_FORCE_CLEANUP_TIMEOUT: '30',
+    });
+    expect(env.THAI_RAG_LLAMACPP_STARTUP_TIMEOUT).toBe('180');
+    expect(env.THAI_RAG_LLAMACPP_HEALTH_TIMEOUT).toBe('90');
+    expect(env.THAI_RAG_LLAMACPP_IDLE_SHUTDOWN_SECONDS).toBe('1800');
+    expect(env.THAI_RAG_LLAMACPP_FORCE_CLEANUP_TIMEOUT).toBe('30');
+    // A blank value is unset, so the provider's own default still applies.
+    const blank = thaiRagProviderLaunchEnv({ THAI_RAG_LLAMACPP_STARTUP_TIMEOUT: '  ' });
+    expect(Object.hasOwn(blank, 'THAI_RAG_LLAMACPP_STARTUP_TIMEOUT')).toBe(false);
+  });
+
   it('keeps an explicitly configured embedding environment authoritative (#413)', () => {
     const env = thaiRagProviderLaunchEnv({
       THAI_RAG_EMBEDDING_BACKEND: 'ollama',

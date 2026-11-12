@@ -157,7 +157,14 @@ describe('NativeThaiRagProviderDriver', () => {
           // A busy-worker poll is answered from the same session that is
           // embedding, and its job ledger row already carries the reason, so
           // the poll timeout stays out of the journal.
-          if (tool === 'index_status') throw new Error('Timed out calling thai-rag/index_status');
+          if (tool === 'index_status') {
+            // Both arms of the matcher: the poll deadline and the catalog
+            // refresh the session manager performs per call. Neither is news
+            // for a poll, and both are news for any other tool.
+            throw new Error(args.job_id === 'idx_catalogpoll'
+              ? 'Timed out refreshing tool catalog for thai-rag'
+              : 'Timed out calling thai-rag/index_status');
+          }
           // The same matcher also accepts a catalog refresh, which can surface
           // on any tool. A steady-state read has no ledger row behind it.
           if (tool === 'recall' && args.query === 'catalog-timeout') {
@@ -172,6 +179,8 @@ describe('NativeThaiRagProviderDriver', () => {
     await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' }))
       .resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
     await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: 'idx_busypoll' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: 'idx_catalogpoll' }))
       .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
     await expect(driver.call('recall', { workspace_id: workspaceId, query: 'catalog-timeout' }))
       .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });

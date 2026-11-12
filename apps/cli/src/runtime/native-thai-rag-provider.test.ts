@@ -150,7 +150,11 @@ describe('NativeThaiRagProviderDriver', () => {
         command: '/python',
         env: {
           THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '0.05',
-          THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: '0.3',
+          // 2 s here, not 0.3 s: the read below has to outlast the budget the
+          // connect value alone would produce (50 ms + the 5 s RPC margin), so
+          // that dropping the response budget — or reverting the max-of-two rule
+          // — fails this test instead of passing it by accident.
+          THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: '2',
         },
       },
       // The global MCP deadline is far shorter than the provider's declared
@@ -161,7 +165,14 @@ describe('NativeThaiRagProviderDriver', () => {
       clientFactory: clientFactory({
         async onCall(tool): Promise<unknown> {
           calls.push(tool);
-          if (tool === 'recall' || tool === 'code_search') {
+          if (tool === 'recall') {
+            // Longer than 5,050 ms (the connect-only derivation) and shorter than
+            // the 7,000 ms the declared response budget yields.
+            await new Promise((resolve) => setTimeout(resolve, 5_200));
+          }
+          if (tool === 'code_search') {
+            // Cheap: the queued worker path shares `requestCallBudgetMs()`, so it
+            // does not need its own five-second discriminator.
             await new Promise((resolve) => setTimeout(resolve, 400));
           }
           return success(tool);

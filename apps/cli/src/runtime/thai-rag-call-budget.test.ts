@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS,
   DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS,
+  MAX_THAI_RAG_CALL_BUDGET_MS,
   THAI_RAG_CONNECT_BUDGET_ENV,
   THAI_RAG_RESPONSE_BUDGET_ENV,
   thaiRagReadCallBudgetMs,
@@ -54,5 +55,16 @@ describe('thaiRagReadCallBudgetMs', () => {
     // already dropped the child.
     expect(thaiRagReadCallBudgetMs({ [THAI_RAG_RESPONSE_BUDGET_ENV]: '7200' })).toBe(7_205_000);
     expect(thaiRagReadCallBudgetMs({ [THAI_RAG_RESPONSE_BUDGET_ENV]: '86400' })).toBe(86_405_000);
+  });
+
+  it('stays representable by a Node timer instead of aborting immediately', () => {
+    // Node clamps any `setTimeout` delay above 2^31-1 ms to 1 ms, so a host that
+    // declares "effectively unlimited" (or overflows the multiplication) would
+    // otherwise make every call abort at once — the same undercut the module
+    // removes, just faster. The cap is the timer's, not a policy ceiling: it only
+    // bites above ~24.86 days, far past any declared budget.
+    expect(thaiRagReadCallBudgetMs({ [THAI_RAG_RESPONSE_BUDGET_ENV]: String(2_147_484) })).toBe(MAX_THAI_RAG_CALL_BUDGET_MS);
+    expect(thaiRagReadCallBudgetMs({ [THAI_RAG_RESPONSE_BUDGET_ENV]: '1e308' })).toBe(MAX_THAI_RAG_CALL_BUDGET_MS);
+    expect(thaiRagReadCallBudgetMs({ [THAI_RAG_CONNECT_BUDGET_ENV]: '1e308' })).toBe(MAX_THAI_RAG_CALL_BUDGET_MS);
   });
 });

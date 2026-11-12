@@ -104,7 +104,7 @@ import {
   type NativeThaiRagWorkspace,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
-import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS } from './thai-rag-call-budget.js';
+import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1643,9 +1643,13 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
     // Long-running forwarded methods (`code_index`, the reconciles, base
     // attach/detach) are budgeted separately from the connect/retry deadline
     // above (`THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT`, soulzerox/thai-rag-mcp#431).
-    // The provider already defaults that budget, so the launcher only passes an
-    // explicit host value through instead of duplicating the default here.
-    ...(authoritative('THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT') === undefined ? {} : { THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT') as string }),
+    // The driver derives its request deadline from this env too, so it is
+    // attested here rather than left to the provider's own default: otherwise an
+    // unset value would make the driver rely on an assumption about the
+    // installed provider, and a provider default change would silently
+    // reintroduce the undercut this pair of budgets removes (#770). An explicit
+    // host value stays authoritative.
+    THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT') ?? String(DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS),
     // One code-index batch embeds every chunk of a single file in one
     // `embed_documents` request, so the deadline has to cover the largest file
     // of a real repository, not one average chunk. The provider's own 60s

@@ -1,6 +1,6 @@
 import { appError, ok } from '@unified-mpc/domain';
 import type { McpServerOptions } from '@unified-mpc/mcp-server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { configuredLegacySessionTtlMs, createWebMcpHttpServerOptions, desktopFullBypassAllEnabled, runMcpHttpCommand, startMcpHttpBeforeProvider, type McpHttpServerHandle, type McpHttpServerStarter } from './mcp-http.js';
 
 const workspace = {
@@ -95,6 +95,24 @@ describe('mcp http command', () => {
 
     expect(webOptions.hostMutationApprovalProvider).toBe(brokerProvider);
     expect(webOptions.hostMutationApprovalProvider).not.toBe(directProvider);
+  });
+
+  it('gives an internal exception a stderr sink unless the caller supplied one (#766)', () => {
+    const provided = vi.fn();
+    const withDefault = createWebMcpHttpServerOptions({
+      port: 0,
+      services: {},
+      actor: { clientId: 'web-http-diagnostic', clientName: 'web-http-diagnostic' },
+    });
+    const withProvided = createWebMcpHttpServerOptions({
+      port: 0,
+      services: {},
+      actor: { clientId: 'web-http-diagnostic-explicit', clientName: 'web-http-diagnostic-explicit' },
+      diagnostic: provided,
+    });
+
+    expect(withDefault.diagnostic).toBeTypeOf('function');
+    expect(withProvided.diagnostic).toBe(provided);
   });
 
   it('resolves the configured workspace and strips trusted-host approval before starting HTTP', async () => {

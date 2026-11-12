@@ -17,6 +17,7 @@ import {
   type McpServerLaunchConfig,
 } from '@unified-mpc/extensions';
 import { parseBooleanSetting } from '@unified-mpc/shared';
+import { redactDiagnosticText } from '@unified-mpc/application';
 import {
   CanonicalManifestStore,
   CanonicalRefStore,
@@ -177,6 +178,13 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly strictWorkerAuthorizedWorkspacesProvider?: () => Promise<readonly NativeThaiRagWorkspace[]>;
   readonly callTimeoutMs?: number;
   /**
+   * #766: one line per child call that failed on the transport. A dropped child
+   * session reaches the client only as a generic `INTERNAL_ERROR`, and the
+   * session manager keeps no record, so without this sink a killed provider is
+   * invisible in the journal. `stdio-mcp-runtime` defaults it to stderr.
+   */
+  readonly diagnostics?: (line: string) => void;
+  /**
    * How long a terminal admission failure is surfaced before an automatic retry
    * re-arms it (issue #762). `0` retries on the next read; an explicit
    * `code_index` clears the window regardless.
@@ -278,6 +286,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly indexStatusTimeoutMs: number;
   private readonly indexStatusTimeoutCap: number;
   private readonly codeIndexVectors: boolean;
+  private readonly diagnostics: ((line: string) => void) | undefined;
   private ownerId: string | undefined;
   private launchConfig: McpServerLaunchConfig | undefined;
   private lastHealth: ThaiRagProviderDriverHealth | undefined;
@@ -385,6 +394,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     this.indexStatusTimeoutMs = Math.max(1_000, Math.floor(options.indexStatusTimeoutMs ?? DEFAULT_INDEX_STATUS_TIMEOUT_MS));
     this.indexStatusTimeoutCap = Math.max(1, Math.floor(options.indexStatusTimeoutCap ?? DEFAULT_INDEX_STATUS_TIMEOUT_POLLS));
     this.codeIndexVectors = options.codeIndexVectors ?? DEFAULT_CODE_INDEX_VECTORS;
+    this.diagnostics = options.diagnostics;
   }
 
   public start(options: ThaiRagProviderDriverStartOptions, signal?: AbortSignal): Promise<Result<ThaiRagProviderDriverHealth>> {
@@ -618,9 +628,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);
     const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
     if (!normalizedArgs.ok) return normalizedArgs;
-    return bypassBusyRefresh
-      ? normalizeWorkerCallResult(tool, await this.sessions.call(SERVER_NAME, this.launchConfig, tool, normalizedArgs.value, signal, {}, budget))
-      : this.callWorker(tool, normalizedArgs.value, signal, budget);
+    if (bypassBusyRefresh) {
+      // A gate-exempt or already-ready read skips the worker queue, so it has
+      // its own dispatch and needs its own record (#766): a steady-state
+      // `code_search` failure is the exact symptom that was invisible.
+      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig, tool, normalizedArgs.value, signal, {}, budget);
+      this.reportChildCallFailure(tool, raw);
+      return normalizeWorkerCallResult(tool, raw);
+    }
+    return this.callWorker(tool, normalizedArgs.value, signal, budget);
   }
 
   private async canServeReadyWorkspaceDuringIndex(args: Readonly<Record<string, unknown>>): Promise<boolean> {
@@ -2186,7 +2202,36 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     callTimeoutMs?: number,
   ): Promise<Result<unknown>> {
     const raw = await this.enqueueWorker(() => this.sessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget, callTimeoutMs));
+    this.reportChildCallFailure(tool, raw);
     return normalizeWorkerCallResult(tool, raw);
+  }
+
+  /**
+   * #766: a worker that dies mid-call reaches the client only as a generic
+   * `INTERNAL_ERROR`, and the session manager answers the next call from a fresh
+   * child. Recording the transport failure is the only way to tell a recovered
+   * restart from a wedged provider afterwards.
+   *
+   * The direct `indexSessions.call` sites in the index monitors are deliberately
+   * left out: a failed index call is already mirrored into the durable job
+   * ledger with its reason, so the journal would only repeat it.
+   */
+  private reportChildCallFailure(tool: string, result: Result<unknown>): void {
+    if (result.ok || this.diagnostics === undefined) return;
+    // Only a transport failure is news. A deliberate cancel comes back as
+    // PROCESS_TIMEOUT, a structured child refusal as CONFLICT/INVALID_INPUT, and
+    // an index_status poll timeout is the documented busy-worker answer whose
+    // job ledger row already carries the reason (#439).
+    if (result.error.code !== 'INTERNAL_ERROR' || isIndexStatusPollTimeout(result.error)) return;
+    // `sanitizeError` already collapsed whitespace and capped the length; keep
+    // credentials out of the journal with the same redaction the tool boundary
+    // uses for a diagnostic exception.
+    const reason = redactDiagnosticText(result.error.message);
+    try {
+      this.diagnostics(`Unified-MPC Thai-RAG child call failed tool=${tool} code=${result.error.code} error=${reason}`);
+    } catch {
+      // Diagnostics must never change the safe application result.
+    }
   }
 
   /**
@@ -2201,6 +2246,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     budget?: ResultBudget,
   ): Promise<Result<unknown>> {
     const raw = await this.enqueueWorker(() => this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, signal, {}, budget));
+    this.reportChildCallFailure(tool, raw);
     return normalizeWorkerCallResult(tool, raw);
   }
 
@@ -2209,7 +2255,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     args: Readonly<Record<string, unknown>>,
     callTimeoutMs?: number,
   ): Promise<Result<unknown>> {
-    return normalizeWorkerCallResult(tool, await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, undefined, {}, undefined, callTimeoutMs));
+    const raw = await this.indexSessions.call(SERVER_NAME, this.launchConfig!, tool, args, undefined, {}, undefined, callTimeoutMs);
+    this.reportChildCallFailure(tool, raw);
+    return normalizeWorkerCallResult(tool, raw);
   }
 
   /**

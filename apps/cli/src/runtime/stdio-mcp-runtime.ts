@@ -205,6 +205,8 @@ export interface StdioMcpRuntimeOptions {
   readonly thaiRagProviderPath?: string;
   /** Test seam for the parent-owned provider worker. */
   readonly thaiRagDriver?: ThaiRagProviderDriver;
+  /** #766: destination for one line per failed provider child call; defaults to stderr. */
+  readonly thaiRagDiagnostics?: (line: string) => void;
   /** Cooldown before re-attempting a failed Thai-RAG provider start so one transient failure does not outlive the process. */
   readonly thaiRagStartRetryMs?: number;
   /** Steady-state follower retry budget while the owner socket is being recreated (#418). */
@@ -398,6 +400,9 @@ export function createStdioMcpRuntime(
   };
   const thaiRagDriver = options.thaiRagDriver ?? new NativeThaiRagProviderDriver({
     dataRoot: dataPath,
+    // #766: stderr is this process's diagnostics channel, and the client never
+    // sees the transport failure behind a generic `INTERNAL_ERROR`.
+    diagnostics: options.thaiRagDiagnostics ?? ((line: string): void => { process.stderr.write(`${line}\n`); }),
     launchConfig: {
       command: process.platform === 'win32'
         ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')

@@ -1630,6 +1630,12 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
   };
   return {
     THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT') ?? '900',
+    // Long-running forwarded methods (`code_index`, the reconciles, base
+    // attach/detach) are budgeted separately from the connect/retry deadline
+    // above (`THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT`, soulzerox/thai-rag-mcp#431).
+    // The provider already defaults that budget, so the launcher only passes an
+    // explicit host value through instead of duplicating the default here.
+    ...(authoritative('THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT') === undefined ? {} : { THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT') as string }),
     // One code-index batch embeds every chunk of a single file in one
     // `embed_documents` request, so the deadline has to cover the largest file
     // of a real repository, not one average chunk. The provider's own 60s

@@ -104,7 +104,7 @@ import {
   type NativeThaiRagWorkspace,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
-import { DEFAULT_THAI_RAG_ORDINARY_CALL_BUDGET_SECONDS } from './thai-rag-call-budget.js';
+import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1636,9 +1636,10 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
   };
   return {
     // The provider reuses this as the response budget of an ordinary call, and
-    // the driver derives its request deadline from the same value, so the two
-    // can never disagree (#770, see `thai-rag-call-budget.ts`).
-    THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT') ?? String(DEFAULT_THAI_RAG_ORDINARY_CALL_BUDGET_SECONDS),
+    // the driver derives its request deadline from it together with the
+    // long-running response budget, so the two sides cannot disagree (#770,
+    // see `thai-rag-call-budget.ts`).
+    THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: authoritative('THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT') ?? String(DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS),
     // Long-running forwarded methods (`code_index`, the reconciles, base
     // attach/detach) are budgeted separately from the connect/retry deadline
     // above (`THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT`, soulzerox/thai-rag-mcp#431).

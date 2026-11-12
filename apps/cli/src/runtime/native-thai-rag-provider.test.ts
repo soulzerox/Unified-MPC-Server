@@ -143,19 +143,26 @@ describe('NativeThaiRagProviderDriver', () => {
     const calls: string[] = [];
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
-      // The launcher hands the child this budget, and an ordinary call may wait
-      // that long for the serial data owner.
-      launchConfig: { command: '/python', env: { THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '0.3' } },
+      // The launcher hands the child these budgets, and a read may wait for the
+      // serial data owner. `pre_edit_context` is long-running in the provider,
+      // so the response budget is the one that can keep a read waiting.
+      launchConfig: {
+        command: '/python',
+        env: {
+          THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '0.05',
+          THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: '0.3',
+        },
+      },
       // The global MCP deadline is far shorter than the provider's declared
       // wait. Enforcing it here aborted the child mid-work and turned one slow
       // read into a cold-start loop.
-      callTimeoutMs: 20,
+      callTimeoutMs: 100,
       workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
       clientFactory: clientFactory({
         async onCall(tool): Promise<unknown> {
           calls.push(tool);
           if (tool === 'recall' || tool === 'code_search') {
-            await new Promise((resolve) => setTimeout(resolve, 150));
+            await new Promise((resolve) => setTimeout(resolve, 400));
           }
           return success(tool);
         },

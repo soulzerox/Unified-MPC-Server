@@ -765,6 +765,61 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('gives legacy adoption the provider budget instead of the MCP session default (#770)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      // The provider treats `adopt_legacy_index` as long-running, so a wait for
+      // the serial data owner is normal. The session default stays far shorter.
+      launchConfig: {
+        command: '/python',
+        env: {
+          THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '0.001',
+          THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT: '0.001',
+        },
+      },
+      callTimeoutMs: 100,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        handshake: legacyAdoptionHandshake(),
+        includeCancelIndex: true,
+        includeAdoptLegacyIndex: true,
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'adopt_legacy_index') {
+            // Longer than the 100 ms session default, shorter than the 5,001 ms
+            // the declared provider budgets yield.
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            return success('adoptable', {
+              status: 'ok',
+              adoption_status: 'adoptable',
+              workspace_id: workspaceId,
+            });
+          }
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({
+      providerRoot: path.join(dataRoot, 'thai-rag'),
+      ownerId: 'owner',
+      providerVersion: '4.61.0',
+      embeddingIndexGeneration: 1,
+    })).ok).toBe(true);
+
+    await expect(driver.call('adopt_legacy_index', {
+      workspace_id: workspaceId,
+      dry_run: true,
+      legacy_embedding_profile_fingerprint: 'embed-legacy',
+      legacy_chunking_fingerprint: 'chunk-legacy',
+    })).resolves.toMatchObject({ ok: true });
+    expect(calls).toContain('adopt_legacy_index');
+    await driver.stop();
+  });
+
   it('refreshes a relinked workspace for legacy adoption without starting code_index', async () => {
     const dataRoot = await tempRoot();
     const firstRoot = await tempRoot();

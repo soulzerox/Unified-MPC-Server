@@ -41,7 +41,16 @@ if (!Number.isInteger(port) || port <= 0) {
   console.error('fake MCP child requires a positive UNIFIED_MPC_PORT, got ' + process.env.UNIFIED_MPC_PORT);
   process.exit(2);
 }
-appendFileSync(path.join(process.env.SMOKE_PORT_RECORD, 'ports.jsonl'), JSON.stringify({ role: 'mcp', port }) + '\\n');
+appendFileSync(path.join(process.env.SMOKE_PORT_RECORD, 'ports.jsonl'), JSON.stringify({
+  role: 'mcp',
+  port,
+  // The smoke must hand the release a throwaway machine, not the operator's
+  // home (#777). Record what the child actually received so the test can
+  // prove the redirect instead of trusting the helper's unit test.
+  HOME: process.env.HOME,
+  XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+  UNIFIED_MPC_DATA_PATH: process.env.UNIFIED_MPC_DATA_PATH,
+}) + '\\n');
 
 const server = createServer((request, response) => {
   if (request.url === '/_unified-mpc/identity') {
@@ -77,7 +86,13 @@ if (!Number.isInteger(mcpPort) || mcpPort <= 0) {
   console.error('fake web child requires a positive UNIFIED_MPC_PORT, got ' + process.env.UNIFIED_MPC_PORT);
   process.exit(2);
 }
-appendFileSync(path.join(process.env.SMOKE_PORT_RECORD, 'ports.jsonl'), JSON.stringify({ role: 'web', port: webPort }) + '\\n');
+appendFileSync(path.join(process.env.SMOKE_PORT_RECORD, 'ports.jsonl'), JSON.stringify({
+  role: 'web',
+  port: webPort,
+  HOME: process.env.HOME,
+  XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+  UNIFIED_MPC_DATA_PATH: process.env.UNIFIED_MPC_DATA_PATH,
+}) + '\\n');
 
 const server = createServer(async (request, response) => {
   if (request.url !== '/api/status') {
@@ -137,7 +152,7 @@ function runSmoke(releaseRoot, recordDirectory) {
   });
 }
 
-test('the release smoke probes reserved ports, never the live installation ports', async (t) => {
+test('the release smoke runs the artifact on a throwaway machine with reserved ports', async (t) => {
   const releaseRoot = await createFakeRelease();
   const recordDirectory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-smoke-ports-'));
   t.after(async () => {
@@ -171,4 +186,29 @@ test('the release smoke probes reserved ports, never the live installation ports
     assert.notEqual(String(port), LEGACY_WEB_PORT, 'the smoke must not bind the desktop web port');
   }
   assert.notEqual(mcpPorts[0], webPorts[0], 'the two reserved ports must differ');
+
+  // The other half of the same gate: #777 moved HOME and the XDG roots into the
+  // throwaway root so the release sees a clean machine. Dropping that helper
+  // would leave the ports test green, so assert on what the children received.
+  const realHome = process.env.HOME;
+  for (const record of records) {
+    for (const key of ['HOME', 'XDG_DATA_HOME', 'UNIFIED_MPC_DATA_PATH']) {
+      const value = record[key];
+      assert.equal(typeof value, 'string', `${record.role} child must receive ${key}`);
+      if (realHome !== undefined) {
+        assert.notEqual(value, realHome, `${record.role} child must not inherit the operator HOME as ${key}`);
+      }
+      const relative = path.relative(os.tmpdir(), value);
+      assert.equal(
+        relative.startsWith('..') || path.isAbsolute(relative),
+        false,
+        `${record.role} child ${key} must stay inside a throwaway root, got ${value}`,
+      );
+    }
+  }
+  // One run uses one throwaway root for both cycles; a per-cycle root would be
+  // a design change, so pin the invariant that matters: all four children see
+  // the same throwaway machine, not the operator's.
+  const homes = records.map((record) => record.HOME);
+  assert.equal(new Set(homes).size, 1, 'every child of one smoke run must share its throwaway root');
 });

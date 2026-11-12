@@ -8,6 +8,14 @@ export const MAX_TREE_DEPTH = 8;
 export const DEFAULT_TREE_ENTRIES = 2000;
 export const MAX_TREE_ENTRIES = 5000;
 
+/**
+ * Largest delay a Node timer can represent (2^31-1 ms, ~24.86 days). Node clamps
+ * a larger delay to 1 ms and warns, so an "effectively unlimited" deadline
+ * becomes the shortest one instead of the longest. Bound a deadline where the
+ * timer is armed, and pass the bounded value to any child that arms its own.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 export interface ResultBudget {
   readonly maxItems: number;
   readonly maxTextBytes: number;

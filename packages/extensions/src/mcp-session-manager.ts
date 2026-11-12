@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Client, SSEClientTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { captureChildStderr, withChildStderr } from './child-stderr-capture.js';
-import { appError, err, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
+import { appError, err, MAX_TIMER_DELAY_MS, ok, type Result, type ResultBudget } from '@unified-mpc/domain';
 import type { ExternalMcpContractDrift, McpResourceSummary, McpServerLaunchConfig, McpToolSummary } from './types.js';
 
 export interface McpClientSession {
@@ -58,7 +58,8 @@ function closeSessionWithin(session: McpClientSession, closeTimeoutMs: number): 
   return Promise.race([
     session.close().catch(() => undefined),
     new Promise<void>((resolve) => {
-      const timer = setTimeout(() => resolve(), closeTimeoutMs);
+      // A ceiling above the timer range would resolve at ~1 ms instead of waiting.
+      const timer = setTimeout(() => resolve(), Math.min(closeTimeoutMs, MAX_TIMER_DELAY_MS));
       timer.unref?.();
     }),
   ]);
@@ -175,7 +176,10 @@ export class McpSessionManager {
     budget?: ResultBudget,
     callTimeoutMs?: number,
   ): Promise<Result<unknown>> {
-    const timeoutMs = callTimeoutMs ?? this.callTimeoutMs;
+    // Bound once, at the source: the same deadline arms this manager's timer and
+    // is forwarded to the child as its own request timeout. Passing the raw
+    // configured value would let a Node timer clamp it to 1 ms on either side.
+    const timeoutMs = Math.min(callTimeoutMs ?? this.callTimeoutMs, MAX_TIMER_DELAY_MS);
     let managed: ManagedSession | undefined;
     try {
       if (isAborted(signal)) return cancelledCall();
@@ -518,15 +522,6 @@ export function attachChildStderrDrain(stderr: unknown): () => void {
   return captureChildStderr(stderr).drain;
 }
 
-
-/**
- * Largest delay a Node timer can represent (2^31-1 ms, ~24.86 days). Node clamps
- * a larger delay to 1 ms and warns, so a host that configures an "effectively
- * unlimited" deadline would otherwise abort every call immediately instead of
- * waiting. The deadline is bounded where the timer is armed, so no caller has to
- * repeat the rule.
- */
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs: number, message: string, parentSignal?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {

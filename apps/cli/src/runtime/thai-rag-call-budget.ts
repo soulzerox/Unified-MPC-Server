@@ -29,6 +29,8 @@
  * timer delay above 2^31-1 ms is clamped to 1 ms, which would abort every call
  * immediately.
  */
+import { MAX_TIMER_DELAY_MS } from '@unified-mpc/domain';
+
 export const THAI_RAG_CONNECT_BUDGET_ENV = 'THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT';
 export const THAI_RAG_RESPONSE_BUDGET_ENV = 'THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT';
 
@@ -42,11 +44,11 @@ export const DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS = 3600;
 const TRANSPORT_MARGIN_MS = 5_000;
 
 /**
- * Largest delay `setTimeout` can represent (2^31-1 ms, ~24.86 days). Node
- * clamps a larger delay to 1 ms, so a host declaring an effectively unlimited
- * budget would otherwise turn every call into an immediate abort.
+ * The derived deadline is still a `setTimeout` delay, so it inherits the largest
+ * delay a Node timer can represent (~24.86 days); a larger number is not a longer
+ * wait. Shared with every other deadline in the runtime.
  */
-export const MAX_THAI_RAG_CALL_BUDGET_MS = 2_147_483_647;
+export const MAX_THAI_RAG_CALL_BUDGET_MS = MAX_TIMER_DELAY_MS;
 
 /**
  * Request-session deadline for a child call, derived from the environment the

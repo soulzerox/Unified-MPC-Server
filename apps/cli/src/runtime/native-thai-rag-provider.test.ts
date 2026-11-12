@@ -137,6 +137,43 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('waits for a slow provider read instead of killing the child at the global MCP deadline (#770)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const calls: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      // The launcher hands the child this budget, and an ordinary call may wait
+      // that long for the serial data owner.
+      launchConfig: { command: '/python', env: { THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '0.3' } },
+      // The global MCP deadline is far shorter than the provider's declared
+      // wait. Enforcing it here aborted the child mid-work and turned one slow
+      // read into a cold-start loop.
+      callTimeoutMs: 20,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        async onCall(tool): Promise<unknown> {
+          calls.push(tool);
+          if (tool === 'recall' || tool === 'code_search') {
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    // Both read dispatches: the steady-state gate-exempt path and the queued
+    // worker path.
+    await expect(driver.call('recall', { workspace_id: workspaceId, query: 'busy-owner' }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(driver.call('code_search', { workspace_id: workspaceId, query: 'busy-owner' }))
+      .resolves.toMatchObject({ ok: true });
+    await driver.stop();
+
+    expect(calls).toEqual(expect.arrayContaining(['recall', 'code_search']));
+  });
+
   it('reports a transport failure on the admission dispatch and keeps a busy poll out of it (#768)', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

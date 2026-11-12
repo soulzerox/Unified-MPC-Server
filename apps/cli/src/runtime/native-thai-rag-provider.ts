@@ -32,6 +32,7 @@ import {
   type WorkspaceLifecycleKind,
 } from '@unified-mpc/workspace';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
+import { thaiRagOrdinaryCallBudgetMs } from './thai-rag-call-budget.js';
 import {
   ThaiRagIndexJobStore,
   ThaiRagWorkspaceVerificationStore,
@@ -176,6 +177,12 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly strictWorkerRegistryGenerationProvider?: () => number;
   /** Required for strict mode: admission-checked, host-owned workspace scopes; legacy uses workspacesProvider. */
   readonly strictWorkerAuthorizedWorkspacesProvider?: () => Promise<readonly NativeThaiRagWorkspace[]>;
+  /**
+   * Global MCP call deadline. A native Thai-RAG read uses the larger of this
+   * and the provider's own data-owner budget (#770): the child declares how
+   * long it may wait for the serial data owner, and a driver deadline below
+   * that drops a child that is still working.
+   */
   readonly callTimeoutMs?: number;
   /**
    * #766: one line per child call that failed on the transport. A dropped child
@@ -632,11 +639,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // A gate-exempt or already-ready read skips the worker queue, so it has
       // its own dispatch and needs its own record (#766): a steady-state
       // `code_search` failure is the exact symptom that was invisible.
-      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig, tool, normalizedArgs.value, signal, {}, budget);
+      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig, tool, normalizedArgs.value, signal, {}, budget, this.requestCallBudgetMs());
       this.reportChildCallFailure(tool, raw);
       return normalizeWorkerCallResult(tool, raw);
     }
-    return this.callWorker(tool, normalizedArgs.value, signal, budget);
+    return this.callWorker(tool, normalizedArgs.value, signal, budget, this.requestCallBudgetMs());
   }
 
   private async canServeReadyWorkspaceDuringIndex(args: Readonly<Record<string, unknown>>): Promise<boolean> {
@@ -2192,6 +2199,22 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     for (const [id, root] of previousRoots) this.workspaceRoots.set(id, root);
     for (const [root, id] of previousRootIds) this.workspaceRootIds.set(root, id);
     return ok(undefined);
+  }
+
+  /**
+   * #770: a request-session deadline that undercuts the provider's own budget
+   * kills a read the child was still willing to serve. The child is launched
+   * with `THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT` (see `thaiRagProviderLaunchEnv`)
+   * and an ordinary call may wait that long for the serial data owner, so the
+   * larger of the configured MCP deadline and that budget wins. Startup probes
+   * and status polls keep their own short deadlines: they are how a wedged
+   * child is detected, and waiting on the read budget there would only delay it.
+   */
+  private requestCallBudgetMs(): number {
+    return Math.max(
+      this.options.callTimeoutMs ?? 0,
+      thaiRagOrdinaryCallBudgetMs(this.launchConfig?.env),
+    );
   }
 
   private async callWorker(

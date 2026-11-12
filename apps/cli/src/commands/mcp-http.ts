@@ -2,6 +2,7 @@ import { USER_SETTING_KEYS, parseBooleanSetting } from '@unified-mpc/shared';
 import { appError, err, type Result } from '@unified-mpc/domain';
 import { DEFAULT_LEGACY_SESSION_TTL_MS, startMcpHttp, type McpHttpServerHandle, type McpHttpServerOptions } from '@unified-mpc/mcp-server';
 import type { Workspace } from '@unified-mpc/workspace';
+import { createStderrDiagnosticSink } from '../runtime/diagnostic-sink.js';
 
 /** The loopback port the HTTP MCP runtime binds unless `UNIFIED_MPC_PORT` overrides it. */
 export const DEFAULT_MCP_HTTP_PORT = 18_765;
@@ -106,6 +107,11 @@ export type WebMcpHttpServerOptions = Omit<McpHttpServerOptions, 'hostMutationAp
  * Web never inherits a direct trusted-host adapter from its upstream runtime.
  * A broker provider must be supplied explicitly through the second argument so
  * remote Web calls can only reach a separately connected trusted local worker.
+ *
+ * #766: an internal exception is redacted into a generic `INTERNAL_ERROR`
+ * before it reaches the client, so the reason only survives through the
+ * `DiagnosticLogger`. Installing the stderr sink here keeps every HTTP runtime
+ * failure greppable in the journal instead of vanishing.
  */
 export function createWebMcpHttpServerOptions(
   options: McpHttpServerOptions,
@@ -113,9 +119,13 @@ export function createWebMcpHttpServerOptions(
 ): WebMcpHttpServerOptions {
   const { hostMutationApprovalProvider, ...webOptions } = options;
   void hostMutationApprovalProvider;
+  const diagnosed: McpHttpServerOptions = {
+    ...webOptions,
+    diagnostic: webOptions.diagnostic ?? createStderrDiagnosticSink({ label: 'Unified-MPC MCP HTTP' }),
+  };
   return brokeredHostMutationApprovalProvider === undefined
-    ? webOptions
-    : { ...webOptions, hostMutationApprovalProvider: brokeredHostMutationApprovalProvider };
+    ? diagnosed
+    : { ...diagnosed, hostMutationApprovalProvider: brokeredHostMutationApprovalProvider };
 }
 
 export async function runMcpHttpCommand(

@@ -18,6 +18,7 @@ import { comparableHostPath, hostPathApi, isMachineRootPath, normalizeWorkspaceR
 import { ThaiRagWorkspaceVerificationStore } from '@unified-mpc/thai-rag';
 import { createStdioMcpRuntime, resolveStdioCheckpointKey } from '../runtime/stdio-mcp-runtime.js';
 import { startNativeProviderOrDegrade } from '../runtime/native-provider-startup.js';
+import { createStderrDiagnosticSink } from '../runtime/diagnostic-sink.js';
 import { createRuntimeAdmissionIdentity, loadBuildProvenance } from '../build-provenance.js';
 import { StrictWorkspaceRepository, canonicalizeAllowedRoots, requestedPathInsideAllowedRoot } from '../runtime/strict-workspace-repository.js';
 import { reconcileProviderGenerations } from '../runtime/provider-generation-reconcile.js';
@@ -237,6 +238,10 @@ async function main(): Promise<void> {
     activeWorkspaceScopesProvider: runtime.activeWorkspaceScopesProvider,
     toolAvailabilitySnapshotProvider: () => runtime.toolAvailabilityService.snapshot(),
     toolAvailabilitySubscribe: (listener) => runtime.toolAvailabilityService.subscribe(listener),
+    // #766: the redacted reason for an internal exception only survives through
+    // this sink; the parent runtime keeps the child's stderr tail for exactly
+    // that purpose.
+    diagnostic: createStderrDiagnosticSink({ label: 'Unified-MPC MCP stdio' }),
     onError: (error): void => {
       if (/EPIPE|ECONNRESET|broken pipe/i.test(error.message)) {
         process.stderr.write(`Unified-MPC MCP stdio: peer closed (${error.message})\n`);

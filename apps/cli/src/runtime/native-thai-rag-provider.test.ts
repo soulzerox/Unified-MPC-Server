@@ -96,6 +96,38 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('reports a transport failure on a worker call so a dropped child is diagnosable (#766)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const lines: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      diagnostics: (line): void => { lines.push(line); },
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'health' || tool === 'version') return success(tool, defaultHandshake());
+          if (tool === 'code_search') throw new Error('Connection closed');
+          if (args.workspace_id !== workspaceId) return structuredFailure('workspace_scope_required');
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    await expect(driver.call('code_search', { workspace_id: workspaceId, query: 'probe' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    // A structured child refusal is normal control flow and stays out of the journal.
+    await driver.call('recall', { workspace_id: 'other-workspace', query: 'probe' });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('tool=code_search');
+    expect(lines[0]).toContain('code=INTERNAL_ERROR');
+    expect(lines[0]).toContain('Connection closed');
+    await driver.stop();
+  });
+
   it('keeps code indexing lexical-only unless the deployment opts into vectors (#445)', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

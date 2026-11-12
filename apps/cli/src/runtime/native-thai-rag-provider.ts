@@ -628,9 +628,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     if (tool === 'code_index') return this.codeIndex(args, signal, budget);
     const normalizedArgs = tool === 'pre_edit_context' ? this.canonicalPreEditArgs(args) : ok(args);
     if (!normalizedArgs.ok) return normalizedArgs;
-    return bypassBusyRefresh
-      ? normalizeWorkerCallResult(tool, await this.sessions.call(SERVER_NAME, this.launchConfig, tool, normalizedArgs.value, signal, {}, budget))
-      : this.callWorker(tool, normalizedArgs.value, signal, budget);
+    if (bypassBusyRefresh) {
+      // A gate-exempt or already-ready read skips the worker queue, so it has
+      // its own dispatch and needs its own record (#766): a steady-state
+      // `code_search` failure is the exact symptom that was invisible.
+      const raw = await this.sessions.call(SERVER_NAME, this.launchConfig, tool, normalizedArgs.value, signal, {}, budget);
+      this.reportChildCallFailure(tool, raw);
+      return normalizeWorkerCallResult(tool, raw);
+    }
+    return this.callWorker(tool, normalizedArgs.value, signal, budget);
   }
 
   private async canServeReadyWorkspaceDuringIndex(args: Readonly<Record<string, unknown>>): Promise<boolean> {
@@ -2205,13 +2211,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
    * `INTERNAL_ERROR`, and the session manager answers the next call from a fresh
    * child. Recording the transport failure is the only way to tell a recovered
    * restart from a wedged provider afterwards.
+   *
+   * The direct `indexSessions.call` sites in the index monitors are deliberately
+   * left out: a failed index call is already mirrored into the durable job
+   * ledger with its reason, so the journal would only repeat it.
    */
   private reportChildCallFailure(tool: string, result: Result<unknown>): void {
     if (result.ok || this.diagnostics === undefined) return;
     // Only a transport failure is news. A deliberate cancel comes back as
-    // PROCESS_TIMEOUT and a structured child refusal as CONFLICT/INVALID_INPUT;
-    // logging those would bury the one line that matters.
-    if (result.error.code !== 'INTERNAL_ERROR') return;
+    // PROCESS_TIMEOUT, a structured child refusal as CONFLICT/INVALID_INPUT, and
+    // an index_status poll timeout is the documented busy-worker answer whose
+    // job ledger row already carries the reason (#439).
+    if (result.error.code !== 'INTERNAL_ERROR' || isIndexStatusPollTimeout(result.error)) return;
     // `sanitizeError` already collapsed whitespace and capped the length; keep
     // credentials out of the journal with the same redaction the tool boundary
     // uses for a diagnostic exception.

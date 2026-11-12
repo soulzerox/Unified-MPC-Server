@@ -109,6 +109,10 @@ describe('NativeThaiRagProviderDriver', () => {
         async onCall(tool, args): Promise<unknown> {
           if (tool === 'health' || tool === 'version') return success(tool, defaultHandshake());
           if (tool === 'code_search') throw new Error('Connection closed');
+          // `recall` is gate-exempt, so it takes the steady-state dispatch
+          // instead of the queued worker path.
+          if (tool === 'recall' && args.query === 'transport-fail') throw new Error('Connection closed');
+          if (tool === 'recall' && args.query === 'refused') return structuredFailure('workspace_scope_required');
           if (args.workspace_id !== workspaceId) return structuredFailure('workspace_scope_required');
           return success(tool);
         },
@@ -118,13 +122,18 @@ describe('NativeThaiRagProviderDriver', () => {
 
     await expect(driver.call('code_search', { workspace_id: workspaceId, query: 'probe' }))
       .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
-    // A structured child refusal is normal control flow and stays out of the journal.
-    await driver.call('recall', { workspace_id: 'other-workspace', query: 'probe' });
+    // The queued worker path and the steady-state gate-exempt path both report.
+    await expect(driver.call('recall', { workspace_id: workspaceId, query: 'transport-fail' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    // A structured child refusal is normal control flow and stays out of it.
+    await expect(driver.call('recall', { workspace_id: workspaceId, query: 'refused' }))
+      .resolves.toMatchObject({ ok: false });
 
-    expect(lines).toHaveLength(1);
+    expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('tool=code_search');
     expect(lines[0]).toContain('code=INTERNAL_ERROR');
     expect(lines[0]).toContain('Connection closed');
+    expect(lines[1]).toContain('tool=recall');
     await driver.stop();
   });
 

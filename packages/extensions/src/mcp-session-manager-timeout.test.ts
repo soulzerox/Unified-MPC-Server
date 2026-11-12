@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_TIMER_DELAY_MS } from '@unified-mpc/domain';
 import { McpSessionManager, type McpClientFactory, type McpClientSession } from './mcp-session-manager.js';
 
 function mockFactory(): { factory: McpClientFactory; counts: { connects: number; calls: number; closes: number } } {
@@ -124,6 +125,41 @@ describe('dedicated native index status timeout recovery', () => {
       .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
     expect(manager.isConnected('native')).toBe(false);
     expect(counts).toEqual({ connects: 1, calls: 1, closes: 1 });
+    await manager.close();
+  });
+
+  it('bounds a deadline past the Node timer range instead of aborting at once', async () => {
+    let calls = 0;
+    const childTimeouts: Array<number | undefined> = [];
+    const factory: McpClientFactory = {
+      async connect(): Promise<McpClientSession> {
+        return {
+          listTools: async () => [{ name: 'index_status', description: 'Read-only status' }],
+          listResources: async () => [],
+          callTool: async (_name, _args, _signal, timeoutMs): Promise<unknown> => {
+            calls += 1;
+            childTimeouts.push(timeoutMs);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return { content: [] };
+          },
+          close: async (): Promise<void> => {},
+        };
+      },
+    };
+    // One millisecond past 2^31-1. A Node timer clamps such a delay to 1 ms and
+    // warns, so without the bound the call would abort before the child answered:
+    // a host asking for a longer deadline would get the shortest one. The child
+    // arms its own timer with the same number, so it has to receive the bounded
+    // value too, not the configured one.
+    const manager = new McpSessionManager({
+      clientFactory: factory,
+      callTimeoutMs: 2_147_483_648,
+      validateToolSchemas: false,
+    });
+    await expect(manager.call('native', { command: '/mock/index-provider' }, 'index_status', {}))
+      .resolves.toMatchObject({ ok: true });
+    expect(calls).toBe(1);
+    expect(childTimeouts).toEqual([MAX_TIMER_DELAY_MS]);
     await manager.close();
   });
 });

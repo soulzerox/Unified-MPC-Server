@@ -907,6 +907,9 @@ describe('stdio MCP runtime', () => {
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_MODEL_PATH')).toBe(false);
     // Server arguments stay the provider's default unless the host tuned them.
     expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_SERVER_ARGS')).toBe(false);
+    // The spawn command also stays the provider's default (PATH lookup) unless
+    // the host configured an explicit binary.
+    expect(Object.hasOwn(env, 'THAI_RAG_LLAMACPP_SERVER_CMD')).toBe(false);
   });
 
   it('sizes the deployment embedding deadline for a whole large file (#439)', () => {
@@ -946,6 +949,19 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_LLAMACPP_SERVER_ARGS).toBe('-b 2048 -ub 2048 --parallel 1');
   });
 
+  it('forwards an explicit llama.cpp spawn command for a binary outside PATH (#328)', () => {
+    // Phase A starts the server on demand and the provider falls back to
+    // `llama-server` from PATH when no command is configured. A host whose
+    // binary lives outside PATH must keep the explicit command across the
+    // data-owner launch, otherwise the cold start fails closed.
+    const binary = '/data/llama.cpp/build/bin/llama-server';
+    const env = thaiRagProviderLaunchEnv({ THAI_RAG_LLAMACPP_SERVER_CMD: binary });
+    expect(env.THAI_RAG_LLAMACPP_SERVER_CMD).toBe(binary);
+    // A blank value is unset, like the other forwarded keys.
+    const blank = thaiRagProviderLaunchEnv({ THAI_RAG_LLAMACPP_SERVER_CMD: '   ' });
+    expect(Object.hasOwn(blank, 'THAI_RAG_LLAMACPP_SERVER_CMD')).toBe(false);
+  });
+
   it('keeps an explicitly configured embedding environment authoritative (#413)', () => {
     const env = thaiRagProviderLaunchEnv({
       THAI_RAG_EMBEDDING_BACKEND: 'ollama',
@@ -955,6 +971,7 @@ describe('stdio MCP runtime', () => {
       THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT: '60',
       THAI_RAG_LLAMACPP_REQUEST_TIMEOUT: '900',
       THAI_RAG_LLAMACPP_SERVER_ARGS: '-b 1024 -ub 1024',
+      THAI_RAG_LLAMACPP_SERVER_CMD: '/opt/llama/bin/llama-server',
     });
     expect(env.THAI_RAG_EMBEDDING_BACKEND).toBe('ollama');
     expect(env.THAI_RAG_LLAMACPP_BASE_URL).toBe('http://127.0.0.1:9999');
@@ -963,6 +980,7 @@ describe('stdio MCP runtime', () => {
     expect(env.THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT).toBe('60');
     expect(env.THAI_RAG_LLAMACPP_REQUEST_TIMEOUT).toBe('900');
     expect(env.THAI_RAG_LLAMACPP_SERVER_ARGS).toBe('-b 1024 -ub 1024');
+    expect(env.THAI_RAG_LLAMACPP_SERVER_CMD).toBe('/opt/llama/bin/llama-server');
   });
 
   it('treats explicitly empty embedding env as unset (#413)', () => {

@@ -1679,6 +1679,12 @@ export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process
     // verbatim to the llama-server it launches, so a tuned host must reach it
     // or every cold start silently regresses to the unusable default.
     ...(authoritative('THAI_RAG_LLAMACPP_SERVER_ARGS') === undefined ? {} : { THAI_RAG_LLAMACPP_SERVER_ARGS: authoritative('THAI_RAG_LLAMACPP_SERVER_ARGS') as string }),
+    // The provider spawns `llama-server` from PATH unless a spawn command is
+    // configured. A host that keeps the binary outside PATH (the documented
+    // CPU-only deployment does) must reach the child, otherwise the on-demand
+    // Phase A start fails closed on the first cold request. Only an explicit
+    // host value is forwarded; the provider owns the default.
+    ...(authoritative('THAI_RAG_LLAMACPP_SERVER_CMD') === undefined ? {} : { THAI_RAG_LLAMACPP_SERVER_CMD: authoritative('THAI_RAG_LLAMACPP_SERVER_CMD') as string }),
   };
 }
 

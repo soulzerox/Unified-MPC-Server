@@ -126,4 +126,34 @@ describe('dedicated native index status timeout recovery', () => {
     expect(counts).toEqual({ connects: 1, calls: 1, closes: 1 });
     await manager.close();
   });
+
+  it('bounds a deadline past the Node timer range instead of aborting at once', async () => {
+    let calls = 0;
+    const factory: McpClientFactory = {
+      async connect(): Promise<McpClientSession> {
+        return {
+          listTools: async () => [{ name: 'index_status', description: 'Read-only status' }],
+          listResources: async () => [],
+          callTool: async (): Promise<unknown> => {
+            calls += 1;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return { content: [] };
+          },
+          close: async (): Promise<void> => {},
+        };
+      },
+    };
+    // One millisecond past 2^31-1. A Node timer clamps such a delay to 1 ms and
+    // warns, so without the bound the call would abort before the child answered:
+    // a host asking for a longer deadline would get the shortest one.
+    const manager = new McpSessionManager({
+      clientFactory: factory,
+      callTimeoutMs: 2_147_483_648,
+      validateToolSchemas: false,
+    });
+    await expect(manager.call('native', { command: '/mock/index-provider' }, 'index_status', {}))
+      .resolves.toMatchObject({ ok: true });
+    expect(calls).toBe(1);
+    await manager.close();
+  });
 });

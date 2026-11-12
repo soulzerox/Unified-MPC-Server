@@ -519,6 +519,15 @@ export function attachChildStderrDrain(stderr: unknown): () => void {
 }
 
 
+/**
+ * Largest delay a Node timer can represent (2^31-1 ms, ~24.86 days). Node clamps
+ * a larger delay to 1 ms and warns, so a host that configures an "effectively
+ * unlimited" deadline would otherwise abort every call immediately instead of
+ * waiting. The deadline is bounded where the timer is armed, so no caller has to
+ * repeat the rule.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs: number, message: string, parentSignal?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const controller = new AbortController();
@@ -554,7 +563,7 @@ function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutM
     const timer = setTimeout(() => {
       controller.abort(new Error(message));
       rejectOnce(new Error(message));
-    }, timeoutMs);
+    }, Math.min(timeoutMs, MAX_TIMER_DELAY_MS));
 
     let pending: Promise<T>;
     try {

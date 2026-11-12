@@ -5,6 +5,8 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { createSmokeChildEnv } from './smoke-runtime-child-env.mjs';
+
 const root = process.cwd();
 const entrypoint = path.join(root, 'apps', 'cli', 'dist', 'bin', 'mcp-http.js');
 const provenancePath = path.join(root, 'apps', 'cli', 'dist', 'build-provenance.json');
@@ -25,9 +27,9 @@ if (gitStatusResult.stdout.trim().length === 0 && provenance.buildDirty !== fals
   throw new Error('Clean checkout produced provenance marked dirty');
 }
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-runtime-smoke-'));
-const workspace = path.join(temporaryRoot, 'workspace');
-const dataRoot = path.join(temporaryRoot, 'data');
-await mkdir(workspace, { recursive: true });
+const childEnv = createSmokeChildEnv({ temporaryRoot, baseEnv: process.env });
+await mkdir(childEnv.UNIFIED_MPC_WORKSPACE, { recursive: true });
+await mkdir(childEnv.HOME, { recursive: true });
 
 let child;
 let stderr = '';
@@ -36,12 +38,7 @@ let settled = false;
 try {
   child = spawn(process.execPath, [entrypoint], {
     cwd: root,
-    env: {
-      ...process.env,
-      UNIFIED_MPC_WORKSPACE: workspace,
-      UNIFIED_MPC_DATA_PATH: dataRoot,
-      UNIFIED_MPC_PORT: '0',
-    },
+    env: childEnv,
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 

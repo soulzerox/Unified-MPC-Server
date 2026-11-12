@@ -2219,10 +2219,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private reportChildCallFailure(tool: string, result: Result<unknown>): void {
     if (result.ok || this.diagnostics === undefined) return;
     // Only a transport failure is news. A deliberate cancel comes back as
-    // PROCESS_TIMEOUT, a structured child refusal as CONFLICT/INVALID_INPUT, and
-    // an index_status poll timeout is the documented busy-worker answer whose
-    // job ledger row already carries the reason (#439).
-    if (result.error.code !== 'INTERNAL_ERROR' || isIndexStatusPollTimeout(result.error)) return;
+    // PROCESS_TIMEOUT and a structured child refusal as CONFLICT/INVALID_INPUT.
+    if (result.error.code !== 'INTERNAL_ERROR') return;
+    // An index_status poll timeout is the documented busy-worker answer whose
+    // job ledger row already carries the reason (#439), so repeating it in the
+    // journal says nothing new. The exemption is scoped to that tool: the
+    // matcher also accepts a timed-out tool-catalog refresh, which can surface
+    // on any tool, and a steady-state read has no ledger row to fall back on
+    // (issue #768).
+    if (tool === 'index_status' && isIndexStatusPollTimeout(result.error)) return;
     // `sanitizeError` already collapsed whitespace and capped the length; keep
     // credentials out of the journal with the same redaction the tool boundary
     // uses for a diagnostic exception.

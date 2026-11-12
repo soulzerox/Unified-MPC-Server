@@ -137,6 +137,113 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('reports a transport failure on the admission dispatch and keeps a busy poll out of it (#768)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    const lines: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 20,
+      indexJobPollMs: 10,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      diagnostics: (line): void => { lines.push(line); },
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          // A cold workspace admits through the dedicated admission session.
+          if (tool === 'code_index') throw new Error('Connection closed');
+          // A busy-worker poll is answered from the same session that is
+          // embedding, and its job ledger row already carries the reason, so
+          // the poll timeout stays out of the journal.
+          if (tool === 'index_status') throw new Error('Timed out calling thai-rag/index_status');
+          // The same matcher also accepts a catalog refresh, which can surface
+          // on any tool. A steady-state read has no ledger row behind it.
+          if (tool === 'recall' && args.query === 'catalog-timeout') {
+            throw new Error('Timed out refreshing tool catalog for thai-rag');
+          }
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    await expect(driver.call('index_status', { workspace_id: workspaceId, job_id: 'idx_busypoll' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    await expect(driver.call('recall', { workspace_id: workspaceId, query: 'catalog-timeout' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    await driver.stop();
+
+    expect(lines.filter((line) => line.includes('tool=code_index'))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes('tool=index_status'))).toHaveLength(0);
+    expect(lines.filter((line) => line.includes('tool=recall') && line.includes('Timed out refreshing tool catalog'))).toHaveLength(1);
+  });
+
+  it('reports a transport failure on the index dispatch too (#768)', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let completeAdmission = false;
+    let failIndex = false;
+    const lines: string[] = [];
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 20,
+      indexJobPollMs: 10,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      diagnostics: (line): void => { lines.push(line); },
+      clientFactory: clientFactory({
+        handshake: cancellableHandshake(),
+        includeCancelIndex: true,
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') {
+            if (failIndex) throw new Error('Connection closed');
+            if (args.max_files !== undefined) return success('ok');
+            return success('code_index', {
+              status: 'ok',
+              data: { status: 'running', job_id: 'idx_provider_admission', workspace_id: workspaceId },
+            });
+          }
+          if (tool === 'index_status') {
+            return success('index_status', {
+              status: 'ok',
+              data: completeAdmission
+                ? { status: 'done', job_id: 'idx_provider_admission', workspace_id: workspaceId, result: { indexed: 3 } }
+                : { status: 'running', job_id: 'idx_provider_admission', workspace_id: workspaceId },
+            });
+          }
+          return success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+
+    // A cold workspace must be admitted before an explicit rebuild reaches the
+    // index session, so admit it first and only then break the child.
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' }))
+      .resolves.toMatchObject({ ok: false, error: { details: { reason: 'workspace-indexing' } } });
+    const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+      jobs: Array<{ jobId: string; workspaceId: string; status: string }>;
+    };
+    const admissionJobId = persisted.jobs.find((job) => job.workspaceId === workspaceId && job.status === 'running')!.jobId;
+    completeAdmission = true;
+    await expect.poll(async () => {
+      const status = await driver.call('index_status', { workspace_id: workspaceId, job_id: admissionJobId });
+      return status.ok && isRecord(status.value) ? status.value.status : 'unavailable';
+    }).toBe('completed');
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+
+    failIndex = true;
+    await expect(driver.call('code_index', { workspace_path: workspaceRoot, workspace_id: workspaceId }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    await driver.stop();
+
+    expect(lines.filter((line) => line.includes('tool=code_index'))).toHaveLength(1);
+  });
+
   it('keeps code indexing lexical-only unless the deployment opts into vectors (#445)', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

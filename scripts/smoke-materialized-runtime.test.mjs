@@ -131,7 +131,9 @@ function runSmoke(releaseRoot, recordDirectory) {
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
     child.on('error', reject);
-    child.on('exit', (code) => resolve({ code, output }));
+    // 'close' fires after the stdio pipes drain, so the collected output holds
+    // the whole transcript. 'exit' can fire while they are still draining.
+    child.on('close', (code) => resolve({ code, output }));
   });
 }
 

@@ -162,4 +162,34 @@ describe('dedicated native index status timeout recovery', () => {
     expect(childTimeouts).toEqual([MAX_TIMER_DELAY_MS]);
     await manager.close();
   });
+
+  it('keeps the connection deadline representable outside the call path', async () => {
+    // `call()` bounds its own deadline, but connect, the initial tool listing and
+    // `listResources` go through the timer's own clamp. Without it a host asking
+    // for a longer connection deadline would abort the handshake at ~1 ms.
+    let listToolsCalls = 0;
+    const factory: McpClientFactory = {
+      async connect(): Promise<McpClientSession> {
+        return {
+          listTools: async (): Promise<readonly { name: string; description: string }[]> => {
+            listToolsCalls += 1;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return [{ name: 'index_status', description: 'Read-only status' }];
+          },
+          listResources: async () => [{ uri: 'mock://resource', name: 'mock' }],
+          callTool: async (): Promise<unknown> => ({ content: [] }),
+          close: async (): Promise<void> => {},
+        };
+      },
+    };
+    const manager = new McpSessionManager({
+      clientFactory: factory,
+      callTimeoutMs: 2_147_483_648,
+      validateToolSchemas: false,
+    });
+    await expect(manager.listResources('native', { command: '/mock/index-provider' }))
+      .resolves.toMatchObject({ ok: true, value: { connected: true } });
+    expect(listToolsCalls).toBe(1);
+    await manager.close();
+  });
 });

@@ -1,8 +1,11 @@
 /* global process, fetch, AbortSignal, setTimeout */
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+
+import { createSmokeChildEnv } from './smoke-runtime-child-env.mjs';
 
 const releaseArgument = process.argv[2];
 if (releaseArgument === undefined || releaseArgument.length === 0) {
@@ -17,16 +20,40 @@ if (typeof provenance.buildCommit !== 'string' || provenance.buildDirty !== fals
 }
 
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-portable-release-'));
-const workspace = path.join(temporaryRoot, 'workspace');
-const dataRoot = path.join(temporaryRoot, 'data');
-await mkdir(workspace, { recursive: true });
-
+// A materialized release is verified as a fresh install: the storage identity
+// guard compares the canonical data root against the home-derived historical
+// roots, so an inherited HOME makes the release under test refuse to start on
+// any machine that already runs unified-mpc (#777).
 const baseEnv = {
-  ...process.env,
+  ...createSmokeChildEnv({ temporaryRoot, baseEnv: process.env }),
   NODE_ENV: 'production',
-  UNIFIED_MPC_WORKSPACE: workspace,
-  UNIFIED_MPC_DATA_PATH: dataRoot,
 };
+await mkdir(baseEnv.UNIFIED_MPC_WORKSPACE, { recursive: true });
+await mkdir(baseEnv.HOME, { recursive: true });
+
+/**
+ * Reserve one loopback port and release it for the child.
+ *
+ * The smoke used to bind 18765 and 3000, so on a workstation that already runs
+ * unified-mpc both probes talked to the live installation instead of the
+ * release under test: the release child could die at startup and the smoke
+ * still passed. Reserve free ports so only the release can answer them.
+ */
+async function reservePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : undefined;
+  await new Promise((resolve) => server.close(resolve));
+  if (port === undefined) throw new Error('Unable to reserve a loopback port for the materialized smoke');
+  return port;
+}
+
+const mcpPort = await reservePort();
+const webPort = await reservePort();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -79,17 +106,22 @@ async function verifyCycle(cycle) {
   const mcpEntrypoint = path.join(releaseRoot, 'apps', 'cli', 'dist', 'bin', 'mcp-http.js');
   const cliEntrypoint = path.join(releaseRoot, 'apps', 'cli', 'dist', 'index.js');
 
-  const mcp = start(process.execPath, [mcpEntrypoint], { UNIFIED_MPC_PORT: '18765' });
+  const mcp = start(process.execPath, [mcpEntrypoint], { UNIFIED_MPC_PORT: String(mcpPort) });
   let web;
   try {
     await waitForJson(
-      'http://127.0.0.1:18765/_unified-mpc/identity',
+      `http://127.0.0.1:${mcpPort}/_unified-mpc/identity`,
       (value) => value?.buildCommit === provenance.buildCommit,
       `MCP identity cycle ${cycle}`,
     );
-    web = start(process.execPath, [cliEntrypoint, 'web', '--port', '3000'], {});
+    // The web control plane probes the MCP identity on its configured gateway
+    // local port, which is `UNIFIED_MPC_PORT`. Point it at the reserved MCP port
+    // of this run so the status check cannot observe another installation.
+    web = start(process.execPath, [cliEntrypoint, 'web', '--port', String(webPort)], {
+      UNIFIED_MPC_PORT: String(mcpPort),
+    });
     await waitForJson(
-      'http://127.0.0.1:3000/api/status',
+      `http://127.0.0.1:${webPort}/api/status`,
       (value) => value?.status === 'healthy' && value?.mcpIdentity?.buildCommit === provenance.buildCommit,
       `Web status cycle ${cycle}`,
     );

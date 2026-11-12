@@ -32,7 +32,7 @@ import {
   type WorkspaceLifecycleKind,
 } from '@unified-mpc/workspace';
 import { createThaiRagPrivateWorkerBootstrap } from './native-thai-rag-private-bootstrap.js';
-import { thaiRagOrdinaryCallBudgetMs } from './thai-rag-call-budget.js';
+import { thaiRagReadCallBudgetMs } from './thai-rag-call-budget.js';
 import {
   ThaiRagIndexJobStore,
   ThaiRagWorkspaceVerificationStore,
@@ -369,7 +369,13 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     });
     this.indexSessions = new McpSessionManager({
       ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
-      callTimeoutMs: Math.max(options.callTimeoutMs ?? 60_000, INDEX_CALL_TIMEOUT_MS),
+      callTimeoutMs: Math.max(
+        options.callTimeoutMs ?? 60_000,
+        INDEX_CALL_TIMEOUT_MS,
+        // #770: an index start may wait for the same serial data owner, and the
+        // provider's long-pass bound must stay the first deadline to fire.
+        thaiRagReadCallBudgetMs(options.launchConfig.env),
+      ),
       validateToolSchemas: false,
       preserveReadOnlyStatusSessionOnTimeout: true,
       idleTimeoutMs: 24 * 60 * 60_000,
@@ -716,7 +722,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ...(legacyChunking === undefined ? {} : {
         legacy_chunking_fingerprint: legacyChunking,
       }),
-    }, signal, budget);
+    }, signal, budget, this.requestCallBudgetMs());
   }
 
   private async codeIndex(args: Readonly<Record<string, unknown>>, signal?: AbortSignal, budget?: ResultBudget): Promise<Result<unknown>> {
@@ -2203,17 +2209,20 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   /**
    * #770: a request-session deadline that undercuts the provider's own budget
-   * kills a read the child was still willing to serve. The child is launched
-   * with `THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT` (see `thaiRagProviderLaunchEnv`)
-   * and an ordinary call may wait that long for the serial data owner, so the
-   * larger of the configured MCP deadline and that budget wins. Startup probes
-   * and status polls keep their own short deadlines: they are how a wedged
-   * child is detected, and waiting on the read budget there would only delay it.
+   * kills a call the child was still willing to serve. The child is launched
+   * with the data-owner budgets (see `thaiRagProviderLaunchEnv`): ordinary calls
+   * may wait `THAI_RAG_DATA_OWNER_CONNECT_TIMEOUT` for the serial data owner,
+   * and the methods the provider lists as long-running — `pre_edit_context`
+   * among them — may wait `THAI_RAG_DATA_OWNER_RESPONSE_TIMEOUT`. The driver
+   * cannot see that per-method list, so the larger of the two wins, as does the
+   * configured MCP deadline when it is larger still. Startup probes and status
+   * polls keep their own short deadlines: they are how a wedged child is
+   * detected, and waiting on the read budget there would only delay it.
    */
   private requestCallBudgetMs(): number {
     return Math.max(
       this.options.callTimeoutMs ?? 0,
-      thaiRagOrdinaryCallBudgetMs(this.launchConfig?.env),
+      thaiRagReadCallBudgetMs(this.launchConfig?.env),
     );
   }
 

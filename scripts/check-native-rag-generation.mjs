@@ -49,13 +49,82 @@ export function defaultDatabasePath(environment = process.env, home = os.homedir
   return path.join(dataHome, 'unified-mpc', 'thai-rag', 'runtime', 'local_context.db');
 }
 
-export function readGenerationHealth(databasePath, workspaceIds) {
+/**
+ * Retired records, and why they are not a live workspace (#788).
+ *
+ * `index_generations` keeps a row set per workspace id forever, but a workspace
+ * id is not the same thing as a workspace: goal worktrees are deleted, and the
+ * provider has changed identity for a root more than once. Judging those rows
+ * made this check permanently red on records no operator can repair, which is
+ * how a health gate stops being read.
+ */
+export const RETIRED_REASONS = Object.freeze({
+  pathMissing: 'workspace-path-missing',
+  superseded: 'superseded-identity',
+});
+
+function readWorkspaceRegistry(database) {
+  try {
+    return database
+      .prepare('SELECT workspace_id, workspace_path, updated_at FROM workspace_registry')
+      .all()
+      .map((row) => ({
+        workspaceId: String(row.workspace_id),
+        workspacePath: String(row.workspace_path),
+        updatedAt: Date.parse(String(row.updated_at ?? '')) || 0,
+      }));
+  } catch {
+    // A database written before the registry existed has no retirement
+    // evidence, so every recorded workspace stays in scope.
+    return [];
+  }
+}
+
+/**
+ * Keep only the workspace the provider currently serves for a root that still
+ * exists. A record with no registry row is kept: nothing proves it retired.
+ * Health is a property of the root, so when several ids share one path the
+ * newest registry row owns it and the rest are superseded identities.
+ */
+export function selectLiveWorkspaces(recordedWorkspaceIds, registry, pathExists = existsSync) {
+  const retired = [];
+  const byRoot = new Map();
+  const byId = new Map(registry.map((entry) => [entry.workspaceId, entry]));
+  for (const workspaceId of recordedWorkspaceIds) {
+    const entry = byId.get(workspaceId);
+    if (entry === undefined) {
+      byRoot.set(`unregistered:${workspaceId}`, { workspaceId, updatedAt: 0 });
+      continue;
+    }
+    if (!pathExists(entry.workspacePath)) {
+      retired.push({ workspaceId, reason: RETIRED_REASONS.pathMissing, workspacePath: entry.workspacePath });
+      continue;
+    }
+    const current = byRoot.get(entry.workspacePath);
+    if (current === undefined) {
+      byRoot.set(entry.workspacePath, { workspaceId, updatedAt: entry.updatedAt });
+      continue;
+    }
+    const [winner, loser] = entry.updatedAt > current.updatedAt ? [entry, current] : [current, entry];
+    byRoot.set(entry.workspacePath, { workspaceId: winner.workspaceId, updatedAt: winner.updatedAt });
+    retired.push({ workspaceId: loser.workspaceId, reason: RETIRED_REASONS.superseded, workspacePath: entry.workspacePath });
+  }
+  return { live: [...byRoot.values()].map((entry) => entry.workspaceId), retired };
+}
+
+export function readGenerationHealth(databasePath, workspaceIds, options = {}) {
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    const workspaces = workspaceIds === undefined || workspaceIds.length === 0
-      ? database.prepare('SELECT DISTINCT workspace_id FROM index_generations ORDER BY workspace_id').all().map((row) => String(row.workspace_id))
-      : workspaceIds;
-    return workspaces.map((workspaceId) => readWorkspaceHealth(database, workspaceId));
+    const explicit = workspaceIds !== undefined && workspaceIds.length > 0;
+    const recorded = explicit
+      ? workspaceIds
+      : database.prepare('SELECT DISTINCT workspace_id FROM index_generations ORDER BY workspace_id').all().map((row) => String(row.workspace_id));
+    // An explicit `--workspace` is the caller saying "judge this record", so it
+    // never gets the retirement filter that the default sweep applies.
+    const { live, retired } = explicit
+      ? { live: recorded, retired: [] }
+      : selectLiveWorkspaces(recorded, readWorkspaceRegistry(database), options.pathExists);
+    return { workspaces: live.map((workspaceId) => readWorkspaceHealth(database, workspaceId)), retired };
   } finally {
     database.close();
   }
@@ -129,7 +198,7 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     process.exit(2);
   }
   const workspaceIds = argumentValues('--workspace');
-  const report = readGenerationHealth(databasePath, workspaceIds.length === 0 ? undefined : workspaceIds);
+  const { workspaces: report, retired } = readGenerationHealth(databasePath, workspaceIds.length === 0 ? undefined : workspaceIds);
   const failing = report.filter((workspace) => workspace.violations.length > 0);
   for (const workspace of report) {
     if (workspace.generationId === undefined) {
@@ -143,6 +212,12 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
       );
     }
     for (const violation of workspace.violations) process.stdout.write(`  - ${violation.kind}: ${violation.detail}\n`);
+  }
+  if (retired.length > 0) {
+    const counts = new Map();
+    for (const entry of retired) counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
+    const detail = [...counts.entries()].map(([reason, count]) => `${reason} ${count}`).join(', ');
+    process.stdout.write(`retired workspace records skipped: ${retired.length} (${detail})\n`);
   }
   if (failing.length === 0) {
     process.stdout.write(`Native Thai-RAG generation health passed for ${report.length} workspace(s).\n`);

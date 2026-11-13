@@ -61,7 +61,7 @@ import {
   type ExtensionsService,
   type ManagedPolicyRepairReport,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   ThaiRagIndexJobStore,
@@ -1400,7 +1400,7 @@ export function createStdioMcpRuntime(
       await (await sharedActivityLease)?.record(event);
     },
   };
-  const durableActivitySink = createFileActivitySink(mcpActivityLogPath(dataPath));
+  const durableActivitySink = createFileActivitySink(mcpActivityLogPath(dataPath), { maxBytes: activityLogMaxBytes() });
   const activityTracker = new ActivityTracker({
     async record(event: ActivitySinkEvent): Promise<void> {
       // Publish starts before slower durable evidence so updater quiet-time

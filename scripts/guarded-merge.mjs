@@ -5,9 +5,9 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { expectedFingerprint } from './local-verify.mjs';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 import { readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity } from './review-gate.mjs';
-import { evaluateMergeEligibility, findReviewReceipt, reviewFingerprint, selectVerificationReceipt } from './workflow-gate-core.mjs';
+import { createGatePolicy, findReviewReceipt, reviewFingerprint } from './workflow-gate-core.mjs';
 
 /**
  * Repository-level guarded merge (#144).
@@ -27,6 +27,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RECEIPT_ROOT = path.join(ROOT, '.unified-mpc', 'local-verify');
 const MERGE_RECORD_ROOT = path.join(RECEIPT_ROOT, 'merges');
 const METHODS = ['squash', 'merge', 'rebase'];
+
+// This checkout's profile is the gate's input, not the gate's dependency.
+const gate = createGatePolicy({ profileVersion: PROFILE_VERSION, fingerprintFor: expectedFingerprint });
 
 export function parseArgs(argv) {
   const options = { base: 'main', method: 'squash', dryRun: false, deleteBranch: true, repo: undefined, pr: undefined };
@@ -90,7 +93,7 @@ export function parseRepositoryFromRemote(remoteUrl) {
 
 /** The receipt that authorizes this head: see `selectVerificationReceipt`. */
 export function findReceipt(receipts, headSha) {
-  return selectVerificationReceipt(receipts, headSha);
+  return gate.selectVerificationReceipt(receipts, headSha);
 }
 
 // Re-exported because this module is where the merge guard reports the exact
@@ -103,7 +106,7 @@ export { expectedFingerprint };
  * not own the policy, so the review gate and the merge guard refuse a head for
  * the same reasons instead of keeping two copies of the same checks.
  */
-export { evaluateMergeEligibility as evaluateEligibility };
+export const evaluateEligibility = gate.evaluateMergeEligibility;
 
 function run(argv) {
   return new Promise((resolve, reject) => {
@@ -165,7 +168,7 @@ async function main() {
   ]);
   const receipt = findReceipt(verificationReceipts, pr.headRefOid);
   const review = findReviewReceipt(reviewStore.records, pr.headRefOid);
-  const { eligible, blockers } = evaluateMergeEligibility({
+  const { eligible, blockers } = evaluateEligibility({
     pr,
     receipt,
     review,
@@ -174,7 +177,6 @@ async function main() {
     headReceiptCount: reviewStore.records.filter((record) => record?.headSha === pr.headRefOid).length,
     corruptReviewReceipts: reviewStore.corrupt.length,
     expectedBase: options.base,
-    headFingerprint: expectedFingerprint(pr.headRefOid),
   });
 
   console.log(`guarded-merge ${repository}#${options.pr} head ${String(pr.headRefOid).slice(0, 12)}`);

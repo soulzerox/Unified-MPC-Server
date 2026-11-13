@@ -129,17 +129,26 @@ export function evaluateCloseGate(input: CloseGateInput): CloseGateVerdict {
     ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
     allowed: blockers.length === 0,
     blockers,
-    fingerprint: closeGateFingerprint(input),
+    fingerprint: closeGateFingerprint(input, evaluations),
   };
 }
 
-/** Canonical, decision-relevant projection of the inputs. */
-function closeGateFingerprint(input: CloseGateInput): string {
+/**
+ * Canonical, decision-relevant projection of the inputs.
+ *
+ * `evaluations` is the filtered set the verdict actually used, not every row the
+ * caller produced: an unrelated goal's cleanup state changing must not invalidate
+ * a receipt that describes this goal.
+ */
+function closeGateFingerprint(
+  input: CloseGateInput,
+  evaluations: readonly WorkspaceLifecycleCleanupEvaluation[],
+): string {
   const canonical = JSON.stringify({
     phase: 'close',
     workspaceId: input.workspaceId,
     goalId: input.goalId ?? null,
-    cleanup: input.cleanup
+    cleanup: evaluations
       .map((evaluation) => ({
         workspaceId: evaluation.workspaceId,
         goalId: evaluation.goalId ?? null,

@@ -162,6 +162,15 @@ describe('close gate fingerprint', () => {
     expect(reversed.fingerprint).toBe(forward.fingerprint);
   });
 
+  it('ignores cleanup rows of other goals', () => {
+    const alone = evaluateCloseGate(input());
+    const withUnrelated = evaluateCloseGate(input({
+      cleanup: [cleanup(), cleanup({ goalId: 'goal_other', disposition: 'blocked', blockers: ['goal_workspace_not_clean'] })],
+    }));
+    expect(withUnrelated.fingerprint).toBe(alone.fingerprint);
+    expect(withUnrelated.allowed).toBe(true);
+  });
+
   it('changes when a decision-relevant input changes', () => {
     const candidate = evaluateCloseGate(input());
     const pending = evaluateCloseGate(input({ cleanup: [cleanup({ disposition: 'retention_pending' })] }));

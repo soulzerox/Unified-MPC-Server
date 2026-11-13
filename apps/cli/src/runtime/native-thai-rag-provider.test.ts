@@ -26,6 +26,7 @@ import {
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+  isThaiRagProviderErrorCode,
   mapThaiRagProviderErrorCode,
 } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv } from './native-thai-rag-provider.js';
@@ -5024,11 +5025,11 @@ describe('canonical code_index source identity (#210 §13)', () => {
   // ---------------------------------------------------------------------------
   // Contract corpus replay (thai-rag-mcp#1)
   //
-  // The provider-side replay proves the live provider emits these envelopes.
-  // This replay feeds the exact same vendored fixtures through the Unified
-  // adapter and asserts what crosses the boundary: Unified's error code,
-  // provider status/reason, retryability, and that success payload fields are
-  // not renamed or dropped.
+  // The corpus is vendored from the provider repository at a pinned commit
+  // (`contract/PROVENANCE.json`), so these are the provider's own envelopes.
+  // This replay feeds them through the Unified adapter and asserts what
+  // crosses the boundary: Unified's error code, provider status/reason,
+  // retryability, and that success payload fields are not renamed or dropped.
   // ---------------------------------------------------------------------------
   describe('contract corpus replay through the Unified adapter (#1)', () => {
     const corpusRoot = new URL('../../../../packages/thai-rag/contract/', import.meta.url);
@@ -5067,13 +5068,28 @@ describe('canonical code_index source identity (#210 §13)', () => {
 
     // The adapter dispatches these operations. Health is replayed by the
     // handshake corpus test; Unified does not dispatch attach_workspace_base
-    // yet, so both are named here instead of being silently skipped.
+    // yet, so both are named here instead of being silently skipped. The list
+    // is per fixture, not per operation: a key-presence check on the operation
+    // would let a new `health` fixture pass as "named" while no test replays it.
     const ADAPTER_OPERATIONS = new Set([
       'code_index', 'index_status', 'code_search', 'code_context', 'code_blast_radius', 'pre_edit_context',
     ]);
     const OTHER_SURFACES: Readonly<Record<string, string>> = {
-      health: 'packages/thai-rag/src/provider-contract.corpus.test.ts',
-      attach_workspace_base: 'provider-side replay only; Unified has no attach dispatcher',
+      'fixtures/health-ready.json': 'packages/thai-rag/src/provider-contract.corpus.test.ts',
+      'fixtures/health-degraded-embedding.json': 'packages/thai-rag/src/provider-contract.corpus.test.ts',
+      'fixtures/health-unavailable-storage.json': 'packages/thai-rag/src/provider-contract.corpus.test.ts',
+      'fixtures/attach-success.json': 'provider-side replay only; Unified has no attach dispatcher',
+      'fixtures/incompatible-index.json': 'provider-side replay only; Unified has no attach dispatcher',
+    };
+    // Unified's own provider-code mapping is the thing under test, so it is
+    // pinned here instead of imported: deriving the expectation from
+    // `mapThaiRagProviderErrorCode` would keep this replay green through a
+    // change to the very table it exists to catch.
+    const EXPECTED_UNIFIED_CODES: Readonly<Record<string, string>> = {
+      indexing_conflict: 'CONFLICT',
+      stale_index: 'CONFLICT',
+      storage_unavailable: 'CONFLICT',
+      scope_denied: 'PERMISSION_DENIED',
     };
     const REPLAYED_FILES = [
       'fixtures/indexing-conflict.json',
@@ -5088,10 +5104,10 @@ describe('canonical code_index source identity (#210 §13)', () => {
     ] as const;
 
     it('accounts for every vendored fixture on the adapter or a named surface', async () => {
-      const { index } = await loadCorpus();
+      const { index, fixtures } = await loadCorpus();
       expect(index.schema).toBe('provider-contract.v1.schema.json');
       const unaccounted = index.fixtures
-        .filter((entry) => !ADAPTER_OPERATIONS.has(entry.operation) && OTHER_SURFACES[entry.operation] === undefined)
+        .filter((entry) => !ADAPTER_OPERATIONS.has(entry.operation) && OTHER_SURFACES[entry.file] === undefined)
         .map((entry) => `${entry.file}:${entry.operation}`);
       expect(unaccounted).toEqual([]);
       const adapterFiles = index.fixtures
@@ -5099,6 +5115,21 @@ describe('canonical code_index source identity (#210 §13)', () => {
         .map((entry) => entry.file)
         .sort();
       expect([...REPLAYED_FILES].sort()).toEqual(adapterFiles);
+      // The named-elsewhere list cannot go stale in either direction: every key
+      // must still be a corpus fixture, and every one must say where it is judged.
+      expect(index.fixtures.filter((entry) => OTHER_SURFACES[entry.file] !== undefined).map((entry) => entry.file).sort())
+        .toEqual(Object.keys(OTHER_SURFACES).sort());
+      expect(Object.values(OTHER_SURFACES).every((surface) => surface.length > 0)).toBe(true);
+      // Same for the pinned code table: a replayed fixture's code must have a
+      // pin, and a pin must still describe a replayed code. `index_job_not_found`
+      // is the one deliberate projection (FILE_NOT_FOUND/provider-job-unknown),
+      // asserted separately instead of through the table.
+      const replayed = new Set<string>(REPLAYED_FILES);
+      const corpusCodes = [...new Set(index.fixtures
+        .filter((entry) => replayed.has(entry.file))
+        .flatMap((entry) => (fixtures.get(entry.file)?.errors ?? []).map((error) => error.code)))];
+      expect(Object.keys(EXPECTED_UNIFIED_CODES).sort())
+        .toEqual(corpusCodes.filter((code) => code !== 'index_job_not_found').sort());
     });
 
     it.each(REPLAYED_FILES)('replays %s through the adapter', async (file) => {
@@ -5113,6 +5144,12 @@ describe('canonical code_index source identity (#210 §13)', () => {
       expect(fixture.status, `${file} fixture status drifted from the manifest`).toBe(entry.expect.status);
       const errors = fixture.errors ?? [];
       expect(errors.map((error) => error.code).sort()).toEqual([...entry.expect.error_codes].sort());
+
+      // Snapshot the expected envelope before the call. On success the driver
+      // returns the provider payload by reference, so comparing against
+      // `fixture` afterwards would compare the adapter output with itself and
+      // an in-place rename or drop would still satisfy "field-for-field".
+      const expected = structuredClone(fixture);
 
       const dataRoot = await tempRoot();
       const workspaceRoot = await tempRoot();
@@ -5134,27 +5171,32 @@ describe('canonical code_index source identity (#210 §13)', () => {
           : success('code_index', { status: 'ok', indexed: 0 })),
         onTool: (tool) => (tool === entry.operation ? envelope : success(tool)),
       });
-      await startCanonicalDriver(driver, dataRoot);
+      try {
+        await startCanonicalDriver(driver, dataRoot);
 
-      const result = await driver.call(entry.operation, replayArgs(entry.operation, fixture, workspaceRoot));
-      // The boundary carries the snake_case workspace scope unchanged: the
-      // demand call for code_index, the single call for every other operation.
-      const dispatched = calls.filter(({ tool, args }) => tool === entry.operation
-        && (tool !== 'code_index' || (args.background !== true && args.max_files === undefined)));
-      expect(dispatched.length, `${file} never reached the provider`).toBeGreaterThan(0);
-      expect(dispatched.every(({ args }) => args.workspace_id === workspaceId && !Object.hasOwn(args, 'workspaceId'))).toBe(true);
+        const result = await driver.call(entry.operation, replayArgs(entry.operation, fixture, workspaceRoot));
+        // The boundary carries the snake_case workspace scope unchanged: the
+        // demand call for code_index, the single call for every other operation.
+        const dispatched = calls.filter(({ tool, args }) => tool === entry.operation
+          && (tool !== 'code_index' || (args.background !== true && args.max_files === undefined)));
+        expect(dispatched.length, `${file} never reached the provider`).toBeGreaterThan(0);
+        expect(dispatched.every(({ args }) => args.workspace_id === workspaceId && !Object.hasOwn(args, 'workspaceId'))).toBe(true);
 
-      if (errors.length > 0) {
-        expect(result.ok, `${file} should surface a Unified error`).toBe(false);
-        if (!result.ok) assertProviderError(result.error, file, fixture, errors[0]!);
-      } else if (entry.operation === 'index_status') {
-        expect(result.ok, `${file} should surface a Unified job`).toBe(true);
-        if (result.ok) assertIndexStatusProjection(result.value, file, fixture);
-      } else {
-        expect(result.ok, `${file} should surface success`).toBe(true);
-        if (result.ok) assertSuccessPayload(result.value, file, fixture);
+        if (errors.length > 0) {
+          expect(result.ok, `${file} should surface a Unified error`).toBe(false);
+          if (!result.ok) assertProviderError(result.error, file, expected, errors[0]!);
+        } else if (entry.operation === 'index_status') {
+          expect(result.ok, `${file} should surface a Unified job`).toBe(true);
+          if (result.ok) assertIndexStatusProjection(result.value, file, expected);
+        } else {
+          expect(result.ok, `${file} should surface success`).toBe(true);
+          if (result.ok) assertSuccessPayload(result.value, file, expected);
+        }
+      } finally {
+        // A failed expectation must not leak the driver, its fake client and
+        // both temp roots into the rest of the file.
+        await driver.stop();
       }
-      await driver.stop();
     });
 
     it('projects a lexical-only terminal pass as a degraded verification (#1)', async () => {
@@ -5165,8 +5207,19 @@ describe('canonical code_index source identity (#210 §13)', () => {
       const { fixtures } = await loadCorpus();
       const lexical = fixtures.get('fixtures/lexical-only-index.json');
       expect(lexical, 'lexical-only-index fixture').toBeDefined();
-      const data = isRecord(lexical?.data) ? lexical.data : {};
-      const generationId = typeof data.generation_id === 'string' ? data.generation_id : 'gen-lexical';
+      const data = isRecord(lexical?.data) ? lexical.data : undefined;
+      // The corpus payload is the input under test: a fixture that drifts must
+      // fail here instead of being quietly replaced by a shape this test made
+      // up, which is exactly the drift the replay exists to catch.
+      expect(data, 'lexical-only-index data').toMatchObject({
+        status: 'complete',
+        generation_id: expect.any(String),
+        indexed: expect.any(Number),
+        skipped: expect.any(Number),
+        lexical_only: true,
+      });
+      if (data === undefined || typeof data.generation_id !== 'string') return;
+      const generationId = data.generation_id;
       const jobId = 'idx_provider_lexical';
 
       const dataRoot = await tempRoot();
@@ -5250,6 +5303,49 @@ describe('canonical code_index source identity (#210 §13)', () => {
       }
     });
 
+    it('keeps an unreported skipped counter absent on a running job (#1)', async () => {
+      // `index_status_data` requires `indexed_files` but not `skipped_files`.
+      // A running job that reports only the indexed count must not be padded
+      // with a zero the provider never measured: the CLI and web UI render an
+      // absent counter as unknown, not as 0.
+      const dataRoot = await tempRoot();
+      const workspaceRoot = await tempRoot();
+      await write(workspaceRoot, 'src/a.ts', HELLO);
+      const driver = createCanonicalDriver({
+        dataRoot,
+        workspaceRoot,
+        calls: [],
+        source: null,
+        onTool: (tool) => (tool === 'index_status'
+          ? {
+            structuredContent: {
+              status: 'ok',
+              data: {
+                job_id: 'idx_providerrun1',
+                workspace_id: workspaceId,
+                status: 'running',
+                indexed_files: 4,
+              },
+            },
+          }
+          : success(tool)),
+      });
+      try {
+        await startCanonicalDriver(driver, dataRoot);
+        const result = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providerrun1',
+        });
+        expect(result).toMatchObject({ ok: true, value: { status: 'running', indexedFiles: 4 } });
+        if (result.ok && isRecord(result.value)) {
+          expect(result.value).not.toHaveProperty('skippedFiles');
+          expect(result.value).not.toHaveProperty('totalFiles');
+        }
+      } finally {
+        await driver.stop();
+      }
+    });
+
     function replayArgs(operation: string, fixture: CorpusFixture, workspaceRoot: string): Record<string, unknown> {
       const data = isRecord(fixture.data) ? fixture.data : {};
       const details = fixture.errors?.[0]?.details ?? {};
@@ -5278,7 +5374,17 @@ describe('canonical code_index source identity (#210 §13)', () => {
         expect(error.details, file).toMatchObject({ reason: 'provider-job-unknown' });
         return;
       }
-      expect(error.code, file).toBe(mapThaiRagProviderErrorCode(providerError.code));
+      const expectedCode = EXPECTED_UNIFIED_CODES[providerError.code];
+      expect(expectedCode, `${file} has no pinned Unified code for ${providerError.code}`).toBeDefined();
+      expect(error.code, file).toBe(expectedCode);
+      // The pinned table must not drift from the shipped mapper either.
+      expect(mapThaiRagProviderErrorCode(providerError.code), file).toBe(expectedCode);
+      // `recoverable` is true because the code is part of the contract
+      // vocabulary: a known code keeps the classification it had before the
+      // vocabulary became open. Assert that premise, so a fixture publishing an
+      // unknown code (terminal unless the envelope marks it retryable) cannot
+      // ride along on this hardcoded expectation.
+      expect(isThaiRagProviderErrorCode(providerError.code), `${file} ${providerError.code}`).toBe(true);
       expect(error.recoverable, file).toBe(true);
       expect(error.details, file).toMatchObject({
         reason: providerError.code,
@@ -5295,12 +5401,15 @@ describe('canonical code_index source identity (#210 §13)', () => {
         source: 'provider',
         jobId: data.job_id,
         indexedFiles: data.indexed_files,
-        // `index_status_data` pins `indexed_files` but not `skipped_files`, so
-        // the projection must still publish a complete counter triple instead
-        // of dropping the whole progress block.
-        skippedFiles: 0,
-        totalFiles: data.indexed_files,
       });
+      // `index_status_data` pins `indexed_files` but not `skipped_files` or
+      // `total_files`. Absent stays absent: the CLI/UI render "not reported"
+      // as unknown, so defaulting the missing counters to 0 would fabricate a
+      // measurement the provider never made.
+      if (isRecord(value)) {
+        expect(value, file).not.toHaveProperty('skippedFiles');
+        expect(value, file).not.toHaveProperty('totalFiles');
+      }
     }
 
     function assertSuccessPayload(value: unknown, file: string, fixture: CorpusFixture): void {

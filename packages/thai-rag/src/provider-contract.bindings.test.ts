@@ -261,12 +261,14 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
   it('refuses an unknown option before reading or writing anything', async () => {
     const run = await runGeneratorWithArguments((directory) => [
       '--schemaa',
-      SCHEMA_PATH,
+      path.join(directory, 'missing.json'),
       '--out',
       path.join(directory, 'bindings.ts'),
     ]);
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain("unknown option '--schemaa'");
+    // Parsing happens first: a missing schema would otherwise surface ENOENT.
+    expect(run.stderr).not.toContain('ENOENT');
     expect(run.outputWritten).toBe(false);
   });
 
@@ -357,11 +359,10 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
 
   it('keeps compatible scalar const types', async () => {
     const cases: readonly [unknown, string][] = [
+      ['thai-rag', 'string'],
       [1, 'integer'],
       [true, 'boolean'],
       [null, 'null'],
-      [[], 'array'],
-      [{}, 'object'],
     ];
     for (const [value, type] of cases) {
       const run = await runGeneratorWith((schema) => {
@@ -375,9 +376,26 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
     }
   });
 
+  it('refuses a non-scalar const', async () => {
+    const run = await runGeneratorWith((schema) => {
+      const properties = definition(schema, 'provider_metadata').properties as Record<string, MutableDefinition>;
+      properties.provider_name.const = {};
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('non-scalar literal');
+  });
+
+  it('refuses a non-scalar enum value', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').enum = ['ok', []];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('non-scalar literal');
+  });
+
   it('refuses an empty type array', async () => {
     const run = await runGeneratorWith((schema) => {
-      definition(schema, 'relative_path').type = [];
+      schema.$defs.empty_type_test = { type: [] };
     });
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('type is empty');
@@ -385,10 +403,34 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
 
   it('refuses an empty anyOf', async () => {
     const run = await runGeneratorWith((schema) => {
-      definition(schema, 'relative_path').anyOf = [];
+      schema.$defs.empty_union_test = { anyOf: [] };
     });
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('anyOf is empty');
+  });
+
+  it('refuses an empty oneOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      schema.$defs.empty_union_test = { oneOf: [] };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('oneOf is empty');
+  });
+
+  it('refuses a structural sibling beside a union', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'code_index_data').type = 'object';
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("puts 'type' beside a union");
+  });
+
+  it('refuses mixed anyOf and oneOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'code_index_data').oneOf = [{ type: 'string' }];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("combines 'anyOf' and 'oneOf'");
   });
 
   it('refuses structural keywords beside enum', async () => {
@@ -455,9 +497,28 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
   });
 
   it('refuses a bare positional argument', async () => {
-    const run = await runGeneratorWithArguments(() => [SCHEMA_PATH]);
+    const run = await runGeneratorWithArguments((directory) => [
+      SCHEMA_PATH,
+      '--out',
+      path.join(directory, 'bindings.ts'),
+    ]);
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain(`unexpected argument '${SCHEMA_PATH}'`);
+    expect(run.outputWritten).toBe(false);
+  });
+
+  it('refuses a trailing --schema with no value', async () => {
+    const run = await runGeneratorWithArguments(() => ['--schema']);
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('--schema requires a path');
+    expect(run.outputWritten).toBe(false);
+  });
+
+  it('refuses a trailing --out with no value', async () => {
+    const run = await runGeneratorWithArguments(() => ['--schema', SCHEMA_PATH, '--out']);
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('--out requires a path');
+    expect(run.outputWritten).toBe(false);
   });
 
   it('refuses a duplicate value flag', async () => {

@@ -110,6 +110,25 @@ function assertNoStructuralRefSiblings(schema, where) {
 }
 
 /**
+ * A union is emitted as `A | B`. JSON Schema evaluates any other structural
+ * keyword beside it as an intersection, which this emitter cannot represent,
+ * so fail instead of returning the union and dropping the sibling.
+ */
+function assertNoStructuralUnionSiblings(schema, where) {
+  if (schema.anyOf === undefined && schema.oneOf === undefined) return;
+  if (schema.anyOf !== undefined && schema.oneOf !== undefined) {
+    throw new Error(`${where} combines 'anyOf' and 'oneOf', which the bindings generator does not model`);
+  }
+  for (const keyword of Object.keys(schema)) {
+    if (STRUCTURAL_KEYWORDS.has(keyword) && keyword !== 'anyOf' && keyword !== 'oneOf') {
+      throw new Error(
+        `${where} puts '${keyword}' beside a union, which the bindings generator does not model`,
+      );
+    }
+  }
+}
+
+/**
  * `propertyNames` only reaches the binding when it leaves the key space open:
  * a plain string (or a reference to one). A closed set would need a mapped
  * type, so fail instead of emitting a wider `Record<string, T>` than the
@@ -179,10 +198,21 @@ function matchesDeclaredType(value, type) {
   }
 }
 
+/** `JSON.stringify` only emits a precise type for scalar literals. */
+function assertScalarLiteral(value, where) {
+  if (value === null) return;
+  const type = typeof value;
+  if (type === 'string' || type === 'number' || type === 'boolean') return;
+  throw new Error(
+    `${where} uses the non-scalar literal ${JSON.stringify(value)}, which the bindings generator does not model`,
+  );
+}
+
 /**
  * `enum`/`const` are emitted as literal unions. A structural sibling would be
- * dropped, and a `type` that no literal matches would emit a type the schema
- * can never satisfy, so check both instead of trusting the annotation.
+ * dropped, a non-scalar literal would widen to `{}`/`unknown[]`, and a `type`
+ * that no literal matches would emit a type the schema can never satisfy, so
+ * check all three instead of trusting the annotation.
  */
 function assertLiteralSiblings(schema, where) {
   const hasEnum = schema.enum !== undefined;
@@ -204,12 +234,15 @@ function assertLiteralSiblings(schema, where) {
   if (hasEnum && schema.enum.length === 0) {
     throw new Error(`${where}.enum is empty, which the bindings generator does not model`);
   }
+  const values = hasEnum ? schema.enum : [schema.const];
+  for (const value of values) {
+    assertScalarLiteral(value, `${where}.${hasEnum ? 'enum' : 'const'}`);
+  }
   if (schema.type !== undefined) {
     const types = Array.isArray(schema.type) ? schema.type : [schema.type];
     if (types.length === 0) {
       throw new Error(`${where}.type is empty, which the bindings generator does not model`);
     }
-    const values = hasEnum ? schema.enum : [schema.const];
     for (const value of values) {
       if (!types.some((type) => matchesDeclaredType(value, type))) {
         throw new Error(
@@ -273,6 +306,7 @@ function typeOf(schema, where = 'schema') {
   if (schema === false) return 'never';
   assertSchemaObject(schema, where);
   assertNoStructuralRefSiblings(schema, where);
+  assertNoStructuralUnionSiblings(schema, where);
   assertLiteralSiblings(schema, where);
   if (schema.$ref !== undefined) {
     return referenceName(schema, where);

@@ -417,6 +417,14 @@ journalctl --user -u unified-mpc-web.service -f
 
 Because both child units declare `PartOf=unified-mpc.service`, stopping or restarting the aggregate propagates to the MCP and Web services.
 
+The durable tool-activity log at `$XDG_DATA_HOME/unified-mpc/mcp-activity.log` is
+bounded. Before an append would exceed 4 MiB, the runtime rotates the active
+file to `mcp-activity.log.1`; only one archive is kept, so the pair stays at
+roughly two caps instead of growing for the life of the host. The `live_logs_*`
+tools read the active file's last 4 MiB, so every line they can serve stays in
+that file. Set `UNIFIED_MPC_ACTIVITY_LOG_MAX_BYTES` to change the cap; `0`
+disables rotation for an operator who ships the file elsewhere.
+
 ## 7. Security and network notes
 
 1. Both servers bind to loopback. Do not expose ports `18765` or `3000` directly on public interfaces.

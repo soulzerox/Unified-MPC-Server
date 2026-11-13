@@ -5,9 +5,9 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
-import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
-import { evaluateReviewEvidence, findReviewReceipt, readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity, reviewFingerprint, selectVerificationReceipt } from './review-gate.mjs';
+import { expectedFingerprint } from './local-verify.mjs';
+import { readPullDiff, readPullRequest, readReviewReceipts, readSkillIdentity } from './review-gate.mjs';
+import { evaluateMergeEligibility, findReviewReceipt, reviewFingerprint, selectVerificationReceipt } from './workflow-gate-core.mjs';
 
 /**
  * Repository-level guarded merge (#144).
@@ -27,7 +27,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RECEIPT_ROOT = path.join(ROOT, '.unified-mpc', 'local-verify');
 const MERGE_RECORD_ROOT = path.join(RECEIPT_ROOT, 'merges');
 const METHODS = ['squash', 'merge', 'rebase'];
-const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 export function parseArgs(argv) {
   const options = { base: 'main', method: 'squash', dryRun: false, deleteBranch: true, repo: undefined, pr: undefined };
@@ -94,56 +93,17 @@ export function findReceipt(receipts, headSha) {
   return selectVerificationReceipt(receipts, headSha);
 }
 
-// Defined next to `diffFingerprint` so the review gate can share the same rule
-// without importing this module, which already imports it.
+// Re-exported because this module is where the merge guard reports the exact
+// head, and `guarded-merge.test.mjs` asserts the fingerprint rule through it.
 export { expectedFingerprint };
 
 /**
- * Every blocker is reported, not just the first, so one run tells the operator
- * everything that stands between this head and a merge.
+ * The `integrate` gate is `workflow-gate-core.mjs`'s `evaluateMergeEligibility`.
+ * This module supplies the PR, GitHub state and the merge side effect; it does
+ * not own the policy, so the review gate and the merge guard refuse a head for
+ * the same reasons instead of keeping two copies of the same checks.
  */
-export function evaluateEligibility({ pr, receipt, review, reviewSkill, reviewFingerprint: headReviewFingerprint, headReceiptCount, corruptReviewReceipts, expectedBase, headFingerprint }) {
-  const blockers = [];
-  if (pr.state !== 'OPEN') blockers.push(`PR is not open (state=${pr.state})`);
-  if (pr.isDraft === true) blockers.push('PR is a draft');
-  if (pr.baseRefName !== expectedBase) blockers.push(`base is '${pr.baseRefName}', expected '${expectedBase}'`);
-  if (typeof pr.headRefOid !== 'string' || !HEAD_SHA_PATTERN.test(pr.headRefOid)) {
-    blockers.push(`PR head '${String(pr.headRefOid)}' is not a 40-character commit SHA`);
-  }
-  if (pr.mergeable !== 'MERGEABLE') blockers.push(`GitHub reports mergeable=${String(pr.mergeable)}`);
-  if (pr.mergeStateStatus !== 'CLEAN') blockers.push(`merge state is ${String(pr.mergeStateStatus)}, expected CLEAN`);
-
-  if (receipt === undefined) {
-    blockers.push('no local verification receipt for the current PR head; run `pnpm verify:local` on that commit');
-  } else {
-    if (receipt.headSha !== pr.headRefOid) blockers.push('receipt was produced for a different head');
-    if (receipt.mergeReady !== true) blockers.push('local verification receipt is not merge-ready');
-    if (receipt.dirty !== false) blockers.push('local verification receipt was produced from a dirty worktree');
-    if (receipt.profile !== 'merge') blockers.push(`local verification receipt used the '${String(receipt.profile)}' profile`);
-    // A bumped PROFILE_VERSION means the step set changed, so an older receipt
-    // vouched for steps this profile no longer runs.
-    if (receipt.profileVersion !== PROFILE_VERSION) {
-      blockers.push(`local verification receipt used profile version ${String(receipt.profileVersion)}, current is ${PROFILE_VERSION}`);
-    }
-    if (receipt.diffFingerprint !== headFingerprint) blockers.push('receipt fingerprint does not match the PR head');
-  }
-
-  const reviewEvaluation = evaluateReviewEvidence({
-    receipt: review,
-    headReceiptCount,
-    corruptReceiptCount: corruptReviewReceipts,
-    pr,
-    skill: reviewSkill,
-    fingerprint: headReviewFingerprint,
-  });
-  blockers.push(...reviewEvaluation.blockers);
-
-  for (const hazard of findNegatedClosingKeywordHazards({ title: pr.title, body: pr.body })) {
-    blockers.push(`PR ${hazard.source} retracts a closing keyword: "${hazard.excerpt}"`);
-  }
-
-  return { eligible: blockers.length === 0, blockers };
-}
+export { evaluateMergeEligibility as evaluateEligibility };
 
 function run(argv) {
   return new Promise((resolve, reject) => {
@@ -205,7 +165,7 @@ async function main() {
   ]);
   const receipt = findReceipt(verificationReceipts, pr.headRefOid);
   const review = findReviewReceipt(reviewStore.records, pr.headRefOid);
-  const { eligible, blockers } = evaluateEligibility({
+  const { eligible, blockers } = evaluateMergeEligibility({
     pr,
     receipt,
     review,

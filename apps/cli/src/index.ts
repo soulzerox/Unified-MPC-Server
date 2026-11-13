@@ -3,17 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appError, err, ok, type GoalRuntimeProjection, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { AuditService } from '@unified-mpc/audit';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
-import {
-  DoctorService,
-  WorkspaceSelectionService,
-  goalCompletionWorktreeBlockers,
-  type DoctorProbes,
-  type DoctorReport,
-  type WorkspaceSelectionSnapshot,
-} from '@unified-mpc/application';
+import { DoctorService, WorkspaceSelectionService, type DoctorProbes, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import {
   advanceRevisionFromGit,
   ArtifactQuarantineStore,
@@ -55,15 +48,11 @@ import {
   type RevisionPruneReport,
   type StoredArtifact,
   type Workspace,
-  workspaceLifecycleKind,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
-import { parseGateArgs, type GateCheckCommand } from './commands/gate.js';
-import { runCloseGate, type RunCloseGateResult } from './commands/gate-command.js';
 import { ThaiRagIndexJobStore, type ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { SqliteGoalRuntimeSnapshotRepository } from '@unified-mpc/storage';
 import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
@@ -248,7 +237,6 @@ export type CliCommand =
   | SkillAuditCommand
   | PublishCredentialCommand
   | WebCommand
-  | GateCheckCommand
   | ToolsCommand;
 
 export interface CliServerHandle {
@@ -321,13 +309,6 @@ export interface CliDependencies {
     writeError: (text: string) => void,
   ): Promise<number>;
   web?(options?: WebRunOptions): Promise<Result<WebRunResult>>;
-  gateCheck?(input: {
-    readonly workspaceId: string;
-    readonly goalId?: string;
-    readonly worktrees: readonly string[];
-    readonly dryRun: boolean;
-    readonly json: boolean;
-  }): Promise<Result<RunCloseGateResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
   readonly write?: (text: string) => void;
@@ -377,7 +358,6 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'skill') return parseSkillAuditArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
-  if (args[0] === 'gate') return parseGateArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
   return err(appError('INVALID_INPUT', 'Unknown unified-mpc command'));
 }
@@ -424,7 +404,6 @@ Commands:
   publish-credential revoke <lease>      Revoke a publish credential lease
   publish-credential status <lease>      Show lease expiry and hosts without the secret
   web [--port <p>]                       Start the Local Web Control Plane
-  gate check --phase close               Refuse or allow a goal close and record the verdict
   tools list                             List available downstream MCP tools
   tools call <tool> <args-json>          Call a downstream MCP tool headlessly
   workspace add <path>                   Register a workspace root
@@ -801,30 +780,6 @@ Commands:
       }
       write(`Control Plane running on ${result.value.url}`);
       return 0;
-    }
-    case 'gate-check': {
-      if (dependencies.gateCheck === undefined) {
-        writeError('Close gate is not available');
-        return 1;
-      }
-      try {
-        const result = await dependencies.gateCheck({
-          workspaceId: parsed.value.workspaceId,
-          ...(parsed.value.goalId === undefined ? {} : { goalId: parsed.value.goalId }),
-          worktrees: parsed.value.worktrees,
-          dryRun: parsed.value.dryRun,
-          json: parsed.value.json,
-        });
-        if (!result.ok) {
-          writeError(result.error.message);
-          return 1;
-        }
-        for (const line of result.value.lines) write(line);
-        return result.value.exitCode;
-      } catch (error) {
-        writeError(error instanceof Error ? error.message : String(error));
-        return 1;
-      }
     }
     case 'tools-list': {
       const listFn = dependencies.toolsList;
@@ -1609,76 +1564,6 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         return err(appError('INTERNAL_ERROR', errorText || `Tool ${name} failed`));
       }
       return ok(response);
-    },
-    gateCheck: async (input): Promise<Result<RunCloseGateResult>> => {
-      const state = getWorkspaceState();
-      const workspaces = await state.service.list();
-      const target = workspaces.find((candidate) => candidate.id === input.workspaceId);
-      if (target === undefined) {
-        return err(appError('WORKSPACE_NOT_FOUND', `Workspace ${input.workspaceId} is not registered`, true));
-      }
-      const registry = await getToolRegistry();
-      const actor = mcpRuntime?.actor;
-      const goalWorktrees = mcpRuntime?.services.goalWorktrees;
-      const snapshots = new SqliteGoalRuntimeSnapshotRepository(state.database);
-      return runCloseGate({
-        workspaceId: input.workspaceId,
-        ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
-        worktrees: input.worktrees,
-        dryRun: input.dryRun,
-        json: input.json,
-        receiptDirectory: path.join(target.rootPath, '.unified-mpc', 'gates'),
-        ports: {
-          cleanup: async () => {
-            const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
-            for (const workspace of workspaces) {
-              if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;
-              const snapshot = await snapshots.getGoalRuntimeSnapshot(workspace.goalId);
-              if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
-            }
-            return state.service.evaluateGoalWorkspaceCleanup({ goalRuntimeProjections });
-          },
-          removal: async (request) => {
-            const response = await registry.invoke('git_worktree_remove', {
-              workspaceId: request.workspaceId,
-              worktreePath: request.worktreePath,
-              dryRun: true,
-            });
-            const text = response.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
-            if (response.isError) return err(appError('INTERNAL_ERROR', text || 'git_worktree_remove dry run failed'));
-            let parsed: unknown;
-            try {
-              parsed = JSON.parse(text);
-            } catch {
-              return err(appError('INTERNAL_ERROR', 'git_worktree_remove did not return a JSON preview'));
-            }
-            const safety = (parsed as { worktreeSafety?: { status?: string; blockers?: readonly string[]; blockerDetails?: readonly string[] } }).worktreeSafety;
-            if (safety?.status !== 'clean' && safety?.status !== 'blocked' && safety?.status !== 'unavailable') {
-              return err(appError('INTERNAL_ERROR', 'git_worktree_remove returned no worktree safety verdict'));
-            }
-            return ok({
-              worktreePath: request.worktreePath,
-              status: safety.status,
-              blockers: safety.blockers ?? [],
-              blockerDetails: safety.blockerDetails ?? [],
-            });
-          },
-          completion: async (request) => {
-            // Fail closed: the completion check is one of the three inputs, so a
-            // runtime that cannot classify must not look like a clean goal.
-            if (goalWorktrees === undefined || actor === undefined) {
-              return err(appError('CONFLICT', 'Goal worktree reconciliation is unavailable; refusing to gate the close phase', true));
-            }
-            const classified = await goalWorktrees.classify({
-              actor: { clientId: actor.clientId, ...(actor.sessionId === undefined ? {} : { sessionId: actor.sessionId }) },
-              ownershipScope: 'client',
-              workspaceId: request.workspaceId,
-            });
-            if (!classified.ok) return classified;
-            return ok(goalCompletionWorktreeBlockers(classified.value.entries));
-          },
-        },
-      });
     },
   };
 }

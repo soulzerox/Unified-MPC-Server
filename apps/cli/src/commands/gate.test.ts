@@ -209,6 +209,19 @@ describe('close gate receipts', () => {
     await writeFile(file, JSON.stringify({ kind: 'workflow-gate', phase: 'integrate', version: 1 }), 'utf8');
     expect((await readCloseGateReceipt(file)).ok).toBe(false);
     expect((await readCloseGateReceipt(path.join(directory, 'missing.json'))).ok).toBe(false);
+
+    // A JSON document that is not an object, and a receipt whose verdict is not a
+    // verdict, are refused instead of being cast.
+    for (const [name, body] of [
+      ['null.json', 'null'],
+      ['array.json', '[]'],
+      ['no-verdict.json', JSON.stringify({ kind: 'workflow-gate', phase: 'close', version: 1, gateId: 'g', createdAt: 'now' })],
+      ['bad-verdict.json', JSON.stringify({ kind: 'workflow-gate', phase: 'close', version: 1, gateId: 'g', createdAt: 'now', verdict: { fingerprint: 'sha256:x' } })],
+    ] as const) {
+      const candidate = path.join(directory, name);
+      await writeFile(candidate, body, 'utf8');
+      expect((await readCloseGateReceipt(candidate)).ok).toBe(false);
+    }
   });
 });
 

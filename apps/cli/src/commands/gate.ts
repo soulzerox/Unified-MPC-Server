@@ -183,9 +183,10 @@ export interface CloseGateReceipt {
 }
 
 /**
- * Writes the verdict as one file. The filename carries the fingerprint so a
- * later phase can find the evidence for the exact inputs it is about to act on,
- * and so two runs over different inputs never overwrite each other.
+ * Writes the verdict as one file named after its subject and a fresh gate id, so
+ * two runs never overwrite each other. The fingerprint is inside the receipt
+ * rather than in the name: it describes the inputs, and a caller that wants to
+ * match evidence to state reads it rather than parsing a filename.
  */
 export async function writeCloseGateReceipt(options: {
   readonly directory: string;
@@ -222,10 +223,16 @@ export async function readCloseGateReceipt(file: string): Promise<Result<CloseGa
   } catch (cause) {
     return err(appError('INVALID_INPUT', `Could not read ${file}: ${(cause as Error).message}`));
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
+  }
   const receipt = parsed as Partial<CloseGateReceipt>;
+  const verdict = receipt.verdict;
   if (receipt.kind !== 'workflow-gate' || receipt.phase !== 'close' || receipt.version !== 1
     || typeof receipt.gateId !== 'string' || typeof receipt.createdAt !== 'string'
-    || receipt.verdict === undefined || typeof receipt.verdict.fingerprint !== 'string') {
+    || typeof verdict !== 'object' || verdict === null
+    || typeof verdict.fingerprint !== 'string' || typeof verdict.allowed !== 'boolean'
+    || typeof verdict.workspaceId !== 'string' || !Array.isArray(verdict.blockers)) {
     return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
   }
   return ok(receipt as CloseGateReceipt);

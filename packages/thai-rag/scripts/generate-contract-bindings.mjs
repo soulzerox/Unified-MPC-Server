@@ -145,7 +145,7 @@ function assertOpenStringKeySpace(schema, where, seen = new Set()) {
   }
   if (schema.type !== undefined) {
     const types = Array.isArray(schema.type) ? schema.type : [schema.type];
-    if (!types.every((type) => type === 'string')) {
+    if (types.length === 0 || !types.every((type) => type === 'string')) {
       throw new Error(
         `${where} constrains property names to ${JSON.stringify(schema.type)}, which the bindings generator does not model`,
       );
@@ -281,9 +281,11 @@ function typeOf(schema, where = 'schema') {
     assertOpenStringKeySpace(schema.propertyNames, `${where}.propertyNames`);
   }
   if (Array.isArray(schema.anyOf)) {
+    if (schema.anyOf.length === 0) throw new Error(`${where}.anyOf is empty, which the bindings generator does not model`);
     return unionOf(schema.anyOf.map((member, index) => typeOf(member, `${where}.anyOf[${index}]`)));
   }
   if (Array.isArray(schema.oneOf)) {
+    if (schema.oneOf.length === 0) throw new Error(`${where}.oneOf is empty, which the bindings generator does not model`);
     return unionOf(schema.oneOf.map((member, index) => typeOf(member, `${where}.oneOf[${index}]`)));
   }
   if (Array.isArray(schema.enum)) {
@@ -292,6 +294,7 @@ function typeOf(schema, where = 'schema') {
   if (schema.const !== undefined) return JSON.stringify(schema.const);
   const declared = schema.type;
   if (Array.isArray(declared)) {
+    if (declared.length === 0) throw new Error(`${where}.type is empty, which the bindings generator does not model`);
     return unionOf(declared.map((entry) => typeOf({ ...schema, type: entry, required: schema.required }, where)));
   }
   if (declared === 'string') return 'string';

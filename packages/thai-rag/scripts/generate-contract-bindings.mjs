@@ -112,15 +112,22 @@ function assertNoStructuralRefSiblings(schema, where) {
 /**
  * A union is emitted as `A | B`. JSON Schema evaluates any other structural
  * keyword beside it as an intersection, which this emitter cannot represent,
- * so fail instead of returning the union and dropping the sibling.
+ * so fail instead of returning the union and dropping the sibling. A union
+ * keyword that is not an array would otherwise fall through to `unknown`, so
+ * its shape is validated here before any member is inspected.
  */
 function assertNoStructuralUnionSiblings(schema, where) {
-  if (schema.anyOf === undefined && schema.oneOf === undefined) return;
-  if (schema.anyOf !== undefined && schema.oneOf !== undefined) {
+  const unions = ['anyOf', 'oneOf'].filter((keyword) => schema[keyword] !== undefined);
+  if (unions.length === 0) return;
+  if (unions.length > 1) {
     throw new Error(`${where} combines 'anyOf' and 'oneOf', which the bindings generator does not model`);
   }
+  const [union] = unions;
+  if (!Array.isArray(schema[union])) {
+    throw new Error(`${where}.${union} must be an array`);
+  }
   for (const keyword of Object.keys(schema)) {
-    if (STRUCTURAL_KEYWORDS.has(keyword) && keyword !== 'anyOf' && keyword !== 'oneOf') {
+    if (STRUCTURAL_KEYWORDS.has(keyword) && keyword !== union) {
       throw new Error(
         `${where} puts '${keyword}' beside a union, which the bindings generator does not model`,
       );
@@ -184,7 +191,11 @@ function assertOpenStringKeySpace(schema, where, seen = new Set()) {
   });
 }
 
-/** JSON Schema scalar types a literal can match. */
+/**
+ * JSON Schema types a literal can match. `assertScalarLiteral` runs first, so
+ * a structural declared type can never match and is reported as a mismatch
+ * instead of pretending an array or object literal was supported.
+ */
 function matchesDeclaredType(value, type) {
   switch (type) {
     case 'string': return typeof value === 'string';
@@ -192,8 +203,8 @@ function matchesDeclaredType(value, type) {
     case 'integer': return typeof value === 'number' && Number.isInteger(value);
     case 'boolean': return typeof value === 'boolean';
     case 'null': return value === null;
-    case 'array': return Array.isArray(value);
-    case 'object': return typeof value === 'object' && value !== null && !Array.isArray(value);
+    case 'array':
+    case 'object': return false;
     default: throw new Error(`unsupported JSON Schema type ${JSON.stringify(type)}`);
   }
 }

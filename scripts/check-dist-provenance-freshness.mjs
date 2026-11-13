@@ -36,6 +36,45 @@ export function scanDeployments(root) {
   return deployments;
 }
 
+/**
+ * A `dist` that exists for an app declaring a `bin` is a shipped, invocable
+ * artifact; without `build-provenance.json` it cannot report the build it
+ * serves. Only `apps/cli` produces the file (`web` and `cf-gateway` build with
+ * plain `tsc`), so a missing file must be judged by what the app ships rather
+ * than by scanning every `dist`.
+ */
+export function findUnattestedDeployments(root) {
+  const absoluteRoot = path.resolve(root);
+  const appsRoot = path.join(absoluteRoot, 'apps');
+  const unattested = [];
+  if (!fs.existsSync(appsRoot)) return unattested;
+  for (const entry of fs.readdirSync(appsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const appRoot = path.join(appsRoot, entry.name);
+    const distDirectory = path.join(appRoot, 'dist');
+    if (!fs.existsSync(distDirectory)) continue;
+    if (fs.existsSync(path.join(distDirectory, PROVENANCE_FILE))) continue;
+    const manifestPath = path.join(appRoot, 'package.json');
+    if (!declaresExecutable(manifestPath)) continue;
+    unattested.push({ appRoot, distDirectory, manifestPath });
+  }
+  return unattested;
+}
+
+function declaresExecutable(manifestPath) {
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  const bin = manifest?.bin;
+  if (typeof bin === 'string') return bin.trim().length > 0;
+  if (bin === null || typeof bin !== 'object') return false;
+  return Object.values(bin).some((target) => typeof target === 'string' && target.trim().length > 0);
+}
+
+
 export function findStaleDeployments(root, options = {}) {
   const toleranceMs = options.toleranceMs ?? DEFAULT_TOLERANCE_MS;
   const checked = [];
@@ -105,15 +144,22 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     process.exit(2);
   }
   const { checked, violations } = findStaleDeployments(root, { toleranceMs });
-  if (checked.length === 0) {
+  const unattested = findUnattestedDeployments(root);
+  if (checked.length === 0 && unattested.length === 0) {
     process.stdout.write('No deployment build provenance found; nothing to verify.\n');
-  } else if (violations.length === 0) {
+  } else if (violations.length === 0 && unattested.length === 0) {
     for (const deployment of checked) {
       process.stdout.write(
         `Deployment provenance is fresh: ${path.relative(root, deployment.provenancePath)} (${deployment.buildVersion ?? 'unknown build version'})\n`,
       );
     }
   } else {
+    for (const deployment of unattested) {
+      process.stderr.write(
+        `Unattested deployment artifacts: ${path.relative(root, deployment.distDirectory)} has no ${PROVENANCE_FILE}, `
+        + 'so the runtime cannot report the build it serves.\n',
+      );
+    }
     for (const violation of violations) {
       const provenanceLabel = `${path.relative(root, violation.provenancePath)} (${new Date(violation.provenanceTime).toISOString()}`;
       process.stderr.write(
@@ -127,11 +173,19 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
       const hidden = violation.newerFiles.length - MAX_REPORTED_FILES;
       if (hidden > 0) process.stderr.write(`- ... and ${row(hidden)} more\n`);
     }
-    process.stderr.write(
-      'The deployment would report a build the runtime was not compiled from. '
-      + 'Run a clean rebuild (`rm -rf apps/*/dist` plus the project `dist` directories, then `pnpm build`) '
-      + 'so the provenance describes the artifacts it ships with.\n',
-    );
+    if (unattested.length > 0) {
+      process.stderr.write(
+        'Build the shipped app so it writes its provenance (`pnpm build`) or restore the missing file; '
+        + 'the deployment must not stay without a build identity.\n',
+      );
+    }
+    if (violations.length > 0) {
+      process.stderr.write(
+        'The deployment would report a build the runtime was not compiled from. '
+        + 'Run a clean rebuild (`rm -rf apps/*/dist` plus the project `dist` directories, then `pnpm build`) '
+        + 'so the provenance describes the artifacts it ships with.\n',
+      );
+    }
     process.exitCode = 1;
   }
 }

@@ -1145,6 +1145,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       const runtimeAdmissionIdentity = options.runtimeAdmissionIdentity ?? createRuntimeAdmissionIdentity(loadBuildProvenance());
       mcpRuntime = createStdioMcpRuntime(resolveDataPathFromShared(), workspace, true, {
         runtimeAdmissionIdentity,
+        activityDiagnosticsLabel: 'Unified-MPC CLI',
         ...(options.thaiRagDriver === undefined ? {} : { thaiRagDriver: options.thaiRagDriver }),
         ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
       });

@@ -209,6 +209,8 @@ export interface StdioMcpRuntimeOptions {
   readonly thaiRagDriver?: ThaiRagProviderDriver;
   /** #766: destination for one line per failed provider child call; defaults to stderr. */
   readonly thaiRagDiagnostics?: (line: string) => void;
+  /** Prefix for activity-sink failure diagnostics so each entrypoint is greppable; defaults to `Unified-MPC`. */
+  readonly activityDiagnosticsLabel?: string;
   /** Cooldown before re-attempting a failed Thai-RAG provider start so one transient failure does not outlive the process. */
   readonly thaiRagStartRetryMs?: number;
   /** Steady-state follower retry budget while the owner socket is being recreated (#418). */
@@ -1410,7 +1412,7 @@ export function createStdioMcpRuntime(
         ? [sharedActivitySink, durableActivitySink]
         : [durableActivitySink, sharedActivitySink]).record(event);
     },
-  }, createActivityRecordErrorSink({ label: 'Unified-MPC MCP stdio' }), {
+  }, createActivityRecordErrorSink({ label: options.activityDiagnosticsLabel ?? 'Unified-MPC' }), {
     async record(event: ActivitySinkEvent, detail): Promise<void> {
       await auditService.recordMcpTool({
         actorId: actor.clientId,

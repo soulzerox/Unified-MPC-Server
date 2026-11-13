@@ -39,6 +39,7 @@ async function main(): Promise<void> {
   const runtimeAdmissionIdentity = createRuntimeAdmissionIdentity(buildProvenance);
   const runtime = createStdioMcpRuntime(dataPath, workspace, isUnrestricted(process.env, undefined), {
     persistWorkspaceSelection: true,
+    activityDiagnosticsLabel: 'Unified-MPC MCP HTTP',
     runtimeAdmissionIdentity,
     fullBypassAllProvider: desktopFullBypassAllProvider,
   });

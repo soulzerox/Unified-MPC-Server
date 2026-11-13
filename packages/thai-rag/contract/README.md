@@ -246,7 +246,7 @@ Selected mappings the corpus pins:
 | --- | --- | --- |
 | stale canonical expectation | `review_required` | `stale_index` |
 | foreign/unregistered workspace | `unavailable` | `scope_denied` |
-| caller demands a generation the active index cannot satisfy | `unavailable` | `incompatible_index` (reserved; see §8) |
+| caller demands a generation the active index cannot satisfy | `unavailable` | `incompatible_index`, `details.reason: "base_generation_not_active"` |
 | `sqlite3.OperationalError: database is locked` | `unavailable` | `storage_unavailable`, `details.retryable: true`, `details.reason: "sqlite_busy"` |
 | embedding backend down, lexical still works | `degraded` | `embedding_unavailable` |
 | index slot already occupied | `unavailable` | `indexing_conflict`, `details.job_id` names the active job |
@@ -273,17 +273,59 @@ without reading storage internals:
 | `storage` | Storage engine identity. |
 
 A caller that requires a specific generation is answered with
-`incompatible_index`; current indexing instead rebuilds for a changed embedding
-profile rather than rejecting the request (see §8). A generation is never
-silently reused across a contract, embedding-profile or index-generation
-change. File and revision identity stay independent of embedding identity:
-re-embedding must not rewrite revision ids, and a revision change must not
-invalidate vectors whose content hashes and profile still match.
+`incompatible_index` when that demand cannot be honoured. `attach_workspace_base`
+is the canonical demand point: it pins one base generation, so a generation
+that is no longer that workspace's active view is `unavailable` with
+`details.demanded_generation_id`, `details.active_generation_id` and
+`details.reason: "base_generation_not_active"` — not `invalid_input`, because
+the request is well-formed. Current indexing instead rebuilds for a changed
+embedding profile rather than rejecting the request (see §8). A generation is
+never silently reused across a contract, embedding-profile or index-generation
+change. `code_search` follows the same rule: when the caller requests hybrid
+evidence and the active generation was published by another embedding profile,
+the provider answers from the channel it can trust and names the missing vector
+channel in `warnings` instead of scoring mismatched vectors. A strong lexical
+answer that never requested the vector half stays `ok`. File and revision
+identity stay independent of embedding identity: re-embedding must not rewrite
+revision ids, and a revision change must not invalidate vectors whose content
+hashes and profile still match.
 
 ## 7. Fixture corpus
 
 `fixtures/index.json` is the manifest. Each fixture is a complete envelope and
-asserts its status, error codes and selected `data` fields.
+asserts its status, error codes and selected `data` fields. A fixture with
+non-null `data` names a `data_schema` under `$defs`; the test suite validates
+that payload, so the corpus machine-checks the operation fields it describes
+without closing `data` against additive fields.
+
+Every fixture's `metadata` version fields (`contract_version`,
+`provider_version`, `contract_fingerprint`, `compatibility_range`,
+`index_job_contract_version`, `generation.contract`) are pinned to the live
+provider constants. A contract change that bumps any of them must update the
+corpus in the same commit; `test_fixtures_match_the_live_contract_constants`
+fails otherwise.
+
+The same corpus is replayed on both surfaces this repo serves directly.
+`tests/test_provider_fixture_replay.py` drives one scripted core per fixture
+into the direct `ThaiRagProvider` and checks the declared status, error
+codes/details and pinned `data` fields, then validates the live envelope and
+operation payload against this schema.
+`tests/test_standalone_adapter_fixture_replay.py` replays the identical
+scenarios through the standalone FastMCP tool wrapper and requires the adapter
+payload to equal the provider envelope, allowing only the additive
+`presentation` key on a successful code tool. Both replays share their scenarios
+from `tests/contract_replay.py`, so the surfaces cannot drift apart. Every
+fixture must own a replay scenario, so a new state cannot be added as a document
+that nothing executes. The corpus therefore describes provider behavior, not
+only the fixtures themselves. The Unified-native adapter half of the
+shared-fixture deliverable stays with Unified's own suite.
+
+The same scenarios also cross the real data-owner process boundary:
+`tests/test_provider_boundary_fixture_replay.py` runs an owner subprocess, calls
+it through `_ForwardingProvider` exactly as a standalone follower does, and
+requires the rehydrated envelope to equal the direct provider result and the
+fixture declaration. A field that survives in-process but not the IPC JSON
+round-trip fails here.
 
 | State | Operation | Proves |
 | --- | --- | --- |
@@ -292,6 +334,9 @@ asserts its status, error codes and selected `data` fields.
 | `unavailable-storage` | `health` | every channel down is `unavailable` with typed errors |
 | `indexing-conflict` | `code_index` | a second job names the active job instead of queueing silently |
 | `workspace-scope-denied` | `code_search` | canonical scope is authorization |
+| `code-search-success` | `code_search` | a successful search pins query, items, rescue diagnostics and warnings |
+| `incompatible-index` | `attach_workspace_base` | a well-formed demand for an inactive generation is `incompatible_index`, not `invalid_input` |
+| `attach-success` | `attach_workspace_base` | a successful attach pins the base reference and identity |
 | `zero-change-verification` | `code_index` | an all-unchanged delta reuses the active generation and echoes identity |
 | `lexical-only-index` | `code_index` | lexical-only publication is `ok` with a named warning and `vectors_skipped:disabled` channel |
 | `stale-source` | `code_index` | stale fence is `review_required`, nothing published |
@@ -308,16 +353,19 @@ its authority as described in §1 rule 5. A native deployment only reports
 default is the honest answer, and `source_identity` presence remains the
 stronger signal during that rollout.
 
-1. `data` is open in `v1`. Per-operation payload schemas (beyond the fence, job
-   state and identity fields the corpus pins) are not yet machine-validated.
+1. `data` is open in `v1`. The corpus machine-validates every non-null payload
+   it carries (`health`, `code_index`, `index_status`, `code_search`,
+   `attach_workspace_base`), but the envelope does not dispatch `data` by
+   operation for consumers.
 2. Envelope `repository_id`/`revision_id` are claimed only when the core records
    a `source_identity`; they are not synthesized from `data` fields the provider
    cannot verify.
-3. `incompatible_index` is in the vocabulary and `generation` is in the
-   handshake, but no current code path emits that code: a changed embedding
-   profile rebuilds the generation instead of rejecting the request. The code is
-   reserved for a caller that demands a specific generation; do not treat its
-   absence as proof of compatibility — compare `metadata.generation` yourself.
+3. `incompatible_index` is emitted only where a caller actually demands one
+   generation: `attach_workspace_base` refuses a generation that is not the base
+   workspace's active view (§6). Indexing still rebuilds for a changed embedding
+   profile instead of rejecting the request, and operations that merely read the
+   active index do not take a generation demand. Do not treat the absence of
+   this code as proof of compatibility — compare `metadata.generation` yourself.
 
 Closing any of these requires a contract review because a consumer may already
 depend on the current truthful behavior.

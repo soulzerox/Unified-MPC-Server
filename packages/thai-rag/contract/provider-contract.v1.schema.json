@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:thai-rag-mcp:contract:provider:v1",
   "title": "Thai-RAG canonical provider contract v1",
-  "description": "Machine-readable form of the transport-independent Thai-RAG provider contract (issue #1). The top-level schema validates one ProviderResult envelope. Request-side definitions live in $defs: source_identity, expected_paths, deleted_paths and canonical_index_request. Closed definitions change only in a new major schema file, except ErrorCode, which may gain values within v1 (see its x-evolution annotation); provider data and metadata may add fields within v1. Normative field semantics are documented in contract/README.md.",
+  "description": "Machine-readable form of the transport-independent Thai-RAG provider contract (issue #1). The top-level schema validates one ProviderResult envelope. Request-side definitions live in $defs: source_identity, expected_paths, deleted_paths and canonical_index_request. Response payload definitions live in $defs: contract_handshake, code_index_data, index_status_data, code_search_data and attach_workspace_base_data. Closed definitions change only in a new major schema file, except ErrorCode, which may gain values within v1 (see its x-evolution annotation); provider data and metadata may add fields within v1. Normative field semantics are documented in contract/README.md.",
   "type": "object",
   "$ref": "#/$defs/provider_result",
   "$defs": {
@@ -224,6 +224,206 @@
         "generation": { "$ref": "#/$defs/generation_compatibility" },
         "embedding": { "$ref": "#/$defs/embedding_compatibility" },
         "readiness": { "$ref": "#/$defs/readiness" }
+      }
+    },
+    "code_index_channel_state": {
+      "title": "One code-index channel state",
+      "description": "Per-channel publication state carried by a code_index payload. Extra channel fields may be added within contract 1.x.",
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": true,
+      "properties": {
+        "state": { "type": "string", "minLength": 1 },
+        "records": { "type": ["integer", "null"], "minimum": 0 },
+        "expected_records": { "type": ["integer", "null"], "minimum": 0 },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "code_index_reconciliation": {
+      "title": "code_index reconciliation result",
+      "description": "Cross-store reconciliation summary. The corpus pins the fields a caller reads to decide whether the active generation was reused.",
+      "type": "object",
+      "required": ["status", "stale_paths", "removed", "failed", "reused_active_generation"],
+      "additionalProperties": true,
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "stale_paths": { "type": "array", "items": { "type": "string" } },
+        "removed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "object", "additionalProperties": true },
+        "reused_active_generation": { "type": "boolean" }
+      }
+    },
+    "code_index_publication_data": {
+      "title": "code_index publication payload",
+      "description": "The fields a code_index run that reached publication pins, including a cancelled publication. data stays open in contract 1.x; this definition validates the fields the corpus describes, not an exhaustive payload.",
+      "type": "object",
+      "required": [
+        "status",
+        "cancelled",
+        "indexed",
+        "skipped",
+        "unchanged",
+        "duration_s",
+        "workspace",
+        "generation_id",
+        "lexical_only",
+        "vector_coverage"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "status": { "type": "string", "minLength": 1 },
+        "cancelled": { "type": "boolean" },
+        "indexed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "unchanged": { "type": "integer", "minimum": 0 },
+        "policy_skipped": { "type": "integer", "minimum": 0 },
+        "skip_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "duration_s": { "type": "number", "minimum": 0 },
+        "workspace": { "type": "string", "minLength": 1 },
+        "generation_id": { "type": ["string", "null"], "minLength": 1 },
+        "active_generation_id": { "type": ["string", "null"], "minLength": 1 },
+        "source_snapshot_id": { "type": ["string", "null"], "minLength": 1 },
+        "embed_fallbacks": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "object", "additionalProperties": true },
+        "trial_truncated": { "type": "boolean" },
+        "scoped": { "type": "boolean" },
+        "mode": { "type": "string", "minLength": 1 },
+        "source_identity": { "anyOf": [{ "$ref": "#/$defs/source_identity" }, { "type": "null" }] },
+        "tombstones": { "type": "array", "items": { "type": "string" } },
+        "deleted_paths": { "$ref": "#/$defs/deleted_paths" },
+        "unfenced_paths": { "type": "array", "items": { "type": "string" } },
+        "lexical_only": { "type": "boolean" },
+        "vector_coverage": { "type": "string", "enum": ["none", "partial", "full"] },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "channels": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/code_index_channel_state" }
+        },
+        "reconciliation": { "$ref": "#/$defs/code_index_reconciliation" }
+      }
+    },
+    "code_index_dry_run_data": {
+      "title": "code_index dry-run payload",
+      "description": "A dry run scans and reports what it would index, but mutates nothing and publishes no generation. It is a successful code_index result with a different payload shape.",
+      "type": "object",
+      "required": [
+        "status",
+        "dry_run",
+        "workspace",
+        "would_index",
+        "indexed",
+        "skipped",
+        "total_files",
+        "duration_s"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "status": { "const": "dry_run" },
+        "dry_run": { "const": true },
+        "workspace": { "type": "string", "minLength": 1 },
+        "would_index": { "type": "array", "items": { "type": "string" } },
+        "would_delete": { "type": "array", "items": { "type": "string" } },
+        "indexed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "total_files": { "type": "integer", "minimum": 0 },
+        "duration_s": { "type": "number", "minimum": 0 },
+        "trial_truncated": { "type": "boolean" },
+        "scoped": { "type": "boolean" },
+        "mode": { "type": "string", "minLength": 1 },
+        "source_identity": { "anyOf": [{ "$ref": "#/$defs/source_identity" }, { "type": "null" }] }
+      }
+    },
+    "code_index_data": {
+      "title": "code_index payload",
+      "description": "A successful code_index result is either a publication (including a cancelled one) or a dry-run plan. data stays open in contract 1.x; this definition validates the fields the corpus describes.",
+      "anyOf": [
+        { "$ref": "#/$defs/code_index_publication_data" },
+        { "$ref": "#/$defs/code_index_dry_run_data" }
+      ]
+    },
+    "index_status_data": {
+      "title": "index_status payload",
+      "description": "Job state is data, not an envelope status. The fields pinned here are the ones a caller uses to follow and cancel a job.",
+      "type": "object",
+      "required": [
+        "job_id",
+        "workspace_id",
+        "status",
+        "indexed_files",
+        "cancellation_requested",
+        "cancellation_completed"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "job_id": { "type": "string", "minLength": 1 },
+        "workspace_id": { "$ref": "#/$defs/workspace_id" },
+        "status": { "type": "string", "minLength": 1 },
+        "indexed_files": { "type": "integer", "minimum": 0 },
+        "cancellation_requested": { "type": "boolean" },
+        "cancellation_completed": { "type": "boolean" }
+      }
+    },
+    "code_search_item": {
+      "title": "One code_search match",
+      "description": "A ranked code match. Extra fields may be added within contract 1.x.",
+      "type": "object",
+      "required": ["parent_id", "file_path", "start_line", "end_line", "symbol_name", "score", "content"],
+      "additionalProperties": true,
+      "properties": {
+        "parent_id": { "type": "string", "minLength": 1 },
+        "file_path": { "type": "string", "minLength": 1 },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "symbol_name": { "type": "string" },
+        "score": { "type": "number" },
+        "content": { "type": "string" }
+      }
+    },
+    "vector_rescue": {
+      "title": "code_search vector-rescue diagnostics",
+      "description": "Why the vector half was consulted, skipped or refused. The channel outcome is operation data, not a cached readiness probe.",
+      "type": "object",
+      "required": ["mode", "reason", "consulted"],
+      "additionalProperties": true,
+      "properties": {
+        "mode": { "type": "string", "enum": ["auto", "off", "always"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "consult_requested": { "type": "boolean" },
+        "incompatible": { "type": "boolean" },
+        "consulted": { "type": "boolean" },
+        "skipped": { "type": ["string", "null"] },
+        "lexical_matches": { "type": "integer", "minimum": 0 },
+        "vector_matches": { "type": "integer", "minimum": 0 },
+        "semantic_error": { "type": ["string", "null"] }
+      }
+    },
+    "code_search_data": {
+      "title": "code_search payload",
+      "description": "A successful search result. data stays open in contract 1.x; this definition validates the fields the corpus describes.",
+      "type": "object",
+      "required": ["query", "workspace_id", "items", "vector_rescue", "warnings", "semantic_error"],
+      "additionalProperties": true,
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "workspace_id": { "$ref": "#/$defs/workspace_id" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/code_search_item" } },
+        "vector_rescue": { "$ref": "#/$defs/vector_rescue" },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "semantic_error": { "type": ["string", "null"] }
+      }
+    },
+    "attach_workspace_base_data": {
+      "title": "attach_workspace_base payload",
+      "description": "The validated attach record. base_identity is the canonical identity the base generation recorded.",
+      "type": "object",
+      "required": ["workspace_id", "base_workspace_id", "base_generation_id", "base_identity", "created_at"],
+      "additionalProperties": true,
+      "properties": {
+        "workspace_id": { "$ref": "#/$defs/workspace_id" },
+        "base_workspace_id": { "$ref": "#/$defs/workspace_id" },
+        "base_generation_id": { "type": "string", "minLength": 1 },
+        "base_identity": { "$ref": "#/$defs/source_identity" },
+        "created_at": { "type": "string", "minLength": 1 }
       }
     },
     "provider_error": {

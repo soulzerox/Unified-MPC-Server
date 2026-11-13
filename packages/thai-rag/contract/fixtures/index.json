@@ -9,7 +9,8 @@
       "expect": {
         "status": "ok",
         "error_codes": []
-      }
+      },
+      "data_schema": "contract_handshake"
     },
     {
       "file": "fixtures/health-degraded-embedding.json",
@@ -20,7 +21,8 @@
         "error_codes": [
           "embedding_unavailable"
         ]
-      }
+      },
+      "data_schema": "contract_handshake"
     },
     {
       "file": "fixtures/health-unavailable-storage.json",
@@ -33,7 +35,8 @@
           "lexical_retrieval_unavailable",
           "vector_retrieval_degraded"
         ]
-      }
+      },
+      "data_schema": "contract_handshake"
     },
     {
       "file": "fixtures/indexing-conflict.json",
@@ -58,6 +61,17 @@
       }
     },
     {
+      "file": "fixtures/incompatible-index.json",
+      "operation": "attach_workspace_base",
+      "state": "incompatible-index",
+      "expect": {
+        "status": "unavailable",
+        "error_codes": [
+          "incompatible_index"
+        ]
+      }
+    },
+    {
       "file": "fixtures/zero-change-verification.json",
       "operation": "code_index",
       "state": "zero-change-verification",
@@ -69,7 +83,8 @@
           "indexed": 0,
           "reconciliation.reused_active_generation": true
         }
-      }
+      },
+      "data_schema": "code_index_data"
     },
     {
       "file": "fixtures/lexical-only-index.json",
@@ -82,7 +97,8 @@
           "lexical_only": true,
           "vector_coverage": "none"
         }
-      }
+      },
+      "data_schema": "code_index_data"
     },
     {
       "file": "fixtures/stale-source.json",
@@ -120,7 +136,8 @@
         "data_equals": {
           "status": "cancelled"
         }
-      }
+      },
+      "data_schema": "index_status_data"
     },
     {
       "file": "fixtures/typed-failure-sqlite-busy.json",
@@ -136,6 +153,33 @@
           "reason": "sqlite_busy"
         }
       }
+    },
+    {
+      "file": "fixtures/code-search-success.json",
+      "operation": "code_search",
+      "state": "code-search-success",
+      "expect": {
+        "status": "ok",
+        "error_codes": [],
+        "data_equals": {
+          "query": "provider contract",
+          "semantic_error": null
+        }
+      },
+      "data_schema": "code_search_data"
+    },
+    {
+      "file": "fixtures/attach-success.json",
+      "operation": "attach_workspace_base",
+      "state": "attach-success",
+      "expect": {
+        "status": "ok",
+        "error_codes": [],
+        "data_equals": {
+          "base_generation_id": "gen-base-8"
+        }
+      },
+      "data_schema": "attach_workspace_base_data"
     }
   ],
   "requests": [

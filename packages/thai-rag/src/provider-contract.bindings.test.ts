@@ -49,6 +49,10 @@ interface GeneratorRun {
   readonly stderr: string;
 }
 
+interface GeneratorRunWithOutput extends GeneratorRun {
+  readonly outputWritten: boolean;
+}
+
 function definition(schema: MutableContractSchema, name: string): MutableDefinition {
   const value = schema.$defs[name];
   if (value === undefined) throw new Error(`schema has no $defs.${name}`);
@@ -81,6 +85,29 @@ async function runGeneratorWith(
       { cwd: PACKAGE_ROOT, encoding: 'utf8' },
     );
     return { status: result.status, stderr: result.stderr };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Runs the generator with an explicit argument list and reports whether it
+ * wrote the output file, so a rejected command line cannot be mistaken for a
+ * silent write to the checked-in path.
+ */
+async function runGeneratorWithArguments(
+  argumentsFor: (directory: string) => string[],
+): Promise<GeneratorRunWithOutput> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'contract-bindings-'));
+  try {
+    const outputPath = path.join(directory, 'bindings.ts');
+    const result = spawnSync(
+      process.execPath,
+      [GENERATOR_PATH, ...argumentsFor(directory)],
+      { cwd: PACKAGE_ROOT, encoding: 'utf8' },
+    );
+    const outputWritten = await readFile(outputPath, 'utf8').then(() => true, () => false);
+    return { status: result.status, stderr: result.stderr, outputWritten };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -231,12 +258,219 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
     expect(run.stderr).toContain('closes the property-name set');
   });
 
-  it('refuses an unknown option before reading or writing anything', () => {
-    const run = spawnSync(process.execPath, [GENERATOR_PATH, '--schemaa', '/tmp/x.json'], {
-      cwd: PACKAGE_ROOT,
-      encoding: 'utf8',
-    });
+  it('refuses an unknown option before reading or writing anything', async () => {
+    const run = await runGeneratorWithArguments((directory) => [
+      '--schemaa',
+      SCHEMA_PATH,
+      '--out',
+      path.join(directory, 'bindings.ts'),
+    ]);
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain("unknown option '--schemaa'");
+    expect(run.outputWritten).toBe(false);
+  });
+
+  it('refuses a propertyNames schema that mixes anyOf and oneOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        anyOf: [{ type: 'string' }],
+        oneOf: [{ enum: ['src/a.ts'] }],
+      };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("combines 'anyOf' and 'oneOf'");
+  });
+
+  it('refuses a non-string type beside a propertyNames union', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        anyOf: [{ type: 'string' }],
+        type: 'number',
+      };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('constrains property names to "number"');
+  });
+
+  it('refuses an empty propertyNames union', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = { anyOf: [] };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('anyOf is empty, so it closes the property-name set');
+  });
+
+  it('refuses an empty propertyNames type array', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = { type: [] };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('constrains property names to []');
+  });
+
+  it('keeps a string-array type beside a propertyNames union', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        anyOf: [{ type: 'string' }],
+        type: ['string'],
+      };
+    });
+    expect(run.status, run.stderr.trim()).toBe(0);
+  });
+
+  it('refuses structural keywords beside a propertyNames string', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        type: 'string',
+        properties: {},
+      };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("uses 'properties' on a property name");
+  });
+
+  it('refuses an empty enum', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').enum = [];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('enum is empty');
+  });
+
+  it('refuses structural keywords beside const', async () => {
+    const run = await runGeneratorWith((schema) => {
+      const properties = definition(schema, 'provider_metadata').properties as Record<string, MutableDefinition>;
+      properties.provider_name.properties = { extra: { type: 'string' } };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("puts 'properties' beside const");
+  });
+
+  it('refuses a const whose declared type no value matches', async () => {
+    const run = await runGeneratorWith((schema) => {
+      const properties = definition(schema, 'provider_metadata').properties as Record<string, MutableDefinition>;
+      properties.provider_name.type = 'number';
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('declares type "number" but const contains "thai-rag"');
+  });
+
+  it('keeps compatible scalar const types', async () => {
+    const cases: readonly [unknown, string][] = [
+      [1, 'integer'],
+      [true, 'boolean'],
+      [null, 'null'],
+      [[], 'array'],
+      [{}, 'object'],
+    ];
+    for (const [value, type] of cases) {
+      const run = await runGeneratorWith((schema) => {
+        const properties = definition(schema, 'provider_metadata').properties as Record<string, MutableDefinition>;
+        const target = properties.provider_name;
+        for (const keyword of Object.keys(target)) delete target[keyword];
+        target.const = value;
+        target.type = type;
+      });
+      expect(run.status, `${type}: ${run.stderr.trim()}`).toBe(0);
+    }
+  });
+
+  it('refuses an empty type array', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'relative_path').type = [];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('type is empty');
+  });
+
+  it('refuses an empty anyOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'relative_path').anyOf = [];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('anyOf is empty');
+  });
+
+  it('refuses structural keywords beside enum', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').properties = { extra: { type: 'string' } };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("puts 'properties' beside enum");
+  });
+
+  it('refuses an enum whose declared type no value matches', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').type = 'number';
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('declares type "number" but enum contains "ok"');
+  });
+
+  it('keeps a compatible type beside enum', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').type = ['string', 'null'];
+    });
+    expect(run.status, run.stderr.trim()).toBe(0);
+  });
+
+  it('refuses a nested $ref with a structural sibling', async () => {
+    const run = await runGeneratorWith((schema) => {
+      const properties = definition(schema, 'provider_result').properties as Record<string, MutableDefinition>;
+      properties.status.required = ['status'];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('beside $ref');
+  });
+
+  it('refuses a top-level enum definition with a $ref sibling', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').$ref = '#/$defs/error_code';
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('beside $ref');
+  });
+
+  it('refuses --check=value instead of silently writing', async () => {
+    const run = await runGeneratorWithArguments((directory) => [
+      `--schema=${SCHEMA_PATH}`,
+      `--out=${path.join(directory, 'bindings.ts')}`,
+      '--check=true',
+    ]);
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("unknown option '--check=true'");
+    expect(run.outputWritten).toBe(false);
+  });
+
+  it('refuses a single-dash option', async () => {
+    const run = await runGeneratorWithArguments((directory) => [
+      '-s',
+      SCHEMA_PATH,
+      '--out',
+      path.join(directory, 'bindings.ts'),
+    ]);
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("unknown option '-s'");
+    expect(run.outputWritten).toBe(false);
+  });
+
+  it('refuses a bare positional argument', async () => {
+    const run = await runGeneratorWithArguments(() => [SCHEMA_PATH]);
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain(`unexpected argument '${SCHEMA_PATH}'`);
+  });
+
+  it('refuses a duplicate value flag', async () => {
+    const run = await runGeneratorWithArguments((directory) => [
+      '--schema',
+      SCHEMA_PATH,
+      '--schema',
+      SCHEMA_PATH,
+      '--out',
+      path.join(directory, 'bindings.ts'),
+    ]);
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("duplicate option '--schema'");
+    expect(run.outputWritten).toBe(false);
   });
 });

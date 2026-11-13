@@ -376,21 +376,36 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
     }
   });
 
-  it('refuses a non-scalar const', async () => {
+  it('refuses a non-scalar const even with a matching declared type', async () => {
     const run = await runGeneratorWith((schema) => {
       const properties = definition(schema, 'provider_metadata').properties as Record<string, MutableDefinition>;
       properties.provider_name.const = {};
+      properties.provider_name.type = 'object';
     });
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('non-scalar literal');
   });
 
-  it('refuses a non-scalar enum value', async () => {
+  it('refuses a non-scalar enum value even with a matching declared type', async () => {
     const run = await runGeneratorWith((schema) => {
-      definition(schema, 'provider_status').enum = ['ok', []];
+      const status = definition(schema, 'provider_status');
+      status.enum = [[]];
+      status.type = 'array';
     });
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('non-scalar literal');
+  });
+
+  it('refuses a scalar literal whose declared type is structural', async () => {
+    for (const type of ['array', 'object'] as const) {
+      const run = await runGeneratorWith((schema) => {
+        const properties = definition(schema, 'provider_metadata').properties as Record<string, MutableDefinition>;
+        properties.provider_name.const = 'thai-rag';
+        properties.provider_name.type = type;
+      });
+      expect(run.status, `${type}: ${run.stderr.trim()}`).not.toBe(0);
+      expect(run.stderr).toContain(`declares type "${type}" but const contains "thai-rag"`);
+    }
   });
 
   it('refuses an empty type array', async () => {
@@ -415,6 +430,22 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
     });
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('oneOf is empty');
+  });
+
+  it('refuses a non-array anyOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      schema.$defs.nonarray_union_test = { anyOf: { type: 'string' } };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('anyOf must be an array');
+  });
+
+  it('refuses a non-array oneOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      schema.$defs.nonarray_union_test = { oneOf: 'string' };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('oneOf must be an array');
   });
 
   it('refuses a structural sibling beside a union', async () => {
@@ -508,14 +539,28 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
   });
 
   it('refuses a trailing --schema with no value', async () => {
-    const run = await runGeneratorWithArguments(() => ['--schema']);
+    // A temp --out comes first so a parser regression that ignored the trailing
+    // flag would write there instead of the checked-in bindings.
+    const run = await runGeneratorWithArguments((directory) => [
+      '--out',
+      path.join(directory, 'bindings.ts'),
+      '--schema',
+    ]);
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('--schema requires a path');
     expect(run.outputWritten).toBe(false);
   });
 
   it('refuses a trailing --out with no value', async () => {
-    const run = await runGeneratorWithArguments(() => ['--schema', SCHEMA_PATH, '--out']);
+    // The earlier temp --out proves the write target: if the trailing flag were
+    // ignored, the generator would write there and outputWritten would be true.
+    const run = await runGeneratorWithArguments((directory) => [
+      '--schema',
+      SCHEMA_PATH,
+      '--out',
+      path.join(directory, 'bindings.ts'),
+      '--out',
+    ]);
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('--out requires a path');
     expect(run.outputWritten).toBe(false);

@@ -5346,6 +5346,60 @@ describe('canonical code_index source identity (#210 §13)', () => {
       }
     });
 
+    it('bounds a partial counter pair by its reported total (#1)', async () => {
+      // `index_status_data` does not require `skipped_files`, so a total can
+      // arrive without it. The reported total still bounds the pass: publishing
+      // `indexed > total` would hand the caller an impossible counter pair. A
+      // reported skipped counter with no total, on the other hand, keeps both
+      // counters and leaves the total unknown.
+      const dataRoot = await tempRoot();
+      const workspaceRoot = await tempRoot();
+      await write(workspaceRoot, 'src/a.ts', HELLO);
+      const driver = createCanonicalDriver({
+        dataRoot,
+        workspaceRoot,
+        calls: [],
+        source: null,
+        onTool: (tool, args) => (tool === 'index_status'
+          ? {
+            structuredContent: {
+              status: 'ok',
+              data: {
+                job_id: String(args.job_id),
+                workspace_id: workspaceId,
+                status: 'running',
+                ...(args.job_id === 'idx_providerover1'
+                  ? { indexed_files: 5, total_files: 3 }
+                  : { indexed_files: 2, skipped_files: 1 }),
+              },
+            },
+          }
+          : success(tool)),
+      });
+      try {
+        await startCanonicalDriver(driver, dataRoot);
+        const impossible = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providerover1',
+        });
+        expect(impossible.ok, 'an impossible counter pair should not fail the read').toBe(true);
+        if (impossible.ok && isRecord(impossible.value)) {
+          expect(impossible.value).not.toHaveProperty('indexedFiles');
+          expect(impossible.value).not.toHaveProperty('totalFiles');
+        }
+        const partial = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providerpartial1',
+        });
+        expect(partial).toMatchObject({ ok: true, value: { indexedFiles: 2, skippedFiles: 1 } });
+        if (partial.ok && isRecord(partial.value)) {
+          expect(partial.value).not.toHaveProperty('totalFiles');
+        }
+      } finally {
+        await driver.stop();
+      }
+    });
+
     function replayArgs(operation: string, fixture: CorpusFixture, workspaceRoot: string): Record<string, unknown> {
       const data = isRecord(fixture.data) ? fixture.data : {};
       const details = fixture.errors?.[0]?.details ?? {};

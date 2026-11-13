@@ -50,6 +50,7 @@ import {
   validateThaiRagHandshake,
   type ThaiRagProviderDriver,
   type ThaiRagProviderDriverHealth,
+  type ThaiRagIndexJobProgress,
   type ThaiRagProviderDriverStartOptions,
   type ThaiRagProviderHandshake,
   type ThaiRagReindexReason,
@@ -1425,8 +1426,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // embedding phase reports no file progress; keep the reaper off it.
       await this.jobs.recordHeartbeat(jobId, ownerId);
       const progress = nativeIndexProgress(status.value);
-      if (progress !== undefined && isRecordableIndexProgress(progress)) {
-        await this.jobs.recordProgress(jobId, progress, ownerId);
+      const durable = progress === undefined ? undefined : durableIndexProgress(progress);
+      if (durable !== undefined) {
+        await this.jobs.recordProgress(jobId, durable, ownerId);
       }
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus !== undefined && NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
@@ -2155,8 +2157,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // embedding phase reports no file progress; keep the reaper off it.
       await this.jobs.recordHeartbeat(jobId, ownerId);
       const progress = nativeIndexProgress(status.value);
-      if (progress !== undefined && isRecordableIndexProgress(progress)) {
-        await this.jobs.recordProgress(jobId, progress, ownerId);
+      const durable = progress === undefined ? undefined : durableIndexProgress(progress);
+      if (durable !== undefined) {
+        await this.jobs.recordProgress(jobId, durable, ownerId);
       }
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus !== undefined && NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
@@ -2744,12 +2747,18 @@ interface NativeIndexProgress {
   readonly cacheMissReasons?: Readonly<Record<string, number>>;
 }
 
-/** A durable progress row needs both derived counters, not just the indexed one. */
-function isRecordableIndexProgress(progress: NativeIndexProgress): progress is NativeIndexProgress & {
-  readonly skippedFiles: number;
-  readonly totalFiles: number;
-} {
-  return progress.skippedFiles !== undefined && progress.totalFiles !== undefined;
+/**
+ * A durable progress row needs the skipped counter; the store derives the total
+ * from the counters it stores. The reader itself never invents one, so a
+ * provider payload that reports no total stays unknown on the read path.
+ */
+function durableIndexProgress(progress: NativeIndexProgress): ThaiRagIndexJobProgress | undefined {
+  if (progress.skippedFiles === undefined) return undefined;
+  return {
+    ...progress,
+    skippedFiles: progress.skippedFiles,
+    totalFiles: progress.totalFiles ?? progress.indexedFiles + progress.skippedFiles,
+  };
 }
 
 function nativeIndexProgress(value: unknown): NativeIndexProgress | undefined {
@@ -2769,8 +2778,11 @@ function nativeIndexProgress(value: unknown): NativeIndexProgress | undefined {
   const reportedTotal = nestedValue(value, 'total_files');
   if (reportedTotal !== undefined && !valid(reportedTotal)) return undefined;
   const skippedFiles = reportedSkipped;
-  const totalFiles = reportedTotal ?? (skippedFiles === undefined ? undefined : indexedFiles + skippedFiles);
-  if (skippedFiles !== undefined && totalFiles !== undefined && indexedFiles + skippedFiles > totalFiles) {
+  const totalFiles = reportedTotal;
+  // A reported total still bounds the pass even when the skipped counter is
+  // missing, so a payload that indexed more files than it claims to contain is
+  // rejected instead of published as `indexed > total`.
+  if (totalFiles !== undefined && indexedFiles + (skippedFiles ?? 0) > totalFiles) {
     return undefined;
   }
   const base = {

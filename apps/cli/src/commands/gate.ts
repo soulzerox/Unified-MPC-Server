@@ -257,3 +257,83 @@ function describeBlocker(blocker: CloseGateBlocker): string {
 export function closeGateExitCode(verdict: CloseGateVerdict): number {
   return verdict.allowed ? 0 : 1;
 }
+
+export interface GateCheckCommand {
+  readonly kind: 'gate-check';
+  readonly phase: 'close';
+  readonly workspaceId: string;
+  readonly goalId?: string;
+  readonly worktrees: readonly string[];
+  readonly json: boolean;
+  readonly dryRun: boolean;
+}
+
+const GATE_USAGE = 'Usage: unified-mpc gate check --phase close --workspace <id>'
+  + ' [--goal <id>] [--worktree <path>]... [--json] [--dry-run]';
+
+/**
+ * Parses `gate check`. The phase is required rather than defaulted: this engine
+ * grows one phase at a time and a missing phase must not silently pick one.
+ */
+export function parseGateArgs(args: readonly string[]): Result<GateCheckCommand> {
+  if (args[0] !== 'check') return err(appError('INVALID_INPUT', GATE_USAGE));
+
+  let phase: string | undefined;
+  let workspaceId: string | undefined;
+  let goalId: string | undefined;
+  let json = false;
+  let dryRun = false;
+  const worktrees: string[] = [];
+
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    const value = (): string | undefined => args[index + 1];
+    switch (argument) {
+      case '--phase':
+        if (phase !== undefined || value() === undefined) return err(appError('INVALID_INPUT', GATE_USAGE));
+        phase = value();
+        index += 1;
+        break;
+      case '--workspace':
+        if (workspaceId !== undefined || value() === undefined) return err(appError('INVALID_INPUT', GATE_USAGE));
+        workspaceId = value();
+        index += 1;
+        break;
+      case '--goal':
+        if (goalId !== undefined || value() === undefined) return err(appError('INVALID_INPUT', GATE_USAGE));
+        goalId = value();
+        index += 1;
+        break;
+      case '--worktree':
+        if (value() === undefined) return err(appError('INVALID_INPUT', GATE_USAGE));
+        worktrees.push(value()!);
+        index += 1;
+        break;
+      case '--json':
+        if (json) return err(appError('INVALID_INPUT', GATE_USAGE));
+        json = true;
+        break;
+      case '--dry-run':
+        if (dryRun) return err(appError('INVALID_INPUT', GATE_USAGE));
+        dryRun = true;
+        break;
+      default:
+        return err(appError('INVALID_INPUT', GATE_USAGE));
+    }
+  }
+
+  if (phase !== 'close') {
+    return err(appError('INVALID_INPUT', phase === undefined ? GATE_USAGE : `Unknown gate phase: ${phase}`));
+  }
+  if (workspaceId === undefined) return err(appError('INVALID_INPUT', GATE_USAGE));
+
+  return ok({
+    kind: 'gate-check',
+    phase,
+    workspaceId,
+    ...(goalId === undefined ? {} : { goalId }),
+    worktrees,
+    json,
+    dryRun,
+  });
+}

@@ -49,13 +49,13 @@
     "embeddingIndexGeneration": 1,
     "generation": {
       "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
-      "embedding": "nomic-embed-text-v2-moe:latest",
+      "embedding": "embeddinggemma-2-Q8_0",
       "index": "unknown",
       "storage": "sqlite"
     },
     "embedding": {
-      "profile": "nomic-embed-text-v2-moe:latest",
-      "model": "nomic-embed-text-v2-moe:latest",
+      "profile": "embeddinggemma-2-Q8_0",
+      "model": "embeddinggemma-2-Q8_0",
       "dimension": 768,
       "preprocessing_version": "1",
       "ready": true
@@ -70,10 +70,10 @@
     "ready": false,
     "embedding_ready": true,
     "embedding_backend": {
-      "backend": "ollama",
-      "model": "nomic-embed-text-v2-moe:latest",
-      "base_url": "http://127.0.0.1:11434",
-      "keep_alive": "5m",
+      "backend": "llamacpp",
+      "model": "embeddinggemma-2-Q8_0",
+      "base_url": "http://127.0.0.1:8080",
+      "keep_alive": null,
       "ready": true,
       "reason": null
     },
@@ -125,13 +125,13 @@
     "index_job_contract_version": "1.1",
     "generation": {
       "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
-      "embedding": "nomic-embed-text-v2-moe:latest",
+      "embedding": "embeddinggemma-2-Q8_0",
       "index": "unknown",
       "storage": "sqlite"
     },
     "embedding": {
-      "profile": "nomic-embed-text-v2-moe:latest",
-      "model": "nomic-embed-text-v2-moe:latest",
+      "profile": "embeddinggemma-2-Q8_0",
+      "model": "embeddinggemma-2-Q8_0",
       "dimension": 768,
       "preprocessing_version": "1",
       "ready": true

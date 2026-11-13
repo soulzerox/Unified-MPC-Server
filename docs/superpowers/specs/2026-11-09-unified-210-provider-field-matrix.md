@@ -123,7 +123,7 @@ is negotiated through the handshake and the provider's own generation record:
 | `contract_fingerprint` | `metadata` / handshake | Must be a tested fingerprint |
 | `compatibility_range` | `metadata` / handshake | Must admit the vendored v1 |
 | `generation.{contract,embedding,index,storage}` | `metadata` | Provider reuse key; compare it yourself. `incompatible_index` is reserved vocabulary: no current code path emits it (README §8) — a changed embedding profile rebuilds the generation instead of rejecting the request |
-| `expectedEmbeddingProfile` / `expectedEmbeddingModel` / `expectedPreprocessingVersion` | Unified-side handshake-validation options | Not sent to the provider: `validateThaiRagHandshake` checks them against the handshake. Contract 1.0 maps to `nomic-embed-text-v2-moe` + preprocessing `1` |
+| `expectedEmbeddingProfile` / `expectedEmbeddingModel` / `expectedPreprocessingVersion` | Unified-side handshake-validation options | Not sent to the provider: `validateThaiRagHandshake` checks them against the handshake. Contract 1.0 maps to the llama.cpp deployment identity (`embeddinggemma-2-Q8_0`) + preprocessing `1`; the retired `nomic-embed-text-v2-moe` identity survives only as 0.9 bridge metadata (#786) |
 
 The provider records exactly one generation identity per contract/embedding/
 index/storage tuple. Unified never reads storage internals to decide reuse.

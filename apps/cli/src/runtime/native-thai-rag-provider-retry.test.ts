@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { McpClientFactory, McpClientSession } from '@unified-mpc/extensions';
-import { THAI_RAG_CANCEL_CAPABILITY, THAI_RAG_CANCEL_CONTRACT_FINGERPRINT } from '@unified-mpc/thai-rag';
+import { THAI_RAG_CANCEL_CAPABILITY, THAI_RAG_CANCEL_CONTRACT_FINGERPRINT, THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver, runWithHeartbeat } from './native-thai-rag-provider.js';
 
 const workspaceId = '11111111-1111-4111-8111-111111111111';
@@ -36,13 +36,13 @@ function handshake(): Record<string, unknown> {
       lexical_retrieval_available: true, semantic_retrieval_available: true, active_jobs: [],
     },
     embedding: {
-      profile: 'nomic-embed-text-v2-moe',
-      model: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+      model: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`,
       dimension: 768, preprocessing_version: '1',
     },
     generation: {
       contract: THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
-      embedding: 'nomic-embed-text-v2-moe', index: '1', storage: 'sqlite',
+      embedding: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE, index: '1', storage: 'sqlite',
     },
   };
 }

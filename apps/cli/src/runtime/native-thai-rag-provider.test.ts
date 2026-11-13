@@ -23,6 +23,7 @@ import {
   THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
   THAI_RAG_CONFORMANCE_FIXTURE,
   THAI_RAG_CONTRACT_FINGERPRINT,
+  THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
 } from '@unified-mpc/thai-rag';
@@ -2539,7 +2540,7 @@ describe('NativeThaiRagProviderDriver', () => {
       embedding_index_generation: 2,
       generation: {
         contract: THAI_RAG_CONTRACT_FINGERPRINT,
-        embedding: 'nomic-embed-text-v2-moe',
+        embedding: 'some-other-embedding',
         index: '2',
         storage: 'sqlite',
       },
@@ -2585,8 +2586,8 @@ describe('NativeThaiRagProviderDriver', () => {
     const workspaceRoot = await tempRoot();
     const tagged = {
       ...defaultHandshake(),
-      embedding: { ...defaultHandshake().embedding as Record<string, unknown>, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest' },
-      generation: { ...defaultHandshake().generation as Record<string, unknown>, embedding: 'nomic-embed-text-v2-moe:latest' },
+      embedding: { ...defaultHandshake().embedding as Record<string, unknown>, profile: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}:latest` },
+      generation: { ...defaultHandshake().generation as Record<string, unknown>, embedding: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}:latest` },
     };
     const driver = new NativeThaiRagProviderDriver({
       dataRoot,
@@ -2614,7 +2615,7 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     await expect(driver.health()).resolves.toMatchObject({
       ok: true,
-      value: { contractVersion: '1.0', indexJobContractVersion: '1.0', embedding: { profile: 'nomic-embed-text-v2-moe' } },
+      value: { contractVersion: '1.0', indexJobContractVersion: '1.0', embedding: { profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE } },
     });
     await driver.stop();
   });
@@ -2635,7 +2636,7 @@ describe('NativeThaiRagProviderDriver', () => {
     });
     await expect(driver.health()).resolves.toMatchObject({
       ok: true,
-      value: { contractVersion: '1.0', indexJobContractVersion: '1.0', embedding: { profile: 'nomic-embed-text-v2-moe' } },
+      value: { contractVersion: '1.0', indexJobContractVersion: '1.0', embedding: { profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE } },
     });
     await driver.stop();
   });
@@ -3475,14 +3476,14 @@ function defaultHandshake(): Record<string, unknown> {
       active_jobs: [],
     },
     embedding: {
-      profile: 'nomic-embed-text-v2-moe',
-      model: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+      model: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`,
       dimension: 768,
       preprocessing_version: '1',
     },
     generation: {
       contract: THAI_RAG_CONTRACT_FINGERPRINT,
-      embedding: 'nomic-embed-text-v2-moe',
+      embedding: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
       index: '1',
       storage: 'sqlite',
     },

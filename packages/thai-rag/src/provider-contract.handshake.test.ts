@@ -7,8 +7,13 @@ import {
   THAI_RAG_CONTRACT_VERSION,
   THAI_RAG_CONSTRAINT_RESOLUTION_CAPABILITY,
   THAI_RAG_CONSTRAINT_RESOLUTION_CONTRACT_FINGERPRINT,
+  THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+  THAI_RAG_EMBEDDING_COMPATIBILITY,
+  THAI_RAG_EMBEDDING_MODEL,
+  THAI_RAG_EMBEDDING_PROFILE,
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+  THAI_RAG_LEGACY_EMBEDDING_PROFILE,
   THAI_RAG_PRODUCTION_BRIDGE,
   THAI_RAG_REQUIRED_CAPABILITIES,
   validateThaiRagHandshake,
@@ -26,14 +31,14 @@ const baseHandshake: ThaiRagProviderHandshake = {
   workspaceScopeModel: 'explicit_workspace_id',
   health: 'ready',
   embedding: {
-    profile: 'nomic-embed-text-v2-moe',
-    model: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+    model: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`,
     dimension: 768,
     preprocessingVersion: '1',
   },
   generation: {
     contract: THAI_RAG_CONTRACT_FINGERPRINT,
-    embedding: 'nomic-embed-text-v2-moe',
+    embedding: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
     index: '1',
     storage: 'sqlite',
   },
@@ -236,8 +241,8 @@ describe('Thai-RAG provider handshake', () => {
       ...baseHandshake,
       contractVersion: '0.9',
       compatibilityRange: { min: '0.9', max: '1.x' },
-      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', preprocessingVersion: undefined },
-      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest', index: 'unknown' },
+      embedding: { ...baseHandshake.embedding, profile: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, embedding: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, index: 'unknown' },
       health: 'degraded',
       components: {
         workerReachable: true,
@@ -260,8 +265,8 @@ describe('Thai-RAG provider handshake', () => {
       contractVersion: '0.9',
       compatibilityRange: { min: '0.9', max: '1.x' },
       health: 'degraded',
-      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', preprocessingVersion: undefined },
-      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest', index: 'unknown' },
+      embedding: { ...baseHandshake.embedding, profile: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, embedding: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, index: 'unknown' },
       components: {
         workerReachable: true,
         sqliteAvailable: true,
@@ -292,29 +297,36 @@ describe('Thai-RAG provider handshake', () => {
     for (const change of [
       { compatibilityRange: { min: '2.0', max: '2.x' } },
       { embedding: { ...baseHandshake.embedding, model: 'other@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' } },
-      { embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe@sha256:bad-digest' } },
+      { embedding: { ...baseHandshake.embedding, model: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}@sha256:bad-digest` } },
       { embedding: { ...baseHandshake.embedding, preprocessingVersion: '2' } },
       { embedding: { ...baseHandshake.embedding, preprocessingVersion: undefined } },
       { generation: { ...baseHandshake.generation, embedding: 'other-profile' } },
     ]) {
-      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' });
+      const result = validateThaiRagHandshake({ ...baseHandshake, ...change }, { expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL, expectedPreprocessingVersion: '1' });
       expect(result.ok).toBe(false);
     }
   });
 
+  // The deployment attestation owns the 1.0 identity and a bridged 0.9 producer
+  // is trusted through its adapter, so the digest options are exercised on a
+  // forward-compatible minor contract: the shape a future provider would use
+  // when it is not yet covered by `THAI_RAG_EMBEDDING_COMPATIBILITY` (#786).
+  const futureMinor: ThaiRagProviderHandshake = { ...baseHandshake, contractVersion: '1.1' };
+
   it('accepts model-family metadata without requiring a digest', () => {
-    expect(validateThaiRagHandshake({ ...baseHandshake, embedding: { ...baseHandshake.embedding, model: 'nomic-embed-text-v2-moe' } }, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' }).ok).toBe(true);
+    const undigested = { ...futureMinor, embedding: { ...futureMinor.embedding, model: THAI_RAG_EMBEDDING_MODEL } };
+    expect(validateThaiRagHandshake(undigested, { expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL }).ok).toBe(true);
   });
 
   it('normalizes supported provider model tags', () => {
     const tagged = {
       ...baseHandshake,
-      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest' },
-      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest' },
+      embedding: { ...baseHandshake.embedding, profile: `${THAI_RAG_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_EMBEDDING_MODEL}:latest` },
+      generation: { ...baseHandshake.generation, embedding: `${THAI_RAG_EMBEDDING_PROFILE}:latest` },
     };
     expect(validateThaiRagHandshake(tagged)).toMatchObject({ ok: true, value: {
-      embedding: { profile: 'nomic-embed-text-v2-moe', model: 'nomic-embed-text-v2-moe' },
-      generation: { embedding: 'nomic-embed-text-v2-moe' },
+      embedding: { profile: THAI_RAG_EMBEDDING_PROFILE, model: THAI_RAG_EMBEDDING_MODEL },
+      generation: { embedding: THAI_RAG_EMBEDDING_PROFILE },
     } });
   });
 
@@ -333,14 +345,14 @@ describe('Thai-RAG provider handshake', () => {
       ...baseHandshake,
       embedding: { ...baseHandshake.embedding, profile: 'other-profile', model: 'other-profile' },
       generation: { ...baseHandshake.generation, embedding: 'other-profile' },
-    }, { expectedEmbeddingProfile: 'nomic-embed-text-v2-moe', expectedEmbeddingModel: 'nomic-embed-text-v2-moe', expectedPreprocessingVersion: '1' });
+    }, { expectedEmbeddingProfile: THAI_RAG_EMBEDDING_PROFILE, expectedEmbeddingModel: THAI_RAG_EMBEDDING_MODEL, expectedPreprocessingVersion: '1' });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
   });
 
   it('enforces digest only when expected model publishes trusted digest', () => {
-    const matching = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', expectedPreprocessingVersion: '1' });
-    const drifted = validateThaiRagHandshake(baseHandshake, { expectedEmbeddingModel: 'nomic-embed-text-v2-moe@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210', expectedPreprocessingVersion: '1' });
+    const matching = validateThaiRagHandshake(futureMinor, { expectedEmbeddingModel: `${THAI_RAG_EMBEDDING_MODEL}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` });
+    const drifted = validateThaiRagHandshake(futureMinor, { expectedEmbeddingModel: `${THAI_RAG_EMBEDDING_MODEL}@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210` });
     expect(matching.ok).toBe(true);
     expect(drifted.ok).toBe(false);
   });
@@ -390,8 +402,8 @@ describe('Thai-RAG provider handshake', () => {
       ...baseHandshake,
       contractVersion: '0.9',
       compatibilityRange: { min: '0.9', max: '1.x' },
-      embedding: { ...baseHandshake.embedding, profile: 'nomic-embed-text-v2-moe:latest', model: 'nomic-embed-text-v2-moe:latest', preprocessingVersion: undefined },
-      generation: { ...baseHandshake.generation, embedding: 'nomic-embed-text-v2-moe:latest' },
+      embedding: { ...baseHandshake.embedding, profile: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, preprocessingVersion: undefined },
+      generation: { ...baseHandshake.generation, embedding: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest` },
       capabilities: [...baseHandshake.capabilities],
       legacyAdapter: THAI_RAG_PRODUCTION_BRIDGE,
     }, { allowLegacyAdapter: true });
@@ -401,20 +413,20 @@ describe('Thai-RAG provider handshake', () => {
 
 describe('Thai-RAG producer handshake shape (issue #332)', () => {
   // Captured from the live provider `version` result on thai-rag main
-  // (18231ac): both embedding.profile and generation.embedding carry the
-  // `:latest` suffix and generation.index is 'unknown' until an index run
-  // publishes a generation. Pinned so the contract cannot start rejecting
-  // the shape the producer actually emits.
+  // (bec781f): the embedding identity is the llama.cpp deployment artifact that
+  // `THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE` attests, and generation.index is
+  // 'unknown' until an index run publishes a generation. Pinned so the contract
+  // cannot start rejecting the shape the producer actually emits (#786).
   const liveShape: ThaiRagProviderHandshake = {
     ...baseHandshake,
     embedding: {
       ...baseHandshake.embedding,
-      profile: 'nomic-embed-text-v2-moe:latest',
-      model: 'nomic-embed-text-v2-moe:latest',
+      profile: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+      model: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
     },
     generation: {
       contract: THAI_RAG_CONTRACT_FINGERPRINT,
-      embedding: 'nomic-embed-text-v2-moe:latest',
+      embedding: THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
       index: 'unknown',
       storage: 'sqlite',
     },
@@ -423,21 +435,16 @@ describe('Thai-RAG producer handshake shape (issue #332)', () => {
   it('accepts the exact shape the producer emits today', () => {
     const validated = validateThaiRagHandshake(liveShape);
     expect(validated.ok).toBe(true);
-    // The validator normalizes the `:latest` suffix on both sides, so the
-    // accepted value is the canonical profile name.
-    if (validated.ok) {
-      expect(validated.value.generation.embedding).toBe('nomic-embed-text-v2-moe');
-      expect(validated.value.embedding.profile).toBe('nomic-embed-text-v2-moe');
-    }
+    if (validated.ok) expect(validated.value.embedding.profile).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
   });
 
-  it('normalizes a one-sided :latest suffix instead of reporting drift', () => {
-    const asymmetric = validateThaiRagHandshake({
+  it('canonicalizes a tagged deployment identity instead of reporting drift', () => {
+    const tagged = validateThaiRagHandshake({
       ...liveShape,
-      generation: { ...liveShape.generation, embedding: 'nomic-embed-text-v2-moe' },
+      embedding: { ...liveShape.embedding, profile: `${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}:latest` },
     });
-    expect(asymmetric.ok).toBe(true);
-    if (asymmetric.ok) expect(asymmetric.value.generation.embedding).toBe('nomic-embed-text-v2-moe');
+    expect(tagged.ok).toBe(true);
+    if (tagged.ok) expect(tagged.value.embedding.profile).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
   });
 
   it('still fails closed when the generation names a different embedding', () => {
@@ -447,5 +454,31 @@ describe('Thai-RAG producer handshake shape (issue #332)', () => {
     });
     expect(drifted.ok).toBe(false);
     if (!drifted.ok) expect(drifted.error.details?.reason).toBe('generation-drift');
+  });
+});
+
+describe('Thai-RAG supported embedding identity (#786)', () => {
+  it('attests the deployed llama.cpp artifact as the contract 1.0 profile', () => {
+    expect(THAI_RAG_EMBEDDING_PROFILE).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
+    expect(THAI_RAG_EMBEDDING_COMPATIBILITY['1.0'].profile).toBe(THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE);
+    expect(THAI_RAG_EMBEDDING_COMPATIBILITY['1.0'].model).toBe(THAI_RAG_EMBEDDING_PROFILE);
+  });
+
+  it('refuses a contract 1.0 handshake that still claims the retired Ollama/Nomic identity', () => {
+    // A literal, not the constant: this pins the identity a pre-Phase-B provider
+    // used to emit, which the 1.0 contract must no longer accept.
+    const retiredIdentity = 'nomic-embed-text-v2-moe';
+    const retired = {
+      ...baseHandshake,
+      embedding: {
+        ...baseHandshake.embedding,
+        profile: retiredIdentity,
+        model: retiredIdentity,
+      },
+      generation: { ...baseHandshake.generation, embedding: retiredIdentity },
+    };
+    const result = validateThaiRagHandshake(retired);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.details?.reason).toBe('embedding-metadata-invalid');
   });
 });

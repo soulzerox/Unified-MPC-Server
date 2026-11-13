@@ -1621,10 +1621,10 @@ export function createStdioMcpRuntime(
  * (PATH/HOME/TMP/LANG, see `isSafeExternalEnvironmentKey`), so anything the
  * provider must know about this node's deployment has to be listed here
  * explicitly. The node contract attests the deployment embedding profile
- * (`THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE` via llama.cpp); a host booted
- * without a backend falls back to the thai-rag ollama/nomic defaults, which can
- * never satisfy that attestation and keeps every rag/memory call behind
- * CONFLICT. An explicitly configured host environment stays authoritative.
+ * (`THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE` via llama.cpp); naming it here keeps a
+ * 1.0 handshake attesting the artifact this build expects instead of relying on
+ * the provider's own fallback. An explicitly configured host environment stays
+ * authoritative.
  */
 export function thaiRagProviderLaunchEnv(processEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
   // Empty-string values are treated as unset: Python treats ``""`` for

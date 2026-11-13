@@ -94,6 +94,22 @@ function referenceName(schema, where) {
 }
 
 /**
+ * JSON Schema 2020-12 evaluates siblings beside `$ref`; every emitter here
+ * would return the referenced type and silently drop them.
+ */
+function assertNoStructuralRefSiblings(schema, where) {
+  if (schema.$ref === undefined) return;
+  const siblings = Object.keys(schema).filter(
+    (keyword) => STRUCTURAL_KEYWORDS.has(keyword) && keyword !== '$ref',
+  );
+  if (siblings.length > 0) {
+    throw new Error(
+      `${where} puts ${siblings.map((keyword) => `'${keyword}'`).join(', ')} beside $ref, which the bindings generator does not model`,
+    );
+  }
+}
+
+/**
  * `propertyNames` only reaches the binding when it leaves the key space open:
  * a plain string (or a reference to one). A closed set would need a mapped
  * type, so fail instead of emitting a wider `Record<string, T>` than the
@@ -102,6 +118,7 @@ function referenceName(schema, where) {
 function assertOpenStringKeySpace(schema, where, seen = new Set()) {
   if (schema === true) return;
   assertSchemaObject(schema, where);
+  assertNoStructuralRefSiblings(schema, where);
   if (schema.$ref !== undefined) {
     const { name, definition } = referenceDefinition(schema, where);
     if (seen.has(name)) {
@@ -185,17 +202,8 @@ function typeOf(schema, where = 'schema') {
   if (schema === true) return 'unknown';
   if (schema === false) return 'never';
   assertSchemaObject(schema, where);
+  assertNoStructuralRefSiblings(schema, where);
   if (schema.$ref !== undefined) {
-    // JSON Schema 2020-12 evaluates siblings beside `$ref`; this generator
-    // would return the referenced type and silently drop them.
-    const siblings = Object.keys(schema).filter(
-      (keyword) => STRUCTURAL_KEYWORDS.has(keyword) && keyword !== '$ref',
-    );
-    if (siblings.length > 0) {
-      throw new Error(
-        `${where} puts ${siblings.map((keyword) => `'${keyword}'`).join(', ')} beside $ref, which the bindings generator does not model`,
-      );
-    }
     return referenceName(schema, where);
   }
   if (schema.propertyNames !== undefined) {
@@ -257,6 +265,7 @@ function render(schema, schemaReference = SCHEMA_REFERENCE) {
   ].join('\n')];
   for (const [name, definition] of Object.entries(definitions)) {
     assertSchemaObject(definition, `$defs.${name}`);
+    assertNoStructuralRefSiblings(definition, `$defs.${name}`);
     const typeName = pascalCase(name);
     if (Array.isArray(definition.enum)) {
       const values = definition.enum.map((value) => JSON.stringify(value)).join(', ');
@@ -290,7 +299,15 @@ function render(schema, schemaReference = SCHEMA_REFERENCE) {
   ].join('\n');
 }
 
+const KNOWN_FLAGS = new Set(['--check', '--schema', '--out']);
+
 function argumentValue(flag) {
+  const inline = process.argv.slice(2).find((argument) => argument.startsWith(`${flag}=`));
+  if (inline !== undefined) {
+    const value = inline.slice(flag.length + 1);
+    if (value.length === 0) throw new Error(`${flag} requires a path`);
+    return value;
+  }
   const index = process.argv.indexOf(flag);
   if (index === -1) return undefined;
   const value = process.argv[index + 1];
@@ -298,6 +315,12 @@ function argumentValue(flag) {
     throw new Error(`${flag} requires a path`);
   }
   return value;
+}
+
+for (const argument of process.argv.slice(2)) {
+  if (!argument.startsWith('--')) continue;
+  const flag = argument.split('=')[0];
+  if (!KNOWN_FLAGS.has(flag)) throw new Error(`unknown option '${argument}'`);
 }
 
 const schemaPath = path.resolve(argumentValue('--schema') ?? SCHEMA_PATH);

@@ -63,16 +63,21 @@ function definition(schema: MutableContractSchema, name: string): MutableDefinit
  */
 async function runGeneratorWith(
   mutate: (schema: MutableContractSchema) => void,
+  options: { readonly inlineFlags?: boolean } = {},
 ): Promise<GeneratorRun> {
   const schema = await readJson(SCHEMA_PATH) as MutableContractSchema;
   mutate(schema);
   const directory = await mkdtemp(path.join(os.tmpdir(), 'contract-bindings-'));
   try {
     const schemaPath = path.join(directory, 'schema.json');
+    const outputPath = path.join(directory, 'bindings.ts');
     await writeFile(schemaPath, JSON.stringify(schema), 'utf8');
+    const argumentsWithPaths = options.inlineFlags === true
+      ? [`--schema=${schemaPath}`, `--out=${outputPath}`]
+      : ['--schema', schemaPath, '--out', outputPath];
     const result = spawnSync(
       process.execPath,
-      [GENERATOR_PATH, '--schema', schemaPath, '--out', path.join(directory, 'bindings.ts')],
+      [GENERATOR_PATH, ...argumentsWithPaths],
       { cwd: PACKAGE_ROOT, encoding: 'utf8' },
     );
     return { status: result.status, stderr: result.stderr };
@@ -181,5 +186,57 @@ describe('contract bindings generator rejects an unmodelled schema', () => {
     });
     expect(run.status, run.stderr.trim()).not.toBe(0);
     expect(run.stderr).toContain('mixes named properties with a typed additionalProperties');
+  });
+
+  it('refuses a propertyNames $ref that also closes the key set', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        $ref: '#/$defs/relative_path',
+        enum: ['src/a.ts'],
+      };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('beside $ref');
+  });
+
+  it('keeps annotation siblings beside $ref', async () => {
+    const run = await runGeneratorWith((schema) => {
+      const target = definition(schema, 'code_index_data');
+      for (const keyword of Object.keys(target)) delete target[keyword];
+      target.$ref = '#/$defs/code_index_publication_data';
+      target.description = 'A publication, including a cancelled one, or a dry-run plan.';
+    });
+    expect(run.status, run.stderr.trim()).toBe(0);
+  });
+
+  it('does not mistake a $ref shared by two propertyNames branches for a cycle', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        anyOf: [
+          { $ref: '#/$defs/relative_path' },
+          { $ref: '#/$defs/relative_path' },
+        ],
+      };
+    });
+    expect(run.status, run.stderr.trim()).toBe(0);
+  });
+
+  it('honours the --flag=value form instead of falling back to the checked-in paths', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = { type: 'string', enum: ['src/a.ts'] };
+    }, { inlineFlags: true });
+    // The mutated schema must be the one read: falling back to the checked-in
+    // schema would succeed and silently ignore the override.
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('closes the property-name set');
+  });
+
+  it('refuses an unknown option before reading or writing anything', () => {
+    const run = spawnSync(process.execPath, [GENERATOR_PATH, '--schemaa', '/tmp/x.json'], {
+      cwd: PACKAGE_ROOT,
+      encoding: 'utf8',
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("unknown option '--schemaa'");
   });
 });

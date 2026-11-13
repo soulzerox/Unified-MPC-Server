@@ -107,6 +107,8 @@ Two of those sources are deliberately shaped like the existing code:
 
 `ResolvedSubject` — the caller's identity plus `baseSha`, `diffFingerprint`,
 changed paths and pull-request state — is what the engine records in a receipt.
+`baseSha` comes from the pull-request source, so a subject without a PR has no
+base and the base-sensitive gates simply do not apply.
 `changedPaths` is derived from the diff, never supplied by the caller, so the
 `mutate` gate cannot be told which files were touched.
 
@@ -157,10 +159,10 @@ Required evidence per gate, all keyed by the resolved subject:
 | Phase | Evidence | Enforced today |
 |---|---|---|
 | `intake` / `discover` / `prepare` | none defined yet | no |
-| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | yes, at the tool boundary (see §4) |
+| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: coding mutations only, and it auto-prepares (see §4) |
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
-| `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models |
+| `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
 | `close` | merge evidence for the head, base revision known, cleanup disposition `retention_candidate` | partially (cleanup evaluation and `goalCompletionWorktreeBlockers` exist; the workflow gate does not) |
 
 Workflows are versioned data, not code: a profile names the phases and gates it
@@ -190,9 +192,10 @@ interface GateReceipt {
 Rules the implementation enforces, per gate rather than uniformly:
 
 - a receipt is valid only for the exact subject it names. A moved head or a new
-  diff fingerprint invalidates every gate; a changed base invalidates
-  `integrate` and `close` only, because verification and review receipts record
-  no base;
+  diff fingerprint invalidates every gate; a changed base invalidates `review`,
+  `integrate` and `close`, because a review receipt records the `baseSha` it was
+  reviewed against and its fingerprint hashes that base. Verification receipts
+  record no base, so a base change does not touch `verify`;
 - `verify` is a run log: many receipts per subject, append-only, and the gate
   selects one by the predicate above. A re-run after a failed or targeted run is
   normal;
@@ -203,10 +206,12 @@ Rules the implementation enforces, per gate rather than uniformly:
   can be audited after the fact;
 - a blocked evaluation is recorded too, so "why was this refused" is answerable;
 - a new receipt kind needs its own store, and the same step must extend
-  `scripts/prune-evidence.mjs` and its tests: prune plans only
-  `.unified-mpc/local-verify` and `.unified-mpc/reviews` and skips filenames
-  that do not match its receipt pattern, so a new kind dropped into an existing
-  directory would never be pruned.
+  `scripts/prune-evidence.mjs` and its tests. Prune plans only
+  `.unified-mpc/local-verify` and `.unified-mpc/reviews`; the verification store
+  skips filenames that do not match its receipt pattern, while the review store
+  reads every `.json` file and refuses the whole plan when one is unreadable. A
+  new kind dropped into either directory would be silently unpruned or would
+  break pruning.
 
 ---
 
@@ -219,16 +224,32 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    Both delegate to `evaluate({phase:'integrate'})`; the CLI keeps
    `--match-head-commit`. Behaviour must not change, and the runtime side needs
    the receipt conversion described above.
-2. **Cleanup** — the MCP `git_worktree_remove` tool's `worktreeCleanupSafety`
-   gate and goal completion's `goalCompletionWorktreeBlockers`. The gate is
-   `disposition === 'retention_candidate'`, not "no blockers":
-   `retention_pending` also has none and must not authorize deletion before the
-   grace elapses. This is the gate that would have caught a
-   discarded-but-unmerged branch.
-3. **Mutation** — `ToolRegistry.validateHarnessMutation`, which already requires
-   `workspace_bootstrap` and `prepare_code_change` for every edited path and
-   fails closed. The `mutate` phase extends that check; it must not add a second
-   CLI gate that an MCP edit bypasses.
+2. **Cleanup** — three checks that are easy to conflate:
+
+   - `WorkspaceService.evaluateGoalWorkspaceCleanup` returns a
+     `WorkspaceCleanupDisposition` (`blocked` | `retention_pending` |
+     `retention_candidate`) plus its blockers. This is the only source of a
+     disposition, and the close gate requires `retention_candidate`:
+     `retention_pending` has no blockers but must not authorize deletion before
+     the grace elapses.
+   - the MCP `git_worktree_remove` tool's `worktreeCleanupSafety` returns
+     `clean` | `blocked` | `unavailable` from `goalWorktreeRemovalBlockers` and
+     refuses an unverifiable classification.
+   - goal completion's `goalCompletionWorktreeBlockers` returns entries for
+     `dirty`, `unmerged_changes` and `probe_failed`; `unintegrated_head` is
+     deliberately not blocking because the merge flow squash-merges.
+
+   The close gate composes those three; it does not redefine them. Goal
+   completion already blocks `unmerged_changes` in a goal worktree, but a
+   repository branch outside a goal worktree has no equivalent check.
+3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam, but it is
+   narrower than "every edit fails closed": it runs only when
+   `isCodingMutation` is true, covers the fixed file-tool set in
+   `codeMutationPaths` (so `shell`, `git` and `restore_deleted_file` are not
+   covered), returns allow when no `workspaceId` is resolved, and auto-bootstraps
+   the harness and auto-prepares each path instead of refusing. The `mutate`
+   phase would tighten it — all mutation tools, refuse rather than auto-prepare —
+   and must not add a second CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -243,14 +264,16 @@ Each step ships alone and leaves the repository working.
 | Step | Change | Acceptance |
 |---|---|---|
 | 1 | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | `guarded-merge.test.mjs` and `local-verify.test.mjs` pass unchanged on a clean checkout; `merge:pr --dry-run` gives identical verdicts on three known heads |
-| 2 | Add `gate:check --phase <p>` CLI + the `close` gate over `evaluateGoalWorkspaceCleanup` and `goalCompletionWorktreeBlockers`, with its receipt store and the matching `prune-evidence` update and test | a branch with unmerged commits is refused; a merged head is allowed; `retention_pending` is refused; the new receipt kind is pruned by policy |
+| 2 | Add `gate:check --phase <p>` CLI + the `close` gate over `evaluateGoalWorkspaceCleanup`, `worktreeCleanupSafety` and `goalCompletionWorktreeBlockers`, with its receipt store and the matching `prune-evidence` update and test | a goal worktree with `unmerged_changes` is refused; a merged head is allowed; `retention_pending` is refused; the new receipt kind is pruned by policy |
 | 3 | Convert runtime merge evidence to the shared model, repoint `GuardedMergeService`, wire `verify`/`review` through `receipts()` | runtime gate tests pass unchanged; existing runtime receipts are converted, not silently invalidated; the CLI receipt format is unchanged |
-| 4 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged |
+| 4 | Move the shared core into a workspace package and reorder `test:merge-gate` after `build` (or make the gate suites build-aware) | the gate suites still pass on a clean checkout; no script imports built output before it exists |
+| 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
-that pays for the rest, and the one that must not invent new policy. Moving the
-core into a workspace package is a separate step that also reorders
-`test:merge-gate` against `build`.
+that pays for the rest, and the one that must not invent new policy. Step 4 is
+the prerequisite for step 5: `packages/mcp-server` includes only `src/**/*.ts`
+and no package imports `scripts/`, so the mutation seam cannot share the core
+until it lives in a package the runtime can import.
 
 ---
 

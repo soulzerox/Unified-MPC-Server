@@ -28,6 +28,8 @@ import {
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
   isThaiRagProviderErrorCode,
   mapThaiRagProviderErrorCode,
+  type ProviderError,
+  type ProviderResult,
 } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv } from './native-thai-rag-provider.js';
 
@@ -5043,15 +5045,10 @@ describe('canonical code_index source identity (#210 §13)', () => {
       readonly schema: string;
       readonly fixtures: readonly CorpusEntry[];
     }
-    interface FixtureError {
-      readonly code: string;
-      readonly details?: Readonly<Record<string, unknown>>;
-    }
-    interface CorpusFixture {
-      readonly status: string;
-      readonly data?: unknown;
-      readonly errors?: readonly FixtureError[];
-    }
+    // The envelope shape comes from the vendored schema
+    // (`packages/thai-rag/src/provider-contract.bindings.ts`); this replay must
+    // not grow a second hand-maintained copy of it.
+    type CorpusFixture = ProviderResult;
 
     async function readCorpusJson(relativePath: string): Promise<unknown> {
       return JSON.parse(await readFile(new URL(relativePath, corpusRoot), 'utf8')) as unknown;
@@ -5437,7 +5434,7 @@ describe('canonical code_index source identity (#210 §13)', () => {
       error: { readonly code: string; readonly recoverable: boolean; readonly details?: Readonly<Record<string, unknown>> },
       file: string,
       fixture: CorpusFixture,
-      providerError: FixtureError,
+      providerError: ProviderError,
     ): void {
       // A lost provider job is a deliberate projection: Unified reports
       // FILE_NOT_FOUND/provider-job-unknown instead of the raw provider code.

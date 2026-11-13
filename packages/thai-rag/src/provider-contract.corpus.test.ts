@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { THAI_RAG_PROVIDER_ID } from './canonical-workspace.js';
+import type { ProviderResult } from './provider-contract.bindings.js';
 import {
   THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,
   THAI_RAG_CANCEL_INDEX_JOB_CONTRACT_VERSION,
@@ -51,38 +52,11 @@ interface CorpusIndex {
   readonly fixtures: readonly CorpusEntry[];
 }
 
-interface FixtureMetadata {
-  readonly provider_name: string;
-  readonly provider_version: string;
-  readonly contract_version: string;
-  readonly contract_fingerprint: string;
-  readonly index_job_contract_version: string;
-  readonly generation: {
-    readonly contract: string;
-    readonly embedding: string;
-    readonly index: string;
-    readonly storage: string;
-  };
-  readonly embedding: {
-    readonly profile: string;
-    readonly model: string;
-    readonly dimension: number;
-  };
-}
-
-interface FixtureError {
-  readonly code: string;
-  readonly message?: string;
-}
-
-interface ProviderFixture {
-  readonly status: string;
-  readonly data?: unknown;
-  readonly metadata: FixtureMetadata;
-  readonly errors?: readonly FixtureError[];
-  readonly repository_provenance: string | null;
-  readonly trust_scope: string | null;
-}
+/**
+ * The envelope shape is generated from the vendored schema
+ * (`src/provider-contract.bindings.ts`), not maintained here.
+ */
+type ProviderFixture = ProviderResult;
 
 interface SchemaDefinition {
   readonly additionalProperties?: boolean;

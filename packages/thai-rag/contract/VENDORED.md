@@ -11,6 +11,15 @@ updating `PROVENANCE.json`, when a fixture uses an unmapped `ErrorCode`, or when
 the corpus adds a file the manifest does not describe. Do not edit a vendored
 file by hand.
 
+The TypeScript wire bindings are generated from
+`provider-contract.v1.schema.json` by
+`packages/thai-rag/scripts/generate-contract-bindings.mjs`; the checked-in
+`src/provider-contract.bindings.ts` must never be edited by hand. Run
+`pnpm --filter @unified-mpc/thai-rag contract:bindings` after a vendored
+refresh, and `contract:bindings:check` (also covered by the package tests) to
+prove the two agree. A schema keyword the generator does not model fails
+instead of being silently dropped.
+
 ## Refresh
 
 1. Check out the exact Thai-RAG commit you want to vendor and note

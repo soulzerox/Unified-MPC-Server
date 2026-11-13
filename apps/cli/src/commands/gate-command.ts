@@ -1,4 +1,5 @@
 import {
+  closeGateExitCode,
   evaluateCloseGate,
   formatCloseGateVerdict,
   writeCloseGateReceipt,
@@ -120,7 +121,7 @@ export async function runCloseGate(options: RunCloseGateOptions): Promise<Result
       verdict,
       ...(receiptPath === undefined ? {} : { receiptPath }),
       lines,
-      exitCode: verdict.allowed ? 0 : 1,
+      exitCode: closeGateExitCode(verdict),
     },
   };
 }

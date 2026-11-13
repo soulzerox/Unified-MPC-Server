@@ -1,8 +1,9 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { appError, err, ok } from '@unified-mpc/domain';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import type { GoalCompletionWorktreeBlocker } from '@unified-mpc/application';
 import type {
   CloseGateInput,
   CloseGateRemovalPreview,
@@ -95,11 +96,17 @@ describe('evaluateCloseGate', () => {
   });
 
   it('ignores cleanup rows that belong to another goal or workspace', () => {
-    const verdict = evaluateCloseGate(input({
+    const otherGoal = evaluateCloseGate(input({
       cleanup: [cleanup({ goalId: 'goal_other', disposition: 'blocked' })],
     }));
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.blockers).toEqual([{ kind: 'cleanup_unclassified', workspaceId: WORKSPACE }]);
+    expect(otherGoal.allowed).toBe(false);
+    expect(otherGoal.blockers).toEqual([{ kind: 'cleanup_unclassified', workspaceId: WORKSPACE }]);
+
+    const otherWorkspace = evaluateCloseGate(input({
+      cleanup: [cleanup({ workspaceId: 'ws_other', disposition: 'blocked' })],
+    }));
+    expect(otherWorkspace.allowed).toBe(false);
+    expect(otherWorkspace.blockers).toEqual([{ kind: 'cleanup_unclassified', workspaceId: WORKSPACE }]);
   });
 
   it('refuses a worktree whose removal preview is blocked or unavailable', () => {
@@ -121,13 +128,44 @@ describe('evaluateCloseGate', () => {
 
   it('refuses a worktree that still holds work, even with no blocker names left', () => {
     const verdict = evaluateCloseGate(input({
-      completion: [{ worktreePath: WORKTREE, blockers: ['unmerged_changes'] }],
+      completion: [{ worktreePath: WORKTREE, blockers: [] }],
     }));
     expect(verdict.allowed).toBe(false);
     expect(verdict.blockers).toEqual([{
       kind: 'completion',
       worktreePath: WORKTREE,
-      blockers: ['unmerged_changes'],
+      blockers: [],
+    }]);
+    expect(formatCloseGateVerdict(verdict)[1]).toBe(`  worktree ${WORKTREE} still holds work`);
+  });
+
+  it('gates every goal of a workspace when no goal is named', () => {
+    const verdict = evaluateCloseGate({
+      workspaceId: WORKSPACE,
+      cleanup: [cleanup(), cleanup({ goalId: 'goal_other' })],
+      removals: [removal()],
+      completion: [],
+    });
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.goalId).toBeUndefined();
+    expect(formatCloseGateVerdict(verdict)[0]).toBe(`close gate for workspace ${WORKSPACE}: allowed`);
+
+    // Workspace mode is not blind to a sibling goal: any row in scope refuses.
+    const siblingBlocked = evaluateCloseGate({
+      workspaceId: WORKSPACE,
+      cleanup: [
+        cleanup(),
+        cleanup({ goalId: 'goal_other', disposition: 'blocked', blockers: ['goal_workspace_not_clean'] }),
+      ],
+      removals: [removal()],
+      completion: [],
+    });
+    expect(siblingBlocked.allowed).toBe(false);
+    expect(siblingBlocked.blockers).toEqual([{
+      kind: 'cleanup',
+      workspaceId: WORKSPACE,
+      disposition: 'blocked',
+      reasons: ['goal_workspace_not_clean'],
     }]);
   });
 
@@ -177,6 +215,23 @@ describe('close gate fingerprint', () => {
     const blocked = evaluateCloseGate(input({ removals: [removal({ status: 'blocked' })] }));
     expect(new Set([candidate.fingerprint, pending.fingerprint, blocked.fingerprint]).size).toBe(3);
   });
+
+  it('covers every field the decision reads, not just the verdict shape', () => {
+    const base = evaluateCloseGate(input());
+    const variants = [
+      // A blocker name, without changing the disposition it belongs to.
+      evaluateCloseGate(input({ cleanup: [cleanup({ blockers: ['goal_workspace_not_clean'] })] })),
+      // A worktree path, without changing its status.
+      evaluateCloseGate(input({ removals: [removal({ worktreePath: 'other' })] })),
+      // A completion row, which has no disposition at all.
+      evaluateCloseGate(input({ completion: [{ worktreePath: WORKTREE, blockers: ['dirty'] }] })),
+      // The subject itself.
+      evaluateCloseGate(input({ workspaceId: 'ws_other', cleanup: [cleanup({ workspaceId: 'ws_other' })] })),
+      evaluateCloseGate(input({ goalId: 'goal_other', cleanup: [cleanup({ goalId: 'goal_other' })] })),
+    ];
+    expect(new Set([base.fingerprint, ...variants.map((verdict) => verdict.fingerprint)]).size)
+      .toBe(variants.length + 1);
+  });
 });
 
 describe('close gate receipts', () => {
@@ -222,6 +277,71 @@ describe('close gate receipts', () => {
       await writeFile(candidate, body, 'utf8');
       expect((await readCloseGateReceipt(candidate)).ok).toBe(false);
     }
+  });
+
+  it('refuses a receipt whose verdict is not the verdict this module produces', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-'));
+    temporaryDirectories.push(directory);
+    const verdict = evaluateCloseGate(input());
+    const base = {
+      kind: 'workflow-gate',
+      phase: 'close',
+      version: 1,
+      gateId: 'g',
+      createdAt: '2026-11-14T00:00:00.000Z',
+      verdict,
+    };
+    // Each mutation keeps the envelope valid and breaks exactly one guarantee the
+    // verdict makes, so every case fails for its own reason.
+    const mutations: readonly (readonly [string, unknown])[] = [
+      ['another phase', { ...base, verdict: { ...verdict, phase: 'integrate' } }],
+      ['a fingerprint that is not a sha256', { ...base, verdict: { ...verdict, fingerprint: 'sha256:x' } }],
+      ['allowed with blockers', {
+        ...base,
+        verdict: {
+          ...verdict,
+          allowed: true,
+          blockers: [{ kind: 'completion', worktreePath: WORKTREE, blockers: [] }],
+        },
+      }],
+      ['a blocker with no reasons', {
+        ...base,
+        verdict: { ...verdict, allowed: false, blockers: [{ kind: 'cleanup', workspaceId: WORKSPACE }] },
+      }],
+      ['an unknown blocker kind', {
+        ...base,
+        verdict: { ...verdict, allowed: false, blockers: [{ kind: 'mystery', workspaceId: WORKSPACE }] },
+      }],
+      ['a removal blocker that says clean', {
+        ...base,
+        verdict: {
+          ...verdict,
+          allowed: false,
+          blockers: [{ kind: 'removal', worktreePath: WORKTREE, status: 'clean', blockers: [] }],
+        },
+      }],
+      ['a non-string headSha', { ...base, headSha: 42 }],
+      ['a non-string goalId', { ...base, verdict: { ...verdict, goalId: 42 } }],
+    ];
+    for (const [name, body] of mutations) {
+      const candidate = path.join(directory, `${name.replace(/\W+/g, '-')}.json`);
+      await writeFile(candidate, JSON.stringify(body), 'utf8');
+      expect((await readCloseGateReceipt(candidate)).ok, name).toBe(false);
+    }
+  });
+
+  it('keeps the receipt inside its directory and never overwrites one', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-'));
+    temporaryDirectories.push(directory);
+    const verdict = evaluateCloseGate(input());
+    const escaped = await writeCloseGateReceipt({ directory, verdict, gateId: () => '../../escape' });
+    expect(escaped.ok).toBe(true);
+    if (!escaped.ok) return;
+    expect(path.dirname(escaped.value.path)).toBe(directory);
+    expect(path.basename(escaped.value.path)).toBe(`${GOAL}-.._.._escape.json`);
+
+    const again = await writeCloseGateReceipt({ directory, verdict, gateId: () => '../../escape' });
+    expect(again).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
   });
 });
 
@@ -318,6 +438,66 @@ describe('runCloseGate', () => {
     expect((await readCloseGateReceipt(result.value.receiptPath!)).ok).toBe(true);
   });
 
+  it('forwards the subject to every owner and omits an absent goal', async () => {
+    const cleanupRequests: unknown[] = [];
+    const completionRequests: unknown[] = [];
+    const recordingPorts = (): CloseGatePorts => ({
+      cleanup: async (request): Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>> => {
+        cleanupRequests.push(request);
+        return ok([cleanup()]);
+      },
+      removal: async ({ worktreePath }) => ok(removal({ worktreePath })),
+      completion: async (request): Promise<Result<readonly GoalCompletionWorktreeBlocker[]>> => {
+        completionRequests.push(request);
+        return ok([]);
+      },
+    });
+
+    await runCloseGate({
+      ports: recordingPorts(),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [WORKTREE],
+      dryRun: true,
+      json: false,
+    });
+    expect(cleanupRequests).toEqual([{ workspaceId: WORKSPACE, goalId: GOAL }]);
+    expect(completionRequests).toEqual([{ workspaceId: WORKSPACE, goalId: GOAL }]);
+
+    await runCloseGate({
+      ports: recordingPorts(),
+      workspaceId: WORKSPACE,
+      worktrees: [],
+      dryRun: true,
+      json: false,
+    });
+    // No `goalId` key at all, rather than `goalId: undefined`.
+    expect(cleanupRequests.at(-1)).toEqual({ workspaceId: WORKSPACE });
+    expect(completionRequests.at(-1)).toEqual({ workspaceId: WORKSPACE });
+  });
+
+  it('aborts when the cleanup or completion owner fails', async () => {
+    const cleanupFailure = await runCloseGate({
+      ports: ports({ cleanup: async () => err(appError('CONFLICT', 'Goal runtime ledger is unreadable')) }),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [],
+      dryRun: true,
+      json: false,
+    });
+    expect(cleanupFailure).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+
+    const completionFailure = await runCloseGate({
+      ports: ports({ completion: async () => err(appError('CONFLICT', 'Reconciliation port is unavailable')) }),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [],
+      dryRun: true,
+      json: false,
+    });
+    expect(completionFailure).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+  });
+
   it('exits non-zero on a refusal but still records it', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-run-'));
     temporaryDirectories.push(directory);
@@ -344,11 +524,14 @@ describe('runCloseGate', () => {
   });
 
   it('writes nothing on a dry run', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-run-'));
+    temporaryDirectories.push(directory);
     const result = await runCloseGate({
       ports: ports(),
       workspaceId: WORKSPACE,
       goalId: GOAL,
       worktrees: [],
+      receiptDirectory: directory,
       dryRun: true,
       json: false,
     });
@@ -356,6 +539,7 @@ describe('runCloseGate', () => {
     if (!result.ok) return;
     expect(result.value.receiptPath).toBeUndefined();
     expect(result.value.lines).toContain('dry run: no receipt written');
+    expect(await readdir(directory)).toEqual([]);
   });
 
   it('aborts instead of reporting a verdict when an owner fails', async () => {

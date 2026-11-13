@@ -20,8 +20,14 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  *   (`dirty` | `unmerged_changes` | `probe_failed`).
  *
  * The caller supplies those answers; this module only decides. That is why it
- * needs no runtime, no database and no tool registry, and why the wiring lives
- * next to the other CLI API methods instead of inside a command.
+ * needs no runtime, no database and no tool registry, and why the command layer
+ * takes its three inputs as ports instead of reaching for a runtime.
+ *
+ * This slice stops at the decision: `apps/cli/src/index.ts` routes no `gate`
+ * command yet. Wiring the ports needs a worktree-removal preview that can run as
+ * the session that owns the worktree, and a durable-reference source for
+ * `evaluateGoalWorkspaceCleanup`; until both exist the command would refuse every
+ * goal. Those are the step 3b prerequisites in `docs/WORKFLOW_GATE.md`.
  */
 
 /** Worktree safety as the `git_worktree_remove` dry run reports it. */
@@ -171,6 +177,12 @@ function closeGateFingerprint(
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
 }
 
+/**
+ * A decision receipt: what the gate decided and the fingerprint of the inputs it
+ * decided from. The richer `GateReceipt` sketched in `docs/WORKFLOW_GATE.md` —
+ * head and base revision, merge evidence, workflow identity — is a later phase,
+ * which is why `headSha` is optional and not checked against a repository.
+ */
 export interface CloseGateReceipt {
   readonly kind: 'workflow-gate';
   readonly phase: 'close';
@@ -204,11 +216,15 @@ export async function writeCloseGateReceipt(options: {
     ...(options.headSha === undefined ? {} : { headSha: options.headSha }),
     verdict: options.verdict,
   };
-  const subject = receipt.verdict.goalId ?? receipt.verdict.workspaceId;
-  const file = path.join(options.directory, `${safeSegment(subject)}-${receipt.gateId}.json`);
+  const subject = safeSegment(receipt.verdict.goalId ?? receipt.verdict.workspaceId);
+  // Both segments are sanitized: `gateId` is injectable, so an id containing a
+  // separator or `..` must not place the receipt outside its directory. `wx`
+  // turns a collision into a loud failure instead of silently overwriting
+  // evidence a previous run is standing on.
+  const file = path.join(options.directory, `${subject}-${safeSegment(receipt.gateId)}.json`);
   try {
     await mkdir(options.directory, { recursive: true });
-    await writeFile(file, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+    await writeFile(file, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   } catch (cause) {
     return err(appError('INTERNAL_ERROR', `Could not write the close gate receipt: ${(cause as Error).message}`));
   }
@@ -223,19 +239,108 @@ export async function readCloseGateReceipt(file: string): Promise<Result<CloseGa
   } catch (cause) {
     return err(appError('INVALID_INPUT', `Could not read ${file}: ${(cause as Error).message}`));
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
+  const headSha = parsed.headSha;
+  if (parsed.kind !== 'workflow-gate' || parsed.phase !== 'close' || parsed.version !== 1
+    || typeof parsed.gateId !== 'string' || typeof parsed.createdAt !== 'string'
+    || (headSha !== undefined && typeof headSha !== 'string')) {
     return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
   }
-  const receipt = parsed as Partial<CloseGateReceipt>;
-  const verdict = receipt.verdict;
-  if (receipt.kind !== 'workflow-gate' || receipt.phase !== 'close' || receipt.version !== 1
-    || typeof receipt.gateId !== 'string' || typeof receipt.createdAt !== 'string'
-    || typeof verdict !== 'object' || verdict === null
-    || typeof verdict.fingerprint !== 'string' || typeof verdict.allowed !== 'boolean'
-    || typeof verdict.workspaceId !== 'string' || !Array.isArray(verdict.blockers)) {
-    return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
+  const verdict = parseCloseGateVerdict(parsed.verdict);
+  if (verdict === undefined) return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
+  return ok({
+    kind: 'workflow-gate',
+    phase: 'close',
+    version: 1,
+    gateId: parsed.gateId,
+    createdAt: parsed.createdAt,
+    ...(headSha === undefined ? {} : { headSha }),
+    verdict,
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+const CLEANUP_DISPOSITIONS: readonly WorkspaceLifecycleCleanupEvaluation['disposition'][] = [
+  'blocked',
+  'retention_pending',
+  'retention_candidate',
+];
+
+function isCleanupDisposition(value: unknown): value is WorkspaceLifecycleCleanupEvaluation['disposition'] {
+  return CLEANUP_DISPOSITIONS.includes(value as WorkspaceLifecycleCleanupEvaluation['disposition']);
+}
+
+/**
+ * Narrows one blocker. A malformed shape returns `undefined` rather than
+ * throwing, so the reader has exactly one refusal path.
+ */
+function parseCloseGateBlocker(value: unknown): CloseGateBlocker | undefined {
+  if (!isRecord(value)) return undefined;
+  switch (value.kind) {
+    case 'cleanup':
+      return typeof value.workspaceId === 'string'
+        && isCleanupDisposition(value.disposition)
+        && isStringArray(value.reasons)
+        ? { kind: 'cleanup', workspaceId: value.workspaceId, disposition: value.disposition, reasons: [...value.reasons] }
+        : undefined;
+    case 'cleanup_unclassified':
+      return typeof value.workspaceId === 'string'
+        ? { kind: 'cleanup_unclassified', workspaceId: value.workspaceId }
+        : undefined;
+    case 'removal':
+      return typeof value.worktreePath === 'string'
+        && (value.status === 'blocked' || value.status === 'unavailable')
+        && isStringArray(value.blockers)
+        ? { kind: 'removal', worktreePath: value.worktreePath, status: value.status, blockers: [...value.blockers] }
+        : undefined;
+    case 'completion':
+      return typeof value.worktreePath === 'string' && isStringArray(value.blockers)
+        ? { kind: 'completion', worktreePath: value.worktreePath, blockers: [...value.blockers] }
+        : undefined;
+    default:
+      return undefined;
   }
-  return ok(receipt as CloseGateReceipt);
+}
+
+/**
+ * Narrows a verdict to the shape this module produces. `allowed` must agree with
+ * the blocker list: a receipt that says "allowed" while listing blockers was not
+ * written by this module, and formatting it would print a contradiction.
+ */
+function parseCloseGateVerdict(value: unknown): CloseGateVerdict | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.phase !== 'close') return undefined;
+  const workspaceId = value.workspaceId;
+  if (typeof workspaceId !== 'string' || workspaceId.length === 0) return undefined;
+  const goalId = value.goalId;
+  if (goalId !== undefined && typeof goalId !== 'string') return undefined;
+  const allowed = value.allowed;
+  if (typeof allowed !== 'boolean') return undefined;
+  const fingerprint = value.fingerprint;
+  if (typeof fingerprint !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(fingerprint)) return undefined;
+  if (!Array.isArray(value.blockers)) return undefined;
+  const blockers: CloseGateBlocker[] = [];
+  for (const candidate of value.blockers) {
+    const blocker = parseCloseGateBlocker(candidate);
+    if (blocker === undefined) return undefined;
+    blockers.push(blocker);
+  }
+  if (allowed !== (blockers.length === 0)) return undefined;
+  return {
+    phase: 'close',
+    workspaceId,
+    ...(typeof goalId === 'string' ? { goalId } : {}),
+    allowed,
+    blockers,
+    fingerprint,
+  };
 }
 
 /** Keeps an identifier usable as a filename segment without inventing a hash. */
@@ -290,6 +395,9 @@ const GATE_USAGE = 'Usage: unified-mpc gate check --phase close --workspace <id>
 /**
  * Parses `gate check`. The phase is required rather than defaulted: this engine
  * grows one phase at a time and a missing phase must not silently pick one.
+ *
+ * Nothing routes this yet; the dispatch in `apps/cli/src/index.ts` lands with the
+ * ports, not before.
  */
 export function parseGateArgs(args: readonly string[]): Result<GateCheckCommand> {
   if (args[0] !== 'check') return err(appError('INVALID_INPUT', GATE_USAGE));

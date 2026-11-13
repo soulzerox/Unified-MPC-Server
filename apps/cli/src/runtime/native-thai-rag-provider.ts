@@ -50,6 +50,7 @@ import {
   validateThaiRagHandshake,
   type ThaiRagProviderDriver,
   type ThaiRagProviderDriverHealth,
+  type ThaiRagIndexJobProgress,
   type ThaiRagProviderDriverStartOptions,
   type ThaiRagProviderHandshake,
   type ThaiRagReindexReason,
@@ -1425,8 +1426,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // embedding phase reports no file progress; keep the reaper off it.
       await this.jobs.recordHeartbeat(jobId, ownerId);
       const progress = nativeIndexProgress(status.value);
-      if (progress !== undefined) {
-        await this.jobs.recordProgress(jobId, progress, ownerId);
+      const durable = progress === undefined ? undefined : durableIndexProgress(progress);
+      if (durable !== undefined) {
+        await this.jobs.recordProgress(jobId, durable, ownerId);
       }
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus !== undefined && NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
@@ -2155,8 +2157,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       // embedding phase reports no file progress; keep the reaper off it.
       await this.jobs.recordHeartbeat(jobId, ownerId);
       const progress = nativeIndexProgress(status.value);
-      if (progress !== undefined) {
-        await this.jobs.recordProgress(jobId, progress, ownerId);
+      const durable = progress === undefined ? undefined : durableIndexProgress(progress);
+      if (durable !== undefined) {
+        await this.jobs.recordProgress(jobId, durable, ownerId);
       }
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus !== undefined && NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
@@ -2731,10 +2734,10 @@ function nestedValue(value: unknown, key: string, depth = 0): unknown {
   return undefined;
 }
 
-function nativeIndexProgress(value: unknown): {
+interface NativeIndexProgress {
   readonly indexedFiles: number;
-  readonly skippedFiles: number;
-  readonly totalFiles: number;
+  readonly skippedFiles?: number;
+  readonly totalFiles?: number;
   readonly cacheHitFiles?: number;
   readonly cacheHitChunks?: number;
   readonly cacheMissFiles?: number;
@@ -2742,19 +2745,51 @@ function nativeIndexProgress(value: unknown): {
   readonly newEmbeddedFiles?: number;
   readonly newEmbeddedChunks?: number;
   readonly cacheMissReasons?: Readonly<Record<string, number>>;
-} | undefined {
+}
+
+/**
+ * A durable progress row needs the skipped counter; the store derives the total
+ * from the counters it stores. The reader itself never invents one, so a
+ * provider payload that reports no total stays unknown on the read path.
+ */
+function durableIndexProgress(progress: NativeIndexProgress): ThaiRagIndexJobProgress | undefined {
+  if (progress.skippedFiles === undefined) return undefined;
+  return {
+    ...progress,
+    skippedFiles: progress.skippedFiles,
+    totalFiles: progress.totalFiles ?? progress.indexedFiles + progress.skippedFiles,
+  };
+}
+
+function nativeIndexProgress(value: unknown): NativeIndexProgress | undefined {
   const valid = (number: unknown): number is number =>
     typeof number === 'number' && Number.isSafeInteger(number) && number >= 0 && number <= 100_000_000;
   // The provider reports final counters as `indexed`/`skipped` inside the
   // terminal result, while progress envelopes use `indexed_files`. Accept both
   // so the durable job never records 0 for a pass that actually indexed files.
   const indexedFiles = nestedValue(value, 'indexed_files') ?? nestedValue(value, 'indexed');
-  const skippedFiles = nestedValue(value, 'skipped_files') ?? nestedValue(value, 'skipped');
+  if (!valid(indexedFiles)) return undefined;
+  // `index_status_data` pins `indexed_files` but not `skipped_files` or
+  // `total_files`: a terminal state such as `cancelled` may report only what it
+  // indexed. An absent counter stays absent — the CLI/UI treat "not reported"
+  // as unknown, and defaulting it to 0 would claim a measurement nobody made.
+  const reportedSkipped = nestedValue(value, 'skipped_files') ?? nestedValue(value, 'skipped');
+  if (reportedSkipped !== undefined && !valid(reportedSkipped)) return undefined;
   const reportedTotal = nestedValue(value, 'total_files');
-  if (!valid(indexedFiles) || !valid(skippedFiles)) return undefined;
-  const totalFiles = valid(reportedTotal) ? reportedTotal : indexedFiles + skippedFiles;
-  if (indexedFiles + skippedFiles > totalFiles) return undefined;
-  const base = { indexedFiles, skippedFiles, totalFiles };
+  if (reportedTotal !== undefined && !valid(reportedTotal)) return undefined;
+  const skippedFiles = reportedSkipped;
+  const totalFiles = reportedTotal;
+  // A reported total still bounds the pass even when the skipped counter is
+  // missing, so a payload that indexed more files than it claims to contain is
+  // rejected instead of published as `indexed > total`.
+  if (totalFiles !== undefined && indexedFiles + (skippedFiles ?? 0) > totalFiles) {
+    return undefined;
+  }
+  const base = {
+    indexedFiles,
+    ...(skippedFiles === undefined ? {} : { skippedFiles }),
+    ...(totalFiles === undefined ? {} : { totalFiles }),
+  };
 
   const cacheHitFiles = nestedValue(value, 'cache_hit_files');
   const cacheHitChunks = nestedValue(value, 'cache_hit_chunks');
@@ -2777,6 +2812,9 @@ function nativeIndexProgress(value: unknown): {
     if (reason.trim().length === 0 || !valid(count)) return base;
     cacheMissReasons[reason] = count;
   }
+  // Cache metrics are validated against the total; without a reported or
+  // derivable total there is no denominator, so keep the counters unknown.
+  if (totalFiles === undefined) return base;
   if ((cacheHitFiles as number) + (cacheMissFiles as number) > totalFiles
     || (newEmbeddedFiles as number) > (cacheMissFiles as number)
     || (newEmbeddedChunks as number) > (cacheMissChunks as number)) return base;

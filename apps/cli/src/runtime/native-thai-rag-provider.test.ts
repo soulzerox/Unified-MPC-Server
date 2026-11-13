@@ -26,6 +26,8 @@ import {
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
   THAI_RAG_LEGACY_ADOPTION_CAPABILITY,
   THAI_RAG_LEGACY_ADOPTION_CONTRACT_FINGERPRINT,
+  isThaiRagProviderErrorCode,
+  mapThaiRagProviderErrorCode,
 } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv } from './native-thai-rag-provider.js';
 
@@ -5018,5 +5020,460 @@ describe('canonical code_index source identity (#210 §13)', () => {
     const completedResult = isRecord(completed.result) ? completed.result : {};
     expect(completedResult).toEqual({ status: 'ok', indexed: 1 });
     await driver.stop();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Contract corpus replay (thai-rag-mcp#1)
+  //
+  // The corpus is vendored from the provider repository at a pinned commit
+  // (`contract/PROVENANCE.json`), so these are the provider's own envelopes.
+  // This replay feeds them through the Unified adapter and asserts what
+  // crosses the boundary: Unified's error code, provider status/reason,
+  // retryability, and that success payload fields are not renamed or dropped.
+  // ---------------------------------------------------------------------------
+  describe('contract corpus replay through the Unified adapter (#1)', () => {
+    const corpusRoot = new URL('../../../../packages/thai-rag/contract/', import.meta.url);
+
+    interface CorpusEntry {
+      readonly file: string;
+      readonly operation: string;
+      readonly expect: { readonly status: string; readonly error_codes: readonly string[] };
+    }
+    interface CorpusIndex {
+      readonly schema: string;
+      readonly fixtures: readonly CorpusEntry[];
+    }
+    interface FixtureError {
+      readonly code: string;
+      readonly details?: Readonly<Record<string, unknown>>;
+    }
+    interface CorpusFixture {
+      readonly status: string;
+      readonly data?: unknown;
+      readonly errors?: readonly FixtureError[];
+    }
+
+    async function readCorpusJson(relativePath: string): Promise<unknown> {
+      return JSON.parse(await readFile(new URL(relativePath, corpusRoot), 'utf8')) as unknown;
+    }
+
+    async function loadCorpus(): Promise<{ index: CorpusIndex; fixtures: ReadonlyMap<string, CorpusFixture> }> {
+      const index = await readCorpusJson('fixtures/index.json') as CorpusIndex;
+      const fixtures = new Map<string, CorpusFixture>();
+      for (const entry of index.fixtures) {
+        fixtures.set(entry.file, await readCorpusJson(entry.file) as CorpusFixture);
+      }
+      return { index, fixtures };
+    }
+
+    // The adapter dispatches these operations. Health is replayed by the
+    // handshake corpus test; Unified does not dispatch attach_workspace_base
+    // yet, so both are named here instead of being silently skipped. The list
+    // is per fixture, not per operation: a key-presence check on the operation
+    // would let a new `health` fixture pass as "named" while no test replays it.
+    const ADAPTER_OPERATIONS = new Set([
+      'code_index', 'index_status', 'code_search', 'code_context', 'code_blast_radius', 'pre_edit_context',
+    ]);
+    const OTHER_SURFACES: Readonly<Record<string, string>> = {
+      'fixtures/health-ready.json': 'packages/thai-rag/src/provider-contract.corpus.test.ts',
+      'fixtures/health-degraded-embedding.json': 'packages/thai-rag/src/provider-contract.corpus.test.ts',
+      'fixtures/health-unavailable-storage.json': 'packages/thai-rag/src/provider-contract.corpus.test.ts',
+      'fixtures/attach-success.json': 'provider-side replay only; Unified has no attach dispatcher',
+      'fixtures/incompatible-index.json': 'provider-side replay only; Unified has no attach dispatcher',
+    };
+    // Unified's own provider-code mapping is the thing under test, so it is
+    // pinned here instead of imported: deriving the expectation from
+    // `mapThaiRagProviderErrorCode` would keep this replay green through a
+    // change to the very table it exists to catch.
+    const EXPECTED_UNIFIED_CODES: Readonly<Record<string, string>> = {
+      indexing_conflict: 'CONFLICT',
+      stale_index: 'CONFLICT',
+      storage_unavailable: 'CONFLICT',
+      scope_denied: 'PERMISSION_DENIED',
+    };
+    const REPLAYED_FILES = [
+      'fixtures/indexing-conflict.json',
+      'fixtures/zero-change-verification.json',
+      'fixtures/lexical-only-index.json',
+      'fixtures/stale-source.json',
+      'fixtures/typed-failure-sqlite-busy.json',
+      'fixtures/job-unknown-after-restart.json',
+      'fixtures/job-cancelled.json',
+      'fixtures/workspace-scope-denied.json',
+      'fixtures/code-search-success.json',
+    ] as const;
+
+    it('accounts for every vendored fixture on the adapter or a named surface', async () => {
+      const { index, fixtures } = await loadCorpus();
+      expect(index.schema).toBe('provider-contract.v1.schema.json');
+      const unaccounted = index.fixtures
+        .filter((entry) => !ADAPTER_OPERATIONS.has(entry.operation) && OTHER_SURFACES[entry.file] === undefined)
+        .map((entry) => `${entry.file}:${entry.operation}`);
+      expect(unaccounted).toEqual([]);
+      const adapterFiles = index.fixtures
+        .filter((entry) => ADAPTER_OPERATIONS.has(entry.operation))
+        .map((entry) => entry.file)
+        .sort();
+      expect([...REPLAYED_FILES].sort()).toEqual(adapterFiles);
+      // The named-elsewhere list cannot go stale in either direction: every key
+      // must still be a corpus fixture, and every one must say where it is judged.
+      expect(index.fixtures.filter((entry) => OTHER_SURFACES[entry.file] !== undefined).map((entry) => entry.file).sort())
+        .toEqual(Object.keys(OTHER_SURFACES).sort());
+      expect(Object.values(OTHER_SURFACES).every((surface) => surface.length > 0)).toBe(true);
+      // Same for the pinned code table: a replayed fixture's code must have a
+      // pin, and a pin must still describe a replayed code. `index_job_not_found`
+      // is the one deliberate projection (FILE_NOT_FOUND/provider-job-unknown),
+      // asserted separately instead of through the table.
+      const replayed = new Set<string>(REPLAYED_FILES);
+      const corpusCodes = [...new Set(index.fixtures
+        .filter((entry) => replayed.has(entry.file))
+        .flatMap((entry) => (fixtures.get(entry.file)?.errors ?? []).map((error) => error.code)))];
+      expect(Object.keys(EXPECTED_UNIFIED_CODES).sort())
+        .toEqual(corpusCodes.filter((code) => code !== 'index_job_not_found').sort());
+    });
+
+    it.each(REPLAYED_FILES)('replays %s through the adapter', async (file) => {
+      const { index, fixtures } = await loadCorpus();
+      const entry = index.fixtures.find((candidate) => candidate.file === file);
+      const fixture = fixtures.get(file);
+      expect(entry, `${file} is missing from fixtures/index.json`).toBeDefined();
+      expect(fixture, `${file} is missing from the vendored corpus`).toBeDefined();
+      if (entry === undefined || fixture === undefined) return;
+
+      // The manifest and the fixture must agree before the adapter sees it.
+      expect(fixture.status, `${file} fixture status drifted from the manifest`).toBe(entry.expect.status);
+      const errors = fixture.errors ?? [];
+      expect(errors.map((error) => error.code).sort()).toEqual([...entry.expect.error_codes].sort());
+
+      // Snapshot the expected envelope before the call. On success the driver
+      // returns the provider payload by reference, so comparing against
+      // `fixture` afterwards would compare the adapter output with itself and
+      // an in-place rename or drop would still satisfy "field-for-field".
+      const expected = structuredClone(fixture);
+
+      const dataRoot = await tempRoot();
+      const workspaceRoot = await tempRoot();
+      await write(workspaceRoot, 'src/a.ts', HELLO);
+      const calls: CapturedCall[] = [];
+      const envelope = { structuredContent: fixture };
+      const driver = createCanonicalDriver({
+        dataRoot,
+        workspaceRoot,
+        calls,
+        // The corpus describes the provider envelope, not canonical planning:
+        // no source provider keeps Unified from adding binding/fence fields the
+        // fixture never declared.
+        source: null,
+        onCodeIndex: (args) => (entry.operation === 'code_index'
+          && args.background !== true
+          && args.max_files === undefined
+          ? envelope
+          : success('code_index', { status: 'ok', indexed: 0 })),
+        onTool: (tool) => (tool === entry.operation ? envelope : success(tool)),
+      });
+      try {
+        await startCanonicalDriver(driver, dataRoot);
+
+        const result = await driver.call(entry.operation, replayArgs(entry.operation, fixture, workspaceRoot));
+        // The boundary carries the snake_case workspace scope unchanged: the
+        // demand call for code_index, the single call for every other operation.
+        const dispatched = calls.filter(({ tool, args }) => tool === entry.operation
+          && (tool !== 'code_index' || (args.background !== true && args.max_files === undefined)));
+        expect(dispatched.length, `${file} never reached the provider`).toBeGreaterThan(0);
+        expect(dispatched.every(({ args }) => args.workspace_id === workspaceId && !Object.hasOwn(args, 'workspaceId'))).toBe(true);
+
+        if (errors.length > 0) {
+          expect(result.ok, `${file} should surface a Unified error`).toBe(false);
+          if (!result.ok) assertProviderError(result.error, file, expected, errors[0]!);
+        } else if (entry.operation === 'index_status') {
+          expect(result.ok, `${file} should surface a Unified job`).toBe(true);
+          if (result.ok) assertIndexStatusProjection(result.value, file, expected);
+        } else {
+          expect(result.ok, `${file} should surface success`).toBe(true);
+          if (result.ok) assertSuccessPayload(result.value, file, expected);
+        }
+      } finally {
+        // A failed expectation must not leak the driver, its fake client and
+        // both temp roots into the rest of the file.
+        await driver.stop();
+      }
+    });
+
+    it('projects a lexical-only terminal pass as a degraded verification (#1)', async () => {
+      // The deliverable calls out degraded terminal semantics: a completed
+      // lexical generation is not a clean "changed" verification, because the
+      // optional vector channel was unavailable. Reuse the corpus payload so
+      // the adapter is judged against the provider's own terminal shape.
+      const { fixtures } = await loadCorpus();
+      const lexical = fixtures.get('fixtures/lexical-only-index.json');
+      expect(lexical, 'lexical-only-index fixture').toBeDefined();
+      const data = isRecord(lexical?.data) ? lexical.data : undefined;
+      // The corpus payload is the input under test: a fixture that drifts must
+      // fail here instead of being quietly replaced by a shape this test made
+      // up, which is exactly the drift the replay exists to catch.
+      expect(data, 'lexical-only-index data').toMatchObject({
+        status: 'complete',
+        generation_id: expect.any(String),
+        indexed: expect.any(Number),
+        skipped: expect.any(Number),
+        lexical_only: true,
+      });
+      if (data === undefined || typeof data.generation_id !== 'string') return;
+      const generationId = data.generation_id;
+      const jobId = 'idx_provider_lexical';
+
+      const dataRoot = await tempRoot();
+      const workspaceRoot = await tempRoot();
+      await write(workspaceRoot, 'src/a.ts', HELLO);
+      const driver = new NativeThaiRagProviderDriver({
+        dataRoot,
+        launchConfig: { command: '/python' },
+        workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [
+          { id: workspaceId, realRootPath: workspaceRoot },
+        ],
+        workspaceSourceIdentityProvider: async (): Promise<WorkspaceSourceEvidenceIdentity> => ({
+          repositoryIdentity: 'repo-a',
+          gitCommonDirIdentity: 'git-a',
+          worktreeIdentity: 'worktree-a',
+          workspaceHead: 'a'.repeat(40),
+          dirtyFingerprint: 'clean',
+          stagedFingerprint: 'none',
+        }),
+        clientFactory: clientFactory({
+          handshake: cancellableHandshake(),
+          includeCancelIndex: true,
+          async onCall(tool, args): Promise<unknown> {
+            if (tool === 'code_index') {
+              return args.max_files !== undefined
+                ? success('ok')
+                : success('code_index', {
+                  status: 'ok',
+                  data: { status: 'running', job_id: jobId, workspace_id: workspaceId },
+                });
+            }
+            if (tool === 'index_status') {
+              return success('index_status', {
+                status: 'ok',
+                data: {
+                  status: 'done',
+                  job_id: jobId,
+                  generation_id: generationId,
+                  result: data,
+                },
+              });
+            }
+            if (tool === 'pre_edit_context') {
+              return args.file_path === '.unified-mpc-verification-probe'
+                ? snapshotPreEdit(workspaceId, generationId)
+                : success('ok');
+            }
+            return success('ok');
+          },
+        }),
+      });
+
+      try {
+        expect((await driver.start({
+          providerRoot: path.join(dataRoot, 'thai-rag'),
+          ownerId: 'owner',
+          providerVersion: '4.61.0',
+          embeddingIndexGeneration: 1,
+        })).ok).toBe(true);
+        await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' }))
+          .resolves.toMatchObject({ ok: true });
+
+        const verificationFile = path.join(dataRoot, 'thai-rag', 'workspaces', workspaceId, 'verification.json');
+        let record: unknown;
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          record = await readFile(verificationFile, 'utf8').then(
+            (text) => JSON.parse(text) as unknown,
+            () => undefined,
+          );
+          if (record !== undefined) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(record).toMatchObject({
+          outcome: 'degraded',
+          providerStatus: data.status,
+          indexedFiles: data.indexed,
+          skippedFiles: data.skipped,
+        });
+      } finally {
+        await driver.stop();
+      }
+    });
+
+    it('keeps an unreported skipped counter absent on a running job (#1)', async () => {
+      // `index_status_data` requires `indexed_files` but not `skipped_files`.
+      // A running job that reports only the indexed count must not be padded
+      // with a zero the provider never measured: the CLI and web UI render an
+      // absent counter as unknown, not as 0.
+      const dataRoot = await tempRoot();
+      const workspaceRoot = await tempRoot();
+      await write(workspaceRoot, 'src/a.ts', HELLO);
+      const driver = createCanonicalDriver({
+        dataRoot,
+        workspaceRoot,
+        calls: [],
+        source: null,
+        onTool: (tool) => (tool === 'index_status'
+          ? {
+            structuredContent: {
+              status: 'ok',
+              data: {
+                job_id: 'idx_providerrun1',
+                workspace_id: workspaceId,
+                status: 'running',
+                indexed_files: 4,
+              },
+            },
+          }
+          : success(tool)),
+      });
+      try {
+        await startCanonicalDriver(driver, dataRoot);
+        const result = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providerrun1',
+        });
+        expect(result).toMatchObject({ ok: true, value: { status: 'running', indexedFiles: 4 } });
+        if (result.ok && isRecord(result.value)) {
+          expect(result.value).not.toHaveProperty('skippedFiles');
+          expect(result.value).not.toHaveProperty('totalFiles');
+        }
+      } finally {
+        await driver.stop();
+      }
+    });
+
+    it('bounds a partial counter pair by its reported total (#1)', async () => {
+      // `index_status_data` does not require `skipped_files`, so a total can
+      // arrive without it. The reported total still bounds the pass: publishing
+      // `indexed > total` would hand the caller an impossible counter pair. A
+      // reported skipped counter with no total, on the other hand, keeps both
+      // counters and leaves the total unknown.
+      const dataRoot = await tempRoot();
+      const workspaceRoot = await tempRoot();
+      await write(workspaceRoot, 'src/a.ts', HELLO);
+      const driver = createCanonicalDriver({
+        dataRoot,
+        workspaceRoot,
+        calls: [],
+        source: null,
+        onTool: (tool, args) => (tool === 'index_status'
+          ? {
+            structuredContent: {
+              status: 'ok',
+              data: {
+                job_id: String(args.job_id),
+                workspace_id: workspaceId,
+                status: 'running',
+                ...(args.job_id === 'idx_providerover1'
+                  ? { indexed_files: 5, total_files: 3 }
+                  : { indexed_files: 2, skipped_files: 1 }),
+              },
+            },
+          }
+          : success(tool)),
+      });
+      try {
+        await startCanonicalDriver(driver, dataRoot);
+        const impossible = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providerover1',
+        });
+        expect(impossible.ok, 'an impossible counter pair should not fail the read').toBe(true);
+        if (impossible.ok && isRecord(impossible.value)) {
+          expect(impossible.value).not.toHaveProperty('indexedFiles');
+          expect(impossible.value).not.toHaveProperty('totalFiles');
+        }
+        const partial = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providerpartial1',
+        });
+        expect(partial).toMatchObject({ ok: true, value: { indexedFiles: 2, skippedFiles: 1 } });
+        if (partial.ok && isRecord(partial.value)) {
+          expect(partial.value).not.toHaveProperty('totalFiles');
+        }
+      } finally {
+        await driver.stop();
+      }
+    });
+
+    function replayArgs(operation: string, fixture: CorpusFixture, workspaceRoot: string): Record<string, unknown> {
+      const data = isRecord(fixture.data) ? fixture.data : {};
+      const details = fixture.errors?.[0]?.details ?? {};
+      if (operation === 'code_index') return { workspace_id: workspaceId, workspace_path: workspaceRoot };
+      if (operation === 'index_status') {
+        const jobId = typeof data.job_id === 'string' ? data.job_id : details.job_id;
+        return { workspace_id: workspaceId, job_id: String(jobId) };
+      }
+      if (operation === 'code_search') return { workspace_id: workspaceId, query: 'provider contract' };
+      if (operation === 'code_context') return { workspace_id: workspaceId, file_path: 'src/a.ts', line_number: 1 };
+      if (operation === 'code_blast_radius') return { workspace_id: workspaceId, symbol_name: 'probe' };
+      return { workspace_id: workspaceId, file_path: 'src/a.ts' };
+    }
+
+    function assertProviderError(
+      error: { readonly code: string; readonly recoverable: boolean; readonly details?: Readonly<Record<string, unknown>> },
+      file: string,
+      fixture: CorpusFixture,
+      providerError: FixtureError,
+    ): void {
+      // A lost provider job is a deliberate projection: Unified reports
+      // FILE_NOT_FOUND/provider-job-unknown instead of the raw provider code.
+      if (providerError.code === 'index_job_not_found') {
+        expect(error.code, file).toBe('FILE_NOT_FOUND');
+        expect(error.recoverable, file).toBe(false);
+        expect(error.details, file).toMatchObject({ reason: 'provider-job-unknown' });
+        return;
+      }
+      const expectedCode = EXPECTED_UNIFIED_CODES[providerError.code];
+      expect(expectedCode, `${file} has no pinned Unified code for ${providerError.code}`).toBeDefined();
+      expect(error.code, file).toBe(expectedCode);
+      // The pinned table must not drift from the shipped mapper either.
+      expect(mapThaiRagProviderErrorCode(providerError.code), file).toBe(expectedCode);
+      // `recoverable` is true because the code is part of the contract
+      // vocabulary: a known code keeps the classification it had before the
+      // vocabulary became open. Assert that premise, so a fixture publishing an
+      // unknown code (terminal unless the envelope marks it retryable) cannot
+      // ride along on this hardcoded expectation.
+      expect(isThaiRagProviderErrorCode(providerError.code), `${file} ${providerError.code}`).toBe(true);
+      expect(error.recoverable, file).toBe(true);
+      expect(error.details, file).toMatchObject({
+        reason: providerError.code,
+        providerStatus: fixture.status,
+      });
+      // The provider's retry classification must survive the mapping.
+      expect(error.details?.retryable, file).toBe(providerError.details?.retryable === true ? 1 : undefined);
+    }
+
+    function assertIndexStatusProjection(value: unknown, file: string, fixture: CorpusFixture): void {
+      const data = isRecord(fixture.data) ? fixture.data : {};
+      expect(value, file).toMatchObject({
+        status: data.status,
+        source: 'provider',
+        jobId: data.job_id,
+        indexedFiles: data.indexed_files,
+      });
+      // `index_status_data` pins `indexed_files` but not `skipped_files` or
+      // `total_files`. Absent stays absent: the CLI/UI render "not reported"
+      // as unknown, so defaulting the missing counters to 0 would fabricate a
+      // measurement the provider never made.
+      if (isRecord(value)) {
+        expect(value, file).not.toHaveProperty('skippedFiles');
+        expect(value, file).not.toHaveProperty('totalFiles');
+      }
+    }
+
+    function assertSuccessPayload(value: unknown, file: string, fixture: CorpusFixture): void {
+      expect(isRecord(value), `${file} did not return an MCP envelope`).toBe(true);
+      if (!isRecord(value)) return;
+      const payload = isRecord(value.structuredContent) ? value.structuredContent : value;
+      expect(payload.status, `${file} envelope status`).toBe(fixture.status);
+      // Unified may add its own canonical_binding/canonical_fence fields to the
+      // envelope; the provider payload itself must survive field-for-field.
+      expect(payload.data, `${file} provider data`).toEqual(fixture.data);
+    }
   });
 });

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { ok, err, type Result } from '@unified-mpc/domain';
+import { appError, ok, err, type Result } from '@unified-mpc/domain';
 import { canonicalManifestId, canonicalRevisionId, computeTreeOid, fileArtifactId } from '@unified-mpc/domain';
 import type { ExtensionsService } from '@unified-mpc/extensions';
 import {
@@ -2725,6 +2725,47 @@ describe('CLI execution dispatcher', () => {
     const code = await runCli(['tools', 'call', 'echo', '{"hello":"world"}'], deps);
     expect(code).toBe(0);
     expect(JSON.parse(output[0]!)).toEqual({ executed: 'echo', args: { hello: 'world' } });
+  });
+
+  it('dispatches gate check with parsed options and returns its exit code', async () => {
+    const output: string[] = [];
+    const seen: unknown[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      gateCheck: async (input) => {
+        seen.push(input);
+        return ok({
+          verdict: {
+            phase: 'close',
+            workspaceId: input.workspaceId,
+            ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
+            allowed: false,
+            blockers: [],
+            fingerprint: 'sha256:0000',
+          },
+          lines: ['close gate: refused'],
+          exitCode: 1,
+        });
+      },
+      write: (text) => output.push(text),
+    };
+
+    const code = await runCli(['gate', 'check', '--phase', 'close', '--workspace', 'ws_1', '--goal', 'goal_1', '--worktree', 'a'], deps);
+    expect(code).toBe(1);
+    expect(output).toEqual(['close gate: refused']);
+    expect(seen).toEqual([{ workspaceId: 'ws_1', goalId: 'goal_1', worktrees: ['a'], dryRun: false, json: false }]);
+  });
+
+  it('reports a close gate that could not run instead of a verdict', async () => {
+    const errors: string[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      gateCheck: async () => err(appError('CONFLICT', 'Goal worktree reconciliation is unavailable')),
+      writeError: (text) => errors.push(text),
+    };
+
+    expect(await runCli(['gate', 'check', '--phase', 'close', '--workspace', 'ws_1'], deps)).toBe(1);
+    expect(errors).toEqual(['Goal worktree reconciliation is unavailable']);
   });
 
   it('runs the injected doctor probes instead of the retired hardcoded pass', async () => {

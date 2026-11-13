@@ -124,6 +124,34 @@ unified-mpc web [--port <number>]
 unified-mpc web --port 3000
 ```
 
+### `unified-mpc gate check --phase close`
+Asks the three owners that already decide whether a goal may be closed, composes
+their answers into one verdict, and records the verdict as evidence.
+
+```bash
+# Syntax
+unified-mpc gate check --phase close --workspace <id> \
+  [--goal <id>] [--worktree <path>]... [--json] [--dry-run]
+```
+
+The three inputs are not re-derived here. `WorkspaceService.evaluateGoalWorkspaceCleanup`
+owns workspace disposition, the `git_worktree_remove` **dry run** owns worktree
+safety, and `goalCompletionWorktreeBlockers` owns goal-completion blockers. A
+`retention_candidate` workspace, a `clean` worktree and an empty blocker list are
+the only passing combination; `retention_pending`, `blocked`, an `unavailable`
+preview and a goal with no cleanup row all refuse, because a gate that cannot
+classify an input must not pass it.
+
+- Exit `0` when the phase may proceed, `1` when it refuses (the blockers are
+  printed with the reason each owner gave).
+- The verdict is written to `.unified-mpc/gates/<subject>-<gate-id>.json` under
+  the workspace root, and its `fingerprint` is a hash of the decision-relevant
+  inputs, so a receipt only matches the exact state it describes. `--dry-run`
+  prints the verdict without writing one.
+- A port that fails — a refused preview because the worktree belongs to another
+  client session, an unreadable ledger — aborts the run with that error instead
+  of reporting a verdict about an input the gate could not see.
+
 ---
 
 ## 6. Headless Tool Execution Commands

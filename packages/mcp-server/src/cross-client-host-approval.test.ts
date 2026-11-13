@@ -98,16 +98,22 @@ describe('cross-client host approval broker', () => {
     let prompts = 0;
     let closeRequested: Promise<void> | undefined;
     let clockReads = 0;
-    const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 400, pollMs: 10 });
+    // Comfortably longer than the observed close latency below, so the request
+    // cannot expire before the scan reaches it on a slow host.
+    const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 1_000, pollMs: 10 });
     const answer = provider(scopedRequest('scope-claim-close'));
     // The worker has to see the request in its first scan, otherwise the clock
     // injection below lands on an empty directory and close() arrives before
     // the entry loop's closed check instead of inside its window.
     const pendingDir = path.join(directory, 'pending');
     const pendingDeadline = Date.now() + 2_000;
+    let pendingSeenAt = 0;
     for (;;) {
       const pending = await readdir(pendingDir).catch(() => [] as string[]);
-      if (pending.length > 0) break;
+      if (pending.length > 0) {
+        pendingSeenAt = Date.now();
+        break;
+      }
       if (Date.now() > pendingDeadline) throw new Error('the requester never wrote a pending request');
       await delay(5);
     }
@@ -135,7 +141,17 @@ describe('cross-client host approval broker', () => {
     workers.push(worker);
 
     await waitFor(() => closeRequested !== undefined);
+    const closeLatencyMs = Date.now() - pendingSeenAt;
     await closeRequested;
+    // Anti-vacuity guards. Both assertions fail loudly when the test stops
+    // exercising the window instead of silently passing:
+    // - a close that arrived before the entry loop's own check leaves the
+    //   request in pending/, because the loop breaks before claiming it;
+    // - a request that expired before the scan reached it is removed by the
+    //   expiry branch, which needs much longer than this bound against the
+    //   requester deadline.
+    expect(closeLatencyMs).toBeLessThan(500);
+    await expect(readdir(pendingDir)).resolves.toEqual([]);
     await expect(answer).resolves.toBe(false);
     // A prompt after close would keep the trusted provider's serialized queue
     // occupied by an unanswered approval, and it can surface a user-facing

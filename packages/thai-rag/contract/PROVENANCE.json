@@ -1,18 +1,21 @@
 {
   "sourceRepository": "soulzerox/thai-rag-mcp",
   "sourceUrl": "https://github.com/soulzerox/thai-rag-mcp",
-  "sourceCommit": "bec781fd85c4698ab5232c6bca906e959a88f7e7",
+  "sourceCommit": "cc506412ec1bf1f09131e8a8f8ae563b177c3cf4",
   "sourceDirectory": "contract",
   "vendoredAt": "2026-11-13",
   "note": "Verbatim copy. PROVENANCE.json and VENDORED.md are not part of the copied set. Refresh with packages/thai-rag/contract/VENDORED.md.",
   "files": {
-    "README.md": "1f2a667ec7bfa91a5f2abd96f9eb87b76a5b93bb35669bd01072f3524c412d30",
+    "README.md": "f99511c5ac27c931f72515d41965fcaf764623291ef1206f36056d2b80f0d23d",
     "examples/index-request-native.json": "aba78b5f4faa9cc7e53ffefa97be85e83389b64912469f1dd5079124a36b47c1",
     "examples/index-request-standalone.json": "9bc43a9e6f0479ca67e33a57a0067c349f12d19ceeb59433ff2393184cfa4fbe",
+    "fixtures/attach-success.json": "ad525885c9f970c155878677de5f8909037e46d4e2b2b0947e65232afca59105",
+    "fixtures/code-search-success.json": "c7062d5254b42059a70f0f5b3e6d905466f0b8f7e463456cf6231216d0c72dc3",
     "fixtures/health-degraded-embedding.json": "4a9d6872b4a4eb7623dfb9bd025c4698e13e04433ab6e9434421eb233912c95c",
     "fixtures/health-ready.json": "52ae085621fc88bca518fba6988f11fbc2a9cbfeed7f67d92803ec536ccf0fd4",
     "fixtures/health-unavailable-storage.json": "00a504b3334f7baf3d861b240c572aa3be6b890b3882449ae6f8c52adc08fff6",
-    "fixtures/index.json": "0dfad864460b710d9dc78af3796e3170684f6770904039af91b247bcc3b9b92e",
+    "fixtures/incompatible-index.json": "38829e5d88509d1a365fa8a86fa5ab80cc43ae5073fa27697e22c74a52514ea8",
+    "fixtures/index.json": "819d5eeb8a7754f6d4b3c9883aa5370efc0265ddc74f397c5b390dcc64c9ef0b",
     "fixtures/indexing-conflict.json": "5205e3926b33bf345c42b2cf30d6007c16da9e579e6d2e1231976138f9ed4e9e",
     "fixtures/job-cancelled.json": "ad907e321b81893956691a1aa377529c651b1d2c158629337643ae6329ffb237",
     "fixtures/job-unknown-after-restart.json": "9afb5bc081507d30705cf9b2619bfea091cccc3e829d856dbe0547afedc4a196",
@@ -21,6 +24,6 @@
     "fixtures/typed-failure-sqlite-busy.json": "922146756727e5528fefa04f298edf64ccb63bba55602ad6b0fab5f06a002b48",
     "fixtures/workspace-scope-denied.json": "5ea0846ce41356de96228cc0abb77add8764b5f3d82b92340ec034d2e0002913",
     "fixtures/zero-change-verification.json": "307684dff08dc47127d1a90675742e470f4e5e7600744d6c066ac3599b623ee5",
-    "provider-contract.v1.schema.json": "75c35d1cb0b3639664169f11118f0d77b4674afb081bb3d23c134478bcff1a3d"
+    "provider-contract.v1.schema.json": "4f7e95c8a0846a7d536b3e3435f1be06c9568625ced90dfb087ed5097bb608da"
   }
 }

@@ -1,0 +1,55 @@
+{
+  "status": "unavailable",
+  "data": null,
+  "workspace_id": "ws-viewer-00000000",
+  "repository_id": null,
+  "revision_id": null,
+  "artifact_id": null,
+  "repository_provenance": null,
+  "trust_scope": null,
+  "operation_id": "op-attach-01",
+  "generation": null,
+  "warnings": [],
+  "errors": [
+    {
+      "code": "incompatible_index",
+      "message": "attach_refused: demanded base generation 'gen-old-7' is not the active view of workspace 'ws-base-00000000' (active: gen-new-8)",
+      "details": {
+        "operation": "attach_workspace_base",
+        "exception": "IncompatibleIndex",
+        "base_workspace_id": "ws-base-00000000",
+        "demanded_generation_id": "gen-old-7",
+        "active_generation_id": "gen-new-8",
+        "reason": "base_generation_not_active"
+      }
+    }
+  ],
+  "metadata": {
+    "provider_name": "thai-rag",
+    "provider_version": "0.1.0",
+    "contract_version": "1.0",
+    "contract_fingerprint": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+    "compatibility_range": { "min": "1.0", "max": "1.x" },
+    "index_job_contract_version": "1.1",
+    "generation": {
+      "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+      "embedding": "embeddinggemma-2-Q8_0",
+      "index": "1",
+      "storage": "sqlite"
+    },
+    "embedding": {
+      "profile": "embeddinggemma-2-Q8_0",
+      "model": "embeddinggemma-2-Q8_0",
+      "dimension": 768,
+      "preprocessing_version": "1",
+      "ready": true
+    },
+    "readiness": {
+      "storage_ready": true,
+      "fts_ready": true,
+      "vector_store_ready": true,
+      "embedding_ready": true,
+      "workspace_ready": true
+    }
+  }
+}

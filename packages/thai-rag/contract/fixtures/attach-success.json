@@ -1,0 +1,55 @@
+{
+  "status": "ok",
+  "data": {
+    "workspace_id": "ws-viewer-00000000",
+    "base_workspace_id": "ws-base-00000000",
+    "base_generation_id": "gen-base-8",
+    "base_identity": {
+      "repository_id": "github:soulzerox/thai-rag-mcp",
+      "manifest_id": "man:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision_id": "rev:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "tree_oid": "dddddddddddddddddddddddddddddddddddddddd",
+      "ref": "refs/heads/main"
+    },
+    "created_at": "2026-11-08T10:05:00+00:00"
+  },
+  "workspace_id": "ws-viewer-00000000",
+  "repository_id": null,
+  "revision_id": null,
+  "artifact_id": null,
+  "repository_provenance": "git-common-dir:sha256:9c228ac3a87d0c3f501b8b8767d42ae9058c836bed1e9ea49e9c8636c4a7ac1e",
+  "trust_scope": "workspace",
+  "operation_id": "op-attach-02",
+  "generation": null,
+  "warnings": [],
+  "errors": [],
+  "metadata": {
+    "provider_name": "thai-rag",
+    "provider_version": "0.1.0",
+    "contract_version": "1.0",
+    "contract_fingerprint": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+    "compatibility_range": { "min": "1.0", "max": "1.x" },
+    "index_job_contract_version": "1.1",
+    "generation": {
+      "contract": "579a2884795d39b837e54ee16a7680414a821bf9d81e8a5e53b213a0c20f653f",
+      "embedding": "embeddinggemma-2-Q8_0",
+      "index": "1",
+      "storage": "sqlite"
+    },
+    "embedding": {
+      "profile": "embeddinggemma-2-Q8_0",
+      "model": "embeddinggemma-2-Q8_0",
+      "dimension": 768,
+      "preprocessing_version": "1",
+      "ready": true
+    },
+    "readiness": {
+      "storage_ready": true,
+      "fts_ready": true,
+      "vector_store_ready": true,
+      "embedding_ready": true,
+      "workspace_ready": true
+    }
+  }
+}

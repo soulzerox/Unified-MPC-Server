@@ -2748,8 +2748,16 @@ function nativeIndexProgress(value: unknown): {
   // The provider reports final counters as `indexed`/`skipped` inside the
   // terminal result, while progress envelopes use `indexed_files`. Accept both
   // so the durable job never records 0 for a pass that actually indexed files.
-  const indexedFiles = nestedValue(value, 'indexed_files') ?? nestedValue(value, 'indexed');
-  const skippedFiles = nestedValue(value, 'skipped_files') ?? nestedValue(value, 'skipped');
+  const contractIndexedFiles = nestedValue(value, 'indexed_files');
+  const indexedFiles = contractIndexedFiles ?? nestedValue(value, 'indexed');
+  // `index_status_data` pins `indexed_files` but not `skipped_files`: a terminal
+  // state such as `cancelled` reports only what it indexed. An absent skipped
+  // counter next to a contract `indexed_files` therefore means 0. The legacy
+  // terminal `indexed` alias is only trusted as a complete counter set, so
+  // payloads that predate the contract keep their previous meaning.
+  const skippedFiles = nestedValue(value, 'skipped_files')
+    ?? nestedValue(value, 'skipped')
+    ?? (contractIndexedFiles === undefined ? undefined : 0);
   const reportedTotal = nestedValue(value, 'total_files');
   if (!valid(indexedFiles) || !valid(skippedFiles)) return undefined;
   const totalFiles = valid(reportedTotal) ? reportedTotal : indexedFiles + skippedFiles;

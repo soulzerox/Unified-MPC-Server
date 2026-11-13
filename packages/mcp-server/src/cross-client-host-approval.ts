@@ -164,6 +164,15 @@ export function startCrossClientHostApprovalWorker(
         } catch {
           continue;
         }
+        // A close can land during any await above (heartbeat, listing, read,
+        // preferred-worker liveness) after the loop's own closed check ran for
+        // this entry. Drop the claim instead of starting a prompt whose answer
+        // can no longer be delivered: a prompt after close can also keep the
+        // trusted provider's serialized queue busy for a later approval.
+        if (closed) {
+          await rm(claimedPath, { force: true }).catch(() => undefined);
+          break;
+        }
         let approved = false;
         try {
           // A close must not wait for a human answering the prompt, so the

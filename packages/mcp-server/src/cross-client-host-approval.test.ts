@@ -92,6 +92,58 @@ describe('cross-client host approval broker', () => {
     await expect(provider(scopedRequest())).resolves.toBe(false);
   });
 
+  it('never prompts for a request claimed after close began', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-approval-claim-close-'));
+    temporaryRoots.push(directory);
+    let prompts = 0;
+    let closeRequested: Promise<void> | undefined;
+    let clockReads = 0;
+    const provider = createCrossClientHostMutationApprovalProvider({ directory, timeoutMs: 400, pollMs: 10 });
+    const answer = provider(scopedRequest('scope-claim-close'));
+    // The worker has to see the request in its first scan, otherwise the clock
+    // injection below lands on an empty directory and close() arrives before
+    // the entry loop's closed check instead of inside its window.
+    const pendingDir = path.join(directory, 'pending');
+    const pendingDeadline = Date.now() + 2_000;
+    for (;;) {
+      const pending = await readdir(pendingDir).catch(() => [] as string[]);
+      if (pending.length > 0) break;
+      if (Date.now() > pendingDeadline) throw new Error('the requester never wrote a pending request');
+      await delay(5);
+    }
+
+    const worker = startCrossClientHostApprovalWorker({
+      directory,
+      provider: async (): Promise<boolean> => {
+        prompts += 1;
+        return true;
+      },
+      workerId: 'trusted-stdio-claim-close',
+      pollMs: 10,
+      // Only the scan's own heartbeat reads the clock, so the second read is
+      // unambiguously the per-entry expiry check: it runs after the request was
+      // read and before the claim. Closing exactly there is the window that the
+      // loop's closed check does not cover.
+      heartbeatMs: 60_000,
+      workerFreshMs: 100,
+      now: (): number => {
+        clockReads += 1;
+        if (clockReads === 2) closeRequested = worker.close();
+        return Date.now();
+      },
+    });
+    workers.push(worker);
+
+    await waitFor(() => closeRequested !== undefined);
+    await closeRequested;
+    await expect(answer).resolves.toBe(false);
+    // A prompt after close would keep the trusted provider's serialized queue
+    // occupied by an unanswered approval, and it can surface a user-facing
+    // prompt for a process that already shut down.
+    expect(prompts).toBe(0);
+    await expect(readdir(path.join(directory, 'claimed'))).resolves.toEqual([]);
+  });
+
   it('closes while a provider prompt is still pending and leaves no broker files behind', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-approval-close-'));
     temporaryRoots.push(directory);

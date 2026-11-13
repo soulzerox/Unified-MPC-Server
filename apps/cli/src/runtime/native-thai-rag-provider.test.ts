@@ -5350,8 +5350,14 @@ describe('canonical code_index source identity (#210 §13)', () => {
       // `index_status_data` does not require `skipped_files`, so a total can
       // arrive without it. The reported total still bounds the pass: publishing
       // `indexed > total` would hand the caller an impossible counter pair. A
-      // reported skipped counter with no total, on the other hand, keeps both
-      // counters and leaves the total unknown.
+      // reported total that does bound the pass is published, and a reported
+      // skipped counter with no total keeps both counters while leaving the
+      // total unknown.
+      const payloads: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+        idx_providerover1: { indexed_files: 5, total_files: 3 },
+        idx_providertotal1: { indexed_files: 2, total_files: 4 },
+        idx_providerpartial1: { indexed_files: 2, skipped_files: 1 },
+      };
       const dataRoot = await tempRoot();
       const workspaceRoot = await tempRoot();
       await write(workspaceRoot, 'src/a.ts', HELLO);
@@ -5368,9 +5374,7 @@ describe('canonical code_index source identity (#210 §13)', () => {
                 job_id: String(args.job_id),
                 workspace_id: workspaceId,
                 status: 'running',
-                ...(args.job_id === 'idx_providerover1'
-                  ? { indexed_files: 5, total_files: 3 }
-                  : { indexed_files: 2, skipped_files: 1 }),
+                ...payloads[String(args.job_id)],
               },
             },
           }
@@ -5386,6 +5390,14 @@ describe('canonical code_index source identity (#210 §13)', () => {
         if (impossible.ok && isRecord(impossible.value)) {
           expect(impossible.value).not.toHaveProperty('indexedFiles');
           expect(impossible.value).not.toHaveProperty('totalFiles');
+        }
+        const bounded = await driver.call('index_status', {
+          workspace_id: workspaceId,
+          job_id: 'idx_providertotal1',
+        });
+        expect(bounded).toMatchObject({ ok: true, value: { indexedFiles: 2, totalFiles: 4 } });
+        if (bounded.ok && isRecord(bounded.value)) {
+          expect(bounded.value).not.toHaveProperty('skippedFiles');
         }
         const partial = await driver.call('index_status', {
           workspace_id: workspaceId,

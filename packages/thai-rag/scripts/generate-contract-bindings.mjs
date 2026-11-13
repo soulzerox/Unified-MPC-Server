@@ -32,12 +32,11 @@ const ANNOTATION_KEYWORDS = new Set([
   'minLength', 'maxLength', 'pattern', 'format',
   'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
   'minItems', 'maxItems', 'uniqueItems', 'minProperties', 'maxProperties',
-  'propertyNames',
 ]);
 /** Keywords this generator intentionally translates. */
 const STRUCTURAL_KEYWORDS = new Set([
   '$ref', 'type', 'enum', 'const', 'required', 'properties', 'items',
-  'additionalProperties', 'anyOf', 'oneOf',
+  'additionalProperties', 'anyOf', 'oneOf', 'propertyNames',
 ]);
 /** Keywords that would change the emitted type but are not implemented yet. */
 const UNSUPPORTED_KEYWORDS = new Set([
@@ -70,12 +69,52 @@ function assertSchemaObject(value, where) {
   }
 }
 
-function referenceName(schema, where) {
+/** Filled by `render` so a `$ref` can be resolved while emitting a type. */
+let schemaDefinitions = {};
+
+function referenceDefinition(schema, where) {
   const reference = schema.$ref;
   if (typeof reference !== 'string' || !reference.startsWith(DEFINITION_REF_PREFIX)) {
     throw new Error(`${where} has unsupported $ref ${JSON.stringify(reference)}`);
   }
-  return pascalCase(reference.slice(DEFINITION_REF_PREFIX.length));
+  const name = reference.slice(DEFINITION_REF_PREFIX.length);
+  const definition = schemaDefinitions[name];
+  if (definition === undefined) {
+    throw new Error(`${where} references unknown definition '${name}'`);
+  }
+  return { name, definition };
+}
+
+function referenceName(schema, where) {
+  return pascalCase(referenceDefinition(schema, where).name);
+}
+
+/**
+ * `propertyNames` only reaches the binding when it leaves the key space open:
+ * a plain string (or a reference to one). A closed set would need a mapped
+ * type, so fail instead of emitting a wider `Record<string, T>` than the
+ * schema allows.
+ */
+function assertOpenStringKeySpace(schema, where, seen = new Set()) {
+  if (schema === true) return;
+  assertSchemaObject(schema, where);
+  if (schema.$ref !== undefined) {
+    const { name, definition } = referenceDefinition(schema, where);
+    if (seen.has(name)) {
+      throw new Error(`${where} has a cyclic propertyNames reference through '${name}'`);
+    }
+    seen.add(name);
+    assertOpenStringKeySpace(definition, `${where} -> $defs.${name}`, seen);
+    return;
+  }
+  if (schema.enum !== undefined || schema.const !== undefined) {
+    throw new Error(`${where} closes the property-name set, which the bindings generator does not model`);
+  }
+  if (schema.type !== undefined && schema.type !== 'string') {
+    throw new Error(
+      `${where} constrains property names to ${JSON.stringify(schema.type)}, which the bindings generator does not model`,
+    );
+  }
 }
 
 function unionOf(types) {
@@ -130,6 +169,9 @@ function typeOf(schema, where = 'schema') {
   if (schema === true) return 'unknown';
   if (schema === false) return 'never';
   assertSchemaObject(schema, where);
+  if (schema.propertyNames !== undefined) {
+    assertOpenStringKeySpace(schema.propertyNames, `${where}.propertyNames`);
+  }
   if (schema.$ref !== undefined) return referenceName(schema, where);
   if (Array.isArray(schema.anyOf)) {
     return unionOf(schema.anyOf.map((member, index) => typeOf(member, `${where}.anyOf[${index}]`)));
@@ -168,6 +210,7 @@ function render(schema) {
   if (typeof definitions !== 'object' || definitions === null || Array.isArray(definitions)) {
     throw new Error('contract schema has no $defs object');
   }
+  schemaDefinitions = definitions;
 
   const names = new Map();
   for (const name of Object.keys(definitions)) {

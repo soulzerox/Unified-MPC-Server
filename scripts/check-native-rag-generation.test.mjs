@@ -102,6 +102,19 @@ describe('generation health workspace scope', () => {
     assert.deepEqual(retired, []);
   });
 
+  it('keeps every candidate when freshness ties', () => {
+    const { live, retired } = selectLiveWorkspaces(
+      [shadowWorkspace, liveWorkspace],
+      [
+        { workspaceId: shadowWorkspace, workspacePath: '/repo', updatedAt: 2 },
+        { workspaceId: liveWorkspace, workspacePath: '/repo', updatedAt: 2 },
+      ],
+      () => true,
+    );
+    assert.deepEqual(live, [shadowWorkspace, liveWorkspace]);
+    assert.deepEqual(retired, []);
+  });
+
   it('fails when every recorded workspace is retired instead of passing on nothing', () => {
     const database = fixtureDatabase();
     insertGeneration(database, { generationId: 'gen-retired', workspaceId: retiredWorkspace, status: 'active' });
@@ -111,6 +124,16 @@ describe('generation health workspace scope', () => {
     const result = spawnSync(process.execPath, [scriptPath, '--db', database], { encoding: 'utf8' });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /judged no live workspace/u);
+    assert.doesNotMatch(result.stdout, /passed for 0 workspace/u);
+  });
+
+  it('fails when no generation was ever recorded instead of passing on nothing', () => {
+    const database = fixtureDatabase();
+
+    const result = spawnSync(process.execPath, [scriptPath, '--db', database], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /judged no live workspace/u);
+    assert.match(result.stderr, /no workspace generation has ever been recorded/u);
     assert.doesNotMatch(result.stdout, /passed for 0 workspace/u);
   });
 });

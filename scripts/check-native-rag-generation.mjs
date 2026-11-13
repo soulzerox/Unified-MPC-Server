@@ -216,9 +216,10 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   const workspaceIds = argumentValues('--workspace');
   const { workspaces: report, retired } = readGenerationHealth(databasePath, workspaceIds.length === 0 ? undefined : workspaceIds);
   const failing = report.filter((workspace) => workspace.violations.length > 0);
-  // A green run has to have judged something: retiring every record would
-  // otherwise turn "nothing was checked" into a passing gate.
-  const judgedNothing = report.length === 0 && retired.length > 0;
+  // A green run has to have judged something: retiring every record, or reading
+  // a database that never recorded one, would otherwise turn "nothing was
+  // checked" into a passing gate.
+  const judgedNothing = report.length === 0;
   for (const workspace of report) {
     if (workspace.generationId === undefined) {
       process.stdout.write(`${workspace.workspaceId}: no active generation\n`);
@@ -239,8 +240,11 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     process.stdout.write(`retired workspace records skipped: ${retired.length} (${detail})\n`);
   }
   if (judgedNothing) {
+    const detail = retired.length > 0
+      ? `all ${retired.length} recorded workspace(s) are retired`
+      : 'no workspace generation has ever been recorded';
     process.stderr.write(
-      `Native Thai-RAG generation health judged no live workspace: all ${retired.length} recorded workspace(s) are retired. `
+      `Native Thai-RAG generation health judged no live workspace: ${detail}. `
       + 'Point this check at a database with a live workspace before treating it as green.\n',
     );
     process.exitCode = 1;

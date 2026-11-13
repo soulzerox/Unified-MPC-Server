@@ -5,16 +5,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 import {
   HEAD_SHA_PATTERN,
+  createGatePolicy,
   evaluateReviewEvidence,
   findReviewReceipt,
   reviewFingerprint,
   reviewVerdict,
-  selectVerificationReceipt,
   skillVersionBlocker,
   validateFindings,
-  verificationGateBlockers,
 } from './workflow-gate-core.mjs';
 
 /**
@@ -57,11 +57,14 @@ export {
   findReviewReceipt,
   reviewFingerprint,
   reviewVerdict,
-  selectVerificationReceipt,
   skillVersionBlocker,
   validateFindings,
-  verificationGateBlockers,
 } from './workflow-gate-core.mjs';
+
+// This checkout's profile is the gate's input, not the gate's dependency.
+const gate = createGatePolicy({ profileVersion: PROFILE_VERSION, fingerprintFor: expectedFingerprint });
+export const selectVerificationReceipt = gate.selectVerificationReceipt;
+export const verificationGateBlockers = gate.verificationGateBlockers;
 
 export function parseArgs(argv) {
   const options = { command: undefined, base: 'main', repo: undefined, pr: undefined, findings: undefined, reviewer: undefined, json: false };

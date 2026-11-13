@@ -2,7 +2,6 @@
 import { createHash } from 'node:crypto';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
-import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 
 /**
  * Shared Workflow Gate policy (#142, step 1).
@@ -201,91 +200,110 @@ export function evaluateReviewEvidence({ receipt, capsule, headReceiptCount, cor
   return { eligible: blockers.length === 0, blockers };
 }
 
-export function selectVerificationReceipt(receipts, headSha) {
-  const matches = receipts.filter((receipt) => receipt?.headSha === headSha);
-  if (matches.length === 0) return undefined;
-  const newestFirst = [...matches].sort((left, right) => (
-    String(right.completedAt ?? '').localeCompare(String(left.completedAt ?? ''))
-  ));
-  return newestFirst.find((receipt) => verificationGateBlockers({ verification: receipt, headSha }).length === 0)
-    ?? newestFirst[0];
-}
-
 /**
- * #142 `before_review` gate: a review is only worth starting once local
- * verification has produced a merge-ready receipt for the exact head. The merge
- * guard enforces that before integration, so a review that runs first spends a
- * reviewer on a head that cannot land, and the capsule ends up documenting a
- * verification that never happened. The blockers are reported instead of the
- * first one so one run tells an operator everything the head is missing.
- *
- * `fingerprint` is the clean-tree fingerprint the caller already resolved. The
- * merge guard passes the one it computed from the PR head; the review gate
- * leaves it out and the default derives the same value, so both gates compare
- * the same bytes.
+ * What the profile expects of a verification receipt: the version whose step set
+ * the receipt must name, and the clean-tree fingerprint for a head. The gate
+ * takes both as inputs instead of importing them, so this module knows nothing
+ * about the local verification profile and a caller can supply a different one
+ * — the runtime merge gate keeps its own verification mode.
  */
-export function verificationGateBlockers({ verification, headSha, fingerprint = expectedFingerprint(headSha) }) {
-  if (verification === undefined) {
-    return [`no local verification receipt for ${headSha.slice(0, 12)}; run \`corepack pnpm@10.15.0 verify:local\` on that commit before freezing a capsule`];
-  }
-  const blockers = [];
-  if (verification.headSha !== headSha) blockers.push('verification receipt was produced for a different head');
-  if (verification.mergeReady !== true) blockers.push('verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`');
-  if (verification.dirty !== false) blockers.push('verification receipt was produced from a dirty worktree');
-  if (verification.profile !== 'merge') blockers.push(`verification receipt used the '${String(verification.profile)}' profile, not 'merge'`);
-  // A bumped PROFILE_VERSION means the step set changed, so an older receipt
-  // vouched for steps this profile no longer runs. The merge guard refuses it,
-  // so a review started on it would only be spent on a head that cannot land.
-  if (verification.profileVersion !== PROFILE_VERSION) {
-    blockers.push(`verification receipt used profile version ${String(verification.profileVersion)}, current is ${PROFILE_VERSION}`);
-  }
-  // The fingerprint binds the receipt to one head on a clean tree. A receipt
-  // that failed this check cannot authorize a merge, so it cannot authorize a
-  // review either.
-  if (verification.diffFingerprint !== fingerprint) {
-    blockers.push('verification receipt fingerprint does not match the head');
-  }
-  return blockers;
-}
-
-/**
- * The `integrate` gate: every blocker is reported, not just the first, so one
- * run tells the operator everything that stands between this head and a merge.
- * PR state, base and head are checked before any receipt, because no receipt
- * can make a draft, a moved base or a conflicting PR mergeable.
- */
-export function evaluateMergeEligibility({ pr, receipt, review, reviewSkill, reviewFingerprint: headReviewFingerprint, headReceiptCount, corruptReviewReceipts, expectedBase, headFingerprint }) {
-  const blockers = [];
-  if (pr.state !== 'OPEN') blockers.push(`PR is not open (state=${pr.state})`);
-  if (pr.isDraft === true) blockers.push('PR is a draft');
-  if (pr.baseRefName !== expectedBase) blockers.push(`base is '${pr.baseRefName}', expected '${expectedBase}'`);
-  if (typeof pr.headRefOid !== 'string' || !HEAD_SHA_PATTERN.test(pr.headRefOid)) {
-    blockers.push(`PR head '${String(pr.headRefOid)}' is not a 40-character commit SHA`);
-  }
-  if (pr.mergeable !== 'MERGEABLE') blockers.push(`GitHub reports mergeable=${String(pr.mergeable)}`);
-  if (pr.mergeStateStatus !== 'CLEAN') blockers.push(`merge state is ${String(pr.mergeStateStatus)}, expected CLEAN`);
-
-  if (receipt === undefined) {
-    blockers.push('no local verification receipt for the current PR head; run `pnpm verify:local` on that commit');
-  } else {
-    // One predicate for both gates: the review gate freezes a capsule only on a
-    // receipt this accepts, so the merge gate refuses exactly the same heads.
-    blockers.push(...verificationGateBlockers({ verification: receipt, headSha: pr.headRefOid, fingerprint: headFingerprint }));
+export function createGatePolicy({ profileVersion, fingerprintFor } = {}) {
+  if (!Number.isSafeInteger(profileVersion) || typeof fingerprintFor !== 'function') {
+    throw new TypeError('createGatePolicy requires { profileVersion: integer, fingerprintFor: (headSha) => string }');
   }
 
-  const reviewEvaluation = evaluateReviewEvidence({
-    receipt: review,
-    headReceiptCount,
-    corruptReceiptCount: corruptReviewReceipts,
-    pr,
-    skill: reviewSkill,
-    fingerprint: headReviewFingerprint,
-  });
-  blockers.push(...reviewEvaluation.blockers);
-
-  for (const hazard of findNegatedClosingKeywordHazards({ title: pr.title, body: pr.body })) {
-    blockers.push(`PR ${hazard.source} retracts a closing keyword: "${hazard.excerpt}"`);
+  /**
+   * A head is immutable, so one fully valid receipt is enough forever.
+   * Newest-wins would let a later weaker run revoke it: running
+   * `verify:targeted` for fast iteration after a merge-ready `verify:local` on
+   * the same commit would make the head unacceptable and force a full
+   * re-verification of an unchanged tree. So the newest receipt the gate
+   * accepts is selected; when none qualifies the newest receipt is returned
+   * anyway, so the blockers explain why the head is refused.
+   */
+  function selectVerificationReceipt(receipts, headSha) {
+    const matches = receipts.filter((receipt) => receipt?.headSha === headSha);
+    if (matches.length === 0) return undefined;
+    const newestFirst = [...matches].sort((left, right) => (
+      String(right.completedAt ?? '').localeCompare(String(left.completedAt ?? ''))
+    ));
+    return newestFirst.find((receipt) => verificationGateBlockers({ verification: receipt, headSha }).length === 0)
+      ?? newestFirst[0];
   }
 
-  return { eligible: blockers.length === 0, blockers };
+  /**
+   * #142 `before_review` gate: a review is only worth starting once local
+   * verification has produced a merge-ready receipt for the exact head. The merge
+   * guard enforces that before integration, so a review that runs first spends a
+   * reviewer on a head that cannot land, and the capsule ends up documenting a
+   * verification that never happened. The blockers are reported instead of the
+   * first one so one run tells an operator everything the head is missing.
+   */
+  function verificationGateBlockers({ verification, headSha }) {
+    if (verification === undefined) {
+      return [`no local verification receipt for ${headSha.slice(0, 12)}; run \`corepack pnpm@10.15.0 verify:local\` on that commit before freezing a capsule`];
+    }
+    const blockers = [];
+    if (verification.headSha !== headSha) blockers.push('verification receipt was produced for a different head');
+    if (verification.mergeReady !== true) blockers.push('verification receipt is not merge-ready; rerun `corepack pnpm@10.15.0 verify:local`');
+    if (verification.dirty !== false) blockers.push('verification receipt was produced from a dirty worktree');
+    if (verification.profile !== 'merge') blockers.push(`verification receipt used the '${String(verification.profile)}' profile, not 'merge'`);
+    // A bumped profile version means the step set changed, so an older receipt
+    // vouched for steps this profile no longer runs. The merge guard refuses it,
+    // so a review started on it would only be spent on a head that cannot land.
+    if (verification.profileVersion !== profileVersion) {
+      blockers.push(`verification receipt used profile version ${String(verification.profileVersion)}, current is ${profileVersion}`);
+    }
+    // The fingerprint binds the receipt to one head on a clean tree. A receipt
+    // that failed this check cannot authorize a merge, so it cannot authorize a
+    // review either.
+    if (verification.diffFingerprint !== fingerprintFor(headSha)) {
+      blockers.push('verification receipt fingerprint does not match the head');
+    }
+    return blockers;
+  }
+
+  /**
+   * The `integrate` gate: every blocker is reported, not just the first, so one
+   * run tells the operator everything that stands between this head and a merge.
+   * PR state, base and head are checked before any receipt, because no receipt
+   * can make a draft, a moved base or a conflicting PR mergeable.
+   */
+  function evaluateMergeEligibility({ pr, receipt, review, reviewSkill, reviewFingerprint: headReviewFingerprint, headReceiptCount, corruptReviewReceipts, expectedBase }) {
+    const blockers = [];
+    if (pr.state !== 'OPEN') blockers.push(`PR is not open (state=${pr.state})`);
+    if (pr.isDraft === true) blockers.push('PR is a draft');
+    if (pr.baseRefName !== expectedBase) blockers.push(`base is '${pr.baseRefName}', expected '${expectedBase}'`);
+    if (typeof pr.headRefOid !== 'string' || !HEAD_SHA_PATTERN.test(pr.headRefOid)) {
+      blockers.push(`PR head '${String(pr.headRefOid)}' is not a 40-character commit SHA`);
+    }
+    if (pr.mergeable !== 'MERGEABLE') blockers.push(`GitHub reports mergeable=${String(pr.mergeable)}`);
+    if (pr.mergeStateStatus !== 'CLEAN') blockers.push(`merge state is ${String(pr.mergeStateStatus)}, expected CLEAN`);
+
+    if (receipt === undefined) {
+      blockers.push('no local verification receipt for the current PR head; run `pnpm verify:local` on that commit');
+    } else {
+      // One predicate for both gates: the review gate freezes a capsule only on a
+      // receipt this accepts, so the merge gate refuses exactly the same heads.
+      blockers.push(...verificationGateBlockers({ verification: receipt, headSha: pr.headRefOid }));
+    }
+
+    const reviewEvaluation = evaluateReviewEvidence({
+      receipt: review,
+      headReceiptCount,
+      corruptReceiptCount: corruptReviewReceipts,
+      pr,
+      skill: reviewSkill,
+      fingerprint: headReviewFingerprint,
+    });
+    blockers.push(...reviewEvaluation.blockers);
+
+    for (const hazard of findNegatedClosingKeywordHazards({ title: pr.title, body: pr.body })) {
+      blockers.push(`PR ${hazard.source} retracts a closing keyword: "${hazard.excerpt}"`);
+    }
+
+    return { eligible: blockers.length === 0, blockers };
+  }
+
+  return { evaluateMergeEligibility, selectVerificationReceipt, verificationGateBlockers };
 }

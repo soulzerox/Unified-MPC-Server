@@ -1603,6 +1603,65 @@ describe('NativeThaiRagProviderDriver', () => {
     await driver.stop();
   });
 
+  it('heartbeats the admission job while the canonical source plan resolves', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let releasePlan: (() => void) | undefined;
+    const planGate = new Promise<void>((resolve) => { releasePlan = resolve; });
+    let markPlanStarted: (() => void) | undefined;
+    const planStarted = new Promise<void>((resolve) => { markPlanStarted = resolve; });
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      callTimeoutMs: 5_000,
+      // The durable store persists a heartbeat only once its clock moved a
+      // second, so the stuck window and the hold below both outlast that
+      // throttle. A shorter window would hide the defect behind the throttle.
+      indexJobStuckTimeoutMs: 2_500,
+      indexJobHeartbeatMs: 50,
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      // A Goal's plan resolution hashes every manifest/view fence path, so it
+      // is the one admission step that can outlast the stuck-job window. This
+      // gate stands in for a workspace large enough to do that.
+      codeIndexSourceProvider: async (): Promise<null> => {
+        markPlanStarted?.();
+        await planGate;
+        return null;
+      },
+      clientFactory: clientFactory({
+        async onCall(tool, args): Promise<unknown> {
+          if (tool === 'code_index') {
+            return args.max_files !== undefined ? success('ok') : backgroundIndexStart(workspaceId);
+          }
+          if (tool === 'index_status') return completedIndexStatus(workspaceId);
+          return success('ok');
+        },
+      }),
+    });
+
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', details: { reason: 'workspace-indexing' } },
+    });
+    await planStarted;
+    // Outlast both the one-second heartbeat write throttle and the stuck-job
+    // window, then run the admission check that reaps a wedged owner.
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    await expect(driver.health()).resolves.toMatchObject({ ok: true });
+    releasePlan?.();
+
+    const jobsPath = path.join(dataRoot, 'thai-rag', 'index-jobs.json');
+    await expect.poll(async () => {
+      const persisted = JSON.parse(await readFile(jobsPath, 'utf8')) as {
+        jobs: Array<{ workspaceId: string; status: string; error?: string }>;
+      };
+      const job = persisted.jobs.find((entry) => entry.workspaceId === workspaceId);
+      return job === undefined ? 'missing' : `${job.status}:${job.error ?? ''}`;
+    }, { timeout: 10_000 }).toBe('completed:');
+    await driver.stop();
+  }, 20_000);
+
   it('surfaces a failed admission instead of re-arming it while the cooldown is warm (issue #762)', async () => {
     const dataRoot = await tempRoot();
     const workspaceRoot = await tempRoot();

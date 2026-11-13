@@ -1849,12 +1849,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // dirty, unsupported) keep indexing and only change what the ledger
         // records; a corrupt canonical store refuses the admission exactly as
         // it refuses a demand pass.
-        const canonical = await this.canonicalCodeIndexPlan({
+        // A clean checkout or an admitted Goal builds the fence by hashing
+        // every manifest/view path, so this is the one admission step that can
+        // outlast the stuck-job window on a large workspace. Beat while it
+        // resolves: a concurrent admission check would otherwise reap this
+        // healthy job as `owner-stuck-no-progress`, and the later completion
+        // would be ignored because the store refuses a non-active row.
+        const canonical = await this.withJobHeartbeat(job.jobId, ownerId, this.canonicalCodeIndexPlan({
           workspaceId: workspace.id,
           rootPath: path.resolve(workspace.realRootPath),
           ...(workspace.lifecycleKind === undefined ? {} : { lifecycleKind: workspace.lifecycleKind }),
           ...(workspace.goalId === undefined ? {} : { goalId: workspace.goalId }),
-        }, []);
+        }, []));
         if (!canonical.ok) {
           await this.jobs.fail(job.jobId, canonical.error.message, ownerId);
           this.recordAdmissionFailure(workspace.id, job.jobId, canonical.error);

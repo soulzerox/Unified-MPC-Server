@@ -5353,11 +5353,11 @@ describe('canonical code_index source identity (#210 §13)', () => {
       // reported total that does bound the pass is published, and a reported
       // skipped counter with no total keeps both counters while leaving the
       // total unknown.
-      const payloads: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
-        idx_providerover1: { indexed_files: 5, total_files: 3 },
-        idx_providertotal1: { indexed_files: 2, total_files: 4 },
-        idx_providerpartial1: { indexed_files: 2, skipped_files: 1 },
-      };
+      const payloads = new Map<string, Readonly<Record<string, unknown>>>([
+        ['idx_providerover1', { indexed_files: 5, total_files: 3 }],
+        ['idx_providertotal1', { indexed_files: 2, total_files: 4 }],
+        ['idx_providerpartial1', { indexed_files: 2, skipped_files: 1 }],
+      ]);
       const dataRoot = await tempRoot();
       const workspaceRoot = await tempRoot();
       await write(workspaceRoot, 'src/a.ts', HELLO);
@@ -5366,19 +5366,26 @@ describe('canonical code_index source identity (#210 §13)', () => {
         workspaceRoot,
         calls: [],
         source: null,
-        onTool: (tool, args) => (tool === 'index_status'
-          ? {
+        onTool: (tool, args) => {
+          if (tool !== 'index_status') return success(tool);
+          const jobId = String(args.job_id);
+          const payload = payloads.get(jobId);
+          // Fail loudly on an unstubbed job id: spreading `undefined` would
+          // produce a payload with no counters, which is indistinguishable from
+          // the rejection the impossible-pair case is meant to prove.
+          if (payload === undefined) throw new Error(`unstubbed index_status job ${jobId}`);
+          return {
             structuredContent: {
               status: 'ok',
               data: {
-                job_id: String(args.job_id),
+                job_id: jobId,
                 workspace_id: workspaceId,
                 status: 'running',
-                ...payloads[String(args.job_id)],
+                ...payload,
               },
             },
-          }
-          : success(tool)),
+          };
+        },
       });
       try {
         await startCanonicalDriver(driver, dataRoot);

@@ -44,6 +44,17 @@ describe('deployment build provenance freshness', () => {
     assert.equal(unattested[0].distDirectory, path.join(root, 'apps', 'cli', 'dist'));
   });
 
+  it('reports a shipped app whose string bin has no provenance', () => {
+    const root = fixtureRoot();
+    writeManifest(root, 'cli', { name: '@unified-mpc/cli', bin: './dist/index.js' });
+    writeArtifact(root, 'cli', 'index.js', 1_700_000_000_000);
+
+    const unattested = findUnattestedDeployments(root);
+
+    assert.equal(unattested.length, 1);
+    assert.equal(unattested[0].distDirectory, path.join(root, 'apps', 'cli', 'dist'));
+  });
+
   it('ignores an app dist that ships no executable', () => {
     const root = fixtureRoot();
     writeManifest(root, 'web', { name: '@unified-mpc/web' });
@@ -102,6 +113,24 @@ describe('deployment build provenance freshness', () => {
     assert.match(result.stderr, /Unattested deployment artifacts/u);
     assert.match(result.stderr, /apps\/cli\/dist/u);
     assert.doesNotMatch(result.stdout, /nothing to verify/u);
+  });
+
+  it('reports both an unattested and a stale deployment in one run', () => {
+    const root = fixtureRoot();
+    writeManifest(root, 'cli', { name: '@unified-mpc/cli', bin: './dist/index.js' });
+    writeArtifact(root, 'cli', 'index.js', 1_700_000_000_000);
+    writeManifest(root, 'worker', { name: '@unified-mpc/worker', bin: { worker: './dist/index.js' } });
+    writeProvenance(root, 'worker', 1_700_000_000_000);
+    writeArtifact(root, 'worker', 'index.js', 1_700_000_005_000);
+
+    const result = spawnSync(process.execPath, [scriptPath, '--root', root], { encoding: 'utf8' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Unattested deployment artifacts: apps\/cli\/dist/u);
+    assert.match(result.stderr, /Stale deployment artifacts: 1 file in apps\/worker\/dist/u);
+    assert.match(result.stderr, /the deployment must not stay without a build identity/u);
+    assert.match(result.stderr, /the provenance describes the artifacts it ships with/u);
+    assert.doesNotMatch(result.stdout, /Deployment provenance is fresh/u);
   });
 
   it('stays a no-op when the checkout was never built', () => {

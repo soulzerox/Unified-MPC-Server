@@ -230,6 +230,7 @@ pnpm provenance:check
 
 # 2.2 ตรวจสอบว่า generation ที่ active ของ Native Thai-RAG สมบูรณ์ทุก channel
 # (parent/lexical/structural/vector) — ถ้า vector degraded pre-edit gate จะไม่เปิด
+# record ของ workspace ที่ถูกปลดระวาง (worktree ถูกลบ หรือ identity ถูกแทนที่) จะถูกข้ามและรายงานแยก
 pnpm rag:generation:check
 
 # 3. รันชุดทดสอบทั้งหมด (Vitest Monorepo Test Runner)

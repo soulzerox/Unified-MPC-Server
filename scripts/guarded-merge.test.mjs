@@ -67,7 +67,6 @@ function evaluate(overrides = {}) {
     headReceiptCount: overrides.headReceiptCount ?? 1,
     corruptReviewReceipts: overrides.corruptReviewReceipts ?? 0,
     expectedBase: 'main',
-    headFingerprint: expectedFingerprint(HEAD),
   });
 }
 

@@ -226,6 +226,7 @@ pnpm lint
 pnpm typecheck
 
 # 2.1 ตรวจสอบว่า dist ที่ deploy อยู่ไม่ถูกเขียนทับหลัง build
+# ถ้า app ที่มี bin มี dist แต่ไม่มี build-provenance.json จะถือว่า fail (สร้างใหม่ด้วย pnpm build)
 pnpm provenance:check
 
 # 2.2 ตรวจสอบว่า generation ที่ active ของ Native Thai-RAG สมบูรณ์ทุก channel

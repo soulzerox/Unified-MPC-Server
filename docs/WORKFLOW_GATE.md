@@ -131,9 +131,13 @@ The gate suites run before `build` in the merge profile (`test:merge-gate` is
 step 4, `build` is step 5) precisely because they import the scripts directly
 and need no workspace output; `dist/` is gitignored, so a clean checkout has
 none. Phase 1 therefore keeps the shared core as plain ESM under `scripts/`,
-importable without a build. Step 2 of the migration moves it into a workspace
-package and makes the gate suites build-aware or moves them after `build`; the
-document does not pretend that is free.
+importable without a build.
+
+The original plan had step 2 move it into a workspace package and make the gate
+suites build-aware, or move them after `build`. That step was reconsidered and
+dropped: the only caller that needs the core from TypeScript is the `close` gate,
+whose inputs all live in application state, so the gate that needs a package is
+the one that never touches the core. See "Status after steps 1–2" in section 5.
 
 ### Why not one module per gate
 
@@ -229,9 +233,10 @@ The engine is only useful if something refuses. The existing refusals already
 live at three seams; the engine extends them instead of adding a parallel gate:
 
 1. **Merge** — the CLI `merge:pr` script and the runtime `GuardedMergeService`.
-   Both delegate to `evaluate({phase:'integrate'})`; the CLI keeps
-   `--match-head-commit`. Behaviour must not change, and the runtime side needs
-   the receipt conversion described above.
+   The CLI already delegates to the shared `evaluateMergeEligibility` and keeps
+   `--match-head-commit`; `GuardedMergeService` still holds its own receipt
+   reader, which is step 4. Neither side may change behaviour, and the runtime
+   side needs the receipt conversion described above.
 2. **Cleanup** — three checks that are easy to conflate:
 
    - `WorkspaceService.evaluateGoalWorkspaceCleanup` returns a
@@ -243,11 +248,17 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    - the MCP `git_worktree_remove` tool's `worktreeCleanupSafety` returns
      `clean` | `blocked` | `unavailable` from `goalWorktreeRemovalBlockers` and
      refuses an unverifiable classification. It is a private method of
-     `UpgradeRuntime`, so step 3 has to export it through the package before the
-     CLI can share it.
+     `UpgradeRuntime`, and it stays private: its own dry run already returns the
+     same verdict without touching Git or the ledger
+     (`upgrade-runtime-worktree-safety.test.ts`, "reports the classification in a
+     dry run without touching git or the ledger"). The close gate therefore asks
+     the tool for a preview rather than reaching into the class, so there is one
+     removal decision and not a second copy of it.
    - goal completion's `goalCompletionWorktreeBlockers` returns entries for
      `dirty`, `unmerged_changes` and `probe_failed`; `unintegrated_head` is
-     deliberately not blocking because the merge flow squash-merges.
+     deliberately not blocking because the merge flow squash-merges. It is
+     already enforced: `GoalContinuationService.goalCompletionWorktreeBlocker`
+     refuses completion on it, client-scoped.
 
    The close gate composes those three; it does not redefine them. Goal
    completion already blocks `unmerged_changes` in a goal worktree, but a
@@ -273,20 +284,52 @@ Each step ships alone and leaves the repository working.
 
 | Step | Change | Acceptance |
 |---|---|---|
-| 1 | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | `guarded-merge.test.mjs` and `local-verify.test.mjs` pass unchanged on a clean checkout; `merge:pr --dry-run` gives identical verdicts on three known heads |
-| 2 | Move the shared core into a workspace package and reorder `test:merge-gate` after `build` (or make the gate suites build-aware) | the gate suites still pass on a clean checkout; no script imports built output before it exists |
-| 3 | Add `gate:check --phase <p>` CLI + the `close` gate over `evaluateGoalWorkspaceCleanup`, the worktree removal check and `goalCompletionWorktreeBlockers`, with its receipt store and the matching `prune-evidence` update and test. The removal check is `UpgradeRuntime.worktreeCleanupSafety` today, so it must be exported through the package step 2 created rather than copied | a goal worktree with `unmerged_changes` is refused; a merged head is allowed; `retention_pending` is refused; the new receipt kind is pruned by policy; the CLI reaches all three checks without importing a package's `dist/` before `build` |
+| 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
+| 2 ✅ | Make the shared core independent of the profile runner: `createGatePolicy({ profileVersion, fingerprintFor })`, both CLIs bind it, tests prove the injected rules are the ones applied | shipped; **no package and no profile reorder**, see "Status" below |
+| 3 | Add `gate:check --phase <p>` CLI + the `close` gate over `evaluateGoalWorkspaceCleanup`, the worktree removal preview and `goalCompletionWorktreeBlockers`, with its receipt store and the matching `prune-evidence` update and test | a goal worktree with `unmerged_changes` is refused; a merged head is allowed; `retention_pending` is refused; the new receipt kind is pruned by policy; the CLI lives where all three inputs are reachable |
 | 4 | Convert runtime merge evidence to the shared model, repoint `GuardedMergeService`, wire `verify`/`review` through `receipts()` | runtime gate tests pass unchanged; existing runtime receipts are converted, not silently invalidated; the CLI receipt format is unchanged |
 | 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
-that pays for the rest, and the one that must not invent new policy. Step 2 is
-the prerequisite for steps 3 and 5: the cleanup and mutation seams live in
-TypeScript packages that resolve to `dist/`, so a `scripts/`-level caller cannot
-reach them on a clean checkout, and `packages/mcp-server` includes only
-`src/**/*.ts` and cannot import `scripts/`. Packaging first is why step 3 can
-call `evaluateGoalWorkspaceCleanup` instead of re-implementing it, and why
-step 5 can extend `validateHarnessMutation` instead of adding a parallel gate.
+that pays for the rest, and the one that must not invent new policy.
+
+### Status after steps 1–2
+
+Step 2 as originally written — move the core into a workspace package and reorder
+`test:merge-gate` after `build` — is **not needed, and would cost more than it
+buys**. The reward for packaging was reaching `packages/*` from `scripts/`, and
+that is only ever needed by the `close` gate, whose inputs are all application
+state. Packaging instead loses three properties: `test:merge-gate` runs before
+`build` on purpose ("a broken guard must fail fast, and these suites need no
+workspace output"), a `dist/` import makes the gate suites unrunnable on a clean
+checkout, and a hand-written `.d.ts` would be a new drift surface.
+
+The gate core is already independent of the profile runner:
+
+```
+scripts/workflow-gate-core.mjs     imports only check-issue-closing-keywords.mjs
+  createGatePolicy({ profileVersion, fingerprintFor })
+    ├─ evaluateMergeEligibility
+    ├─ selectVerificationReceipt
+    └─ verificationGateBlockers
+        ↑                                    ↑
+scripts/guarded-merge.mjs          scripts/review-gate.mjs
+```
+
+Both CLIs bind this checkout's profile; a runtime caller supplies its own. The
+binding is tested rather than assumed: `scripts/workflow-gate-core.test.mjs`
+builds the policy for a foreign profile version and a foreign fingerprint rule
+and asserts the verdict moves, because every other suite only ever exercises the
+real profile's values.
+
+Step 3 therefore belongs in `apps/cli`, next to the other commands, and not in
+`scripts/`. `apps/cli` already depends on `@unified-mpc/workspace`,
+`@unified-mpc/application` and `@unified-mpc/mcp-server`, and already calls
+`evaluateGoalWorkspaceCleanup` from `apps/cli/src/commands/web.ts`. The removal
+question is answered by the `git_worktree_remove` preview rather than by
+exporting `worktreeCleanupSafety`, and the completion question is already
+enforced by `GoalContinuationService`. What step 3 adds is one command that asks
+all three and a durable receipt of the answer.
 
 ---
 
@@ -301,13 +344,20 @@ step 5 can extend `validateHarnessMutation` instead of adding a parallel gate.
 
 ## 7. Open questions
 
-1. Should step 1 land before any new gate exists, or should the engine start as
-   a standalone `close` gate and absorb the merge rules later? The first option
-   risks a large no-op diff; the second leaves two implementations of
-   exact-input matching for a while.
+1. ~~Should step 1 land before any new gate exists, or should the engine start as
+   a standalone `close` gate and absorb the merge rules later?~~ **Answered in
+   practice.** Step 1 landed first (#820, #821, #824) and found two defects that
+   the standalone route would have shipped into a second implementation: the
+   merge guard's private copy of the receipt checks was kept in sync with the
+   review gate's by hand and had already diverged in what it told the operator,
+   and the gate's dependence on the profile runner would have made the package
+   step circular. The no-op-diff risk was real but bounded: the differential dry
+   run on three heads is what kept it honest.
 2. Are workflow profiles configuration (a file under `.unified-mpc/`) or code
    (a typed constant)? Configuration makes per-project specialization cheap but
-   needs validation; code keeps the semantics pinned.
+   needs validation; code keeps the semantics pinned. `createGatePolicy` makes
+   this cheaper to answer later: the profile is now an input, so a file-backed
+   profile is a different *caller*, not a rewrite.
 3. Does `GuardedMergeService` keep its SQLite receipts as a cache in front of
    the shared evaluator, or read the engine's receipts directly? The first keeps
    runtime latency predictable; the second keeps one source of truth.

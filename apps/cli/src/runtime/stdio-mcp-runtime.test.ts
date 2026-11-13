@@ -1215,6 +1215,38 @@ describe('stdio MCP runtime', () => {
   }, 30_000);
 
 
+  it('surfaces a failing durable activity sink with the configured runtime label', async () => {
+    const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-activity-failure-'));
+    temporaryRoots.push(dataPath);
+    // A directory at the archive path makes every rotation rename fail, so the
+    // durable sink keeps throwing after it appends the event.
+    await mkdir(path.join(dataPath, 'mcp-activity.log.1'), { recursive: true });
+    const previousCap = process.env.UNIFIED_MPC_ACTIVITY_LOG_MAX_BYTES;
+    process.env.UNIFIED_MPC_ACTIVITY_LOG_MAX_BYTES = '1';
+    const stderr: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      stderr.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof process.stderr.write);
+
+    const runtime = createStdioMcpRuntime(dataPath, workspace, false, {
+      activityDiagnosticsLabel: 'Unified-MPC test runtime',
+    });
+    try {
+      const callId = await runtime.activityTracker.begin('read_file', {});
+      await runtime.activityTracker.end(callId, 'OK', 1);
+      expect(stderr.join('')).toContain(
+        'Unified-MPC test runtime activity record failed: tool=read_file phase=completed code=OK error=',
+      );
+    } finally {
+      await runtime.close();
+      stderrSpy.mockRestore();
+      if (previousCap === undefined) delete process.env.UNIFIED_MPC_ACTIVITY_LOG_MAX_BYTES;
+      else process.env.UNIFIED_MPC_ACTIVITY_LOG_MAX_BYTES = previousCap;
+    }
+  }, 30_000);
+
+
   it('wires durable goals and scheduled continuation orchestration from the same SQLite repository', async () => {
     const dataPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-stdio-continuation-'));
     temporaryRoots.push(dataPath);

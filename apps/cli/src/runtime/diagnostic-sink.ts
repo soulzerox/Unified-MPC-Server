@@ -1,4 +1,5 @@
 import type { DiagnosticLogger } from '@unified-mpc/application';
+import type { ActivityRecordErrorHandler } from '@unified-mpc/mcp-server';
 
 export interface StderrDiagnosticSinkOptions {
   /** Prefix that names the runtime which observed the exception. */
@@ -28,6 +29,37 @@ export function createStderrDiagnosticSink(options: StderrDiagnosticSinkOptions 
     const stack = event.stack === undefined ? '' : `\n${event.stack}`;
     try {
       write(`${label} internal error name=${event.name} message=${event.message}${stack}\n`);
+    } catch {
+      // Diagnostics must never change the safe application result.
+    }
+  };
+}
+
+export interface ActivityRecordErrorSinkOptions {
+  /** Prefix that names the runtime which observed the failure. */
+  readonly label?: string;
+  /** Test seam; production writes to `process.stderr`, the runtime's only diagnostic channel. */
+  readonly write?: (chunk: string) => void;
+}
+
+/**
+ * Give a failed activity-sink record somewhere to go.
+ *
+ * `ActivityTracker` catches every sink failure so tool execution never fails,
+ * and reports it through `onRecordError`. The stdio runtime supplied no handler,
+ * so a permanently failing rotation (for example `mcp-activity.log.1` being a
+ * directory) silently disabled retention and the log grew unbounded again.
+ *
+ * One line per failed record: a repeating failure is itself the signal, and
+ * the line stays small enough for a bounded stderr tail. Never throws.
+ */
+export function createActivityRecordErrorSink(options: ActivityRecordErrorSinkOptions = {}): ActivityRecordErrorHandler {
+  const label = options.label ?? 'Unified-MPC';
+  const write = options.write ?? ((chunk: string): void => { process.stderr.write(chunk); });
+  return (error, event): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      write(`${label} activity record failed: tool=${event.toolName} phase=${event.phase} code=${event.resultCode} error=${message}\n`);
     } catch {
       // Diagnostics must never change the safe application result.
     }

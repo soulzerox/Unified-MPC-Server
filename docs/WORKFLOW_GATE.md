@@ -24,7 +24,7 @@ runtime adapter over the same policy. The engine must be the single owner of
 `GuardedMergeService` must delegate to it rather than keep separate evaluators.
 That is a real migration, not a drop-in: the runtime receipt carries repository,
 pull request, head, optional base, verification mode, a gate list and a review
-outcome, so step 3 has to convert or re-record it.
+outcome, so step 4 has to convert or re-record it.
 
 ---
 
@@ -98,10 +98,11 @@ Two of those sources are deliberately shaped like the existing code:
 
 - `verification.select` mirrors `selectVerificationReceipt`: it scans every
   receipt for the head newest-first and prefers the newest one that passes
-  `verificationGateBlockers` — profile `merge`, `dirty === false`, the current
-  `PROFILE_VERSION`, a matching `diffFingerprint` — so an older accepted run
-  still beats a newer targeted one. Returning a decision plus blockers is what
-  lets the engine explain a refusal instead of guessing.
+  `verificationGateBlockers` — profile `merge`, `mergeReady === true`,
+  `dirty === false`, the current `PROFILE_VERSION`, a matching
+  `diffFingerprint` — so an older accepted run still beats a newer targeted one.
+  Returning a decision plus blockers is what lets the engine explain a refusal
+  instead of guessing.
 - `review.evaluate` mirrors `evaluateReviewEvidence`: one receipt per head, and
   a corrupt receipt file blocks rather than being ignored.
 
@@ -109,8 +110,15 @@ Two of those sources are deliberately shaped like the existing code:
 changed paths and pull-request state — is what the engine records in a receipt.
 `baseSha` comes from the pull-request source, so a subject without a PR has no
 base and the base-sensitive gates simply do not apply.
-`changedPaths` is derived from the diff, never supplied by the caller, so the
-`mutate` gate cannot be told which files were touched.
+`changedPaths` is not one rule for every phase. For the head-scoped gates
+(`verify` through `close`) it comes from the diff and is never supplied by the
+caller. `mutate` is the exception, and describing it as diff-derived would be
+wrong in a way that breaks it: the write has not happened yet, so a diff names
+the files the caller has already edited and never the pending one. Its path set
+is the tool call's own — `codeMutationPaths(toolName, input)` — which is exactly
+what the preparation receipts must cover. The caller may name the path it is
+about to write; it may not assert that the path was prepared, because the
+preparation source stays injected.
 
 Two adapters justify the seam:
 
@@ -123,9 +131,9 @@ The gate suites run before `build` in the merge profile (`test:merge-gate` is
 step 4, `build` is step 5) precisely because they import the scripts directly
 and need no workspace output; `dist/` is gitignored, so a clean checkout has
 none. Phase 1 therefore keeps the shared core as plain ESM under `scripts/`,
-importable without a build. Moving it into a workspace package is a later step,
-and that step must also make the gate suites build-aware or move them after
-`build`; the document does not pretend that is free.
+importable without a build. Step 2 of the migration moves it into a workspace
+package and makes the gate suites build-aware or moves them after `build`; the
+document does not pretend that is free.
 
 ### Why not one module per gate
 
@@ -234,7 +242,9 @@ live at three seams; the engine extends them instead of adding a parallel gate:
      the grace elapses.
    - the MCP `git_worktree_remove` tool's `worktreeCleanupSafety` returns
      `clean` | `blocked` | `unavailable` from `goalWorktreeRemovalBlockers` and
-     refuses an unverifiable classification.
+     refuses an unverifiable classification. It is a private method of
+     `UpgradeRuntime`, so step 3 has to export it through the package before the
+     CLI can share it.
    - goal completion's `goalCompletionWorktreeBlockers` returns entries for
      `dirty`, `unmerged_changes` and `probe_failed`; `unintegrated_head` is
      deliberately not blocking because the merge flow squash-merges.
@@ -264,16 +274,19 @@ Each step ships alone and leaves the repository working.
 | Step | Change | Acceptance |
 |---|---|---|
 | 1 | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | `guarded-merge.test.mjs` and `local-verify.test.mjs` pass unchanged on a clean checkout; `merge:pr --dry-run` gives identical verdicts on three known heads |
-| 2 | Add `gate:check --phase <p>` CLI + the `close` gate over `evaluateGoalWorkspaceCleanup`, `worktreeCleanupSafety` and `goalCompletionWorktreeBlockers`, with its receipt store and the matching `prune-evidence` update and test | a goal worktree with `unmerged_changes` is refused; a merged head is allowed; `retention_pending` is refused; the new receipt kind is pruned by policy |
-| 3 | Convert runtime merge evidence to the shared model, repoint `GuardedMergeService`, wire `verify`/`review` through `receipts()` | runtime gate tests pass unchanged; existing runtime receipts are converted, not silently invalidated; the CLI receipt format is unchanged |
-| 4 | Move the shared core into a workspace package and reorder `test:merge-gate` after `build` (or make the gate suites build-aware) | the gate suites still pass on a clean checkout; no script imports built output before it exists |
+| 2 | Move the shared core into a workspace package and reorder `test:merge-gate` after `build` (or make the gate suites build-aware) | the gate suites still pass on a clean checkout; no script imports built output before it exists |
+| 3 | Add `gate:check --phase <p>` CLI + the `close` gate over `evaluateGoalWorkspaceCleanup`, the worktree removal check and `goalCompletionWorktreeBlockers`, with its receipt store and the matching `prune-evidence` update and test. The removal check is `UpgradeRuntime.worktreeCleanupSafety` today, so it must be exported through the package step 2 created rather than copied | a goal worktree with `unmerged_changes` is refused; a merged head is allowed; `retention_pending` is refused; the new receipt kind is pruned by policy; the CLI reaches all three checks without importing a package's `dist/` before `build` |
+| 4 | Convert runtime merge evidence to the shared model, repoint `GuardedMergeService`, wire `verify`/`review` through `receipts()` | runtime gate tests pass unchanged; existing runtime receipts are converted, not silently invalidated; the CLI receipt format is unchanged |
 | 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
-that pays for the rest, and the one that must not invent new policy. Step 4 is
-the prerequisite for step 5: `packages/mcp-server` includes only `src/**/*.ts`
-and no package imports `scripts/`, so the mutation seam cannot share the core
-until it lives in a package the runtime can import.
+that pays for the rest, and the one that must not invent new policy. Step 2 is
+the prerequisite for steps 3 and 5: the cleanup and mutation seams live in
+TypeScript packages that resolve to `dist/`, so a `scripts/`-level caller cannot
+reach them on a clean checkout, and `packages/mcp-server` includes only
+`src/**/*.ts` and cannot import `scripts/`. Packaging first is why step 3 can
+call `evaluateGoalWorkspaceCleanup` instead of re-implementing it, and why
+step 5 can extend `validateHarnessMutation` instead of adding a parallel gate.
 
 ---
 

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { THAI_RAG_CANCEL_CAPABILITY, THAI_RAG_CANCEL_CONTRACT_FINGERPRINT } from '@unified-mpc/thai-rag';
+import { THAI_RAG_CANCEL_CAPABILITY, THAI_RAG_CANCEL_CONTRACT_FINGERPRINT, THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE } from '@unified-mpc/thai-rag';
 import { NativeThaiRagProviderDriver } from './native-thai-rag-provider.js';
 
 const WS='14fc20d1-5836-4faf-aed6-0df6a9633a38';
@@ -22,10 +22,10 @@ function handshake():Record<string,unknown>{
   workspace_scope_model:'explicit_workspace_id',state:'ready',workspace_ready:true,embedding_index_generation:1,
   components:{worker_reachable:true,sqlite_available:true,fts_available:true,vector_store_available:true,
    embedder_available:true,lexical_retrieval_available:true,semantic_retrieval_available:true,active_jobs:[]},
-  embedding:{profile:'nomic-embed-text-v2-moe',
-   model:'nomic-embed-text-v2-moe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  embedding:{profile:THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+   model:`${THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`,
    dimension:768,preprocessing_version:'1'},
-  generation:{contract:THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,embedding:'nomic-embed-text-v2-moe',index:'1',storage:'sqlite'},
+  generation:{contract:THAI_RAG_CANCEL_CONTRACT_FINGERPRINT,embedding:THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,index:'1',storage:'sqlite'},
  };
 }
 function lines(contents:string):Array<{pid:number;name:string;workspaceId:string|null;valid:boolean}>{

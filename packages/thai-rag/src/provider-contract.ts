@@ -26,14 +26,29 @@ export const THAI_RAG_CONFORMANCE_OPERATIONS = [
   'remember', 'recall', 'record_event', 'forget', 'pre_edit_context', 'code_search',
   'code_context', 'code_blast_radius', 'code_index', 'index_status', 'health', 'version',
 ] as const;
-export const THAI_RAG_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
-export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
 /** Local llama.cpp deployment embeds with Gemma 2; declared by thai-rag providers built for this environment (#404-followup). */
 export const THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE = 'embeddinggemma-2-Q8_0';
+/**
+ * The embedding identity contract 1.0 attests (#786).
+ *
+ * thai-rag-mcp removed the Ollama/Nomic runtime in #238 Phase B, so llama.cpp
+ * EmbeddingGemma is the only backend a 1.0 provider can serve. The profile is
+ * therefore the deployment artifact, which is exactly what `attestedDeployment`
+ * checks; naming a retired backend here left the map describing a provider that
+ * cannot exist and silently accepted a 1.0 handshake claiming that identity.
+ */
+export const THAI_RAG_EMBEDDING_PROFILE = THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE;
+export const THAI_RAG_EMBEDDING_MODEL = THAI_RAG_EMBEDDING_PROFILE;
+/**
+ * The retired Ollama/Nomic identity, kept only as the 0.9 production-bridge
+ * metadata: a pre-Phase-B provider can still answer 0.9 during a rolling
+ * upgrade and stays readable until it is replaced (#786).
+ */
+export const THAI_RAG_LEGACY_EMBEDDING_PROFILE = 'nomic-embed-text-v2-moe';
 export const THAI_RAG_EMBEDDING_PREPROCESSING_VERSION = '1';
 export const THAI_RAG_EMBEDDING_DIMENSION = 768;
 export const THAI_RAG_EMBEDDING_COMPATIBILITY = {
-  '0.9': { profile: `${THAI_RAG_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_EMBEDDING_MODEL}:latest`, dimension: THAI_RAG_EMBEDDING_DIMENSION },
+  '0.9': { profile: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, model: `${THAI_RAG_LEGACY_EMBEDDING_PROFILE}:latest`, dimension: THAI_RAG_EMBEDDING_DIMENSION },
   '1.0': { profile: THAI_RAG_EMBEDDING_PROFILE, model: THAI_RAG_EMBEDDING_MODEL, dimension: THAI_RAG_EMBEDDING_DIMENSION, preprocessingVersion: THAI_RAG_EMBEDDING_PREPROCESSING_VERSION },
 } as const;
 export const THAI_RAG_ALLOWED_DEGRADED_CAPABILITIES = ['vector_store', 'embedder', 'semantic_retrieval'] as const;
@@ -343,9 +358,13 @@ function parseVersion(value: string): readonly [number, number] | undefined {
 
 function normalizeSupportedEmbeddingMetadata(handshake: ThaiRagProviderHandshake): ThaiRagProviderHandshake {
   if (handshake.contractVersion !== THAI_RAG_CONTRACT_VERSION) return handshake;
-  const profile = handshake.embedding.profile === `${THAI_RAG_EMBEDDING_PROFILE}:latest` ? THAI_RAG_EMBEDDING_PROFILE : handshake.embedding.profile;
-  const model = handshake.embedding.model === `${THAI_RAG_EMBEDDING_MODEL}:latest` ? THAI_RAG_EMBEDDING_MODEL : handshake.embedding.model;
-  const generationEmbedding = handshake.generation.embedding === `${THAI_RAG_EMBEDDING_PROFILE}:latest` ? THAI_RAG_EMBEDDING_PROFILE : handshake.generation.embedding;
+  // `attestedDeployment` already tolerates a `:`-suffixed deployment profile, so
+  // the canonical form has to tolerate it too; otherwise a tagged identity passes
+  // the attestation gate and then fails the final profile comparison (#786).
+  const canonical = (value: string, identity: string): string => value === `${identity}:latest` ? identity : value;
+  const profile = canonical(handshake.embedding.profile, THAI_RAG_EMBEDDING_PROFILE);
+  const model = canonical(handshake.embedding.model, THAI_RAG_EMBEDDING_MODEL);
+  const generationEmbedding = canonical(handshake.generation.embedding, THAI_RAG_EMBEDDING_PROFILE);
   return profile === handshake.embedding.profile && model === handshake.embedding.model && generationEmbedding === handshake.generation.embedding
     ? handshake
     : { ...handshake, embedding: { ...handshake.embedding, profile, model }, generation: { ...handshake.generation, embedding: generationEmbedding } };

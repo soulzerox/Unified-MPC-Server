@@ -85,6 +85,11 @@ function readWorkspaceRegistry(database) {
  * exists. A record with no registry row is kept: nothing proves it retired.
  * Health is a property of the root, so when several ids share one path the
  * newest registry row owns it and the rest are superseded identities.
+ *
+ * Missing freshness evidence never decides retirement: an unparsable
+ * `updated_at`, or two rows with the same timestamp, judges every candidate
+ * instead of picking one arbitrarily. Retiring the identity that is actually
+ * served would be worse than a red check.
  */
 export function selectLiveWorkspaces(recordedWorkspaceIds, registry, pathExists = existsSync) {
   const retired = [];
@@ -93,23 +98,34 @@ export function selectLiveWorkspaces(recordedWorkspaceIds, registry, pathExists 
   for (const workspaceId of recordedWorkspaceIds) {
     const entry = byId.get(workspaceId);
     if (entry === undefined) {
-      byRoot.set(`unregistered:${workspaceId}`, { workspaceId, updatedAt: 0 });
+      byRoot.set(`unregistered:${workspaceId}`, [{ workspaceId, updatedAt: 0 }]);
       continue;
     }
     if (!pathExists(entry.workspacePath)) {
       retired.push({ workspaceId, reason: RETIRED_REASONS.pathMissing, workspacePath: entry.workspacePath });
       continue;
     }
-    const current = byRoot.get(entry.workspacePath);
-    if (current === undefined) {
-      byRoot.set(entry.workspacePath, { workspaceId, updatedAt: entry.updatedAt });
+    const candidates = byRoot.get(entry.workspacePath) ?? [];
+    candidates.push({ workspaceId, updatedAt: entry.updatedAt });
+    byRoot.set(entry.workspacePath, candidates);
+  }
+
+  const live = [];
+  for (const [root, candidates] of byRoot) {
+    const known = candidates.filter((candidate) => candidate.updatedAt > 0);
+    if (known.length !== candidates.length) {
+      live.push(...candidates.map((candidate) => candidate.workspaceId));
       continue;
     }
-    const [winner, loser] = entry.updatedAt > current.updatedAt ? [entry, current] : [current, entry];
-    byRoot.set(entry.workspacePath, { workspaceId: winner.workspaceId, updatedAt: winner.updatedAt });
-    retired.push({ workspaceId: loser.workspaceId, reason: RETIRED_REASONS.superseded, workspacePath: entry.workspacePath });
+    const newest = Math.max(...known.map((candidate) => candidate.updatedAt));
+    const winners = known.filter((candidate) => candidate.updatedAt === newest);
+    live.push(...winners.map((candidate) => candidate.workspaceId));
+    for (const candidate of known) {
+      if (winners.includes(candidate)) continue;
+      retired.push({ workspaceId: candidate.workspaceId, reason: RETIRED_REASONS.superseded, workspacePath: root });
+    }
   }
-  return { live: [...byRoot.values()].map((entry) => entry.workspaceId), retired };
+  return { live, retired };
 }
 
 export function readGenerationHealth(databasePath, workspaceIds, options = {}) {
@@ -200,6 +216,9 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   const workspaceIds = argumentValues('--workspace');
   const { workspaces: report, retired } = readGenerationHealth(databasePath, workspaceIds.length === 0 ? undefined : workspaceIds);
   const failing = report.filter((workspace) => workspace.violations.length > 0);
+  // A green run has to have judged something: retiring every record would
+  // otherwise turn "nothing was checked" into a passing gate.
+  const judgedNothing = report.length === 0 && retired.length > 0;
   for (const workspace of report) {
     if (workspace.generationId === undefined) {
       process.stdout.write(`${workspace.workspaceId}: no active generation\n`);
@@ -219,7 +238,13 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
     const detail = [...counts.entries()].map(([reason, count]) => `${reason} ${count}`).join(', ');
     process.stdout.write(`retired workspace records skipped: ${retired.length} (${detail})\n`);
   }
-  if (failing.length === 0) {
+  if (judgedNothing) {
+    process.stderr.write(
+      `Native Thai-RAG generation health judged no live workspace: all ${retired.length} recorded workspace(s) are retired. `
+      + 'Point this check at a database with a live workspace before treating it as green.\n',
+    );
+    process.exitCode = 1;
+  } else if (failing.length === 0) {
     process.stdout.write(`Native Thai-RAG generation health passed for ${report.length} workspace(s).\n`);
   } else {
     process.stderr.write(

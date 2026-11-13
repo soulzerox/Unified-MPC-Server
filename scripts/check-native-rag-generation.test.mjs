@@ -1,11 +1,16 @@
+/* global process, URL */
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { readGenerationHealth, selectLiveWorkspaces } from './check-native-rag-generation.mjs';
+
+const scriptPath = fileURLToPath(new URL('./check-native-rag-generation.mjs', import.meta.url));
 
 /**
  * `#788`: `index_generations` keeps a row set per workspace id forever, so a
@@ -82,6 +87,31 @@ describe('generation health workspace scope', () => {
     assert.deepEqual(workspaces.map((entry) => entry.workspaceId), [retiredWorkspace]);
     assert.deepEqual(workspaces[0].violations.map((violation) => violation.kind), ['no-active-generation']);
     assert.deepEqual(retired, []);
+  });
+
+  it('keeps every candidate when freshness evidence is missing', () => {
+    const { live, retired } = selectLiveWorkspaces(
+      [shadowWorkspace, liveWorkspace],
+      [
+        { workspaceId: shadowWorkspace, workspacePath: '/repo', updatedAt: 0 },
+        { workspaceId: liveWorkspace, workspacePath: '/repo', updatedAt: 2 },
+      ],
+      () => true,
+    );
+    assert.deepEqual(live, [shadowWorkspace, liveWorkspace]);
+    assert.deepEqual(retired, []);
+  });
+
+  it('fails when every recorded workspace is retired instead of passing on nothing', () => {
+    const database = fixtureDatabase();
+    insertGeneration(database, { generationId: 'gen-retired', workspaceId: retiredWorkspace, status: 'active' });
+    insertChannels(database, 'gen-retired', retiredWorkspace, { parent: 'ok', lexical: 'ok', structural: 'ok', vector: 'ok' });
+    insertRegistry(database, retiredWorkspace, path.join(path.dirname(database), 'deleted-worktree'), '2026-10-25T20:14:42.735193+00:00');
+
+    const result = spawnSync(process.execPath, [scriptPath, '--db', database], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /judged no live workspace/u);
+    assert.doesNotMatch(result.stdout, /passed for 0 workspace/u);
   });
 });
 

@@ -105,6 +105,7 @@ import {
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
+import { createActivityRecordErrorSink } from './diagnostic-sink.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1409,7 +1410,7 @@ export function createStdioMcpRuntime(
         ? [sharedActivitySink, durableActivitySink]
         : [durableActivitySink, sharedActivitySink]).record(event);
     },
-  }, undefined, {
+  }, createActivityRecordErrorSink({ label: 'Unified-MPC MCP stdio' }), {
     async record(event: ActivitySinkEvent, detail): Promise<void> {
       await auditService.recordMcpTool({
         actorId: actor.clientId,

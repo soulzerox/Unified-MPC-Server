@@ -113,7 +113,8 @@ function assertNoStructuralRefSiblings(schema, where) {
  * `propertyNames` only reaches the binding when it leaves the key space open:
  * a plain string (or a reference to one). A closed set would need a mapped
  * type, so fail instead of emitting a wider `Record<string, T>` than the
- * schema allows.
+ * schema allows. Every structural keyword is inspected, not only the first
+ * applicator, because JSON Schema evaluates all of them together.
  */
 function assertOpenStringKeySpace(schema, where, seen = new Set()) {
   if (schema === true) return;
@@ -131,22 +132,91 @@ function assertOpenStringKeySpace(schema, where, seen = new Set()) {
   if (schema.enum !== undefined || schema.const !== undefined) {
     throw new Error(`${where} closes the property-name set, which the bindings generator does not model`);
   }
-  if (Array.isArray(schema.anyOf)) {
-    schema.anyOf.forEach((member, index) => {
-      assertOpenStringKeySpace(member, `${where}.anyOf[${index}]`, new Set(seen));
-    });
-    return;
+  const unionKeywords = ['anyOf', 'oneOf'].filter((keyword) => schema[keyword] !== undefined);
+  if (unionKeywords.length > 1) {
+    throw new Error(`${where} combines 'anyOf' and 'oneOf', which the bindings generator does not model`);
   }
-  if (Array.isArray(schema.oneOf)) {
-    schema.oneOf.forEach((member, index) => {
-      assertOpenStringKeySpace(member, `${where}.oneOf[${index}]`, new Set(seen));
-    });
-    return;
+  for (const keyword of ['properties', 'items', 'required', 'additionalProperties', 'propertyNames']) {
+    if (schema[keyword] !== undefined) {
+      throw new Error(
+        `${where} uses '${keyword}' on a property name, which the bindings generator does not model`,
+      );
+    }
   }
-  if (schema.type !== undefined && schema.type !== 'string') {
-    throw new Error(
-      `${where} constrains property names to ${JSON.stringify(schema.type)}, which the bindings generator does not model`,
-    );
+  if (schema.type !== undefined) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.every((type) => type === 'string')) {
+      throw new Error(
+        `${where} constrains property names to ${JSON.stringify(schema.type)}, which the bindings generator does not model`,
+      );
+    }
+  }
+  if (unionKeywords.length === 0) return;
+  const keyword = unionKeywords[0];
+  const members = schema[keyword];
+  if (!Array.isArray(members)) {
+    throw new Error(`${where}.${keyword} must be an array`);
+  }
+  if (members.length === 0) {
+    throw new Error(`${where}.${keyword} is empty, so it closes the property-name set`);
+  }
+  members.forEach((member, index) => {
+    assertOpenStringKeySpace(member, `${where}.${keyword}[${index}]`, new Set(seen));
+  });
+}
+
+/** JSON Schema scalar types a literal can match. */
+function matchesDeclaredType(value, type) {
+  switch (type) {
+    case 'string': return typeof value === 'string';
+    case 'number': return typeof value === 'number' && Number.isFinite(value);
+    case 'integer': return typeof value === 'number' && Number.isInteger(value);
+    case 'boolean': return typeof value === 'boolean';
+    case 'null': return value === null;
+    case 'array': return Array.isArray(value);
+    case 'object': return typeof value === 'object' && value !== null && !Array.isArray(value);
+    default: throw new Error(`unsupported JSON Schema type ${JSON.stringify(type)}`);
+  }
+}
+
+/**
+ * `enum`/`const` are emitted as literal unions. A structural sibling would be
+ * dropped, and a `type` that no literal matches would emit a type the schema
+ * can never satisfy, so check both instead of trusting the annotation.
+ */
+function assertLiteralSiblings(schema, where) {
+  const hasEnum = schema.enum !== undefined;
+  const hasConst = schema.const !== undefined;
+  if (!hasEnum && !hasConst) return;
+  if (hasEnum && !Array.isArray(schema.enum)) {
+    throw new Error(`${where}.enum must be an array`);
+  }
+  if (hasEnum && hasConst) {
+    throw new Error(`${where} mixes 'enum' and 'const', which the bindings generator does not model`);
+  }
+  for (const keyword of Object.keys(schema)) {
+    if (STRUCTURAL_KEYWORDS.has(keyword) && keyword !== 'enum' && keyword !== 'const' && keyword !== 'type') {
+      throw new Error(
+        `${where} puts '${keyword}' beside ${hasEnum ? 'enum' : 'const'}, which the bindings generator does not model`,
+      );
+    }
+  }
+  if (hasEnum && schema.enum.length === 0) {
+    throw new Error(`${where}.enum is empty, which the bindings generator does not model`);
+  }
+  if (schema.type !== undefined) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (types.length === 0) {
+      throw new Error(`${where}.type is empty, which the bindings generator does not model`);
+    }
+    const values = hasEnum ? schema.enum : [schema.const];
+    for (const value of values) {
+      if (!types.some((type) => matchesDeclaredType(value, type))) {
+        throw new Error(
+          `${where} declares type ${JSON.stringify(schema.type)} but ${hasEnum ? 'enum' : 'const'} contains ${JSON.stringify(value)}`,
+        );
+      }
+    }
   }
 }
 
@@ -203,6 +273,7 @@ function typeOf(schema, where = 'schema') {
   if (schema === false) return 'never';
   assertSchemaObject(schema, where);
   assertNoStructuralRefSiblings(schema, where);
+  assertLiteralSiblings(schema, where);
   if (schema.$ref !== undefined) {
     return referenceName(schema, where);
   }
@@ -266,6 +337,7 @@ function render(schema, schemaReference = SCHEMA_REFERENCE) {
   for (const [name, definition] of Object.entries(definitions)) {
     assertSchemaObject(definition, `$defs.${name}`);
     assertNoStructuralRefSiblings(definition, `$defs.${name}`);
+    assertLiteralSiblings(definition, `$defs.${name}`);
     const typeName = pascalCase(name);
     if (Array.isArray(definition.enum)) {
       const values = definition.enum.map((value) => JSON.stringify(value)).join(', ');
@@ -299,38 +371,55 @@ function render(schema, schemaReference = SCHEMA_REFERENCE) {
   ].join('\n');
 }
 
-const KNOWN_FLAGS = new Set(['--check', '--schema', '--out']);
+const VALUE_FLAGS = new Set(['--schema', '--out']);
 
-function argumentValue(flag) {
-  const inline = process.argv.slice(2).find((argument) => argument.startsWith(`${flag}=`));
-  if (inline !== undefined) {
-    const value = inline.slice(flag.length + 1);
-    if (value.length === 0) throw new Error(`${flag} requires a path`);
-    return value;
+/**
+ * Parse the whole command line before reading or writing anything. An option
+ * this script does not implement must be an error, not a silent fallback to
+ * the checked-in paths: `--check=true`, `-s path` and a stray positional have
+ * all been ways to run the wrong mode by accident.
+ */
+function parseArguments(argv) {
+  const values = new Map();
+  let check = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === '--check') {
+      if (check) throw new Error("duplicate option '--check'");
+      check = true;
+      continue;
+    }
+    if (argument.startsWith('-')) {
+      const separator = argument.indexOf('=');
+      const flag = separator === -1 ? argument : argument.slice(0, separator);
+      if (!VALUE_FLAGS.has(flag)) throw new Error(`unknown option '${argument}'`);
+      let value;
+      if (separator === -1) {
+        value = argv[index + 1];
+        if (value === undefined || value.startsWith('-')) throw new Error(`${flag} requires a path`);
+        index += 1;
+      } else {
+        value = argument.slice(separator + 1);
+        if (value.length === 0) throw new Error(`${flag} requires a path`);
+      }
+      if (values.has(flag)) throw new Error(`duplicate option '${flag}'`);
+      values.set(flag, value);
+      continue;
+    }
+    throw new Error(`unexpected argument '${argument}'`);
   }
-  const index = process.argv.indexOf(flag);
-  if (index === -1) return undefined;
-  const value = process.argv[index + 1];
-  if (value === undefined || value.startsWith('--')) {
-    throw new Error(`${flag} requires a path`);
-  }
-  return value;
+  return { check, schema: values.get('--schema'), out: values.get('--out') };
 }
 
-for (const argument of process.argv.slice(2)) {
-  if (!argument.startsWith('--')) continue;
-  const flag = argument.split('=')[0];
-  if (!KNOWN_FLAGS.has(flag)) throw new Error(`unknown option '${argument}'`);
-}
-
-const schemaPath = path.resolve(argumentValue('--schema') ?? SCHEMA_PATH);
-const outputPath = path.resolve(argumentValue('--out') ?? OUTPUT_PATH);
+const options = parseArguments(process.argv.slice(2));
+const schemaPath = path.resolve(options.schema ?? SCHEMA_PATH);
+const outputPath = path.resolve(options.out ?? OUTPUT_PATH);
 const schemaReference = schemaPath === SCHEMA_PATH
   ? SCHEMA_REFERENCE
   : path.relative(PACKAGE_ROOT, schemaPath);
 const schema = JSON.parse(await readFile(schemaPath, 'utf8'));
 const rendered = render(schema, schemaReference);
-const check = process.argv.includes('--check');
+const check = options.check;
 
 if (check) {
   const current = await readFile(outputPath, 'utf8').catch((error) => {

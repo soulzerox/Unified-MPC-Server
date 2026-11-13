@@ -137,7 +137,7 @@ The original plan had step 2 move it into a workspace package and make the gate
 suites build-aware, or move them after `build`. That step is **deferred, not
 dropped**: no phase-3 caller needs the core from TypeScript, but phase 4 does,
 because `GuardedMergeService` lives in `packages/application` and must delegate
-to the same evaluator instead of keeping its own. See "Status after steps 1–2" in
+to the same evaluator instead of keeping its own. See "Status after step 1" in
 section 5 for the two routes and their cost.
 
 ### Why not one module per gate
@@ -249,8 +249,8 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    - the MCP `git_worktree_remove` tool's `worktreeCleanupSafety` returns
      `clean` | `blocked` | `unavailable` from `goalWorktreeRemovalBlockers` and
      refuses an unverifiable classification. It is a private method of
-     `UpgradeRuntime`, and it stays private: its own dry run already returns the
-     same verdict without touching Git or the ledger
+     `UpgradeRuntimeService`, and it stays private: its own dry run already
+     returns the same verdict without touching Git or the ledger
      (`upgrade-runtime-worktree-safety.test.ts`, "reports the classification in a
      dry run without touching git or the ledger"). The close gate therefore asks
      the tool for a preview rather than reaching into the class, so there is one
@@ -298,7 +298,7 @@ Each step ships alone and leaves the repository working.
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
 
-### Status after steps 1–2
+### Status after step 1
 
 Step 1 is shipped and the core is already independent of the profile runner:
 
@@ -324,7 +324,7 @@ application state, and all three are reachable from `apps/cli` today:
 | Question | Reached through | Caveat |
 |---|---|---|
 | may this worktree be removed? | the `git_worktree_remove` **dry run**, which returns the same verdict and touches neither Git nor the ledger | the preview is ownership-scoped *before* the dry-run return, so a later session must either ask as the owning session or the tool needs an explicit read-only viewer |
-| may this goal complete? | `GoalContinuationService.goalCompletionWorktreeBlocker`, client-scoped | already enforced; nothing to add |
+| may this goal complete? | the exported `goalCompletionWorktreeBlockers` over `GoalWorktreeReconciliationPort.classify` with `ownershipScope: 'client'`, the port `apps/cli` already builds | already enforced at completion; nothing to add |
 | is this workspace cleanup-eligible? | `WorkspaceService.evaluateGoalWorkspaceCleanup`, already called from `apps/cli/src/commands/web.ts` | `retention_pending` is a waiting state, not a blocker |
 
 So step 3 lands in `apps/cli`, next to the other commands, and adds one command
@@ -385,10 +385,10 @@ This is the decision to make before step 4, not before step 3.
 4. **How does the core reach `packages/application`?** A build-free ESM package
    with hand-written declarations, or an evaluator injected at a `.mjs`
    composition root. This is the decision step 4 needs and step 3 does not; see
-   "Status after steps 1–2". It is listed here rather than settled because both
+   "Status after step 1". It is listed here rather than settled because both
    routes are honest and the choice depends on whether the repository wants to
    own hand-maintained type declarations at all.
 5. **Does the close gate ask as the owning session, or does
    `git_worktree_remove` grow a read-only viewer?** The preview's ownership check
-   makes the third input unreachable from a session that did not create the
+   makes that preview unreachable from a session that did not create the
    worktree, which is the common case when a goal is closed after a handoff.

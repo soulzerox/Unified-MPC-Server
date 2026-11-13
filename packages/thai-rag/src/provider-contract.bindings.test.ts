@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -33,6 +34,51 @@ interface ContractSchema {
 
 async function readJson(file: string): Promise<unknown> {
   return JSON.parse(await readFile(file, 'utf8')) as unknown;
+}
+
+interface MutableDefinition {
+  [keyword: string]: unknown;
+}
+
+interface MutableContractSchema {
+  $defs: Record<string, MutableDefinition>;
+}
+
+interface GeneratorRun {
+  readonly status: number | null;
+  readonly stderr: string;
+}
+
+function definition(schema: MutableContractSchema, name: string): MutableDefinition {
+  const value = schema.$defs[name];
+  if (value === undefined) throw new Error(`schema has no $defs.${name}`);
+  return value;
+}
+
+/**
+ * Runs the generator against a mutated copy of the vendored schema, so a guard
+ * cannot regress into a silent widening without a test noticing. The copy and
+ * the output live in the OS temp directory; the vendored corpus is never
+ * written.
+ */
+async function runGeneratorWith(
+  mutate: (schema: MutableContractSchema) => void,
+): Promise<GeneratorRun> {
+  const schema = await readJson(SCHEMA_PATH) as MutableContractSchema;
+  mutate(schema);
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'contract-bindings-'));
+  try {
+    const schemaPath = path.join(directory, 'schema.json');
+    await writeFile(schemaPath, JSON.stringify(schema), 'utf8');
+    const result = spawnSync(
+      process.execPath,
+      [GENERATOR_PATH, '--schema', schemaPath, '--out', path.join(directory, 'bindings.ts')],
+      { cwd: PACKAGE_ROOT, encoding: 'utf8' },
+    );
+    return { status: result.status, stderr: result.stderr };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 describe('provider contract TypeScript bindings', () => {
@@ -80,5 +126,60 @@ describe('provider contract TypeScript bindings', () => {
   it('never falls back to an untyped binding', async () => {
     const bindings = await readFile(BINDINGS_PATH, 'utf8');
     expect(bindings).not.toMatch(/\bany\b/);
+  });
+});
+
+describe('contract bindings generator rejects an unmodelled schema', () => {
+  it('refuses an unsupported keyword', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_status').allOf = [{ type: 'string' }];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain("uses 'allOf'");
+  });
+
+  it('refuses two definitions that collapse onto one type name', async () => {
+    const run = await runGeneratorWith((schema) => {
+      schema.$defs.provider__status = { type: 'string' };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('both map to ProviderStatus');
+  });
+
+  it('refuses a propertyNames set closed by an enum', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = { type: 'string', enum: ['src/a.ts'] };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('closes the property-name set');
+  });
+
+  it('refuses a propertyNames set closed through anyOf', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'expected_paths').propertyNames = {
+        anyOf: [{ type: 'string' }, { enum: ['src/a.ts'] }],
+      };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('closes the property-name set');
+  });
+
+  it('refuses structural keywords beside $ref', async () => {
+    const run = await runGeneratorWith((schema) => {
+      const target = definition(schema, 'code_index_data');
+      for (const keyword of Object.keys(target)) delete target[keyword];
+      target.$ref = '#/$defs/code_index_publication_data';
+      target.required = ['job_id'];
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('beside $ref');
+  });
+
+  it('refuses named properties mixed with a typed additionalProperties', async () => {
+    const run = await runGeneratorWith((schema) => {
+      definition(schema, 'provider_error').additionalProperties = { type: 'string' };
+    });
+    expect(run.status, run.stderr.trim()).not.toBe(0);
+    expect(run.stderr).toContain('mixes named properties with a typed additionalProperties');
   });
 });

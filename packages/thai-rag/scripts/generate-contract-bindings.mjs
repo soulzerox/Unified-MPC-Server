@@ -18,6 +18,10 @@ import { fileURLToPath } from 'node:url';
  * Usage:
  *   node scripts/generate-contract-bindings.mjs           # rewrite the file
  *   node scripts/generate-contract-bindings.mjs --check   # fail if stale
+ *
+ * `--schema <path>` and `--out <path>` override the checked-in locations; the
+ * failure-path tests use them to feed a mutated copy without touching the
+ * vendored corpus.
  */
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SCHEMA_PATH = path.join(PACKAGE_ROOT, 'contract', 'provider-contract.v1.schema.json');
@@ -110,6 +114,18 @@ function assertOpenStringKeySpace(schema, where, seen = new Set()) {
   if (schema.enum !== undefined || schema.const !== undefined) {
     throw new Error(`${where} closes the property-name set, which the bindings generator does not model`);
   }
+  if (Array.isArray(schema.anyOf)) {
+    schema.anyOf.forEach((member, index) => {
+      assertOpenStringKeySpace(member, `${where}.anyOf[${index}]`, new Set(seen));
+    });
+    return;
+  }
+  if (Array.isArray(schema.oneOf)) {
+    schema.oneOf.forEach((member, index) => {
+      assertOpenStringKeySpace(member, `${where}.oneOf[${index}]`, new Set(seen));
+    });
+    return;
+  }
   if (schema.type !== undefined && schema.type !== 'string') {
     throw new Error(
       `${where} constrains property names to ${JSON.stringify(schema.type)}, which the bindings generator does not model`,
@@ -169,10 +185,22 @@ function typeOf(schema, where = 'schema') {
   if (schema === true) return 'unknown';
   if (schema === false) return 'never';
   assertSchemaObject(schema, where);
+  if (schema.$ref !== undefined) {
+    // JSON Schema 2020-12 evaluates siblings beside `$ref`; this generator
+    // would return the referenced type and silently drop them.
+    const siblings = Object.keys(schema).filter(
+      (keyword) => STRUCTURAL_KEYWORDS.has(keyword) && keyword !== '$ref',
+    );
+    if (siblings.length > 0) {
+      throw new Error(
+        `${where} puts ${siblings.map((keyword) => `'${keyword}'`).join(', ')} beside $ref, which the bindings generator does not model`,
+      );
+    }
+    return referenceName(schema, where);
+  }
   if (schema.propertyNames !== undefined) {
     assertOpenStringKeySpace(schema.propertyNames, `${where}.propertyNames`);
   }
-  if (schema.$ref !== undefined) return referenceName(schema, where);
   if (Array.isArray(schema.anyOf)) {
     return unionOf(schema.anyOf.map((member, index) => typeOf(member, `${where}.anyOf[${index}]`)));
   }
@@ -202,7 +230,7 @@ function typeOf(schema, where = 'schema') {
   throw new Error(`${where} has unsupported type ${JSON.stringify(declared)}`);
 }
 
-function render(schema) {
+function render(schema, schemaReference = SCHEMA_REFERENCE) {
   if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
     throw new Error('contract schema must be an object');
   }
@@ -251,7 +279,7 @@ function render(schema) {
     '/**',
     ' * GENERATED FILE - do not edit by hand.',
     ' *',
-    ` * Source: ${SCHEMA_REFERENCE}`,
+    ` * Source: ${schemaReference}`,
     ` * Schema sha256: ${digest}`,
     ' *',
     ' * Regenerate: corepack pnpm@10.15.0 --filter @unified-mpc/thai-rag contract:bindings',
@@ -262,12 +290,27 @@ function render(schema) {
   ].join('\n');
 }
 
-const schema = JSON.parse(await readFile(SCHEMA_PATH, 'utf8'));
-const rendered = render(schema);
+function argumentValue(flag) {
+  const index = process.argv.indexOf(flag);
+  if (index === -1) return undefined;
+  const value = process.argv[index + 1];
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${flag} requires a path`);
+  }
+  return value;
+}
+
+const schemaPath = path.resolve(argumentValue('--schema') ?? SCHEMA_PATH);
+const outputPath = path.resolve(argumentValue('--out') ?? OUTPUT_PATH);
+const schemaReference = schemaPath === SCHEMA_PATH
+  ? SCHEMA_REFERENCE
+  : path.relative(PACKAGE_ROOT, schemaPath);
+const schema = JSON.parse(await readFile(schemaPath, 'utf8'));
+const rendered = render(schema, schemaReference);
 const check = process.argv.includes('--check');
 
 if (check) {
-  const current = await readFile(OUTPUT_PATH, 'utf8').catch((error) => {
+  const current = await readFile(outputPath, 'utf8').catch((error) => {
     if (error?.code === 'ENOENT') return undefined;
     throw error;
   });
@@ -284,6 +327,6 @@ if (check) {
     process.exitCode = 1;
   }
 } else {
-  await writeFile(OUTPUT_PATH, rendered, 'utf8');
-  console.log(`wrote ${Object.keys(schema.$defs).length} contract bindings to ${path.relative(PACKAGE_ROOT, OUTPUT_PATH)}`);
+  await writeFile(outputPath, rendered, 'utf8');
+  console.log(`wrote ${Object.keys(schema.$defs).length} contract bindings to ${path.relative(PACKAGE_ROOT, outputPath)}`);
 }

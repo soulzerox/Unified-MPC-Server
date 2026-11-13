@@ -20,7 +20,9 @@
     "contract:provenance": "node scripts/write-contract-provenance.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "tsc --outDir dist"
+    "build": "tsc --outDir dist",
+    "contract:bindings": "node scripts/generate-contract-bindings.mjs",
+    "contract:bindings:check": "node scripts/generate-contract-bindings.mjs --check"
   },
   "license": "MIT"
 }

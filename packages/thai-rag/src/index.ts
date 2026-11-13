@@ -1,5 +1,6 @@
 export * from './canonical-workspace.js';
 export * from './provider-contract.js';
+export * from './provider-contract.bindings.js';
 export * from './provider-runtime.js';
 export * from './workspace-manifest.js';
 export * from './legacy-migration.js';

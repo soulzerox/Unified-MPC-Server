@@ -19,12 +19,16 @@ model and predicates. This document proposes the deep module that idea belongs
 in, and a migration that changes no behaviour on the way.
 
 The runtime merge gate is not a fourth gate and not future work: it is the
-runtime adapter over the same policy. The engine must be the single owner of
-"is this head verified and reviewed", and both the CLI script and
-`GuardedMergeService` must delegate to it rather than keep separate evaluators.
-That is a real migration, not a drop-in: the runtime receipt carries repository,
-pull request, head, optional base, verification mode, a gate list and a review
-outcome, so step 4 has to convert or re-record it.
+runtime adapter over the same rule. That rule — evidence must exist, and it must
+name this exact repository, pull request, head and base, with a review that is
+not a rejection — has one owner, the conformance corpus in
+`apps/cli/src/workflow-gate-conformance.test.ts`, and both evaluators are
+adapters it holds to it. They are not copies of one function: the runtime
+receipt carries repository, pull request, head, optional base, verification mode,
+a gate list and a review outcome, while the CLI receipt carries a profile
+version, a clean-tree diff fingerprint and a findings document. Forcing those
+into one shape would fabricate fields one side does not have, which is why step 4
+repoints the runtime at the shared rule instead of converting its receipts.
 
 ---
 
@@ -134,11 +138,12 @@ none. Phase 1 therefore keeps the shared core as plain ESM under `scripts/`,
 importable without a build.
 
 The original plan had step 2 move it into a workspace package and make the gate
-suites build-aware, or move them after `build`. That step is **deferred, not
-dropped**: no phase-3 caller needs the core from TypeScript, but phase 4 does,
-because `GuardedMergeService` lives in `packages/application` and must delegate
-to the same evaluator instead of keeping its own. See "Status after step 1" in
-section 5 for the two routes and their cost.
+suites build-aware, or move them after `build`. **That step is dropped, not
+deferred.** Both routes were measured and rejected: neither pays for itself,
+because the two evaluators do not duplicate one decision (open question 4). The
+shared rule is pinned by a conformance corpus instead, so the core stays plain
+ESM under `scripts/` and no caller needs it from TypeScript. See "Status after
+step 2" in section 5.
 
 ### Why not one module per gate
 
@@ -236,8 +241,9 @@ live at three seams; the engine extends them instead of adding a parallel gate:
 1. **Merge** — the CLI `merge:pr` script and the runtime `GuardedMergeService`.
    The CLI already delegates to the shared `evaluateMergeEligibility` and keeps
    `--match-head-commit`; `GuardedMergeService` still holds its own receipt
-   reader, which is step 4. Neither side may change behaviour, and the runtime
-   side needs the receipt conversion described above.
+   reader, which is step 4. Neither side may change behaviour: the runtime keeps
+   its `MergeEvidenceBlocker` vocabulary and its SQLite receipts, and only the
+   shared subject rule becomes visible to both, through the conformance corpus.
 2. **Cleanup** — three checks that are easy to conflate:
 
    - `WorkspaceService.evaluateGoalWorkspaceCleanup` returns a
@@ -290,7 +296,7 @@ Each step ships alone and leaves the repository working.
 | Step | Change | Acceptance |
 |---|---|---|
 | 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
-| 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, one row per shared rule, and each refusal must name the rule it broke |
+| 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, seven shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
 | 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); **blocked** only on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
 | 4 | Repoint `GuardedMergeService` at the shared rule while it keeps its own evidence checks and blocker vocabulary, and wire `verify`/`review` through `receipts()` | the conformance corpus stays green while the runtime keeps reporting its richer `MergeEvidenceBlocker` codes; the CLI receipt format is unchanged |
@@ -396,10 +402,21 @@ apps/cli/src/workflow-gate-conformance.test.ts
           and each refusal names the rule the row broke
 ```
 
-Seven rows: one that must pass, and six that each break exactly one shared rule —
-missing verification, missing review, a foreign head on either receipt, a foreign
-base, a foreign pull request. The suite also pins that the corpus is not vacuous,
-so an evaluator that refuses everything cannot satisfy it.
+Nine rows in two scopes. `shared` rows carry a field in both worlds and must reach
+the same decision: the passing row, then exactly one field broken per row —
+missing verification, missing review, a rejected review, a foreign head on either
+receipt, a foreign base, a foreign pull request. `runtime-only` rows exist where
+only one world records the field: the runtime receipt names a repository and the
+CLI profile receipt does not, so the corpus pins the runtime's refusal and fails
+if the CLI ever starts refusing that head, which is the signal to promote the row
+to `shared` instead of leaving coverage that is no longer accurate.
+
+Every blocked row also names the refusal it must produce (`receipt_head_stale`
+and `/verification receipt was produced for a different head/`, and so on), so a
+row cannot be satisfied by an unrelated blocker that fires first. The suite also
+pins that the corpus is not vacuous — one passing row, seven distinct shared
+refusals with a CLI counterpart each — so an evaluator that refuses everything
+cannot satisfy it.
 
 The corpus binds the two profile rules through `createGatePolicy`'s injected
 `{ profileVersion, fingerprintFor }` instead of reading this checkout's profile,
@@ -411,11 +428,12 @@ Nothing else about step 2 changes: `GuardedMergeService` keeps its own receipt
 reader and its `MergeEvidenceBlocker` vocabulary. Step 4 is the slice that
 repoints it, and the corpus is what makes that refactor safe to review.
 
-Step 4 is where the shared rule becomes load-bearing. `GuardedMergeService` must
-stop owning its own answer, and it lives in `packages/application`, which cannot
-import `scripts/`. Both packaging routes were rejected after measuring what they
-cost (open question 4), so step 4 keeps the two evaluators and repoints the
-runtime through the rule the corpus in "Status after step 2" now pins. No
+Step 4 is where the shared rule becomes load-bearing. `GuardedMergeService`
+already delegates to `evaluateMergeEvidence` in `packages/domain`, so it has one
+owner of its *own* policy; what it cannot do is see the CLI evaluator, and the
+CLI cannot see it. Both packaging routes were rejected after measuring what they
+cost (open question 4), so step 4 makes the runtime's shared clause answerable to
+the corpus in "Status after step 2" rather than to a second implementation. No
 package, no declarations, no new `.mjs` distribution path, and no profile-version
 bump.
 

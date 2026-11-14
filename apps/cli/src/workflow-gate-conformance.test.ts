@@ -1,5 +1,3 @@
-import { pathToFileURL } from 'node:url';
-
 import { evaluateMergeEvidence } from '@unified-mpc/domain';
 import type {
   MergeEvidenceBlockerCode,
@@ -18,12 +16,18 @@ import { describe, expect, it } from 'vitest';
  * shapes, so unifying them into one function would either fabricate fields one
  * world does not have or drop checks the other enforces. What must not diverge
  * is the *decision*: evidence must exist, and it must belong to the exact
- * subject being merged.
+ * subject being merged, with a review that is not a rejection.
  *
  * This suite is the single owner of that rule. It builds one scenario table and
  * runs both real evaluators over it, so a change to either side that makes them
  * disagree fails here. It is the only place allowed to import both worlds —
  * `apps/cli` is the composition root that already binds both.
+ *
+ * A row is either `shared` (both worlds carry the field, and both must reach the
+ * same decision) or `runtime-only` (only the runtime receipt records it, so the
+ * corpus pins the runtime's refusal and states that the CLI cannot express the
+ * clause). Marking a clause shared when one side has no field for it would let
+ * the corpus claim coverage it does not have.
  */
 
 const HEAD = 'a'.repeat(40);
@@ -36,10 +40,13 @@ const DIFF = 'diff --git a/README.md b/README.md\n';
 
 interface Scenario {
   readonly name: string;
+  readonly scope: 'shared' | 'runtime-only';
   /** Verification evidence exists for this subject. */
   readonly verification: boolean;
   /** Review evidence exists for this subject. */
   readonly review: boolean;
+  /** The review rejected the head instead of accepting it. */
+  readonly reviewRejected?: boolean;
   readonly verificationHead: 'subject' | 'other';
   readonly reviewHead: 'subject' | 'other';
   /**
@@ -49,15 +56,32 @@ interface Scenario {
    * reviewed against — so one field drives both adapters.
    */
   readonly base: 'subject' | 'other';
-  /** Evidence names another repository or pull request. */
-  readonly subjectIdentity: 'subject' | 'other';
+  /** Evidence names another pull request. Both worlds record the number. */
+  readonly pullRequest: 'subject' | 'other';
+  /** Evidence names another repository. Only the runtime receipt records it. */
+  readonly repository?: 'subject' | 'other';
   readonly expected: 'allowed' | 'blocked';
   /**
    * The refusal each world must report, so a row cannot pass because of an
-   * unrelated blocker. `null` for the row that must be allowed.
+   * unrelated blocker. `cli: null` means the CLI receipt has no field for this
+   * clause. `proof` is `null` for the row that must be allowed.
    */
-  readonly proof: { readonly cli: RegExp; readonly runtime: MergeEvidenceBlockerCode } | null;
+  readonly proof: { readonly cli: RegExp | null; readonly runtime: MergeEvidenceBlockerCode } | null;
 }
+
+const PASSING_ROW = {
+  name: 'complete evidence for the exact subject',
+  scope: 'shared',
+  verification: true,
+  review: true,
+  verificationHead: 'subject',
+  reviewHead: 'subject',
+  base: 'subject',
+  pullRequest: 'subject',
+  repository: 'subject',
+  expected: 'allowed',
+  proof: null,
+} as const satisfies Scenario;
 
 /**
  * Every blocked row changes exactly one field away from the passing row, so it
@@ -65,82 +89,65 @@ interface Scenario {
  * passed in the first place.
  */
 const SCENARIOS: readonly Scenario[] = [
+  PASSING_ROW,
   {
-    name: 'complete evidence for the exact subject',
-    verification: true,
-    review: true,
-    verificationHead: 'subject',
-    reviewHead: 'subject',
-    base: 'subject',
-    subjectIdentity: 'subject',
-    expected: 'allowed',
-    proof: null,
-  },
-  {
+    ...PASSING_ROW,
     name: 'no verification evidence',
     verification: false,
-    review: true,
-    verificationHead: 'subject',
-    reviewHead: 'subject',
-    base: 'subject',
-    subjectIdentity: 'subject',
     expected: 'blocked',
     proof: { cli: /no local verification receipt/, runtime: 'receipt_missing' },
   },
   {
+    ...PASSING_ROW,
     name: 'no review evidence',
-    verification: true,
     review: false,
-    verificationHead: 'subject',
-    reviewHead: 'subject',
-    base: 'subject',
-    subjectIdentity: 'subject',
     expected: 'blocked',
     proof: { cli: /no exact-head review receipt/, runtime: 'review_missing' },
   },
   {
+    ...PASSING_ROW,
+    name: 'the review rejected the head',
+    reviewRejected: true,
+    expected: 'blocked',
+    proof: { cli: /review verdict is 'blocked'/, runtime: 'review_rejected' },
+  },
+  {
+    ...PASSING_ROW,
     name: 'verification produced for another head',
-    verification: true,
-    review: true,
     verificationHead: 'other',
-    reviewHead: 'subject',
-    base: 'subject',
-    subjectIdentity: 'subject',
     expected: 'blocked',
     proof: { cli: /verification receipt was produced for a different head/, runtime: 'receipt_head_stale' },
   },
   {
+    ...PASSING_ROW,
     name: 'review produced for another head',
-    verification: true,
-    review: true,
-    verificationHead: 'subject',
     reviewHead: 'other',
-    base: 'subject',
-    subjectIdentity: 'subject',
     expected: 'blocked',
     proof: { cli: /review receipt was produced for a different head/, runtime: 'review_head_stale' },
   },
   {
+    ...PASSING_ROW,
     name: 'evidence recorded against another base',
-    verification: true,
-    review: true,
-    verificationHead: 'subject',
-    reviewHead: 'subject',
     base: 'other',
-    subjectIdentity: 'subject',
     expected: 'blocked',
     proof: { cli: /review receipt was produced against a different base/, runtime: 'receipt_base_stale' },
   },
   {
+    ...PASSING_ROW,
     name: 'evidence belongs to another pull request',
-    verification: true,
-    review: true,
-    verificationHead: 'subject',
-    reviewHead: 'subject',
-    base: 'subject',
-    subjectIdentity: 'other',
+    pullRequest: 'other',
     expected: 'blocked',
     proof: { cli: /review receipt is for PR #143/, runtime: 'pull_request_mismatch' },
+  },
+  {
+    ...PASSING_ROW,
+    name: 'runtime evidence belongs to another repository',
+    scope: 'runtime-only',
+    repository: 'other',
+    expected: 'blocked',
+    // The CLI profile receipt has no repository field: its identity is the PR
+    // number plus the head and base it named.
+    proof: { cli: null, runtime: 'repository_mismatch' },
   },
 ];
 
@@ -161,9 +168,11 @@ async function loadCliModules(): Promise<CliModules> {
   // The scripts are plain ESM with no declarations, which is exactly why the
   // shared core is not packaged (see docs/WORKFLOW_GATE.md, open question 4).
   // A dynamic import keeps that boundary visible instead of hiding it behind a
-  // hand-written ambient module.
-  const url = pathToFileURL(new URL('../../../scripts/workflow-gate-core.mjs', import.meta.url).pathname).href;
-  return await import(url) as CliModules;
+  // hand-written ambient module. `import.meta.url` is already a file URL, so its
+  // `href` is the specifier — round-tripping it through a path would re-encode
+  // any `%` and break a checkout whose directory name contains a space.
+  const specifier = new URL('../../../scripts/workflow-gate-core.mjs', import.meta.url).href;
+  return await import(specifier) as CliModules;
 }
 
 function runtimePolicy(): RepositoryMergePolicy {
@@ -180,10 +189,14 @@ function runtimeReceipt(scenario: Scenario): MergeVerificationReceipt | undefine
   if (!scenario.verification) return undefined;
   const head = scenario.verificationHead === 'subject' ? HEAD : OTHER_HEAD;
   const reviewHead = scenario.reviewHead === 'subject' ? HEAD : OTHER_HEAD;
-  const review: MergeReviewOutcome = scenario.review ? 'clean_llm_review' : 'missing';
+  const review: MergeReviewOutcome = scenario.reviewRejected === true
+    ? 'rejected'
+    : scenario.review
+      ? 'clean_llm_review'
+      : 'missing';
   return {
-    repository: scenario.subjectIdentity === 'subject' ? REPOSITORY : 'someone/else',
-    pullRequest: scenario.subjectIdentity === 'subject' ? PULL_REQUEST : PULL_REQUEST + 1,
+    repository: scenario.repository === 'other' ? 'someone/else' : REPOSITORY,
+    pullRequest: scenario.pullRequest === 'other' ? PULL_REQUEST + 1 : PULL_REQUEST,
     headSha: head,
     baseSha: scenario.base === 'subject' ? BASE : OTHER_BASE,
     verificationMode: 'local_exact_head',
@@ -234,16 +247,27 @@ function cliVerdict(scenario: Scenario, modules: CliModules): { allowed: boolean
   const review = scenario.review
     ? {
         role: 'reviewer',
-        prNumber: scenario.subjectIdentity === 'subject' ? PULL_REQUEST : PULL_REQUEST + 1,
+        prNumber: scenario.pullRequest === 'other' ? PULL_REQUEST + 1 : PULL_REQUEST,
         baseSha: scenario.base === 'subject' ? BASE : OTHER_BASE,
         headSha: scenario.reviewHead === 'subject' ? HEAD : OTHER_HEAD,
         skillId: 'unified-code-review',
         skillVersion: 1,
         skillSha256: 'sha256:conformance',
         reviewedFingerprint: fingerprint,
-        blockingOpenCount: 0,
-        verdict: 'clean',
-        findings: [],
+        blockingOpenCount: scenario.reviewRejected === true ? 1 : 0,
+        verdict: scenario.reviewRejected === true ? 'blocked' : 'clean',
+        findings: scenario.reviewRejected === true
+          ? [{
+              severity: 'blocking',
+              category: 'correctness',
+              file: 'src/index.ts',
+              line: 1,
+              claim: 'the corpus rejected this head on purpose',
+              evidence_refs: ['src/index.ts:1'],
+              required_fix: true,
+              status: 'open',
+            }]
+          : [],
       }
     : undefined;
 
@@ -272,9 +296,9 @@ function cliVerdict(scenario: Scenario, modules: CliModules): { allowed: boolean
 }
 
 describe('merge evidence conformance', () => {
-  it('both merge gates reach the same decision for the shared subject rule', async () => {
+  it('shared rows: both merge gates reach the same, expected decision', async () => {
     const modules = await loadCliModules();
-    const failures = SCENARIOS.flatMap((scenario) => {
+    const failures = SCENARIOS.filter((scenario) => scenario.scope === 'shared').flatMap((scenario) => {
       const runtime = runtimeVerdict(scenario);
       const cli = cliVerdict(scenario, modules);
       const problems: string[] = [];
@@ -292,8 +316,9 @@ describe('merge evidence conformance', () => {
         if (!runtime.codes.includes(scenario.proof.runtime)) {
           problems.push(`${scenario.name}: runtime did not report ${scenario.proof.runtime} (got ${runtime.codes.join(', ')})`);
         }
-        if (!cli.blockers.some((blocker) => scenario.proof !== null && scenario.proof.cli.test(blocker))) {
-          problems.push(`${scenario.name}: cli did not report ${String(scenario.proof.cli)} (got ${cli.blockers.join(' | ')})`);
+        const cliProof = scenario.proof.cli;
+        if (cliProof !== null && !cli.blockers.some((blocker) => cliProof.test(blocker))) {
+          problems.push(`${scenario.name}: cli did not report ${String(cliProof)} (got ${cli.blockers.join(' | ')})`);
         }
       }
 
@@ -303,13 +328,41 @@ describe('merge evidence conformance', () => {
     expect(failures).toEqual([]);
   });
 
-  it('the corpus is not vacuous: one row passes and every rule has its own refusal', () => {
+  it('runtime-only rows: the runtime refuses and the CLI has no field for the clause', async () => {
+    const modules = await loadCliModules();
+    const failures = SCENARIOS.filter((scenario) => scenario.scope === 'runtime-only').flatMap((scenario) => {
+      const runtime = runtimeVerdict(scenario);
+      const problems: string[] = [];
+      if (runtime.allowed) problems.push(`${scenario.name}: runtime allowed the head`);
+      if (scenario.proof !== null) {
+        if (!runtime.codes.includes(scenario.proof.runtime)) {
+          problems.push(`${scenario.name}: runtime did not report ${scenario.proof.runtime} (got ${runtime.codes.join(', ')})`);
+        }
+        // The row exists because one world cannot express the clause. If the CLI
+        // ever gains the field, this assertion is what forces the row back into
+        // the shared set instead of leaving stale coverage behind.
+        if (scenario.proof.cli === null && !cliVerdict(scenario, modules).allowed) {
+          problems.push(`${scenario.name}: the CLI now refuses this head, so the clause is shared and belongs in the shared table`);
+        }
+      }
+      return problems;
+    });
+
+    expect(failures).toEqual([]);
+  });
+
+  it('the corpus is not vacuous: one passing row, and every shared rule has its own refusal', () => {
     // A table that only ever blocks would pass against an evaluator that refuses
     // everything, which is the failure mode a conformance suite must not have.
     const allowed = SCENARIOS.filter((scenario) => scenario.expected === 'allowed');
-    const blocked = SCENARIOS.filter((scenario) => scenario.expected === 'blocked');
     expect(allowed).toHaveLength(1);
-    expect(blocked).toHaveLength(6);
-    expect(new Set(blocked.map((scenario) => scenario.proof?.runtime)).size).toBe(6);
+
+    const shared = SCENARIOS.filter((scenario) => scenario.scope === 'shared' && scenario.expected === 'blocked');
+    expect(shared).toHaveLength(7);
+    expect(new Set(shared.map((scenario) => scenario.proof?.runtime)).size).toBe(7);
+    expect(shared.every((scenario) => scenario.proof?.cli !== null && scenario.proof?.cli !== undefined)).toBe(true);
+
+    const runtimeOnly = SCENARIOS.filter((scenario) => scenario.scope === 'runtime-only');
+    expect(runtimeOnly.length).toBeGreaterThanOrEqual(1);
   });
 });

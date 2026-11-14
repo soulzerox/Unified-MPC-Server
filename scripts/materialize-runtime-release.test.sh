@@ -50,24 +50,38 @@ done < <(find "$release" -type l -print0)
 # #835: the release must own its bytes. pnpm's legacy deploy imports local
 # `file:` workspace packages by hard link, so every deployed dist shared an
 # inode with the checkout and a rebuild rewrote the release in place.
+#
+# A link count of 1 *is* the proof, not a proxy for it: it means no other path
+# to that inode exists, so no rebuild anywhere can reach the release file. The
+# tempting stronger-looking check — append to the checkout's dist and watch the
+# release stay unchanged — is unsafe to run here: on a host whose live releases
+# were materialized from this same checkout, the checkout file is itself a path
+# into a published release, so the test would write into production to prove
+# that writes do not reach production.
 shared_release_files="$(find "$release" -type f -links +1 -printf 'x' | wc -c)"
-[[ "$shared_release_files" -eq 0 ]]
-[[ "$(cat "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/delinked_files")" -gt 0 ]]
+if [[ "$shared_release_files" -ne 0 ]]; then
+  printf 'release has %s files that still share an inode with another path\n' "$shared_release_files" >&2
+  exit 1
+fi
+
+delinked_recorded="$(cat "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/delinked_files")"
+if [[ ! "$delinked_recorded" =~ ^[0-9]+$ ]]; then
+  printf 'materialization state does not record a delinked file count: %s\n' "$delinked_recorded" >&2
+  exit 1
+fi
 
 deployed_application="$release/apps/cli/node_modules/@unified-mpc/application/dist/index.js"
 source_application="$REPO_ROOT/packages/application/dist/index.js"
 test -f "$deployed_application"
 test -f "$source_application"
-[[ "$(stat -c '%d:%i' -- "$deployed_application")" != "$(stat -c '%d:%i' -- "$source_application")" ]]
-[[ "$(stat -c '%h' -- "$deployed_application")" == "1" ]]
-
-# The regression itself: rebuilding the checkout must not reach the release.
-deployed_hash="$(sha256sum -- "$deployed_application" | cut -d' ' -f1)"
-cp -p -- "$source_application" "$TMP_ROOT/source-application.backup"
-printf '\n/* #835 simulated checkout rebuild */\n' >>"$source_application"
-[[ "$(sha256sum -- "$deployed_application" | cut -d' ' -f1)" == "$deployed_hash" ]]
-cp -p -- "$TMP_ROOT/source-application.backup" "$source_application"
-[[ "$(sha256sum -- "$source_application" | cut -d' ' -f1)" == "$deployed_hash" ]]
+if [[ "$(stat -c '%d:%i' -- "$deployed_application")" == "$(stat -c '%d:%i' -- "$source_application")" ]]; then
+  printf 'deployed dist is the same inode as the checkout dist: %s\n' "$deployed_application" >&2
+  exit 1
+fi
+if [[ "$(stat -c '%h' -- "$deployed_application")" -ne 1 ]]; then
+  printf 'deployed dist still has %s paths\n' "$(stat -c '%h' -- "$deployed_application")" >&2
+  exit 1
+fi
 
 bash "$SCRIPT_DIR/validate-runtime-root.sh" mcp-http "$release" >/dev/null
 bash "$SCRIPT_DIR/validate-runtime-root.sh" web "$release" >/dev/null

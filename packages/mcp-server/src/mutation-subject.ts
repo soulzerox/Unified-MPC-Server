@@ -1,4 +1,4 @@
-import { codeMutationPaths, isDevelopmentArtifactPath, normalizeHarnessPath } from './harness-runtime.js';
+import { codeMutationPaths, isDevelopmentArtifactPath, isPathExtractorTool, normalizeHarnessPath } from './harness-runtime.js';
 
 /**
  * What a mutation is *about*, as opposed to what its request spells (#142,
@@ -40,24 +40,6 @@ export type MutationSubject =
   }
   | { readonly kind: 'opaque'; readonly reason: 'command' | 'unresolved' };
 
-/**
- * The tools whose request names its own artifact paths. Exported so the matrix
- * test can prove this set and `codeMutationPaths` agree: a tool that switches on
- * one side and not the other would resolve to `opaque/command` and silently keep
- * its mutation ungated.
- */
-export const PATH_NAMED_MUTATION_TOOLS: readonly string[] = [
-  'write_file',
-  'edit_file',
-  'delete_file',
-  'move_file',
-  'copy_file',
-  'apply_patch',
-  'lsp_rename',
-];
-
-const PATH_NAMED = new Set(PATH_NAMED_MUTATION_TOOLS);
-
 /** Tools whose request names a stored subject instead of an artifact path. */
 const RECOVERY_MUTATION_TOOLS = new Set(['restore_deleted_file', 'restore_recovery_item']);
 const CHECKPOINT_MUTATION_TOOLS = new Set(['restore_checkpoint']);
@@ -83,7 +65,7 @@ export async function resolveMutationSubjects(
   input: unknown,
   resolvers?: MutationSubjectResolvers,
 ): Promise<MutationSubject> {
-  if (PATH_NAMED.has(toolName)) {
+  if (isPathExtractorTool(toolName)) {
     return { kind: 'paths', paths: artifactPaths(codeMutationPaths(toolName, input)), origin: 'request' };
   }
 

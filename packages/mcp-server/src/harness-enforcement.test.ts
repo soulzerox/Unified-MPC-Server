@@ -348,12 +348,15 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
   });
 
-  it('treats a recovery restore as a path subject once the workspace opts into the mutate phase', async () => {
+  it('treats a restore over existing content as a path subject once the workspace opts into the mutate phase', async () => {
     const { services, restores, setFileContent, setRecoveryItems } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    // A replacement backup restores *over* a file that is there: that target has
+    // content, so `prepare_code_change` can bind a receipt to it.
+    setFileContent('src/app.ts', 'export const replaced = 1;\n');
     setRecoveryItems([{
       recoveryId: '123e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/app.ts',
-      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'replacement_backup',
     }]);
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
@@ -386,6 +389,29 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', recoveryId: '123e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
     })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
     expect(restores).toEqual(['123e4567-e89b-42d3-a456-426614174000']);
+  });
+
+  it('does not gate a restore whose target is absent by construction', async () => {
+    const { services, restores, nativeRagCalls, setFileContent, setFileMissing, setRecoveryItems } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    // A `deleted` recovery is restorable only where the target is gone, and a
+    // path with no content cannot carry a preparation: prepare_code_change binds
+    // its receipt to the current bytes and refuses an absent target with
+    // `pre-edit-target-unreadable`. Demanding one would refuse this restore
+    // forever, so the gate must not pretend it has evidence to ask for.
+    setFileMissing('src/app.ts');
+    setRecoveryItems([{
+      recoveryId: '623e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/app.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    expect((await registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '623e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).isError).not.toBe(true);
+    expect(restores).toEqual(['623e4567-e89b-42d3-a456-426614174000']);
+    expect(nativeRagCalls).toEqual([]);
   });
 
   it('treats a checkpoint restore as the paths it will write', async () => {

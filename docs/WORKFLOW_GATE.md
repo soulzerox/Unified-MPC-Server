@@ -313,7 +313,7 @@ Each step ships alone and leaves the repository working.
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
 | 5a ✅ | Extend `validateHarnessMutation` with the `mutate` phase behind a workspace profile flag: `require_preparation` refuses rather than auto-preparing | shipped in #837: `mutate-gate.ts` owns the pure decision, the opt-in is `{ "workflowGate": { "mutate": "require_preparation" } }` in `.unified-mpc/project-profile.json`, an inactive or stale harness and every unprepared path are named refusals, and the default `auto_prepare` is unchanged |
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
-| 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in this PR: a restore in the opt-in mode is refused until its development artifacts are prepared and spends that preparation when it lands; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore |
+| 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in this PR: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot prepare an absent target; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ⏸ | Cover what is left: `shell`, `git`, `process_start` and any mutation with no resolved workspace | blocked on the evidence shape: those mutations name no development artifact path even indirectly, so a per-path preparation cannot bind to them; the phase has to decide whether a workspace-scoped preparation or command classification is the subject, and a token check would be worse than the gap |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
@@ -563,24 +563,35 @@ spells, a path a store spells for it, and nothing it can name at all.
 
 ```text
 write_file     path: 'src/app.ts'       ── request named ──► prepare that path
-restore_deleted_file  recoveryId: '…'   ── store named ────► prepare what it restores
+restore_deleted_file  recoveryId: '…'   ── store named ────► prepare the paths it
+                                                    overwrites that hold content
 shell          command: 'rm src/app.ts' ── opaque ─────────► unchanged (5b-2)
 ```
 
 The gain is narrow and real: a restore used to escape the opt-in mode because
 `codeMutationPaths` could not see through an id. It now resolves through the
 recovery store or the checkpoint store, so in `require_preparation` mode a
-restore of `src/app.ts` is refused until `src/app.ts` is prepared, and it spends
-that preparation when it lands. Three limits are deliberate:
+restore that will write over a file which still has content is refused until
+that file is prepared, and it spends that preparation when it lands.
+
+A store can also name a path that has no content at all, and the ordinary
+delete-then-restore case is exactly that: file-service refuses to restore a
+`deleted` item onto a target that exists, so the path is absent by construction.
+That path cannot carry a preparation — `prepare_code_change` binds its receipt to
+the current bytes and refuses an absent target with `pre-edit-target-unreadable`
+— so demanding one would refuse the flow the recovery trash exists for, forever,
+rather than gating it. The subject is therefore reduced to the store-named paths
+that can be prepared, and when none of them can, the restore keeps the behaviour
+it had before it had a subject. Three further limits are deliberate:
 
 - a store that cannot answer — an unknown id, an unreadable store, a scan window
   older than the checkpoint — resolves to an opaque subject, not to an invented
   path list. That keeps today's behaviour instead of refusing a restore on a
   lookup failure, and it is why the copy is still "path-bearing", not "covered";
-- the default mode does not auto-prepare a restore. Auto-preparing one would read
-  pre-edit context for a path that the restore exists because it is missing; the
-  opt-in mode is the one where the agent prepares explicitly, so it is the one
-  that asks;
+- the default mode does not auto-prepare a restore, and it does not even read the
+  store: auto-preparing one would read pre-edit context for a path that the
+  restore exists because it is missing. That is the one mode where a restore
+  answers a question it is never asked, so the lookup is skipped before it runs;
 - `shell`, `git` and `process_start` still name no artifact, not even indirectly.
   Binding evidence to them is the remaining design question — a workspace-scoped
   preparation, or classification of the command — and answering it with a token

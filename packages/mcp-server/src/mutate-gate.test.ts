@@ -39,6 +39,23 @@ describe('codeMutationPaths', () => {
     expect(codeMutationPaths('write_file', { path: 'src/App.TS' })).toEqual(['src/App.TS']);
     expect(codeMutationPaths('write_file', { path: 'docs/readme.md' })).toEqual([]);
   });
+
+  it('reads every path a path-naming request spells', () => {
+    // One table drives both the extractor and the mutate gate's subject seam, so
+    // a tool cannot extract a path on one side and resolve to opaque on the
+    // other. This pin is what stops a table entry from extracting nothing.
+    expect(codeMutationPaths('edit_file', { path: 'src/a.ts' })).toEqual(['src/a.ts']);
+    expect(codeMutationPaths('delete_file', { path: 'src/a.ts' })).toEqual(['src/a.ts']);
+    expect(codeMutationPaths('move_file', { sourcePath: 'src/a.ts', destinationPath: 'src/b.ts' })).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(codeMutationPaths('copy_file', { sourcePath: 'src/a.ts', destinationPath: 'src/b.ts' })).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(codeMutationPaths('apply_patch', { files: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }] })).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(codeMutationPaths('lsp_rename', { file: 'src/a.ts' })).toEqual(['src/a.ts']);
+    // A request that does not spell its subject extracts nothing, even for a
+    // tool the table names.
+    expect(codeMutationPaths('write_file', { content: 'x' })).toEqual([]);
+    expect(codeMutationPaths('apply_patch', { files: 'src/a.ts' })).toEqual([]);
+    expect(codeMutationPaths('shell', { path: 'src/a.ts' })).toEqual([]);
+  });
 });
 
 describe('evaluateMutateGate', () => {

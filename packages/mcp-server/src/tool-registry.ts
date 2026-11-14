@@ -1884,18 +1884,22 @@ export class ToolRegistry {
     signal?: AbortSignal,
   ): Promise<HarnessMutationAdmission> {
     if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return { ok: true };
+    // A restore names its subject only through a store, and asking that store
+    // costs an enumeration of the recovery trash or a bounded checkpoint scan
+    // that reads every payload. The default mode keeps restores exactly as they
+    // were — auto-preparing one would read pre-edit context for a path that the
+    // restore exists because it is missing — so ask for the mode before paying
+    // for a lookup whose answer that mode would discard.
+    const storeNamed = isRestoreMutationTool(toolName);
+    const resolvedMode = storeNamed ? await this.resolveMutateMode(workspaceId) : undefined;
+    if (storeNamed && resolvedMode === DEFAULT_MUTATE_MODE) return { ok: true };
     const subject = await resolveMutationSubjects(toolName, input, this.mutationSubjectResolvers(workspaceId));
     if (subject.kind === 'opaque') return { ok: true };
     const paths = subject.paths;
     if (paths.length === 0) return { ok: true };
     const context = this.harnessContext(workspaceId);
     const operationSignal = signal ?? new AbortController().signal;
-    const mode = await this.resolveMutateMode(workspaceId);
-    // A store-named subject is a restore, and the default mode keeps restores
-    // exactly as they were: auto-preparing one would read pre-edit context for a
-    // path that the restore exists because it is missing. Only the opt-in mode,
-    // where the agent has to prepare explicitly, asks about it.
-    if (mode === DEFAULT_MUTATE_MODE && subject.origin === 'store') return { ok: true };
+    const mode = resolvedMode ?? await this.resolveMutateMode(workspaceId);
 
     let state = this.harnessActivation.state(context);
     if (state === undefined) {
@@ -1940,8 +1944,21 @@ export class ToolRegistry {
     }
 
     if (mode === 'require_preparation') {
-      const preparedPaths = paths.filter((path) => this.harnessActivation.isPathPrepared(context, path));
-      const decision = evaluateMutateGate({ mode, harness: 'active', paths, preparedPaths });
+      // A store can name a path that does not exist, and a restore of a deleted
+      // file is the normal case: file-service refuses to restore a `deleted`
+      // item onto an existing target, so the path is absent by construction.
+      // Such a path cannot carry a preparation at all — `prepare_code_change`
+      // binds its receipt to the target's current content and refuses an absent
+      // target with `pre-edit-target-unreadable` — so demanding one would refuse
+      // the restore forever instead of gating it. Reduce a store-named subject
+      // to the paths that can be prepared; when none can, the restore keeps the
+      // behaviour it had before it had a subject.
+      const gatePaths = subject.origin === 'store'
+        ? await this.preparableMutationPaths(workspaceId, paths)
+        : paths;
+      if (gatePaths.length === 0) return { ok: true };
+      const preparedPaths = gatePaths.filter((path) => this.harnessActivation.isPathPrepared(context, path));
+      const decision = evaluateMutateGate({ mode, harness: 'active', paths: gatePaths, preparedPaths });
       if (!decision.allowed) {
         return err(appError('CONFLICT', describeMutateBlockers(decision.blockers), true, {
           phase: 'mutate',
@@ -1954,8 +1971,8 @@ export class ToolRegistry {
       // ledger row, and the second would mutate on evidence the first had
       // already spent. A claim is fail-closed on failure: a write that fails may
       // still have changed the file, so the next attempt must re-prepare.
-      for (const path of paths) this.harnessActivation.consumePath(context, path);
-      return { ok: true, claimedPaths: paths };
+      for (const path of gatePaths) this.harnessActivation.consumePath(context, path);
+      return { ok: true, claimedPaths: gatePaths };
     }
 
     for (const path of paths) {
@@ -1964,6 +1981,25 @@ export class ToolRegistry {
       if (!prepared.ok) return err(prepared.error);
     }
     return { ok: true };
+  }
+
+  /**
+   * The subset of a store-named subject that can actually carry a preparation.
+   * `prepare_code_change` binds a receipt to the target's current content, so an
+   * absent or unreadable target can never be prepared; a path in that state has
+   * no gate to satisfy and must not be demanded as if it did. Absence is the
+   * normal case for a delete recovery, and refusing it would break the flow the
+   * recovery trash exists for.
+   */
+  private async preparableMutationPaths(workspaceId: string, paths: readonly string[]): Promise<readonly string[]> {
+    const file = this.services.file;
+    if (file?.readFile === undefined) return [];
+    const preparable: string[] = [];
+    for (const path of paths) {
+      const loaded = await file.readFile(this.actor, workspaceId, { path });
+      if (loaded.ok && typeof loaded.value.content === 'string') preparable.push(path);
+    }
+    return preparable;
   }
 
   /**

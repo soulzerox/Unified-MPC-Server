@@ -133,15 +133,37 @@ export function fingerprintHarness(agentsMdHash: string, servers: readonly Manda
   return createHash('sha256').update(JSON.stringify({ agentsMdHash, contracts }), 'utf8').digest('hex');
 }
 
+/**
+ * The tools whose request spells the artifact paths. One table, because the
+ * mutate gate decides from this list whether a request names its own subject:
+ * a tool that extracts a path here and resolves to `opaque` in
+ * `mutation-subject.ts` would keep its mutation ungated, so the list cannot be
+ * duplicated on the other side of that seam.
+ */
+const PATH_EXTRACTORS: Readonly<Record<string, (input: Record<string, unknown>, push: (value: unknown) => void) => void>> = {
+  write_file: (input, push) => push(input.path),
+  edit_file: (input, push) => push(input.path),
+  delete_file: (input, push) => push(input.path),
+  move_file: (input, push) => { push(input.sourcePath); push(input.destinationPath); },
+  copy_file: (input, push) => { push(input.sourcePath); push(input.destinationPath); },
+  apply_patch: (input, push) => {
+    if (!Array.isArray(input.files)) return;
+    for (const entry of input.files) if (isRecord(entry)) push(entry.path);
+  },
+  lsp_rename: (input, push) => push(input.file),
+};
+
+export function isPathExtractorTool(toolName: string): boolean {
+  return Object.hasOwn(PATH_EXTRACTORS, toolName);
+}
+
 export function codeMutationPaths(toolName: string, input: unknown): readonly string[] {
   if (!isRecord(input)) return [];
+  const extract = isPathExtractorTool(toolName) ? PATH_EXTRACTORS[toolName] : undefined;
+  if (extract === undefined) return [];
   const paths: string[] = [];
   const push = (value: unknown): void => { if (typeof value === 'string' && value.trim().length > 0) paths.push(value.trim()); };
-  if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'delete_file') push(input.path);
-  else if (toolName === 'move_file' || toolName === 'copy_file') { push(input.sourcePath); push(input.destinationPath); }
-  else if (toolName === 'apply_patch' && Array.isArray(input.files)) {
-    for (const entry of input.files) if (isRecord(entry)) push(entry.path);
-  } else if (toolName === 'lsp_rename') push(input.file);
+  extract(input, push);
   return paths.filter(isDevelopmentArtifactPath);
 }
 

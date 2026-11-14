@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { codeMutationPaths } from './harness-runtime.js';
 import {
-  PATH_NAMED_MUTATION_TOOLS,
   isRestoreMutationTool,
   resolveMutationSubjects,
   type MutationSubjectResolvers,
@@ -14,21 +12,6 @@ const resolvers = (overrides: Partial<MutationSubjectResolvers> = {}): MutationS
 });
 
 describe('resolveMutationSubjects', () => {
-  it('keeps the path-named set and the extractor in agreement', () => {
-    // A tool that one side switches on and the other does not resolves to
-    // opaque/command and keeps its mutation ungated, so the two lists are
-    // pinned here rather than discovered in production.
-    for (const tool of PATH_NAMED_MUTATION_TOOLS) {
-      expect(codeMutationPaths(tool, {
-        path: 'src/app.ts',
-        sourcePath: 'src/app.ts',
-        destinationPath: 'src/app.ts',
-        file: 'src/app.ts',
-        files: [{ path: 'src/app.ts' }],
-      }), tool).toContain('src/app.ts');
-    }
-  });
-
   it('returns the artifact paths a request names, filtered and deduplicated', async () => {
     await expect(resolveMutationSubjects('write_file', { path: 'src/app.ts' })).resolves.toEqual({
       kind: 'paths', paths: ['src/app.ts'], origin: 'request',

@@ -125,6 +125,16 @@ export class GuardedMergeService {
       };
     }
 
+    // The caller's head, base branch and any base commit it named are now
+    // proven equal to the provider's. `baseSha` is still optional on the
+    // caller's subject, so evaluating the caller's object would let an omitted
+    // base silently disable the receipt's base check. The provider base is the
+    // only one a receipt can be valid against.
+    const authorized: MergeEvidenceSubject = {
+      ...request.subject,
+      baseSha: authoritative.baseSha,
+    };
+
     let record: GuardedMergeReceiptRecord | undefined;
     try {
       record = await this.receiptReader.getByRef(receiptRef);
@@ -144,7 +154,7 @@ export class GuardedMergeService {
       };
     }
 
-    const decision = evaluateMergeEvidence(request.policy, request.subject, record?.receipt);
+    const decision = evaluateMergeEvidence(request.policy, authorized, record?.receipt);
     if (decision.status === 'MERGE_BLOCKED') {
       return {
         status: 'blocked',
@@ -156,7 +166,7 @@ export class GuardedMergeService {
     try {
       await this.dispatchPort.dispatchMerge({
         receiptRef,
-        subject: request.subject,
+        subject: authorized,
         mergeMethod: request.policy.mergeMethod ?? 'merge',
       });
     } catch (error: unknown) {
@@ -172,7 +182,7 @@ export class GuardedMergeService {
     return {
       status: 'dispatched',
       receiptRef,
-      subject: request.subject,
+      subject: authorized,
     };
   }
 }

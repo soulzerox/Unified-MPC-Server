@@ -152,8 +152,22 @@ names a default branch, and the evaluator compares the caller's `baseBranch`
 against it — but a comparison against a caller's claim only proves the caller can
 read the policy. A caller that names `main` for a pull request GitHub says targets
 `release` is refused with `subject_mismatch` before the policy check can be
-satisfied by the claim, so a merge cannot land on a branch the policy was never
-written for.
+satisfied by the claim.
+
+The base commit is settled the same way. `baseSha` is optional on a merge
+subject and `evaluateMergeEvidence` only compares a base both sides carry, so an
+omitted base used to skip the receipt's base check entirely. The service now
+evaluates the receipt against the subject the provider confirmed — not the
+object the caller sent — so a receipt written for another base is refused with
+`receipt_base_stale` whether or not the caller named one. A pull request that was
+retargeted and then re-verified gets a fresh receipt for the new base, because
+the receipt reuse path matches on `baseSha` before it reuses anything.
+
+The read is a snapshot, and the provider merge carries the expected head but no
+base. A pull request retargeted between this read and the merge call is therefore
+refused by the next call's preflight, not by this one: what this gate guarantees
+is that the decision was made against the base GitHub reported at read time,
+never against a claim.
 
 ---
 

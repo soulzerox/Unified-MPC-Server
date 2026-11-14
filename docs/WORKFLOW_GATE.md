@@ -183,7 +183,7 @@ Required evidence per gate, all keyed by the resolved subject:
 | Phase | Evidence | Enforced today |
 |---|---|---|
 | `intake` / `discover` / `prepare` | none defined yet | no |
-| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: coding mutations only, and it auto-prepares (see §4) |
+| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, and opaque mutations are step 5b (see §4) |
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
 | `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
@@ -281,14 +281,16 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    The close gate composes those three; it does not redefine them. Goal
    completion already blocks `unmerged_changes` in a goal worktree, but a
    repository branch outside a goal worktree has no equivalent check.
-3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam, but it is
-   narrower than "every edit fails closed": it runs only when
+3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam. It is
+   still narrower than "every edit fails closed": it runs only when
    `isCodingMutation` is true, covers the fixed file-tool set in
    `codeMutationPaths` (so `shell`, `git` and `restore_deleted_file` are not
-   covered), returns allow when no `workspaceId` is resolved, and auto-bootstraps
-   the harness and auto-prepares each path instead of refusing. The `mutate`
-   phase would tighten it — all mutation tools, refuse rather than auto-prepare —
-   and must not add a second CLI gate that an MCP edit bypasses.
+   covered), and returns allow when no `workspaceId` is resolved. Step 5a made
+   the rest opt-in: in `require_preparation` mode the seam refuses instead of
+   bootstrapping the harness and auto-preparing each path, and the default
+   `auto_prepare` keeps the old behaviour for every workspace that does not opt
+   in. The remaining coverage — opaque and unscoped mutations — is step 5b, and
+   it must not become a second CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -309,7 +311,8 @@ Each step ships alone and leaves the repository working.
 | 4a ✅ | Repoint `GuardedMergeService` at the shared rule: the subject it evaluates is now read from the provider, so a receipt can only authorize the pull request GitHub holds, and the gate acts on that decision | shipped in #834: `subject_mismatch`/`subject_unavailable` refuse before the receipt is read; the corpus gains an enforcement suite that fails if a blocked decision ever dispatches; the runtime keeps its `MergeEvidenceBlocker` vocabulary and the CLI receipt format is unchanged |
 | 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
-| 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
+| 5a ✅ | Extend `validateHarnessMutation` with the `mutate` phase behind a workspace profile flag: `require_preparation` refuses rather than auto-preparing | shipped in #837: `mutate-gate.ts` owns the pure decision, the opt-in is `{ "workflowGate": { "mutate": "require_preparation" } }` in `.unified-mpc/project-profile.json`, an inactive or stale harness and every unprepared path are named refusals, and the default `auto_prepare` is unchanged |
+| 5b ⏸ | Cover opaque and unscoped mutations: `shell`, `git`, `restore_deleted_file`, and any mutation with no resolved workspace | blocked on the evidence shape: those mutations name no development artifact path, so a per-path preparation cannot bind to them; the phase has to decide whether a workspace-scoped preparation or command classification is the subject, and a token check would be worse than the gap |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -495,6 +498,71 @@ provider confirmed rather than the object the caller sent: the base is no longer
 the caller's to omit, and the dispatched subject is the one that was authorized.
 The receipt reuse path matches on `baseSha` before it reuses a receipt, so a
 retargeted pull request is re-verified instead of being refused forever.
+
+### Status after step 5a
+
+`ToolRegistry.validateHarnessMutation` is the one seam every MCP code mutation
+passes through, and until now it was not a gate. It auto-bootstrapped the harness
+and auto-prepared each path inside the same call it authorized:
+
+```text
+write_file ──► validateHarnessMutation ──► prepare_code_change ──► allowed
+                        │                        ▲
+                        └── the evidence is ─────┘
+                            manufactured by the
+                            call it authorizes
+```
+
+Evidence that is created by the call it authorizes can never be missing, so the
+seam proved only that preparation *can* run — never that it *did*. Step 5a turns
+that into a decision the workspace can opt into.
+
+`packages/mcp-server/src/mutate-gate.ts` owns the phase: `parseMutateMode`,
+`workspaceMutateMode`, `evaluateMutateGate` and `describeMutateBlockers` are pure,
+so the decision is tested without a workspace, a clock or a file read. The
+opt-in is a workspace profile field:
+
+```json
+{ "workflowGate": { "mutate": "require_preparation" } }
+```
+
+In that mode the registry no longer manufactures evidence. An inactive harness is
+`harness_inactive`, a harness whose `AGENTS.md` changed after preparation is
+`harness_stale`, and any path the ledger does not currently hold is
+`preparation_missing` — named in the refusal, bounded to five paths. The default
+is `auto_prepare` and reads exactly like the old behaviour, and everything that is
+not the exact opt-in value resolves to that default, so a missing, unreadable or
+malformed profile cannot silently tighten the gate.
+
+The decision is tested twice: as a pure matrix over modes, harness states and
+path spellings, and through the registry on a workspace that opted in — an
+unprepared write is refused with nothing written and no pre-edit call made, a
+prepared write lands and spends the preparation, and a harness change after
+preparation refuses with `workspace_bootstrap`. A malformed profile still
+auto-prepares.
+
+Step 5b is the rest of the phase's coverage. `codeMutationPaths` returns nothing
+for `shell`, `git` and `restore_deleted_file`, so those mutations never reach
+this decision, and a mutation with no resolved workspace returns allow before the
+mode is even read. Binding evidence to an opaque mutation is a different design
+question — a workspace-scoped preparation, or classification of the command — and
+answering it with a token check would be the same mistake as auto-preparation
+with fewer steps. It is recorded as `5b ⏸`, not claimed.
+
+Two limits are worth stating plainly rather than discovering later:
+
+- the opt-in can be absent without anyone meaning it. A typo, a profile written
+  by an older writer, or an unreadable file all resolve to `auto_prepare`. That
+  direction is deliberate — a broken profile must not brick every edit — but it
+  means the mode is a convention the workspace declares, not a property the host
+  can prove;
+- `.unified-mpc/project-profile.json` is not a development artifact, so editing
+  the file that holds the opt-in is not itself a prepared mutation. The gate
+  governs code, not the configuration that turns it on: an operator who can write
+  the profile can turn the phase off in the same breath. That is acceptable
+  because the opt-in is a workspace setting, not a boundary between the agent and
+  the human who set it — and pretending otherwise by gating one config file would
+  say nothing about the next one.
 
 ---
 

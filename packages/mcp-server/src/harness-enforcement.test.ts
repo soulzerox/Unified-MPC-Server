@@ -51,7 +51,12 @@ function createHarnessServices(): {
     file: {
       async readFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
         if (request.path === 'AGENTS.md') return ok({ path: request.path, content: agentsMd, startLine: 1, endLine: 2 });
-        if (missingPaths.has(request.path) || request.path === '.unified-mpc/project-profile.json') {
+        if (request.path === '.unified-mpc/project-profile.json') {
+          const profile = fileContents.get(request.path);
+          if (profile === undefined) return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
+          return ok({ path: request.path, content: profile, startLine: 1, endLine: 1 });
+        }
+        if (missingPaths.has(request.path)) {
           return err(appError('FILE_NOT_FOUND', `missing ${request.path}`));
         }
         return ok({ path: request.path, content: fileContent(request.path), startLine: 1, endLine: 1 });
@@ -187,6 +192,88 @@ function createHarnessServices(): {
 }
 
 describe('workspace engineering harness enforcement', () => {
+  it('refuses an unprepared mutation when the workspace opts into the mutate phase', async () => {
+    const { services, writes, nativeRagCalls, bootstrapEvents, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('workspace_bootstrap') } },
+    });
+    expect(writes).toEqual([]);
+    expect(bootstrapEvents).toEqual([]);
+    expect(nativeRagCalls).toEqual([]);
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change for src/app.ts') } },
+    });
+    expect(writes).toEqual([]);
+    expect(nativeRagCalls).toEqual([]);
+  });
+
+  it('allows the opt-in mutation once its path is prepared, and requires a fresh preparation after it is spent', async () => {
+    const { services, writes, nativeRagCalls, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/app.ts', proposedSymbol: 'app',
+    })).isError).not.toBe(true);
+
+    expect((await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).isError).not.toBe(true);
+    expect(writes).toEqual(['src/app.ts']);
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 2;\n',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change for src/app.ts') } },
+    });
+    expect(writes).toEqual(['src/app.ts']);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
+  });
+
+  it('refuses the opt-in mutation when the harness changed after the path was prepared', async () => {
+    const { services, writes, setAgentsMd, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/app.ts',
+    })).isError).not.toBe(true);
+
+    setAgentsMd('# Rules\nChanged after preparation.\n');
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('workspace_bootstrap') } },
+    });
+    expect(writes).toEqual([]);
+  });
+
+  it('keeps automatic preparation when the profile cannot be read as an opt-in', async () => {
+    const { services, writes, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', '{ this is not json');
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    expect((await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).isError).not.toBe(true);
+    expect(writes).toEqual(['src/app.ts']);
+  });
+
   it('self-bootstraps and runs mandatory pre-edit checks when the host cannot call lifecycle tools explicitly', async () => {
     const { services, writes, childCalls, nativeRagCalls, nativeRagArguments, bootstrapEvents } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });

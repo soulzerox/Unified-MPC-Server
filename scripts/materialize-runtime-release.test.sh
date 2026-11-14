@@ -47,6 +47,28 @@ while IFS= read -r -d '' link; do
   }
 done < <(find "$release" -type l -print0)
 
+# #835: the release must own its bytes. pnpm's legacy deploy imports local
+# `file:` workspace packages by hard link, so every deployed dist shared an
+# inode with the checkout and a rebuild rewrote the release in place.
+shared_release_files="$(find "$release" -type f -links +1 -printf 'x' | wc -c)"
+[[ "$shared_release_files" -eq 0 ]]
+[[ "$(cat "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/delinked_files")" -gt 0 ]]
+
+deployed_application="$release/apps/cli/node_modules/@unified-mpc/application/dist/index.js"
+source_application="$REPO_ROOT/packages/application/dist/index.js"
+test -f "$deployed_application"
+test -f "$source_application"
+[[ "$(stat -c '%d:%i' -- "$deployed_application")" != "$(stat -c '%d:%i' -- "$source_application")" ]]
+[[ "$(stat -c '%h' -- "$deployed_application")" == "1" ]]
+
+# The regression itself: rebuilding the checkout must not reach the release.
+deployed_hash="$(sha256sum -- "$deployed_application" | cut -d' ' -f1)"
+cp -p -- "$source_application" "$TMP_ROOT/source-application.backup"
+printf '\n/* #835 simulated checkout rebuild */\n' >>"$source_application"
+[[ "$(sha256sum -- "$deployed_application" | cut -d' ' -f1)" == "$deployed_hash" ]]
+cp -p -- "$TMP_ROOT/source-application.backup" "$source_application"
+[[ "$(sha256sum -- "$source_application" | cut -d' ' -f1)" == "$deployed_hash" ]]
+
 bash "$SCRIPT_DIR/validate-runtime-root.sh" mcp-http "$release" >/dev/null
 bash "$SCRIPT_DIR/validate-runtime-root.sh" web "$release" >/dev/null
 

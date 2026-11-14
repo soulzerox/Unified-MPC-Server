@@ -148,6 +148,29 @@ mkdir -p "$stage_root/apps"
   "$corepack_bin" pnpm --prefer-offline --filter @unified-mpc/cli --prod deploy --legacy "$stage_root/apps/cli"
 )
 
+# #835: pnpm's legacy deploy imports the local `file:` workspace packages by
+# hard link, so a deployed `dist` file shares its inode with the checkout that
+# built it. Rebuilding the checkout then writes through that link: the release
+# keeps the new bytes, loses the sibling files the new entrypoint imports, and
+# the next service restart dies with ERR_MODULE_NOT_FOUND. `--package-import-
+# method=copy` does not change how `file:` dependencies are imported and `clone`
+# is unavailable here, so the guarantee belongs in the materializer rather than
+# in a pnpm flag: give every shared file a private inode before publishing, and
+# refuse to publish while any file still has another path.
+delinked_files=0
+while IFS= read -r -d '' shared_path; do
+  private_copy="$shared_path.private-copy.$$"
+  cp -p -- "$shared_path" "$private_copy"
+  mv -f -- "$private_copy" "$shared_path"
+  delinked_files=$((delinked_files + 1))
+done < <(find "$stage_root" -type f -links +1 -print0)
+
+remaining_shared="$(find "$stage_root" -type f -links +1 -printf 'x' | wc -c)"
+if [[ "$remaining_shared" -ne 0 ]]; then
+  fail 68 "RUNTIME_RELEASE_NOT_PORTABLE: $remaining_shared release files still share an inode with another path"
+fi
+write_state delinked_files "$delinked_files"
+
 bash "$validator" mcp-http "$stage_root" >/dev/null
 bash "$validator" web "$stage_root" >/dev/null
 

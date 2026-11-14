@@ -29,9 +29,11 @@ import { describe, expect, it } from 'vitest';
  * clause). Marking a clause shared when one side has no field for it would let
  * the corpus claim coverage it does not have.
  *
- * It imports `@unified-mpc/domain`, which resolves to the package's `dist`, so
- * this file runs in the merge profile's `test:cli` step, after `build` — it does
- * not run pre-build like the `.mjs` gate suites.
+ * It imports `@unified-mpc/domain`, whose `exports` maps the `development`
+ * condition to its source and `default` to its `dist`. Under the merge profile's
+ * vitest run (`NODE_ENV` unset) that is the source, so this file needs no build;
+ * it still runs in `test:cli`, after `build`, rather than in the pre-build
+ * `.mjs` gate step.
  */
 
 const HEAD = 'a'.repeat(40);
@@ -62,6 +64,8 @@ interface Scenario {
   readonly base: 'subject' | 'other';
   /** Evidence names another pull request. Both worlds record the number. */
   readonly pullRequest: 'subject' | 'other';
+  /** The subject targets another base branch. Both worlds compare it. */
+  readonly baseBranch?: 'subject' | 'other';
   /** Evidence names another repository. Only the runtime receipt records it. */
   readonly repository?: 'subject' | 'other';
   readonly expected: 'allowed' | 'blocked';
@@ -135,6 +139,13 @@ const SCENARIOS: readonly Scenario[] = [
     base: 'other',
     expected: 'blocked',
     proof: { cli: /review receipt was produced against a different base/, runtime: 'receipt_base_stale' },
+  },
+  {
+    ...PASSING_ROW,
+    name: 'the subject targets another base branch',
+    baseBranch: 'other',
+    expected: 'blocked',
+    proof: { cli: /base is 'develop', expected 'main'/, runtime: 'base_branch_mismatch' },
   },
   {
     ...PASSING_ROW,
@@ -218,7 +229,7 @@ function runtimeVerdict(scenario: Scenario): { allowed: boolean; codes: readonly
     repository: REPOSITORY,
     pullRequest: PULL_REQUEST,
     headSha: HEAD,
-    baseBranch: 'main',
+    baseBranch: scenario.baseBranch === 'other' ? 'develop' : 'main',
     baseSha: BASE,
   }, runtimeReceipt(scenario));
   return {
@@ -282,7 +293,7 @@ function cliVerdict(scenario: Scenario, modules: CliModules): { allowed: boolean
       body: 'Refs #142',
       state: 'OPEN',
       isDraft: false,
-      baseRefName: 'main',
+      baseRefName: scenario.baseBranch === 'other' ? 'develop' : 'main',
       baseRefOid: BASE,
       headRefOid: HEAD,
       mergeable: 'MERGEABLE',
@@ -363,8 +374,8 @@ describe('merge evidence conformance', () => {
     expect(allowed).toHaveLength(1);
 
     const shared = SCENARIOS.filter((scenario) => scenario.scope === 'shared' && scenario.expected === 'blocked');
-    expect(shared).toHaveLength(7);
-    expect(new Set(shared.map((scenario) => scenario.proof?.runtime)).size).toBe(7);
+    expect(shared).toHaveLength(8);
+    expect(new Set(shared.map((scenario) => scenario.proof?.runtime)).size).toBe(8);
     expect(shared.every((scenario) => scenario.proof?.cli !== null && scenario.proof?.cli !== undefined)).toBe(true);
 
     const runtimeOnly = SCENARIOS.filter((scenario) => scenario.scope === 'runtime-only');

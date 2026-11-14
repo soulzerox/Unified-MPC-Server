@@ -298,7 +298,7 @@ Each step ships alone and leaves the repository working.
 | Step | Change | Acceptance |
 |---|---|---|
 | 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
-| 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, seven shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
+| 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, eight shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
 | 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); **blocked** only on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
 | 4 | Repoint `GuardedMergeService` at the shared rule while it keeps its own evidence checks and blocker vocabulary, and wire `verify`/`review` through `receipts()` | the conformance corpus stays green while the runtime keeps reporting its richer `MergeEvidenceBlocker` codes; the CLI receipt format is unchanged |
@@ -404,10 +404,11 @@ apps/cli/src/workflow-gate-conformance.test.ts
           and each refusal names the rule the row broke
 ```
 
-Nine rows in two scopes. `shared` rows carry a field in both worlds and must reach
+Ten rows in two scopes. `shared` rows carry a field in both worlds and must reach
 the same decision: the passing row, then exactly one field broken per row —
 missing verification, missing review, a rejected review, a foreign head on either
-receipt, a foreign base, a foreign pull request. `runtime-only` rows exist where
+receipt, a foreign base commit, a foreign base branch, a foreign pull request.
+`runtime-only` rows exist where
 only one world records the field: the runtime receipt names a repository and the
 CLI profile receipt does not, so the corpus pins the runtime's refusal and
 records the asymmetry instead of claiming a CLI assertion it cannot make.
@@ -415,18 +416,22 @@ records the asymmetry instead of claiming a CLI assertion it cannot make.
 Every blocked row also names the refusal it must produce (`receipt_head_stale`
 and `/verification receipt was produced for a different head/`, and so on), so a
 row cannot be satisfied by an unrelated blocker that fires first. The suite also
-pins that the corpus is not vacuous — one passing row, seven distinct shared
+pins that the corpus is not vacuous — one passing row, eight distinct shared
 refusals with a CLI counterpart each — so an evaluator that refuses everything
-cannot satisfy it.
+cannot satisfy it. Rows are added when a shared clause is found rather than when
+a reviewer asks: the base-branch row exists because the first two heads varied
+the base commit but never the branch, and both evaluators check both.
 
 The corpus binds the two profile rules through `createGatePolicy`'s injected
 `{ profileVersion, fingerprintFor }` instead of reading this checkout's profile,
 which is the seam #821 built for exactly this. It reads no files and runs no
-commands, but it does import `@unified-mpc/domain`, which resolves to that
-package's `dist`. It therefore runs in `apps/cli`'s `test:cli` step, after
-`build` — unlike the `.mjs` gate suites, it is not a pre-build check. It changes
-neither the merge profile's step set nor `PROFILE_VERSION`, because it adds no
-workspace project and no profile step.
+commands. It does import `@unified-mpc/domain`, whose `exports` maps the
+`development` condition to its source and `default` to its `dist`: under the
+merge profile's vitest run (`NODE_ENV` unset) that is the source, so the suite
+needs no build, and with `NODE_ENV=production` it needs one. It runs in
+`apps/cli`'s `test:cli` step rather than the pre-build `.mjs` gate step, and adds
+no workspace project and no profile step, so neither the merge step set nor
+`PROFILE_VERSION` changes.
 
 Nothing else about step 2 changes: `GuardedMergeService` keeps its own receipt
 reader and its `MergeEvidenceBlocker` vocabulary. Step 4 is the slice that

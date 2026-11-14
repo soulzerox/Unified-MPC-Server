@@ -145,11 +145,11 @@ export function codeMutationPaths(toolName: string, input: unknown): readonly st
   return paths.filter(isDevelopmentArtifactPath);
 }
 
-function isDevelopmentArtifactPath(value: string): boolean {
+export function isDevelopmentArtifactPath(value: string): boolean {
   // Classification is about what the file *is*, so it is case-insensitive on
   // every platform: `Dockerfile`, `Makefile` and `Cargo.toml` are the same
   // artifact whatever case the author used. Identity is separate — see
-  // normalizeHarnessPath — and stays case-preserving where the filesystem is.
+  // normalizeHarnessPath — and stays case-preserving outside win32.
   const basename = normalizeHarnessPath(value).split('/').at(-1)?.toLowerCase() ?? '';
   if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|cs|c|cc|cpp|h|hpp|swift|rb|php|vue|svelte|sql|proto|graphql|gql)$/.test(basename)) return true;
   if (['package.json', 'dockerfile', 'makefile', 'cargo.toml'].includes(basename)) return true;
@@ -170,7 +170,10 @@ function isDevelopmentArtifactPath(value: string): boolean {
 export function normalizeHarnessPath(value: string): string {
   // `\` is a separator only where the platform says it is; on POSIX it is a
   // legal filename character, and folding it would alias two different files
-  // the way case folding did.
+  // the way case folding did. Case is folded only on win32: darwin is usually
+  // case-insensitive too, but guessing that here would refuse a preparation
+  // for `src/App.ts` when the file is `src/app.ts` — an extra refusal, never a
+  // bypass, so the conservative direction is to keep what the caller typed.
   const unified = process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
   const trimmed = unified.startsWith('./') ? unified.slice(2) : unified;
   return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;

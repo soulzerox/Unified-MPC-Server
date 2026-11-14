@@ -201,7 +201,13 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
     })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('workspace_bootstrap') } },
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('workspace_bootstrap'),
+          details: { phase: 'mutate', reason: 'harness_inactive' },
+        },
+      },
     });
     expect(writes).toEqual([]);
     expect(bootstrapEvents).toEqual([]);
@@ -212,7 +218,13 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
     })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('prepare_code_change for src/app.ts') } },
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('prepare_code_change for src/app.ts'),
+          details: { phase: 'mutate', reason: 'preparation_missing', paths: ['src/app.ts'] },
+        },
+      },
     });
     expect(writes).toEqual([]);
     expect(nativeRagCalls).toEqual([]);
@@ -258,9 +270,41 @@ describe('workspace engineering harness enforcement', () => {
       workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
     })).resolves.toMatchObject({
       isError: true,
-      structuredContent: { error: { code: 'CONFLICT', message: expect.stringContaining('workspace_bootstrap') } },
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('workspace_bootstrap'),
+          details: { phase: 'mutate', reason: 'harness_stale' },
+        },
+      },
     });
     expect(writes).toEqual([]);
+  });
+
+  it('claims a preparation at authorization so two concurrent writes cannot share it', async () => {
+    const { services, writes, nativeRagCalls, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/app.ts',
+    })).isError).not.toBe(true);
+
+    const responses = await Promise.all([
+      registry.invoke('write_file', { workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n' }),
+      registry.invoke('write_file', { workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 2;\n' }),
+    ]);
+
+    // The preparation is claimed by whichever call authorizes first, so the
+    // other one sees an empty ledger and is refused. Consuming it only after a
+    // successful write would let both validate and land.
+    expect(responses.filter((response) => response.isError !== true)).toHaveLength(1);
+    expect(responses.filter((response) => response.isError === true)).toMatchObject([
+      { structuredContent: { error: { code: 'CONFLICT', details: { phase: 'mutate', reason: 'preparation_missing', paths: ['src/app.ts'] } } } },
+    ]);
+    expect(writes).toEqual(['src/app.ts']);
+    expect(nativeRagCalls).toEqual(['pre_edit_context']);
   });
 
   it('keeps automatic preparation when the profile cannot be read as an opt-in', async () => {

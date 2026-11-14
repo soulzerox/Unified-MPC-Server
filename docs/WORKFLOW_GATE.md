@@ -312,6 +312,7 @@ Each step ships alone and leaves the repository working.
 | 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
 | 5a ✅ | Extend `validateHarnessMutation` with the `mutate` phase behind a workspace profile flag: `require_preparation` refuses rather than auto-preparing | shipped in #837: `mutate-gate.ts` owns the pure decision, the opt-in is `{ "workflowGate": { "mutate": "require_preparation" } }` in `.unified-mpc/project-profile.json`, an inactive or stale harness and every unprepared path are named refusals, and the default `auto_prepare` is unchanged |
+| 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b ⏸ | Cover opaque and unscoped mutations: `shell`, `git`, `restore_deleted_file`, and any mutation with no resolved workspace | blocked on the evidence shape: those mutations name no development artifact path, so a per-path preparation cannot bind to them; the phase has to decide whether a workspace-scoped preparation or command classification is the subject, and a token check would be worse than the gap |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
@@ -541,6 +542,20 @@ prepared write lands and spends the preparation, and a harness change after
 preparation refuses with `workspace_bootstrap`. A malformed profile still
 auto-prepares.
 
+Two consequences of that decision are easy to get wrong, so the registry now
+handles them explicitly. First, the preparation is claimed at authorization, not
+after the write returns: otherwise two concurrent writes to one path would both
+validate against the same ledger row and the second would land on evidence the
+first had already spent. Because a write that fails may still have changed the
+file, a claim is not refunded — the next attempt must re-prepare. Second,
+`isDevelopmentArtifactPath` has exactly one implementation, shared with the
+ponytail vocabulary: when the two classifiers could disagree, a path was a
+ponytail mutation and an invisible harness mutation at the same time, so one
+gate demanded its skill while the other saw nothing to prepare. The two still
+answer different questions — ponytail also treats `lsp_rename` as a coding
+mutation, which names no file — but they now share the predicate that decides
+what counts as an artifact.
+
 Step 5b is the rest of the phase's coverage. `codeMutationPaths` returns nothing
 for `shell`, `git` and `restore_deleted_file`, so those mutations never reach
 this decision, and a mutation with no resolved workspace returns allow before the
@@ -549,8 +564,13 @@ question — a workspace-scoped preparation, or classification of the command �
 answering it with a token check would be the same mistake as auto-preparation
 with fewer steps. It is recorded as `5b ⏸`, not claimed.
 
-Two limits are worth stating plainly rather than discovering later:
+Three limits are worth stating plainly rather than discovering later:
 
+- a preparation is spent by the attempt it authorized, not by its success. A
+  refused or failed mutation leaves the ledger empty, so a retry needs a fresh
+  pre-edit call. That is the fail-closed direction: a partial write makes the old
+  baseline stale, and refunding the receipt would authorize the retry on
+  evidence nobody re-read;
 - the opt-in can be absent without anyone meaning it. A typo, a profile written
   by an older writer, or an unreadable file all resolve to `auto_prepare`. That
   direction is deliberate — a broken profile must not brick every edit — but it

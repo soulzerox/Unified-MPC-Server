@@ -49,13 +49,24 @@ describe('evaluateMutateGate', () => {
     })).toEqual({ allowed: false, blockers: [{ code: 'preparation_missing', path: 'src/b.ts' }] });
   });
 
-  it('treats one path spelled two ways as one preparation', () => {
+  it('normalizes separators and a leading ./ but keeps case on a case-sensitive workspace', () => {
+    const foldCase = process.platform === 'win32';
     expect(evaluateMutateGate({
       mode: 'require_preparation',
       harness: 'active',
-      paths: ['./src/App.ts'],
-      preparedPaths: ['src/app.ts'],
+      paths: ['src\\nested\\app.ts'],
+      preparedPaths: ['./src/nested/app.ts'],
     })).toEqual({ allowed: true });
+
+    const decision = evaluateMutateGate({
+      mode: 'require_preparation',
+      harness: 'active',
+      paths: ['src/App.ts'],
+      preparedPaths: ['src/app.ts'],
+    });
+    expect(decision).toEqual(foldCase
+      ? { allowed: true }
+      : { allowed: false, blockers: [{ code: 'preparation_missing', path: 'src/App.ts' }] });
   });
 
   it('names each missing path once', () => {

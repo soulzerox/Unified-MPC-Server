@@ -154,12 +154,18 @@ function isDevelopmentArtifactPath(value: string): boolean {
 }
 
 /**
- * One spelling for a workspace-relative path. Prepared evidence, the ledger and
- * the mutate gate all compare through this, so `./src/A.ts` and `src/a.ts` are
- * the same path and a case difference cannot hide a missing preparation.
+ * One spelling for a workspace-relative path: forward slashes and no leading
+ * `./`. Prepared evidence, the ledger and the mutate gate all compare through
+ * this, so the same file written two ways is one preparation.
+ *
+ * Case is folded only where the filesystem folds it. On a case-sensitive
+ * workspace `src/App.ts` and `src/app.ts` are two files, and treating them as
+ * one would let a preparation for either authorize a mutation of the other
+ * with no pre-edit evidence for the file actually written.
  */
 export function normalizeHarnessPath(value: string): string {
-  return value.replaceAll('\\', '/').replace(/^\.\//, '').toLowerCase();
+  const unified = value.replaceAll('\\', '/').replace(/^\.\//, '');
+  return process.platform === 'win32' ? unified.toLowerCase() : unified;
 }
 
 function key(context: HarnessActivationContext): string {

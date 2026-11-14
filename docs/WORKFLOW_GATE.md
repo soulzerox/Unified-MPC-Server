@@ -549,6 +549,21 @@ question — a workspace-scoped preparation, or classification of the command �
 answering it with a token check would be the same mistake as auto-preparation
 with fewer steps. It is recorded as `5b ⏸`, not claimed.
 
+Two limits are worth stating plainly rather than discovering later:
+
+- the opt-in can be absent without anyone meaning it. A typo, a profile written
+  by an older writer, or an unreadable file all resolve to `auto_prepare`. That
+  direction is deliberate — a broken profile must not brick every edit — but it
+  means the mode is a convention the workspace declares, not a property the host
+  can prove;
+- `.unified-mpc/project-profile.json` is not a development artifact, so editing
+  the file that holds the opt-in is not itself a prepared mutation. The gate
+  governs code, not the configuration that turns it on: an operator who can write
+  the profile can turn the phase off in the same breath. That is acceptable
+  because the opt-in is a workspace setting, not a boundary between the agent and
+  the human who set it — and pretending otherwise by gating one config file would
+  say nothing about the next one.
+
 ---
 
 ## 6. Non-goals

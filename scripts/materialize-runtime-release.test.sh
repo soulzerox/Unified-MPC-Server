@@ -3,26 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-# #835: the release must be produced on the same filesystem as the checkout.
-# pnpm falls back to `copyFileSync` when a hard link crosses devices, so a temp
-# root on another filesystem would make the deploy copy and the hard-link
-# regression vacuous while still passing. `.unified-mpc/` is ignored by Git, so
-# the checkout stays clean.
-test_tmp_parent="$REPO_ROOT/.unified-mpc"
-mkdir -p -- "$test_tmp_parent"
-TMP_ROOT="$(mktemp -d -p "$test_tmp_parent" materialize-test.XXXXXX)"
-if [[ "$(stat -c '%d' -- "$TMP_ROOT")" != "$(stat -c '%d' -- "$REPO_ROOT")" ]]; then
-  printf 'test temp root is on a different filesystem than the checkout; the hard-link regression cannot be exercised\n' >&2
-  exit 1
-fi
-hidden_root="$TMP_ROOT/source-hidden"
+TMP_ROOT=""
+hidden_root=""
 source_hidden=false
 
 restore_hidden_source() {
-  if [[ -d "$hidden_root/apps" ]]; then
+  if [[ -n "$hidden_root" && -d "$hidden_root/apps" ]]; then
     mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
   fi
-  if [[ -d "$hidden_root/packages" ]]; then
+  if [[ -n "$hidden_root" && -d "$hidden_root/packages" ]]; then
     mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
   fi
   source_hidden=false
@@ -34,9 +23,65 @@ restore_source() {
   if [[ "$source_hidden" == "true" ]]; then
     restore_hidden_source
   fi
-  rm -rf -- "$TMP_ROOT"
+  if [[ -n "$TMP_ROOT" ]]; then
+    rm -rf -- "$TMP_ROOT"
+  fi
 }
+# Installed before the temp root is chosen: choosing it can refuse, and a
+# refusal must not leave a directory behind.
 trap restore_source EXIT
+
+# Mirrors `is_disposable_runtime_root` in validate-runtime-root.sh. The
+# materializer validates its stage root, so a temp parent under one of those
+# prefixes fails the run with RUNTIME_ROOT_DISPOSABLE before any assertion.
+is_managed_runtime_path() {
+  case "$1/" in
+    */.unified-mpc/worktrees/*|*/.worktrees/*|*/goal-workspaces/*|*/delegated-workspaces/*|*/inspection-workspaces/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# #835: the release must be produced on the same filesystem as the checkout.
+# pnpm falls back to `copyFileSync` when a hard link crosses devices, so a temp
+# root on another filesystem would make the deploy copy and the hard-link
+# regression vacuous while still passing. `.unified-mpc/` is ignored by Git, so
+# the checkout stays clean. This checkout is tried first, then the primary
+# checkout (this repository's goal worktrees live under one of the managed
+# prefixes above, so their own `.unified-mpc/` cannot be used), then the system
+# temp dir.
+temp_parents=("$REPO_ROOT/.unified-mpc")
+common_git_dir="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$common_git_dir" ]]; then
+  temp_parents+=("$(dirname -- "$common_git_dir")/.unified-mpc")
+fi
+temp_parents+=("${TMPDIR:-/tmp}")
+
+for temp_parent in "${temp_parents[@]}"; do
+  if ! mkdir -p -- "$temp_parent" 2>/dev/null; then
+    continue
+  fi
+  candidate="$(mktemp -d -p "$temp_parent" materialize-test.XXXXXX 2>/dev/null)" || continue
+  if [[ "$(stat -c '%d' -- "$candidate")" != "$(stat -c '%d' -- "$REPO_ROOT")" ]]; then
+    rm -rf -- "$candidate"
+    continue
+  fi
+  if is_managed_runtime_path "$candidate"; then
+    rm -rf -- "$candidate"
+    continue
+  fi
+  TMP_ROOT="$candidate"
+  break
+done
+
+if [[ -z "$TMP_ROOT" ]]; then
+  printf 'no temp directory on the checkout filesystem outside the managed runtime prefixes (%s); the hard-link regression cannot be exercised\n' "${temp_parents[*]}" >&2
+  exit 1
+fi
+hidden_root="$TMP_ROOT/source-hidden"
 
 export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/runtime"
 export UNIFIED_MPC_MATERIALIZE_STATE_DIR="$TMP_ROOT/materializations"

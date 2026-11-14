@@ -164,10 +164,12 @@ retargeted and then re-verified gets a fresh receipt for the new base, because
 the receipt reuse path matches on `baseSha` before it reuses anything.
 
 The read is a snapshot, and the provider merge carries the expected head but no
-base. A pull request retargeted between this read and the merge call is therefore
-refused by the next call's preflight, not by this one: what this gate guarantees
-is that the decision was made against the base GitHub reported at read time,
-never against a claim.
+base. A pull request retargeted between this read and the merge call is not
+caught by this gate: the receipt's base is the one read here, and the merge lands
+into whatever base GitHub holds at that moment. What this gate guarantees is
+narrower and exact — the decision was made against the base GitHub reported at
+read time, never against a claim, and a receipt naming a different base than that
+is refused before dispatch.
 
 ---
 

@@ -486,7 +486,7 @@ describe('GuardedMergeService', () => {
     );
 
     const result = await service.dispatch({ policy, subject: withoutBase, receiptRef: RECEIPT_REF });
-    expect(result).toMatchObject({ status: 'dispatched' });
+    expect(result).toMatchObject({ status: 'dispatched', subject: { baseSha: BASE } });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.subject.baseSha).toBe(BASE);
   });

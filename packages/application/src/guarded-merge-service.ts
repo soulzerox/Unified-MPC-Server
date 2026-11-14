@@ -225,9 +225,10 @@ function dispatchFailureDetail(error: unknown): string | undefined {
  * the pull request and asks again. Fixed messages keep the detail bounded and
  * free of provider text.
  *
- * The optional `baseSha` is compared only when the caller names one. An absent
- * base keeps the evidence rule unchanged: `evaluateMergeEvidence` skips the
- * base-commit check unless both sides carry it.
+ * The optional `baseSha` is compared only when the caller names one. Leaving it
+ * out cannot relax the evidence rule: `dispatch` evaluates the receipt against
+ * the base the provider reported, so an omitted base is filled in rather than
+ * skipped.
  */
 function subjectMismatch(
   subject: MergeEvidenceSubject,

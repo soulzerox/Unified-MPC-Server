@@ -1901,12 +1901,12 @@ export class ToolRegistry {
     signal?: AbortSignal,
   ): Promise<HarnessMutationAdmission> {
     if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return { ok: true };
-    // A restore names its subject only through a store, and asking that store
-    // costs an enumeration of the recovery trash or a bounded checkpoint scan
-    // that reads every payload. The default mode keeps restores exactly as they
-    // were — auto-preparing one would read pre-edit context for a path that the
-    // restore exists because it is missing — so ask for the mode before paying
-    // for a lookup whose answer that mode would discard.
+    // A restore names its subject only through a store, so resolving it costs a
+    // store read: an enumeration of the recovery trash, or one checkpoint row
+    // read by id. The default mode keeps restores exactly as they were —
+    // auto-preparing one would read pre-edit context for a path that the restore
+    // exists because it is missing — so ask for the mode before paying for a
+    // lookup whose answer that mode would discard.
     const storeNamed = isRestoreMutationTool(toolName);
     const resolvedMode = storeNamed ? await this.resolveMutateMode(workspaceId) : undefined;
     if (storeNamed && resolvedMode === DEFAULT_MUTATE_MODE) return { ok: true };

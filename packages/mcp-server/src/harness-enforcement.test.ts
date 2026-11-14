@@ -426,7 +426,7 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('refuses a store-named restore in an opt-in workspace with no active harness', async () => {
-    const { services, restores, setFileContent, setCheckpoints } = createHarnessServices();
+    const { services, setFileContent, setCheckpoints } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
     setCheckpoints([{
       id: '223e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', createdAt: '2026-01-01T00:00:00.000Z',
@@ -437,8 +437,10 @@ describe('workspace engineering harness enforcement', () => {
     // No `workspace_bootstrap`. The subject is what makes this restore reach the
     // phase's harness checks at all, and that refusal is the one behaviour it
     // added: before it had a subject the restore ran ungated. The preparation
-    // reduction does not rescue it either — the artifact is named, so the gate
-    // would demand a preparation next.
+    // reduction does not rescue it either — the artifact is named and readable,
+    // so the gate would demand a preparation next. `CONFLICT` is also proof that
+    // no restore ran: this fixture has no `checkpoint.restore`, so a gate that
+    // let the call through would surface `INTERNAL_ERROR` instead.
     await expect(registry.invoke('restore_checkpoint', {
       workspaceId: 'workspace-1', checkpointId: '223e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
     })).resolves.toMatchObject({
@@ -451,7 +453,29 @@ describe('workspace engineering harness enforcement', () => {
         },
       },
     });
-    expect(restores).toEqual([]);
+  });
+
+  it('asks for the harness before it reduces the store-named subject to preparable paths', async () => {
+    const { services, setFileContent, setCheckpoints, setFileMissing } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    setCheckpoints([{
+      id: '323e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', createdAt: '2026-01-01T00:00:00.000Z',
+      files: [{ path: 'src/gone.ts', contentSha256: 'c'.repeat(64), size: 1 }],
+    }]);
+    // The target is absent, which is the ordinary delete-recovery shape: the
+    // preparation reduction drops it, so a gate that reduced first would see an
+    // empty path list and allow the restore. The harness refusal is documented
+    // unconditionally for a store that names an artifact, so it has to come
+    // first — this test is the only thing that pins that ordering.
+    setFileMissing('src/gone.ts');
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    await expect(registry.invoke('restore_checkpoint', {
+      workspaceId: 'workspace-1', checkpointId: '323e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { phase: 'mutate', reason: 'harness_inactive' } } },
+    });
   });
 
   it('treats a checkpoint restore as the paths it will write', async () => {

@@ -666,8 +666,12 @@ mutation keeps the decision it already had, and `refuse` does not reach it:
 - every other tool the mutation policy classifies `opaque_mutation`, `replace` or
   `execute` without naming a path — `git_publish`, `office`, `docx_merge`,
   `scheduler`, `self_heal_apply`, `agent_swarm_run`, `mcp_call`, `codex_run`,
-  `computer_use` — is not a command rewriting the workspace, which is the class
-  this step covers.
+  `computer_use` — keeps the decision it already had. That is a scope line, not a
+  claim about their shape: `codex_run`, `agent_swarm_run` and `self_heal_apply`
+  do run code that can rewrite the workspace, so `refuse` is **not** a
+  containment boundary for a workspace that has them enabled. Until a later step
+  decides about them, `refuse` means "commands and unresolvable subjects are
+  refused", not "nothing un-gated can write here".
 
 The list, not the category, is the answer: `isOpaqueMutationTool` is the complete
 statement of what the phase sees, and a test pins it in both directions so a tool

@@ -70,6 +70,10 @@ describe('opaque mutate policy', () => {
     const unresolved = describeOpaqueMutateRefusal('restore_deleted_file', 'unresolved');
     expect(unresolved).toContain('restore_deleted_file names a stored subject this workspace cannot resolve');
     expect(unresolved).not.toContain('running a command');
+    // Switching tools would abandon the restore, not resolve it, so the way out
+    // for an unresolvable subject is to name one this workspace can resolve.
+    expect(unresolved).toContain('name a subject this workspace can resolve');
+    expect(unresolved).not.toContain('prepare_code_change');
   });
 
   it('records the admission as a decision, not as ordinary traffic', () => {

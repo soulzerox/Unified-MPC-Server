@@ -562,23 +562,38 @@ describe('workspace engineering harness enforcement', () => {
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
 
-    await expect(registry.invoke('shell', {
-      workspaceId: 'workspace-1', executable: 'touch', arguments: ['src/new.ts'],
-    })).resolves.toMatchObject({
-      isError: true,
-      structuredContent: {
-        error: {
-          code: 'CONFLICT',
-          message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
-          details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'command' },
+    // Every name the docs say the phase reaches is exercised here, not just the
+    // predicate: reaching the seam also needs the mutation policy to classify
+    // the tool non-`read`, so a tool that fell out of either half would still
+    // pass a predicate-only test. Approval is granted up front so each call
+    // arrives at the phase rather than stopping at a confirmation prompt.
+    for (const [tool, input] of [
+      ['shell', { executable: 'touch', arguments: ['src/new.ts'] }],
+      ['wsl_exec', { executable: 'touch', arguments: ['src/new.ts'] }],
+      ['git', { args: ['commit', '-m', 'opaque'] }],
+      ['process_start', { executable: 'touch', args: ['src/new.ts'] }],
+    ] as const) {
+      await expect(registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input }), tool).resolves.toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: 'CONFLICT',
+            message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
+            details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'command' },
+          },
         },
-      },
-    });
+      });
+    }
     // A read-only task operation never reaches the phase, so the strict posture
     // does not refuse observing a command that is already running.
     expect((await registry.invoke('shell', {
       workspaceId: 'workspace-1', operation: 'status', task_id: 'task-1',
     })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+    // The documented asymmetry: a project command runs the command the workspace
+    // configured, so it is not the caller-chosen argv `shell` is and `refuse`
+    // does not reach it.
+    expect((await registry.invoke('project_test', { workspaceId: 'workspace-1' })).structuredContent)
+      .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
   });
 
   it('admits a command mutation and records that it had no prepared evidence', async () => {

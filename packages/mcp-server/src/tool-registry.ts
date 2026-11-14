@@ -1888,7 +1888,8 @@ export class ToolRegistry {
       // when the mutation was planned.
       if (mode === 'require_preparation') {
         return err(appError('CONFLICT',
-          describeMutateBlockers([{ code: 'harness_inactive' }]), true));
+          describeMutateBlockers([{ code: 'harness_inactive' }]), true,
+          { phase: 'mutate', reason: 'harness_inactive' }));
       }
       const bootstrapped = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
       if (!bootstrapped.ok) return bootstrapped;
@@ -1911,7 +1912,8 @@ export class ToolRegistry {
       this.harnessActivation.invalidate(context);
       if (mode === 'require_preparation') {
         return err(appError('CONFLICT',
-          describeMutateBlockers([{ code: 'harness_stale' }]), true));
+          describeMutateBlockers([{ code: 'harness_stale' }]), true,
+          { phase: 'mutate', reason: 'harness_stale' }));
       }
       const reloaded = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
       if (!reloaded.ok) return reloaded;
@@ -1924,7 +1926,13 @@ export class ToolRegistry {
     if (mode === 'require_preparation') {
       const preparedPaths = paths.filter((path) => this.harnessActivation.isPathPrepared(context, path));
       const decision = evaluateMutateGate({ mode, harness: 'active', paths, preparedPaths });
-      if (!decision.allowed) return err(appError('CONFLICT', describeMutateBlockers(decision.blockers), true));
+      if (!decision.allowed) {
+        return err(appError('CONFLICT', describeMutateBlockers(decision.blockers), true, {
+          phase: 'mutate',
+          reason: 'preparation_missing',
+          paths: decision.blockers.flatMap((blocker) => blocker.path === undefined ? [] : [blocker.path]),
+        }));
+      }
       return undefined;
     }
 

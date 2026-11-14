@@ -146,7 +146,11 @@ export function codeMutationPaths(toolName: string, input: unknown): readonly st
 }
 
 function isDevelopmentArtifactPath(value: string): boolean {
-  const basename = normalizeHarnessPath(value).split('/').at(-1) ?? '';
+  // Classification is about what the file *is*, so it is case-insensitive on
+  // every platform: `Dockerfile`, `Makefile` and `Cargo.toml` are the same
+  // artifact whatever case the author used. Identity is separate — see
+  // normalizeHarnessPath — and stays case-preserving where the filesystem is.
+  const basename = normalizeHarnessPath(value).split('/').at(-1)?.toLowerCase() ?? '';
   if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|cs|c|cc|cpp|h|hpp|swift|rb|php|vue|svelte|sql|proto|graphql|gql)$/.test(basename)) return true;
   if (['package.json', 'dockerfile', 'makefile', 'cargo.toml'].includes(basename)) return true;
   if (/^tsconfig(?:\.[^.]+)?\.json$/.test(basename)) return true;
@@ -164,8 +168,12 @@ function isDevelopmentArtifactPath(value: string): boolean {
  * with no pre-edit evidence for the file actually written.
  */
 export function normalizeHarnessPath(value: string): string {
-  const unified = value.replaceAll('\\', '/').replace(/^\.\//, '');
-  return process.platform === 'win32' ? unified.toLowerCase() : unified;
+  // `\` is a separator only where the platform says it is; on POSIX it is a
+  // legal filename character, and folding it would alias two different files
+  // the way case folding did.
+  const unified = process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
+  const trimmed = unified.startsWith('./') ? unified.slice(2) : unified;
+  return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
 }
 
 function key(context: HarnessActivationContext): string {

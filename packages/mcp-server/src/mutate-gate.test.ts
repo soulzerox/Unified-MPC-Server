@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { codeMutationPaths } from './harness-runtime.js';
 import {
   DEFAULT_MUTATE_MODE,
   describeMutateBlockers,
@@ -27,6 +28,19 @@ describe('mutate mode', () => {
   });
 });
 
+describe('codeMutationPaths', () => {
+  it('classifies marker files and extensions whatever case they were written in', () => {
+    // Classification is about the artifact, not about path identity: a
+    // `Dockerfile` written with a capital D is still a Dockerfile, and it must
+    // not fall out of mutation coverage on a case-sensitive platform.
+    expect(codeMutationPaths('write_file', { path: 'Dockerfile' })).toEqual(['Dockerfile']);
+    expect(codeMutationPaths('write_file', { path: 'Makefile' })).toEqual(['Makefile']);
+    expect(codeMutationPaths('write_file', { path: 'Cargo.toml' })).toEqual(['Cargo.toml']);
+    expect(codeMutationPaths('write_file', { path: 'src/App.TS' })).toEqual(['src/App.TS']);
+    expect(codeMutationPaths('write_file', { path: 'docs/readme.md' })).toEqual([]);
+  });
+});
+
 describe('evaluateMutateGate', () => {
   it('allows everything when the workspace has not opted in', () => {
     expect(evaluateMutateGate({ mode: 'auto_prepare', harness: 'inactive', paths: ['src/a.ts'], preparedPaths: [] }))
@@ -49,22 +63,31 @@ describe('evaluateMutateGate', () => {
     })).toEqual({ allowed: false, blockers: [{ code: 'preparation_missing', path: 'src/b.ts' }] });
   });
 
-  it('normalizes separators and a leading ./ but keeps case on a case-sensitive workspace', () => {
-    const foldCase = process.platform === 'win32';
+  it('normalizes a leading ./ and collapses case only where the filesystem does', () => {
+    const win32 = process.platform === 'win32';
     expect(evaluateMutateGate({
       mode: 'require_preparation',
       harness: 'active',
-      paths: ['src\\nested\\app.ts'],
-      preparedPaths: ['./src/nested/app.ts'],
+      paths: ['./src/app.ts'],
+      preparedPaths: ['src/app.ts'],
     })).toEqual({ allowed: true });
 
-    const decision = evaluateMutateGate({
+    // `\` is a separator only on Windows; on POSIX it is a filename character.
+    expect(evaluateMutateGate({
+      mode: 'require_preparation',
+      harness: 'active',
+      paths: ['src\\app.ts'],
+      preparedPaths: ['src/app.ts'],
+    })).toEqual(win32
+      ? { allowed: true }
+      : { allowed: false, blockers: [{ code: 'preparation_missing', path: 'src\\app.ts' }] });
+
+    expect(evaluateMutateGate({
       mode: 'require_preparation',
       harness: 'active',
       paths: ['src/App.ts'],
       preparedPaths: ['src/app.ts'],
-    });
-    expect(decision).toEqual(foldCase
+    })).toEqual(win32
       ? { allowed: true }
       : { allowed: false, blockers: [{ code: 'preparation_missing', path: 'src/App.ts' }] });
   });

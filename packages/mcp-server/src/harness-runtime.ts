@@ -70,20 +70,20 @@ export class HarnessActivationLedger {
     const current = this.state(context);
     if (current === undefined) return undefined;
     const preparedPaths = new Set(current.preparedPaths);
-    preparedPaths.add(normalizePath(path));
+    preparedPaths.add(normalizeHarnessPath(path));
     const preparations = new Map(current.preparations);
-    if (receipt !== undefined) preparations.set(normalizePath(path), receipt);
+    if (receipt !== undefined) preparations.set(normalizeHarnessPath(path), receipt);
     const next = { ...current, preparedPaths, preparations };
     this.states.set(key(context), next);
     return next;
   }
 
   public preparation(context: HarnessActivationContext, path: string): PreparationReceipt | undefined {
-    return this.state(context)?.preparations.get(normalizePath(path));
+    return this.state(context)?.preparations.get(normalizeHarnessPath(path));
   }
 
   public isPathPrepared(context: HarnessActivationContext, path: string): boolean {
-    return this.state(context)?.preparedPaths.has(normalizePath(path)) === true;
+    return this.state(context)?.preparedPaths.has(normalizeHarnessPath(path)) === true;
   }
 
   public synchronizeSource(context: HarnessActivationContext, sourceIdentity: WorkspaceSourceEvidenceIdentity): boolean {
@@ -104,9 +104,9 @@ export class HarnessActivationLedger {
     const current = this.state(context);
     if (current === undefined) return;
     const preparedPaths = new Set(current.preparedPaths);
-    preparedPaths.delete(normalizePath(path));
+    preparedPaths.delete(normalizeHarnessPath(path));
     const preparations = new Map(current.preparations);
-    preparations.delete(normalizePath(path));
+    preparations.delete(normalizeHarnessPath(path));
     this.states.set(key(context), { ...current, preparedPaths, preparations });
   }
 
@@ -146,14 +146,19 @@ export function codeMutationPaths(toolName: string, input: unknown): readonly st
 }
 
 function isDevelopmentArtifactPath(value: string): boolean {
-  const basename = normalizePath(value).split('/').at(-1) ?? '';
+  const basename = normalizeHarnessPath(value).split('/').at(-1) ?? '';
   if (/\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|cs|c|cc|cpp|h|hpp|swift|rb|php|vue|svelte|sql|proto|graphql|gql)$/.test(basename)) return true;
   if (['package.json', 'dockerfile', 'makefile', 'cargo.toml'].includes(basename)) return true;
   if (/^tsconfig(?:\.[^.]+)?\.json$/.test(basename)) return true;
   return /^[^.]+\.config\.(?:js|cjs|mjs|ts|json|ya?ml|toml)$/.test(basename);
 }
 
-function normalizePath(value: string): string {
+/**
+ * One spelling for a workspace-relative path. Prepared evidence, the ledger and
+ * the mutate gate all compare through this, so `./src/A.ts` and `src/a.ts` are
+ * the same path and a case difference cannot hide a missing preparation.
+ */
+export function normalizeHarnessPath(value: string): string {
   return value.replaceAll('\\', '/').replace(/^\.\//, '').toLowerCase();
 }
 

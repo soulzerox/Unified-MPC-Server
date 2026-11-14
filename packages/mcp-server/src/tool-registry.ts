@@ -55,6 +55,7 @@ import { isScopedAutoApprovalAllowed, type WorkspaceScope, type WorkspaceScopeUn
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
+import { DEFAULT_MUTATE_MODE, describeMutateBlockers, evaluateMutateGate, workspaceMutateMode, type MutateMode } from './mutate-gate.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -1878,9 +1879,17 @@ export class ToolRegistry {
     if (paths.length === 0) return undefined;
     const context = this.harnessContext(workspaceId);
     const operationSignal = signal ?? new AbortController().signal;
+    const mode = await this.resolveMutateMode(workspaceId);
 
     let state = this.harnessActivation.state(context);
     if (state === undefined) {
+      // The opt-in phase refuses instead of manufacturing its own evidence: a
+      // harness the mutation had to bootstrap is a harness that was not active
+      // when the mutation was planned.
+      if (mode === 'require_preparation') {
+        return err(appError('CONFLICT',
+          describeMutateBlockers([{ code: 'harness_inactive' }]), true));
+      }
       const bootstrapped = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
       if (!bootstrapped.ok) return bootstrapped;
       state = this.harnessActivation.state(context);
@@ -1900,6 +1909,10 @@ export class ToolRegistry {
     }
     if (currentHash.value !== state.agentsMdHash) {
       this.harnessActivation.invalidate(context);
+      if (mode === 'require_preparation') {
+        return err(appError('CONFLICT',
+          describeMutateBlockers([{ code: 'harness_stale' }]), true));
+      }
       const reloaded = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
       if (!reloaded.ok) return reloaded;
       state = this.harnessActivation.state(context);
@@ -1908,12 +1921,41 @@ export class ToolRegistry {
       }
     }
 
+    if (mode === 'require_preparation') {
+      const preparedPaths = paths.filter((path) => this.harnessActivation.isPathPrepared(context, path));
+      const decision = evaluateMutateGate({ mode, harness: 'active', paths, preparedPaths });
+      if (!decision.allowed) return err(appError('CONFLICT', describeMutateBlockers(decision.blockers), true));
+      return undefined;
+    }
+
     for (const path of paths) {
       if (this.harnessActivation.isPathPrepared(context, path)) continue;
       const prepared = await this.prepareCodeChange(workspaceId, path, undefined, false, operationSignal, true);
       if (!prepared.ok) return prepared;
     }
     return undefined;
+  }
+
+  /**
+   * The workspace opt-in for the `mutate` phase. A profile that cannot be read
+   * or parsed resolves to the default, so a broken file cannot tighten a gate
+   * the workspace never asked for.
+   */
+  private async resolveMutateMode(workspaceId: string): Promise<MutateMode> {
+    if (this.services.file?.readFile === undefined) return DEFAULT_MUTATE_MODE;
+    try {
+      const loaded = await this.services.file.readFile(this.actor, workspaceId, { path: '.unified-mpc/project-profile.json' });
+      if (!loaded.ok) return DEFAULT_MUTATE_MODE;
+      const content = (loaded.value as { content?: unknown }).content;
+      if (typeof content !== 'string') return DEFAULT_MUTATE_MODE;
+      try {
+        return workspaceMutateMode(JSON.parse(content));
+      } catch {
+        return DEFAULT_MUTATE_MODE;
+      }
+    } catch {
+      return DEFAULT_MUTATE_MODE;
+    }
   }
 
   public async setPonytailSessionSuppressed(workspaceId: string, goalId: string | undefined, suppressed: boolean): Promise<boolean> {

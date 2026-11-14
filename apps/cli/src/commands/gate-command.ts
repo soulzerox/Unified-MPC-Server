@@ -16,8 +16,8 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  *
  * Every owner is injected as a port, so the command holds no policy and needs no
  * runtime, database or tool registry. The composition root supplies the ports
- * (the tool preview, the reconciliation port and the cleanup evaluation) and this
- * module stays testable with fakes.
+ * (the client-scoped removal preview, the reconciliation port and the cleanup
+ * evaluation) and this module stays testable with fakes.
  */
 
 export interface CloseGatePorts {

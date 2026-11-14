@@ -87,10 +87,46 @@ describe('createGoalWorktreeRemovalPreviewPort', () => {
       activeLease: false,
       pathMissing: false,
     });
-    // The CLI's removal port accepts a wider status union, so this shape can be
-    // handed to `runCloseGate` without a cast.
-    const wide: { readonly status: 'clean' | 'blocked' | 'unavailable' } = preview.value;
-    expect(wide.status).toBe('clean');
+    // `runCloseGate` accepts this shape without a cast: every field its removal
+    // port reads is structurally present, including a status union wider than
+    // the preview's.
+    const compatible: {
+      readonly worktreePath: string;
+      readonly status: 'clean' | 'blocked' | 'unavailable';
+      readonly blockers: readonly string[];
+      readonly blockerDetails: readonly string[];
+    } = preview.value;
+    expect(compatible.worktreePath).toBe(WORKTREE);
+    expect(compatible.status).toBe('clean');
+    expect(compatible.blockers).toEqual([]);
+    expect(compatible.blockerDetails).toEqual([]);
+  });
+
+  it('matches the ledger path exactly, including a relative form', async () => {
+    const stored = '.unified-mpc/worktrees/goal-1';
+    const { port } = previewPort(ok(report([entry({ worktreePath: stored })])));
+
+    const preview = await port.preview({ workspaceId: WORKSPACE, worktreePath: stored, actor });
+
+    expect(preview).toMatchObject({
+      ok: true,
+      value: { worktreePath: stored, status: 'clean' },
+    });
+  });
+
+  it('refuses a path that differs from the ledger form instead of normalizing it', async () => {
+    const stored = '.unified-mpc/worktrees/goal-1';
+    const { port } = previewPort(ok(report([entry({ worktreePath: stored })])));
+
+    const preview = await port.preview({
+      workspaceId: WORKSPACE,
+      worktreePath: `./${stored}`,
+      actor,
+    });
+
+    expect(preview.ok).toBe(false);
+    if (preview.ok) throw new Error('expected a refusal');
+    expect(preview.error.message).toContain('cannot be attributed');
   });
 
   it('keeps a foreign client and its dirty tree as blockers instead of filtering them', async () => {

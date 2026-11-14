@@ -54,6 +54,13 @@ export interface GoalWorktreeRemovalPreview {
 
 export interface GoalWorktreeRemovalPreviewRequest {
   readonly workspaceId: string;
+  /**
+   * The worktree path exactly as the ownership ledger records it (the
+   * `/`-normalized path `git_worktree_remove` also compares against). The
+   * preview does not re-normalize caller input, because a path it cannot match
+   * is refused rather than guessed at, and the composition root reads the path
+   * from the same ledger the classifier saw.
+   */
   readonly worktreePath: string;
   readonly actor: GoalWorktreeReconcilerActor;
 }

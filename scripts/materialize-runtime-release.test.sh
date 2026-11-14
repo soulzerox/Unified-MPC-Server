@@ -3,14 +3,36 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-TMP_ROOT="$(mktemp -d)"
+# #835: the release must be produced on the same filesystem as the checkout.
+# pnpm falls back to `copyFileSync` when a hard link crosses devices, so a temp
+# root on another filesystem would make the deploy copy and the hard-link
+# regression vacuous while still passing. `.unified-mpc/` is ignored by Git, so
+# the checkout stays clean.
+test_tmp_parent="$REPO_ROOT/.unified-mpc"
+mkdir -p -- "$test_tmp_parent"
+TMP_ROOT="$(mktemp -d -p "$test_tmp_parent" materialize-test.XXXXXX)"
+if [[ "$(stat -c '%d' -- "$TMP_ROOT")" != "$(stat -c '%d' -- "$REPO_ROOT")" ]]; then
+  printf 'test temp root is on a different filesystem than the checkout; the hard-link regression cannot be exercised\n' >&2
+  exit 1
+fi
 hidden_root="$TMP_ROOT/source-hidden"
 source_hidden=false
 
-restore_source() {
-  if [[ "$source_hidden" == "true" ]]; then
+restore_hidden_source() {
+  if [[ -d "$hidden_root/apps" ]]; then
     mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
+  fi
+  if [[ -d "$hidden_root/packages" ]]; then
     mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
+  fi
+  source_hidden=false
+}
+
+restore_source() {
+  # A signal can land between the two moves below, so restore per directory
+  # rather than assuming the pair is all-or-nothing.
+  if [[ "$source_hidden" == "true" ]]; then
+    restore_hidden_source
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -113,15 +135,15 @@ release_commit="$(node --input-type=commonjs -e '
 [[ "$release_commit" == "$commit" ]]
 
 mkdir -p "$hidden_root"
+# Set the flag before the first move so a signal between the two moves still
+# restores the directory that already moved.
+source_hidden=true
 mv -- "$REPO_ROOT/apps" "$hidden_root/apps"
 mv -- "$REPO_ROOT/packages" "$hidden_root/packages"
-source_hidden=true
 
 node "$SCRIPT_DIR/smoke-materialized-runtime.mjs" "$release"
 
-mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
-mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
-source_hidden=false
+restore_hidden_source
 
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]]
 printf 'runtime release portability regression: passed\n'

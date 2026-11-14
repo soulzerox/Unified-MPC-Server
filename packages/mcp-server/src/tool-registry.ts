@@ -16,6 +16,7 @@ import {
 } from '@unified-mpc/domain';
 import { z } from 'zod';
 import { sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
+import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
@@ -55,9 +56,19 @@ import { hasExplicitUserConfirmation } from './destructive-policy.js';
 import { isScopedAutoApprovalAllowed, type WorkspaceScope, type WorkspaceScopeUnavailable } from './destructive-scope.js';
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
-import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
+import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, isOpaqueMutationTool, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
 import { isRestoreMutationTool, resolveMutationSubjects, type MutationSubjectResolvers } from './mutation-subject.js';
-import { DEFAULT_MUTATE_MODE, describeMutateBlockers, evaluateMutateGate, workspaceMutateMode, type MutateMode } from './mutate-gate.js';
+import {
+  DEFAULT_MUTATE_MODE,
+  DEFAULT_OPAQUE_MUTATE_POLICY,
+  describeMutateBlockers,
+  describeOpaqueMutateAdmission,
+  describeOpaqueMutateRefusal,
+  evaluateMutateGate,
+  evaluateOpaqueMutateGate,
+  workspaceWorkflowGate,
+  type WorkspaceWorkflowGate,
+} from './mutate-gate.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -684,8 +695,13 @@ export class ToolRegistry {
       const codingMutation = mutationDecision.kind !== 'read' && isCodingMutation(tool.name, activeRoutedInput);
       const admissionIdentityMutation = mutationDecision.kind !== 'read'
         && isWorkspaceAdmissionIdentityMutation(tool.name, activeRoutedInput);
+      // A restore names its subject through a store and a command names none at
+      // all, so neither is a coding mutation by request shape. They still reach
+      // the same seam: the phase decides what a subject it cannot see is worth.
+      const subjectSeamTool = isRestoreMutationTool(tool.name) || isOpaqueMutationTool(tool.name);
       let claimedHarnessPaths: readonly string[] | undefined;
-      if (codingMutation || (mutationDecision.kind !== 'read' && isRestoreMutationTool(tool.name))) {
+      let harnessGateNote: string | undefined;
+      if (codingMutation || (mutationDecision.kind !== 'read' && subjectSeamTool)) {
         const harnessAdmission = await this.validateHarnessMutation(
           mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId,
           tool.name,
@@ -698,6 +714,7 @@ export class ToolRegistry {
           return response;
         }
         claimedHarnessPaths = harnessAdmission.claimedPaths;
+        harnessGateNote = harnessAdmission.gateNote;
       }
       const ponytailInvocation = codingMutation
         ? await this.resolvePonytailInvocation(mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId, goalLease?.goalId)
@@ -1036,7 +1053,7 @@ export class ToolRegistry {
 
       const resultCode = response.isError === true ? readErrorCode(response) ?? 'ERROR' : 'SUCCESS';
       const resultMessage = readErrorMessage(response);
-      const resultDetail = describeStructuredResultDetail(response.structuredContent ?? response.content);
+      const resultDetail = withGateNote(describeStructuredResultDetail(response.structuredContent ?? response.content), harnessGateNote);
       if (execution.deferredSettlement !== undefined) {
         const endFence = fencedMutationEnd;
         fencedMutationEnd = undefined;
@@ -1908,22 +1925,41 @@ export class ToolRegistry {
     signal?: AbortSignal,
   ): Promise<HarnessMutationAdmission> {
     if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return { ok: true };
-    // A restore names its subject only through a store, so resolving it costs a
-    // store read: an enumeration of the recovery trash, or one checkpoint row
-    // read by id. The default mode keeps restores exactly as they were —
-    // auto-preparing one would read pre-edit context for a path that the restore
-    // exists because it is missing — so ask for the mode before paying for a
-    // lookup whose answer that mode would discard.
+    // One profile read answers both settings. A restore names its subject only
+    // through a store, so resolving it costs a store read: an enumeration of the
+    // recovery trash, or one checkpoint row read by id. The default mode keeps
+    // restores exactly as they were — auto-preparing one would read pre-edit
+    // context for a path that the restore exists because it is missing — so ask
+    // for the mode before paying for a lookup whose answer that mode would
+    // discard.
+    let gate: WorkspaceWorkflowGate | undefined;
+    const workflowGate = async (): Promise<WorkspaceWorkflowGate> => (gate ??= await this.resolveWorkflowGate(workspaceId));
     const storeNamed = isRestoreMutationTool(toolName);
-    const resolvedMode = storeNamed ? await this.resolveMutateMode(workspaceId) : undefined;
-    if (storeNamed && resolvedMode === DEFAULT_MUTATE_MODE) return { ok: true };
+    const storeGate = storeNamed ? await workflowGate() : undefined;
+    if (storeGate !== undefined && storeGate.mutate === DEFAULT_MUTATE_MODE) return { ok: true };
     const subject = await resolveMutationSubjects(toolName, input, this.mutationSubjectResolvers(workspaceId));
-    if (subject.kind === 'opaque') return { ok: true };
+    if (subject.kind === 'opaque') {
+      // Nothing here names a path a preparation could bind to, so the phase has
+      // no evidence to require. It still owes the operator an answer: admit the
+      // mutation and record that it was admitted without evidence, or refuse it
+      // because the workspace asked for a gate that can actually gate.
+      const { mutate, mutateOpaque } = storeGate ?? (await workflowGate());
+      if (mutate === DEFAULT_MUTATE_MODE) return { ok: true };
+      const decision = evaluateOpaqueMutateGate({ policy: mutateOpaque, reason: subject.reason });
+      if (!decision.allowed) {
+        return err(appError('CONFLICT', describeOpaqueMutateRefusal(toolName, decision.reason), true, {
+          phase: 'mutate',
+          reason: 'opaque_mutation',
+          opaqueReason: decision.reason,
+        }));
+      }
+      return { ok: true, gateNote: describeOpaqueMutateAdmission(toolName, subject.reason) };
+    }
     const paths = subject.paths;
     if (paths.length === 0) return { ok: true };
     const context = this.harnessContext(workspaceId);
     const operationSignal = signal ?? new AbortController().signal;
-    const mode = resolvedMode ?? await this.resolveMutateMode(workspaceId);
+    const mode = storeGate?.mutate ?? (await workflowGate()).mutate;
 
     let state = this.harnessActivation.state(context);
     if (state === undefined) {
@@ -2060,24 +2096,25 @@ export class ToolRegistry {
   }
 
   /**
-   * The workspace opt-in for the `mutate` phase. A profile that cannot be read
-   * or parsed resolves to the default, so a broken file cannot tighten a gate
-   * the workspace never asked for.
+   * The workspace opt-in for the `mutate` phase, both settings from one read. A
+   * profile that cannot be read or parsed resolves to the defaults, so a broken
+   * file cannot tighten a gate the workspace never asked for.
    */
-  private async resolveMutateMode(workspaceId: string): Promise<MutateMode> {
-    if (this.services.file?.readFile === undefined) return DEFAULT_MUTATE_MODE;
+  private async resolveWorkflowGate(workspaceId: string): Promise<WorkspaceWorkflowGate> {
+    const defaults: WorkspaceWorkflowGate = { mutate: DEFAULT_MUTATE_MODE, mutateOpaque: DEFAULT_OPAQUE_MUTATE_POLICY };
+    if (this.services.file?.readFile === undefined) return defaults;
     try {
       const loaded = await this.services.file.readFile(this.actor, workspaceId, { path: '.unified-mpc/project-profile.json' });
-      if (!loaded.ok) return DEFAULT_MUTATE_MODE;
+      if (!loaded.ok) return defaults;
       const content = (loaded.value as { content?: unknown }).content;
-      if (typeof content !== 'string') return DEFAULT_MUTATE_MODE;
+      if (typeof content !== 'string') return defaults;
       try {
-        return workspaceMutateMode(JSON.parse(content));
+        return workspaceWorkflowGate(JSON.parse(content));
       } catch {
-        return DEFAULT_MUTATE_MODE;
+        return defaults;
       }
     } catch {
-      return DEFAULT_MUTATE_MODE;
+      return defaults;
     }
   }
 
@@ -3319,10 +3356,37 @@ const LOCAL_MUTATION_TOOLS = new Set(['write_file', 'apply_patch', 'edit_file', 
  * The outcome of the mutate-phase seam. `claimedPaths` is present exactly when
  * the opt-in phase claimed its preparations at authorization, which tells the
  * caller not to consume them a second time after the mutation lands.
+ * `gateNote` is present when the phase admitted a mutation it could not gate,
+ * and is written to that call's durable record so the gap stays visible.
  */
 type HarnessMutationAdmission =
-  | { readonly ok: true; readonly claimedPaths?: readonly string[] }
+  | { readonly ok: true; readonly claimedPaths?: readonly string[]; readonly gateNote?: string }
   | { readonly ok: false; readonly error: AppError };
+
+/**
+ * Adds the gate's note to whatever the result already described. The detail is
+ * the audit trail's own bucket, so the note rides the durable record of the call
+ * it belongs to instead of a second log the operator would have to correlate.
+ */
+function withGateNote(detail: ActivityTargetDetail | undefined, note: string | undefined): ActivityTargetDetail | undefined {
+  if (note === undefined) return detail;
+  return detail === undefined ? { kind: 'details', items: [note] } : appendGateNote(detail, note);
+}
+
+/**
+ * The append is exhaustive on purpose. A detail kind added later must be
+ * extended here rather than dropped: the return type excludes `undefined`, so a
+ * missing case is a compile error instead of a note that silently disappears
+ * together with the detail it was appended to.
+ */
+function appendGateNote(detail: ActivityTargetDetail, note: string): ActivityTargetDetail {
+  switch (detail.kind) {
+    case 'files': return { kind: 'files', items: [...detail.items, note] };
+    case 'tools': return { kind: 'tools', items: [...detail.items, note] };
+    case 'details': return { kind: 'details', items: [...detail.items, note] };
+  }
+}
+
 const LOCAL_OUTPUT_REPLACEMENT_TOOLS = new Set(['audio', 'screen_record']);
 function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
   return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));

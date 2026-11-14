@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { AppErrorCode } from '@unified-mpc/domain';
+import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
+import { ActivityTracker, type ActivitySinkEvent } from './activity-tracker.js';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
 import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
@@ -504,7 +506,35 @@ describe('workspace engineering harness enforcement', () => {
     });
   });
 
-  it('leaves a restore ungated when its subject cannot be resolved', async () => {
+  it('leaves path-bearing mutations on the ordinary refusal when the opaque policy refuses', async () => {
+    // `mutateOpaque` is about subjects the phase cannot see. A path the phase
+    // can see keeps the 5a behaviour exactly, so the two decisions cannot be
+    // swapped for one another.
+    const { services, writes, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { phase: 'mutate', reason: 'preparation_missing', paths: ['src/app.ts'] } } },
+    });
+    expect(writes).toEqual([]);
+
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/app.ts', proposedSymbol: 'app',
+    })).isError).not.toBe(true);
+    expect((await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).isError).not.toBe(true);
+    expect(writes).toEqual(['src/app.ts']);
+  });
+
+  it('leaves a restore ungated when its subject cannot be resolved and the phase allows it', async () => {
     const { services, restores, setFileContent, setRecoveryItems } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
     // The store holds a different item, so this id resolves to no path at all.
@@ -515,12 +545,159 @@ describe('workspace engineering harness enforcement', () => {
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
 
-    // An unresolvable subject keeps today's behaviour rather than refusing on a
-    // lookup that could not answer; step 5b-2 is where that gap closes.
+    // An unresolvable subject is allowed only because the default opaque policy
+    // is `allow`: the restore keeps today's behaviour instead of refusing on a
+    // lookup that could not answer.
     expect((await registry.invoke('restore_deleted_file', {
       workspaceId: 'workspace-1', recoveryId: '423e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
     }))).toMatchObject({ isError: true, structuredContent: { error: { code: 'FILE_NOT_FOUND' } } });
     expect(restores).toEqual(['423e4567-e89b-42d3-a456-426614174000']);
+  });
+
+  it('refuses an unresolvable restore when the workspace refuses what it cannot gate', async () => {
+    const { services, restores, setFileContent, setRecoveryItems } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    setRecoveryItems([{
+      recoveryId: '623e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/other.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    await expect(registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '723e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('cannot resolve'),
+          details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'unresolved' },
+        },
+      },
+    });
+    // The refusal happens before the store is asked to restore anything.
+    expect(restores).toEqual([]);
+  });
+
+  it('refuses a command mutation when the workspace refuses what it cannot gate', async () => {
+    const { services, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    // Every name the docs say the phase reaches is exercised here, not just the
+    // predicate: reaching the seam also needs the mutation policy to classify
+    // the tool non-`read`, so a tool that fell out of either half would still
+    // pass a predicate-only test. Approval is granted up front so each call
+    // arrives at the phase rather than stopping at a confirmation prompt.
+    for (const [tool, input] of [
+      ['shell', { executable: 'touch', arguments: ['src/new.ts'] }],
+      ['wsl_exec', { executable: 'touch', arguments: ['src/new.ts'] }],
+      ['git', { args: ['commit', '-m', 'opaque'] }],
+      ['process_start', { executable: 'touch', args: ['src/new.ts'] }],
+    ] as const) {
+      await expect(registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input }), tool).resolves.toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: 'CONFLICT',
+            message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
+            details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'command' },
+          },
+        },
+      });
+    }
+    // A read-only task operation never reaches the phase, so the strict posture
+    // does not refuse observing a command that is already running.
+    expect((await registry.invoke('shell', {
+      workspaceId: 'workspace-1', operation: 'status', task_id: 'task-1',
+    })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+    // The documented asymmetry: a project command runs the command the workspace
+    // configured, so it is not the caller-chosen argv `shell` is and `refuse`
+    // does not reach it.
+    expect((await registry.invoke('project_test', { workspaceId: 'workspace-1' })).structuredContent)
+      .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+  });
+
+  it('admits a command mutation and records that it had no prepared evidence', async () => {
+    const { services, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    const audited: Array<{ event: ActivitySinkEvent; detail?: ActivityTargetDetail }> = [];
+    const activityTracker = new ActivityTracker(undefined, undefined, {
+      async record(event, detail): Promise<void> {
+        audited.push({ event, ...(detail === undefined ? {} : { detail }) });
+      },
+    });
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider, activityTracker,
+    });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    // The fixture wires no process service, so the command itself cannot run.
+    // What this pins is the gate's answer: admitted, not refused, with a note.
+    const response = await registry.invoke('shell', { workspaceId: 'workspace-1', executable: 'ls', arguments: ['src'] });
+    expect(response).toMatchObject({ isError: true, structuredContent: { error: { code: 'INTERNAL_ERROR' } } });
+
+    const completed = audited.find((entry) => entry.event.toolName === 'shell' && entry.event.phase === 'completed');
+    expect(completed?.detail?.items).toContain(
+      'mutate: admitted shell with an opaque command subject and no prepared path (workflowGate.mutateOpaque is allow)',
+    );
+  });
+
+  it('records an unresolvable restore as a subject the phase admitted without evidence', async () => {
+    const { services, setFileContent, setRecoveryItems } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    setRecoveryItems([{
+      recoveryId: '823e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/other.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const audited: Array<{ event: ActivitySinkEvent; detail?: ActivityTargetDetail }> = [];
+    const activityTracker = new ActivityTracker(undefined, undefined, {
+      async record(event, detail): Promise<void> {
+        audited.push({ event, ...(detail === undefined ? {} : { detail }) });
+      },
+    });
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider, activityTracker,
+    });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    await registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '923e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    });
+    // The note names the reason as `unresolved`, not `command`: the store could
+    // not answer, and that is a different gap from a command that names nothing.
+    const completed = audited.find((entry) => entry.event.toolName === 'restore_deleted_file' && entry.event.phase === 'completed');
+    expect(completed?.detail?.items).toContain(
+      'mutate: admitted restore_deleted_file with an opaque unresolved subject and no prepared path (workflowGate.mutateOpaque is allow)',
+    );
+  });
+
+  it('leaves the opaque policy inert while the workspace has not opted into the phase', async () => {
+    const { services, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutateOpaque: 'refuse' } }));
+    const audited: Array<{ event: ActivitySinkEvent; detail?: ActivityTargetDetail }> = [];
+    const activityTracker = new ActivityTracker(undefined, undefined, {
+      async record(event, detail): Promise<void> {
+        audited.push({ event, ...(detail === undefined ? {} : { detail }) });
+      },
+    });
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider, activityTracker,
+    });
+
+    // `mutateOpaque` is a setting of the phase, and the phase is off here, so
+    // the command is not refused and nothing claims to have been decided.
+    expect(await registry.invoke('shell', {
+      workspaceId: 'workspace-1', executable: 'touch', arguments: ['src/new.ts'],
+    })).toMatchObject({ isError: true, structuredContent: { error: { code: 'INTERNAL_ERROR' } } });
+    const completed = audited.find((entry) => entry.event.toolName === 'shell' && entry.event.phase === 'completed');
+    expect((completed?.detail?.items ?? []).some((item) => item.includes('workflowGate.mutateOpaque'))).toBe(false);
   });
 
   it('leaves a recovery restore ungated while the workspace keeps automatic preparation', async () => {

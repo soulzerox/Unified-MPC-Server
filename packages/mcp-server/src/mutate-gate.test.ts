@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { codeMutationPaths } from './harness-runtime.js';
+import { codeMutationPaths, isOpaqueMutationTool } from './harness-runtime.js';
 import {
   DEFAULT_MUTATE_MODE,
+  DEFAULT_OPAQUE_MUTATE_POLICY,
   describeMutateBlockers,
+  describeOpaqueMutateAdmission,
+  describeOpaqueMutateRefusal,
   evaluateMutateGate,
+  evaluateOpaqueMutateGate,
   parseMutateMode,
-  workspaceMutateMode,
+  parseOpaqueMutatePolicy,
+  workspaceWorkflowGate,
 } from './mutate-gate.js';
 
 describe('mutate mode', () => {
@@ -18,13 +23,80 @@ describe('mutate mode', () => {
   });
 
   it('reads the opt-in from the workspace profile and defaults everything else', () => {
-    expect(workspaceMutateMode({ workflowGate: { mutate: 'require_preparation' } })).toBe('require_preparation');
-    expect(workspaceMutateMode({ workflowGate: { mutate: 'auto_prepare' } })).toBe('auto_prepare');
-    expect(workspaceMutateMode({})).toBe(DEFAULT_MUTATE_MODE);
-    expect(workspaceMutateMode({ workflowGate: 'require_preparation' })).toBe(DEFAULT_MUTATE_MODE);
-    expect(workspaceMutateMode({ workflowGate: { mutate: 'yes' } })).toBe(DEFAULT_MUTATE_MODE);
-    expect(workspaceMutateMode(null)).toBe(DEFAULT_MUTATE_MODE);
-    expect(workspaceMutateMode([])).toBe(DEFAULT_MUTATE_MODE);
+    expect(workspaceWorkflowGate({ workflowGate: { mutate: 'require_preparation' } }).mutate).toBe('require_preparation');
+    expect(workspaceWorkflowGate({ workflowGate: { mutate: 'auto_prepare' } }).mutate).toBe('auto_prepare');
+    expect(workspaceWorkflowGate({}).mutate).toBe(DEFAULT_MUTATE_MODE);
+    expect(workspaceWorkflowGate({ workflowGate: 'require_preparation' }).mutate).toBe(DEFAULT_MUTATE_MODE);
+    expect(workspaceWorkflowGate({ workflowGate: { mutate: 'yes' } }).mutate).toBe(DEFAULT_MUTATE_MODE);
+    expect(workspaceWorkflowGate(null).mutate).toBe(DEFAULT_MUTATE_MODE);
+    expect(workspaceWorkflowGate([]).mutate).toBe(DEFAULT_MUTATE_MODE);
+  });
+});
+
+describe('opaque mutate policy', () => {
+  it('accepts only the exact refuse value and defaults everything else', () => {
+    expect(parseOpaqueMutatePolicy('refuse')).toBe('refuse');
+    expect(parseOpaqueMutatePolicy('allow')).toBe(DEFAULT_OPAQUE_MUTATE_POLICY);
+    expect(parseOpaqueMutatePolicy('REFUSE')).toBe(DEFAULT_OPAQUE_MUTATE_POLICY);
+    expect(parseOpaqueMutatePolicy(undefined)).toBe(DEFAULT_OPAQUE_MUTATE_POLICY);
+    expect(parseOpaqueMutatePolicy(false)).toBe(DEFAULT_OPAQUE_MUTATE_POLICY);
+  });
+
+  it('reads both phase settings from one profile', () => {
+    expect(workspaceWorkflowGate({ workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' } }))
+      .toEqual({ mutate: 'require_preparation', mutateOpaque: 'refuse' });
+    // The policy alone does not turn the phase on: the mode keeps its default.
+    expect(workspaceWorkflowGate({ workflowGate: { mutateOpaque: 'refuse' } }))
+      .toEqual({ mutate: DEFAULT_MUTATE_MODE, mutateOpaque: 'refuse' });
+    expect(workspaceWorkflowGate({})).toEqual({ mutate: DEFAULT_MUTATE_MODE, mutateOpaque: DEFAULT_OPAQUE_MUTATE_POLICY });
+    expect(workspaceWorkflowGate({ workflowGate: [] })).toEqual({ mutate: DEFAULT_MUTATE_MODE, mutateOpaque: DEFAULT_OPAQUE_MUTATE_POLICY });
+  });
+
+  it('admits an opaque mutation under allow and refuses it under refuse', () => {
+    expect(evaluateOpaqueMutateGate({ policy: 'allow', reason: 'command' })).toEqual({ allowed: true });
+    expect(evaluateOpaqueMutateGate({ policy: 'refuse', reason: 'command' }))
+      .toEqual({ allowed: false, code: 'opaque_mutation', reason: 'command' });
+    expect(evaluateOpaqueMutateGate({ policy: 'refuse', reason: 'unresolved' }))
+      .toEqual({ allowed: false, code: 'opaque_mutation', reason: 'unresolved' });
+  });
+
+  it('names the tool, the missing subject and both ways out in the refusal', () => {
+    const command = describeOpaqueMutateRefusal('shell', 'command');
+    expect(command).toContain('shell mutates by running a command');
+    expect(command).toContain('workflowGate.mutateOpaque is refuse');
+    expect(command).toContain('prepare_code_change');
+    expect(command).toContain('allow');
+
+    const unresolved = describeOpaqueMutateRefusal('restore_deleted_file', 'unresolved');
+    expect(unresolved).toContain('restore_deleted_file names a stored subject this workspace cannot resolve');
+    expect(unresolved).not.toContain('running a command');
+    // Switching tools would abandon the restore, not resolve it, so the way out
+    // for an unresolvable subject is to name one this workspace can resolve.
+    expect(unresolved).toContain('name a subject this workspace can resolve');
+    expect(unresolved).not.toContain('prepare_code_change');
+  });
+
+  it('records the admission as a decision, not as ordinary traffic', () => {
+    const note = describeOpaqueMutateAdmission('git', 'command');
+    expect(note).toContain('admitted git');
+    expect(note).toContain('no prepared path');
+    expect(note).toContain('workflowGate.mutateOpaque is allow');
+  });
+});
+
+describe('opaque mutation tools', () => {
+  it('routes the command-shaped tools and leaves the rest to the mutation policy', () => {
+    // The list is the statement, not a derivation: a tool that is removed from
+    // it silently stops reaching the phase, so it is pinned in both directions.
+    // The negative names are a sample of what the exclusion means - a path tool,
+    // a store-named tool, a path-less tool the mutation policy already refuses
+    // as `opaque_mutation`, and the project commands whose configured argv is
+    // not the caller's - not a claim that these are every excluded tool.
+    expect(['shell', 'wsl_exec', 'git', 'process_start'].filter((tool) => !isOpaqueMutationTool(tool))).toEqual([]);
+    expect([
+      'write_file', 'restore_deleted_file', 'mcp_call', 'computer_use', 'process_stop',
+      'project_test', 'project_build', 'codex_run',
+    ].filter(isOpaqueMutationTool)).toEqual([]);
   });
 });
 

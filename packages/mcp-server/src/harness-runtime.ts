@@ -157,6 +157,32 @@ export function isPathExtractorTool(toolName: string): boolean {
   return Object.hasOwn(PATH_EXTRACTORS, toolName);
 }
 
+/**
+ * Why a mutation has no subject the gate can prepare. `command` says the tool
+ * mutates by running something and no request field names an artifact;
+ * `unresolved` says the request did name a subject (`recoveryId`,
+ * `checkpointId`) that no store could answer for. The two are recorded
+ * differently because they are fixed differently: the first is a limit of the
+ * tool shape, the second is a store that could not answer.
+ */
+export type OpaqueMutationReason = 'command' | 'unresolved';
+
+/**
+ * The command-shaped tools. They mutate through an executable, so a request
+ * carries no artifact path for a preparation to bind to, and this list is the
+ * call-site answer to "should the mutate phase see this call at all?".
+ *
+ * It is deliberately not derived from "not a path extractor": every opaque
+ * mutation would then reach the phase, including `mcp_call` and `computer_use`,
+ * whose refusal belongs to the opaque-mutation rule the mutation policy already
+ * applies. This is the set step 5b-2 covers.
+ */
+const OPAQUE_MUTATION_TOOLS = new Set(['shell', 'wsl_exec', 'git', 'process_start']);
+
+export function isOpaqueMutationTool(toolName: string): boolean {
+  return OPAQUE_MUTATION_TOOLS.has(toolName);
+}
+
 export function codeMutationPaths(toolName: string, input: unknown): readonly string[] {
   if (!isRecord(input)) return [];
   const extract = isPathExtractorTool(toolName) ? PATH_EXTRACTORS[toolName] : undefined;

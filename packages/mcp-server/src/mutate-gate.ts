@@ -1,4 +1,4 @@
-import { normalizeHarnessPath } from './harness-runtime.js';
+import { normalizeHarnessPath, type OpaqueMutationReason } from './harness-runtime.js';
 
 /**
  * The `mutate` phase of the workflow gate (#142, step 5).
@@ -32,16 +32,45 @@ export type MutateMode = 'auto_prepare' | 'require_preparation';
 
 export const DEFAULT_MUTATE_MODE: MutateMode = 'auto_prepare';
 
+/**
+ * What the opt-in phase does with a mutation whose subject is opaque, i.e. one
+ * that names no path a preparation could bind to. `allow` keeps the mutation —
+ * the phase admits it and records that it did; `refuse` makes the phase honest
+ * about its own reach and refuses what it cannot gate.
+ *
+ * The default is `allow` for the same reason `mutate` defaults to
+ * `auto_prepare`: a workspace that has not chosen the strict posture keeps
+ * working. The policy is a setting *of* the phase, so it only takes effect in
+ * `require_preparation` mode — `mutateOpaque: 'refuse'` in a workspace that
+ * never turned the phase on is a setting nobody consulted, not a second gate.
+ */
+export type OpaqueMutatePolicy = 'allow' | 'refuse';
+
+export const DEFAULT_OPAQUE_MUTATE_POLICY: OpaqueMutatePolicy = 'allow';
+
 /** Only the exact opt-in value is accepted; everything else is the default. */
 export function parseMutateMode(value: unknown): MutateMode {
   return value === 'require_preparation' ? 'require_preparation' : DEFAULT_MUTATE_MODE;
 }
 
-export function workspaceMutateMode(profile: unknown): MutateMode {
-  if (!isRecord(profile)) return DEFAULT_MUTATE_MODE;
+export function parseOpaqueMutatePolicy(value: unknown): OpaqueMutatePolicy {
+  return value === 'refuse' ? 'refuse' : DEFAULT_OPAQUE_MUTATE_POLICY;
+}
+
+export interface WorkspaceWorkflowGate {
+  readonly mutate: MutateMode;
+  readonly mutateOpaque: OpaqueMutatePolicy;
+}
+
+/**
+ * Both settings come from one profile read, so the two can never be resolved
+ * from two different versions of the file.
+ */
+export function workspaceWorkflowGate(profile: unknown): WorkspaceWorkflowGate {
+  if (!isRecord(profile)) return { mutate: DEFAULT_MUTATE_MODE, mutateOpaque: DEFAULT_OPAQUE_MUTATE_POLICY };
   const gate = profile.workflowGate;
-  if (!isRecord(gate)) return DEFAULT_MUTATE_MODE;
-  return parseMutateMode(gate.mutate);
+  if (!isRecord(gate)) return { mutate: DEFAULT_MUTATE_MODE, mutateOpaque: DEFAULT_OPAQUE_MUTATE_POLICY };
+  return { mutate: parseMutateMode(gate.mutate), mutateOpaque: parseOpaqueMutatePolicy(gate.mutateOpaque) };
 }
 
 export type MutateHarnessState = 'active' | 'inactive' | 'stale';
@@ -75,10 +104,11 @@ export type MutateGateDecision =
  * preparation needs `prepare_code_change` for that path.
  *
  * A mutation that names no development artifact path has nothing to bind a
- * preparation to, so it is allowed. That is the honest limit of this phase and
- * not a claim about opaque mutations: `shell`, `git` and `process_start` never
- * reach it, because no lookup names a file for them. Since step 5b-1 the restore
- * tools do reach it — the caller resolves their subject through
+ * preparation to, so it is allowed. That is the honest limit of this decision,
+ * which decides paths and nothing else: `shell`, `git` and `process_start` reach
+ * the same seam since step 5b-2, but they never arrive here as paths — the
+ * registry asks `evaluateOpaqueMutateGate` instead. Since step 5b-1 the restore
+ * tools do arrive here — the caller resolves their subject through
  * `mutation-subject.ts` before asking this decision.
  */
 export function evaluateMutateGate(request: MutateGateRequest): MutateGateDecision {
@@ -120,6 +150,50 @@ export function describeMutateBlockers(blockers: readonly MutateBlocker[]): stri
   const shown = missing.slice(0, 5).join(', ');
   const suffix = missing.length > 5 ? ` and ${String(missing.length - 5)} more` : '';
   return `Run prepare_code_change for ${shown}${suffix} against the current workspace state before mutating; this workspace requires prepared evidence rather than automatic preparation`;
+}
+
+export interface OpaqueMutateRequest {
+  readonly policy: OpaqueMutatePolicy;
+  readonly reason: OpaqueMutationReason;
+}
+
+export type OpaqueMutateDecision =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly code: 'opaque_mutation'; readonly reason: OpaqueMutationReason };
+
+/**
+ * The residue of step 5b-1: a mutation that names no path, not even through a
+ * store. There is nothing here for a preparation to bind to, so the only honest
+ * decisions are "admit it and say so" and "refuse it". There is deliberately no
+ * third option that reads paths out of a command: `bash -c`, globs and
+ * `node -e` would all satisfy any parser and none of them would mean what the
+ * gate claims, so a classifier here would be a coverage claim, not coverage.
+ */
+export function evaluateOpaqueMutateGate(request: OpaqueMutateRequest): OpaqueMutateDecision {
+  return request.policy === 'refuse'
+    ? { allowed: false, code: 'opaque_mutation', reason: request.reason }
+    : { allowed: true };
+}
+
+/**
+ * One sentence for the refusal. It says what the tool did, why that leaves
+ * nothing to prepare, and the two ways out, because the strict posture is
+ * surprising by construction: it refuses commands, not just edits.
+ */
+export function describeOpaqueMutateRefusal(toolName: string, reason: OpaqueMutationReason): string {
+  const subject = reason === 'command'
+    ? `${toolName} mutates by running a command, so it names no file a preparation could bind to`
+    : `${toolName} names a stored subject this workspace cannot resolve, so it names no file a preparation could bind to`;
+  return `${subject}. This workspace refuses mutations it cannot gate (workflowGate.mutateOpaque is refuse); use a path tool with prepare_code_change, or set workflowGate.mutateOpaque back to allow`;
+}
+
+/**
+ * The audit note for an admitted opaque mutation. It is written to the call's
+ * durable record only in the opt-in mode, where "the phase saw this and let it
+ * through without evidence" is a decision worth keeping.
+ */
+export function describeOpaqueMutateAdmission(toolName: string, reason: OpaqueMutationReason): string {
+  return `mutate: admitted ${toolName} with an opaque ${reason} subject and no prepared path (workflowGate.mutateOpaque is allow)`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

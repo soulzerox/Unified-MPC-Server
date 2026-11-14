@@ -183,7 +183,7 @@ Required evidence per gate, all keyed by the resolved subject:
 | Phase | Evidence | Enforced today |
 |---|---|---|
 | `intake` / `discover` / `prepare` | none defined yet | no |
-| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, restores are a subject since 5b-1, and opaque mutations are step 5b-2 (see §4) |
+| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, restores are a subject since 5b-1, and command-shaped mutations are admitted-and-recorded or refused by policy since 5b-2 (see §4) |
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
 | `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
@@ -283,14 +283,15 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    repository branch outside a goal worktree has no equivalent check.
 3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam. It is
    still narrower than "every edit fails closed": it covers the file-tool set
-   in `codeMutationPaths` plus, since step 5b-1, the restore tools whose paths a
-   store names (`shell`, `git` and `process_start` remain uncovered), and it
-   returns allow when no `workspaceId` is resolved. Step 5a made the rest
-   opt-in: in `require_preparation` mode the seam refuses instead of
-   bootstrapping the harness and auto-preparing each path, and the default
-   `auto_prepare` keeps the old behaviour for every workspace that does not opt
-   in. The remaining coverage — opaque and unscoped mutations — is step 5b-2,
-   and it must not become a second CLI gate that an MCP edit bypasses.
+   in `codeMutationPaths`, since step 5b-1 the restore tools whose paths a store
+   names, and since step 5b-2 the command-shaped tools (`shell`, `wsl_exec`,
+   `git`, `process_start`) whose mutation decision is not `read`. It returns
+   allow when no `workspaceId` is resolved. Step 5a made the rest opt-in: in
+   `require_preparation` mode the seam refuses instead of bootstrapping the
+   harness and auto-preparing each path, and the default `auto_prepare` keeps the
+   old behaviour for every workspace that does not opt in. What is left is a
+   mutation that names no path at all, and step 5b-2 gives the phase an explicit
+   answer for it rather than a second CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -314,7 +315,7 @@ Each step ships alone and leaves the repository working.
 | 5a ✅ | Extend `validateHarnessMutation` with the `mutate` phase behind a workspace profile flag: `require_preparation` refuses rather than auto-preparing | shipped in #837: `mutate-gate.ts` owns the pure decision, the opt-in is `{ "workflowGate": { "mutate": "require_preparation" } }` in `.unified-mpc/project-profile.json`, an inactive or stale harness and every unprepared path are named refusals, and the default `auto_prepare` is unchanged |
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
-| 5b-2 ⏸ | Cover what is left: `shell`, `git`, `process_start` and any mutation with no resolved workspace | blocked on the evidence shape: those mutations name no development artifact path even indirectly, so a per-path preparation cannot bind to them; the phase has to decide whether a workspace-scoped preparation or command classification is the subject, and a token check would be worse than the gap |
+| 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #<pr>: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -565,7 +566,7 @@ spells, a path a store spells for it, and nothing it can name at all.
 write_file     path: 'src/app.ts'       ── request named ──► prepare that path
 restore_deleted_file  recoveryId: '…'   ── store named ────► prepare the paths it
                                                     overwrites that hold content
-shell          command: 'rm src/app.ts' ── opaque ─────────► unchanged (5b-2)
+shell          command: 'rm src/app.ts' ── opaque ─────────► recorded, or refused (5b-2)
 ```
 
 The gain is narrow and real: a restore used to escape the opt-in mode because
@@ -604,11 +605,54 @@ evidence, not to require it. Three further limits are deliberate:
   store: auto-preparing one would read pre-edit context for a path that the
   restore exists because it is missing. That is the one mode where a restore
   answers a question it is never asked, so the lookup is skipped before it runs;
-- `shell`, `git` and `process_start` still name no artifact, not even indirectly.
-  Binding evidence to them is the remaining design question — a workspace-scoped
-  preparation, or classification of the command — and answering it with a token
-  check would be the same mistake as auto-preparation with fewer steps. It is
-  recorded as `5b-2 ⏸`, not claimed.
+- `shell`, `git` and `process_start` name no artifact, not even indirectly. Step
+  5b-2 answers that with a decision rather than a parser — see below.
+
+### Step 5b-2: what the phase does with a subject it cannot see
+
+A command-shaped mutation cannot be turned into a path. Parsing one would be the
+same mistake as auto-preparation with fewer steps: `bash -c`, a glob, or
+`node -e` satisfies any parser anyone writes, and a classifier that says "this
+command mutates `src/app.ts`" is a claim about behavior the gateway cannot
+observe. So the phase does not pretend. It gives the residue an explicit
+decision, and makes the decision visible:
+
+```json
+{ "workflowGate": { "mutate": "require_preparation", "mutateOpaque": "refuse" } }
+```
+
+- the command-shaped tools now reach the seam instead of skipping it. Before this
+  step `validateHarnessMutation` was never called for them, because
+  `isCodingMutation` is a question about request shape and a command has no path
+  shape. `isOpaqueMutationTool` is the call site's answer to "should the phase
+  see this call", and it is a separate list from `PATH_EXTRACTORS` on purpose:
+  deriving it from "not a path extractor" would put `mcp_call` and
+  `computer_use` in the phase, whose refusals belong to the mutation policy's own
+  `opaque_mutation` vocabulary;
+- `mutateOpaque` is a setting *of* the phase. With `mutate: auto_prepare` it is
+  never consulted: a workspace that has not opted in keeps its old behaviour and
+  gets no audit note, because nothing decided anything. This is one opt-in with
+  two answers, not two gates that can be half-on;
+- `allow` (the default) admits the mutation and writes one sentence to the call's
+  durable audit detail: `mutate: admitted shell with an opaque command subject and
+  no prepared path`. The record rides the call it belongs to, so "did the gate
+  cover this?" is answerable from the same audit row as the mutation;
+- `refuse` answers CONFLICT with `details: { phase: 'mutate', reason:
+  'opaque_mutation', opaqueReason: 'command' | 'unresolved' }` and a message that
+  names the tool, the missing subject and both ways out. It refuses on the
+  subject, not on a guess about the command, so it cannot be fooled by a spelling;
+- a command the mutation policy already classifies `read` — a task `status`, a
+  `dry_run`, a read-only git subcommand — never reaches the phase. Everything else
+  does, including `git commit` and `pnpm test`, because the gateway cannot prove
+  either one harmless. That is the honest cost of `refuse`: it is a posture for a
+  workspace whose mutations must all be path-bearing, not a filter that lets
+  "ordinary" commands through.
+
+Two things this step does not claim. It does not gate a mutation that resolves no
+workspace (`validateHarnessMutation` still allows it before the profile is read),
+and it does not cover the other opaque tools — `mcp_call`, `codex_run`,
+`computer_use` — which keep the mutation-policy refusals they already had. Both
+are stated here rather than discovered later.
 
 Three limits are worth stating plainly rather than discovering later:
 

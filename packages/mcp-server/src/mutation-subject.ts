@@ -1,4 +1,10 @@
-import { codeMutationPaths, isDevelopmentArtifactPath, isPathExtractorTool, normalizeHarnessPath } from './harness-runtime.js';
+import {
+  codeMutationPaths,
+  isDevelopmentArtifactPath,
+  isPathExtractorTool,
+  normalizeHarnessPath,
+  type OpaqueMutationReason,
+} from './harness-runtime.js';
 
 /**
  * What a mutation is *about*, as opposed to what its request spells (#142,
@@ -19,11 +25,12 @@ import { codeMutationPaths, isDevelopmentArtifactPath, isPathExtractorTool, norm
  * pure: store lookups arrive as injected functions, so the whole matrix is
  * testable without a workspace, a store or a clock.
  *
- * The subject is deliberately not a verdict. An opaque subject stays allowed
- * here; step 5b-2 is where a workspace-scoped preparation gives it a gate. What
- * this step buys is that a restore of a development artifact is *path-bearing*,
- * so the preparation the agent already produced for that path is required
- * instead of skipped.
+ * The subject is deliberately not a verdict. An opaque subject is decided by
+ * the phase's opaque policy (`allow` and record, or `refuse`), not here: this
+ * module says what a mutation is about, and the gate decides what that is worth.
+ * What this step buys is that a restore of a development artifact is
+ * *path-bearing*, so the preparation the agent already produced for that path is
+ * required instead of skipped.
  */
 export type MutationSubject =
   | {
@@ -38,7 +45,7 @@ export type MutationSubject =
      */
     readonly origin: 'request' | 'store';
   }
-  | { readonly kind: 'opaque'; readonly reason: 'command' | 'unresolved' };
+  | { readonly kind: 'opaque'; readonly reason: OpaqueMutationReason };
 
 /** Tools whose request names a stored subject instead of an artifact path. */
 const RECOVERY_MUTATION_TOOLS = new Set(['restore_deleted_file', 'restore_recovery_item']);

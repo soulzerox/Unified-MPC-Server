@@ -506,6 +506,34 @@ describe('workspace engineering harness enforcement', () => {
     });
   });
 
+  it('leaves path-bearing mutations on the ordinary refusal when the opaque policy refuses', async () => {
+    // `mutateOpaque` is about subjects the phase cannot see. A path the phase
+    // can see keeps the 5a behaviour exactly, so the two decisions cannot be
+    // swapped for one another.
+    const { services, writes, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    await expect(registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { phase: 'mutate', reason: 'preparation_missing', paths: ['src/app.ts'] } } },
+    });
+    expect(writes).toEqual([]);
+
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/app.ts', proposedSymbol: 'app',
+    })).isError).not.toBe(true);
+    expect((await registry.invoke('write_file', {
+      workspaceId: 'workspace-1', path: 'src/app.ts', content: 'export const x = 1;\n',
+    })).isError).not.toBe(true);
+    expect(writes).toEqual(['src/app.ts']);
+  });
+
   it('leaves a restore ungated when its subject cannot be resolved and the phase allows it', async () => {
     const { services, restores, setFileContent, setRecoveryItems } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
@@ -618,6 +646,35 @@ describe('workspace engineering harness enforcement', () => {
     const completed = audited.find((entry) => entry.event.toolName === 'shell' && entry.event.phase === 'completed');
     expect(completed?.detail?.items).toContain(
       'mutate: admitted shell with an opaque command subject and no prepared path (workflowGate.mutateOpaque is allow)',
+    );
+  });
+
+  it('records an unresolvable restore as a subject the phase admitted without evidence', async () => {
+    const { services, setFileContent, setRecoveryItems } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    setRecoveryItems([{
+      recoveryId: '823e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/other.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const audited: Array<{ event: ActivitySinkEvent; detail?: ActivityTargetDetail }> = [];
+    const activityTracker = new ActivityTracker(undefined, undefined, {
+      async record(event, detail): Promise<void> {
+        audited.push({ event, ...(detail === undefined ? {} : { detail }) });
+      },
+    });
+    const registry = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider, activityTracker,
+    });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    await registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '923e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    });
+    // The note names the reason as `unresolved`, not `command`: the store could
+    // not answer, and that is a different gap from a command that names nothing.
+    const completed = audited.find((entry) => entry.event.toolName === 'restore_deleted_file' && entry.event.phase === 'completed');
+    expect(completed?.detail?.items).toContain(
+      'mutate: admitted restore_deleted_file with an opaque unresolved subject and no prepared path (workflowGate.mutateOpaque is allow)',
     );
   });
 

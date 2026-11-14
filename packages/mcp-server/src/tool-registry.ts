@@ -3370,7 +3370,16 @@ type HarnessMutationAdmission =
  */
 function withGateNote(detail: ActivityTargetDetail | undefined, note: string | undefined): ActivityTargetDetail | undefined {
   if (note === undefined) return detail;
-  if (detail === undefined) return { kind: 'details', items: [note] };
+  return detail === undefined ? { kind: 'details', items: [note] } : appendGateNote(detail, note);
+}
+
+/**
+ * The append is exhaustive on purpose. A detail kind added later must be
+ * extended here rather than dropped: the return type excludes `undefined`, so a
+ * missing case is a compile error instead of a note that silently disappears
+ * together with the detail it was appended to.
+ */
+function appendGateNote(detail: ActivityTargetDetail, note: string): ActivityTargetDetail {
   switch (detail.kind) {
     case 'files': return { kind: 'files', items: [...detail.items, note] };
     case 'tools': return { kind: 'tools', items: [...detail.items, note] };

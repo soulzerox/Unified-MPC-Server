@@ -86,11 +86,17 @@ describe('opaque mutate policy', () => {
 
 describe('opaque mutation tools', () => {
   it('routes the command-shaped tools and leaves the rest to the mutation policy', () => {
-    // The phase sees every tool whose mutation the gateway cannot turn into a
-    // path. A tool that is removed from this list silently stops being covered,
-    // so the list is pinned rather than derived.
+    // The list is the statement, not a derivation: a tool that is removed from
+    // it silently stops reaching the phase, so it is pinned in both directions.
+    // The negative names are a sample of what the exclusion means - a path tool,
+    // a store-named tool, a path-less tool the mutation policy already refuses
+    // as `opaque_mutation`, and the project commands whose configured argv is
+    // not the caller's - not a claim that these are every excluded tool.
     expect(['shell', 'wsl_exec', 'git', 'process_start'].filter((tool) => !isOpaqueMutationTool(tool))).toEqual([]);
-    expect(['write_file', 'restore_deleted_file', 'mcp_call', 'computer_use', 'process_stop'].filter(isOpaqueMutationTool)).toEqual([]);
+    expect([
+      'write_file', 'restore_deleted_file', 'mcp_call', 'computer_use', 'process_stop',
+      'project_test', 'project_build', 'codex_run',
+    ].filter(isOpaqueMutationTool)).toEqual([]);
   });
 });
 

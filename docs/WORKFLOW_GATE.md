@@ -291,9 +291,10 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    harness and auto-preparing each path, and the default `auto_prepare` keeps the
    old behaviour for every workspace that does not opt in. What is left is a
    mutation that names no path at all; step 5b-2 gives the phase an explicit
-   answer for the command-shaped subset of that class, and leaves the rest to the
-   mutation policy rather than pretending a list of four tools is a category. It
-   is still not a second CLI gate that an MCP edit bypasses.
+   answer for the command-shaped subset of that class and for a stored subject
+   its store cannot resolve, and leaves the rest to the mutation policy rather
+   than pretending a list of four tools is a category. It is still not a second
+   CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -318,6 +319,7 @@ Each step ships alone and leaves the repository working.
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
+| 5b-3 ⏸ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excludes (`codex_run`, `agent_swarm_run`, `self_heal_apply`, `mcp_call`, `computer_use`) | not started, and named here so 5b-2 can be ✅ without implying the class is closed: `refuse` is not a containment boundary while those channels can still write |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -609,8 +611,9 @@ evidence, not to require it. Three further limits are deliberate:
   store: auto-preparing one would read pre-edit context for a path that the
   restore exists because it is missing. That is the one mode where a restore
   answers a question it is never asked, so the lookup is skipped before it runs;
-- `shell`, `git` and `process_start` name no artifact, not even indirectly. Step
-  5b-2 answers that with a decision rather than a parser — see below.
+- `shell`, `wsl_exec`, `git` and `process_start` name no artifact, not even
+  indirectly. Step 5b-2 answers that with a decision rather than a parser — see
+  below.
 
 ### Step 5b-2: what the phase does with a subject it cannot see
 

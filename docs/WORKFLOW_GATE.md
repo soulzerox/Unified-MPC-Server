@@ -290,8 +290,10 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    `require_preparation` mode the seam refuses instead of bootstrapping the
    harness and auto-preparing each path, and the default `auto_prepare` keeps the
    old behaviour for every workspace that does not opt in. What is left is a
-   mutation that names no path at all, and step 5b-2 gives the phase an explicit
-   answer for it rather than a second CLI gate that an MCP edit bypasses.
+   mutation that names no path at all; step 5b-2 gives the phase an explicit
+   answer for the command-shaped subset of that class, and leaves the rest to the
+   mutation policy rather than pretending a list of four tools is a category. It
+   is still not a second CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -521,9 +523,11 @@ seam proved only that preparation *can* run — never that it *did*. Step 5a tur
 that into a decision the workspace can opt into.
 
 `packages/mcp-server/src/mutate-gate.ts` owns the phase: `parseMutateMode`,
-`workspaceMutateMode`, `evaluateMutateGate` and `describeMutateBlockers` are pure,
-so the decision is tested without a workspace, a clock or a file read. The
-opt-in is a workspace profile field:
+`workspaceWorkflowGate`, `evaluateMutateGate` and `describeMutateBlockers` (and,
+since 5b-2, `parseOpaqueMutatePolicy`, `evaluateOpaqueMutateGate`,
+`describeOpaqueMutateRefusal` and `describeOpaqueMutateAdmission`) are pure, so
+the decision is tested without a workspace, a clock or a file read. The opt-in is
+a workspace profile field:
 
 ```json
 { "workflowGate": { "mutate": "require_preparation" } }
@@ -642,17 +646,34 @@ decision, and makes the decision visible:
   names the tool, the missing subject and both ways out. It refuses on the
   subject, not on a guess about the command, so it cannot be fooled by a spelling;
 - a command the mutation policy already classifies `read` — a task `status`, a
-  `dry_run`, a read-only git subcommand — never reaches the phase. Everything else
-  does, including `git commit` and `pnpm test`, because the gateway cannot prove
+  `dry_run`, a read-only git subcommand — never reaches the phase. Everything in
+  the four-tool list that is not `read` does, so `refuse` refuses
+  `shell pnpm test` and `git commit` alike, because the gateway cannot prove
   either one harmless. That is the honest cost of `refuse`: it is a posture for a
   workspace whose mutations must all be path-bearing, not a filter that lets
   "ordinary" commands through.
 
-Two things this step does not claim. It does not gate a mutation that resolves no
-workspace (`validateHarnessMutation` still allows it before the profile is read),
-and it does not cover the other opaque tools — `mcp_call`, `codex_run`,
-`computer_use` — which keep the mutation-policy refusals they already had. Both
-are stated here rather than discovered later.
+The phase sees exactly those four tools and nothing else. Every other path-less
+mutation keeps the decision it already had, and `refuse` does not reach it:
+
+- the project-command tools — `project_dev`, `project_test`, `project_lint`,
+  `project_typecheck`, `project_build` — run a command the workspace configured,
+  not an argv the caller chose, so they are not the arbitrary-write hole `shell`
+  is. Refusing them would also block the verification step inside the very
+  workspace that opted in. The asymmetry is real and worth naming: `shell` with a
+  `pnpm test` argv is refused, `project_test` is not, because the second cannot
+  be pointed at a different command;
+- every other tool the mutation policy classifies `opaque_mutation`, `replace` or
+  `execute` without naming a path — `git_publish`, `office`, `docx_merge`,
+  `scheduler`, `self_heal_apply`, `agent_swarm_run`, `mcp_call`, `codex_run`,
+  `computer_use` — is not a command rewriting the workspace, which is the class
+  this step covers.
+
+The list, not the category, is the answer: `isOpaqueMutationTool` is the complete
+statement of what the phase sees, and a test pins it in both directions so a tool
+cannot fall out of coverage silently. It also does not gate a mutation that
+resolves no workspace: `validateHarnessMutation` still allows it before the
+profile is read. Both are stated here rather than discovered later.
 
 Three limits are worth stating plainly rather than discovering later:
 

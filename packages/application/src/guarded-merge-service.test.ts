@@ -414,7 +414,7 @@ describe('GuardedMergeService', () => {
     expect(calls).toEqual([]);
   });
 
-  it('compares hex SHAs case-insensitively while the evidence check stays exact', async () => {
+  it('compares hex SHAs case-insensitively in the preflight', async () => {
     const calls: GuardedMergeDispatchRequest[] = [];
     const upper = { ...subject, headSha: LETTERED_HEAD.toUpperCase() };
     const service = new GuardedMergeService(
@@ -426,5 +426,68 @@ describe('GuardedMergeService', () => {
     await expect(service.dispatch({ policy, subject: upper, receiptRef: RECEIPT_REF }))
       .resolves.toMatchObject({ status: 'dispatched' });
     expect(calls).toHaveLength(1);
+  });
+
+  it('keeps the receipt head comparison byte-exact', async () => {
+    // The preflight leniency above must not leak into the evidence rule: a
+    // receipt written for the same commit in another case is still a different
+    // string, and `evaluateMergeEvidence` refuses it.
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt(LETTERED_HEAD.toUpperCase()) }),
+      dispatchPort(calls),
+      subjectSource({ headSha: LETTERED_HEAD, baseSha: BASE }),
+    );
+
+    const result = await service.dispatch({
+      policy,
+      subject: { ...subject, headSha: LETTERED_HEAD },
+      receiptRef: RECEIPT_REF,
+    });
+    expect(result.status).toBe('blocked');
+    const codes = result.status === 'blocked'
+      ? result.decision.blockers.map((blocker) => blocker.code)
+      : [];
+    expect(codes).toContain('receipt_head_stale');
+    expect(calls).toEqual([]);
+  });
+
+  it('enforces the provider base when the caller omits baseSha', async () => {
+    // Omitting baseSha used to skip the receipt's base check entirely, because
+    // the evaluator only compares a base both sides carry. The provider read
+    // makes the base known, so it is no longer the caller's to omit.
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const { baseSha: _omitted, ...withoutBase } = subject;
+    const staleBase = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: { ...receipt(), baseSha: staleBase } }),
+      dispatchPort(calls),
+      subjectSource({ baseSha: BASE }),
+    );
+
+    await expect(service.dispatch({ policy, subject: withoutBase, receiptRef: RECEIPT_REF }))
+      .resolves.toMatchObject({
+        status: 'blocked',
+        decision: {
+          status: 'MERGE_BLOCKED',
+          blockers: [{ code: 'receipt_base_stale', expected: BASE, observed: staleBase }],
+        },
+      });
+    expect(calls).toEqual([]);
+  });
+
+  it('dispatches the subject the provider confirmed, not the object the caller sent', async () => {
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const { baseSha: _omitted, ...withoutBase } = subject;
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      dispatchPort(calls),
+      subjectSource({ baseSha: BASE }),
+    );
+
+    const result = await service.dispatch({ policy, subject: withoutBase, receiptRef: RECEIPT_REF });
+    expect(result).toMatchObject({ status: 'dispatched', subject: { baseSha: BASE } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.subject.baseSha).toBe(BASE);
   });
 });

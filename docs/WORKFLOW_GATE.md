@@ -308,6 +308,7 @@ Each step ships alone and leaves the repository working.
 | 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); **blocked** only on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
 | 4a ✅ | Repoint `GuardedMergeService` at the shared rule: the subject it evaluates is now read from the provider, so a receipt can only authorize the pull request GitHub holds, and the gate acts on that decision | shipped in #834: `subject_mismatch`/`subject_unavailable` refuse before the receipt is read; the corpus gains an enforcement suite that fails if a blocked decision ever dispatches; the runtime keeps its `MergeEvidenceBlocker` vocabulary and the CLI receipt format is unchanged |
 | 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
+| 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
 | 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
@@ -485,6 +486,15 @@ still read their own store, and the engine's `receipts(subject)` has no
 implementation to route them through. Converting the runtime's SQLite receipts
 into engine receipts is not a refactor that changes no behaviour, so it waits for
 the receipt store rather than being faked here (open question 3).
+
+Step 4c closed the hole the 4a review found. `baseSha` is optional on a merge
+subject and `evaluateMergeEvidence` only compares a base both sides carry, so a
+caller that omitted `baseSha` still skipped `receipt_base_stale` even though the
+service held the provider's base. The evaluator now receives the subject the
+provider confirmed rather than the object the caller sent: the base is no longer
+the caller's to omit, and the dispatched subject is the one that was authorized.
+The receipt reuse path matches on `baseSha` before it reuses a receipt, so a
+retargeted pull request is re-verified instead of being refused forever.
 
 ---
 

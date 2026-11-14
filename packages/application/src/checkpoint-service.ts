@@ -98,8 +98,8 @@ export class CheckpointService implements CheckpointServicePort {
   /**
    * One checkpoint by id, for a caller that needs the subject a restore names
    * rather than a listing. A checkpoint that belongs to another workspace is
-   * reported as absent on purpose: the caller must not learn that it exists, and
-   * the mutating path refuses that case explicitly in `restore`.
+   * reported as absent, so this read cannot confirm that it exists; `restore` is
+   * the path that names that case explicitly with `PERMISSION_DENIED`.
    *
    * This is the read that lets `restore_checkpoint` resolve its subject from the
    * id it was given instead of scanning a window of recent checkpoints and

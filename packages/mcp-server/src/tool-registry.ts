@@ -1299,10 +1299,17 @@ export class ToolRegistry {
   }
 
   /**
-   * The one definition of "this target can carry a preparation": the file
-   * service reads it as text. `prepare_code_change` binds its receipt to exactly
-   * this content, so a path that fails here cannot be prepared, and the mutate
-   * gate must not demand a preparation it knows cannot be produced.
+   * The one definition of "this target can carry a preparation in the mode that
+   * binds a receipt to it": the file service reads it as text.
+   * `prepare_code_change` binds to exactly this content, so a path that fails
+   * here cannot be prepared that way, and the mutate gate must not demand a
+   * preparation the same mode could not produce.
+   *
+   * Trusted Full Bypass is the exception and stays one: there
+   * `prepare_code_change` registers a path without reading it, so an absent
+   * target can carry a preparation. This predicate is the binding mode's
+   * definition on purpose — the reduction below is what keeps the opt-in mode
+   * satisfiable, and a bypass exists to skip evidence, not to require it.
    *
    * One predicate, because the two answers have to stay identical. If the
    * binding side ever tightens — a size cap, a symlink rule, an identity check —
@@ -2000,7 +2007,8 @@ export class ToolRegistry {
   }
 
   /**
-   * The subset of a store-named subject that can actually carry a preparation.
+   * The subset of a store-named subject that can carry a binding preparation.
+   *
    * A path that `prepare_code_change` could not bind has no gate to satisfy and
    * must not be demanded as if it did: absence is the normal case for a delete
    * recovery, and refusing it would break the flow the recovery trash exists

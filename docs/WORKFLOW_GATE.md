@@ -584,14 +584,17 @@ the current bytes and refuses an absent target with `pre-edit-target-unreadable`
 — so demanding one would refuse the flow the recovery trash exists for, forever,
 rather than gating it. The subject is therefore reduced to the store-named paths
 that can be prepared, and when none of them can, the restore demands no
-preparation. It is still a path-bearing subject, so the phase's harness checks
-still run first: a workspace that opted in and has no active harness is refused
-with `harness_inactive` for that restore, which is one refusal more than it had
-before it had a subject. Under Trusted Full Bypass the premise is weaker —
-`prepare_code_change` registers a path without reading it — so an absent target
-*can* carry a preparation there; the reduction does not special-case that mode,
-because a bypass exists to skip evidence, not to require it. Three further limits
-are deliberate:
+preparation. It is still a path-bearing subject, so when the store names at
+least one development artifact the phase's harness checks run before the
+preparation is asked for: a workspace that opted in and has no active harness is
+refused with `harness_inactive` for that restore, which is one refusal more than
+it had before it had a subject. A store that names only non-artifacts resolves
+to an empty artifact list, and an empty list is allowed early — that is what a
+restore of a documentation file does today and what it did before. Under
+Trusted Full Bypass the premise is weaker — `prepare_code_change` registers a
+path without reading it — so an absent target *can* carry a preparation there;
+the reduction does not special-case that mode, because a bypass exists to skip
+evidence, not to require it. Three further limits are deliberate:
 
 - a store that cannot answer — an unknown id, a store this deployment does not
   wire, an unreadable store — resolves to an opaque subject, not to an invented

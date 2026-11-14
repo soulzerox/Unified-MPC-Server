@@ -319,7 +319,7 @@ Each step ships alone and leaves the repository working.
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
-| 5b-3 ⏸ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excludes (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `mcp_call`, `codex_run`, `computer_use`) | not started, and named here so 5b-2 can be ✅ without implying the class is closed: `refuse` is not a containment boundary while those channels can still write |
+| 5b-3 ⏸ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excludes (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`) | not started, and named here so 5b-2 can be ✅ without implying the class is closed: `refuse` is not a containment boundary while those channels can still write |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -656,6 +656,13 @@ decision, and makes the decision visible:
   workspace whose mutations must all be path-bearing, not a filter that lets
   "ordinary" commands through.
 
+Widening the call site has one cost worth stating: a non-`read` call to one of
+those four tools now reads the workspace profile before the phase is known to be
+off, so a workspace that never opted in pays one file read per command call — the
+same read a coding mutation already pays — and its decision is unchanged. Paying
+that read is what makes the phase's answer a property of the workspace rather
+than of the tool the caller happened to use.
+
 The phase sees exactly those four tools and nothing else. Every other path-less
 mutation keeps the decision it already had, and `refuse` does not reach it:
 
@@ -668,8 +675,8 @@ mutation keeps the decision it already had, and `refuse` does not reach it:
   be pointed at a different command;
 - every other tool the mutation policy classifies `opaque_mutation`, `replace` or
   `execute` without naming a path — `git_publish`, `office`, `docx_merge`,
-  `scheduler`, `self_heal_apply`, `agent_swarm_run`, `mcp_call`, `codex_run`,
-  `computer_use` — keeps the decision it already had. That is a scope line, not a
+  `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`,
+  `codex_run`, `computer_use` — keeps the decision it already had. That is a scope line, not a
   claim about their shape: `codex_run`, `agent_swarm_run` and `self_heal_apply`
   do run code that can rewrite the workspace, so `refuse` is **not** a
   containment boundary for a workspace that has them enabled. Until a later step

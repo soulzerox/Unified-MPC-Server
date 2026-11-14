@@ -1,6 +1,13 @@
+import {
+  GuardedMergeService,
+  type GuardedMergeAuthoritativeSubject,
+  type GuardedMergeDispatchRequest,
+  type GuardedMergeReceiptRecord,
+} from '@unified-mpc/application';
 import { evaluateMergeEvidence } from '@unified-mpc/domain';
 import type {
   MergeEvidenceBlockerCode,
+  MergeEvidenceSubject,
   MergeReviewOutcome,
   MergeVerificationReceipt,
   RepositoryMergePolicy,
@@ -234,14 +241,18 @@ function runtimeReceipt(scenario: Scenario): MergeVerificationReceipt | undefine
   };
 }
 
-function runtimeVerdict(scenario: Scenario): { allowed: boolean; codes: readonly string[] } {
-  const decision = evaluateMergeEvidence(runtimePolicy(), {
+function subjectFor(scenario: Scenario): MergeEvidenceSubject {
+  return {
     repository: REPOSITORY,
     pullRequest: PULL_REQUEST,
     headSha: HEAD,
     baseBranch: scenario.baseBranch === 'other' ? 'develop' : 'main',
     baseSha: BASE,
-  }, runtimeReceipt(scenario));
+  };
+}
+
+function runtimeVerdict(scenario: Scenario): { allowed: boolean; codes: readonly string[] } {
+  const decision = evaluateMergeEvidence(runtimePolicy(), subjectFor(scenario), runtimeReceipt(scenario));
   return {
     allowed: decision.status === 'MERGE_ALLOWED',
     codes: decision.blockers.map((blocker) => blocker.code),
@@ -393,5 +404,98 @@ describe('merge evidence conformance', () => {
 
     const runtimeOnly = SCENARIOS.filter((scenario) => scenario.scope === 'runtime-only');
     expect(runtimeOnly.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+/**
+ * A decision is not a gate. The rows above prove the two evaluators agree; this
+ * suite proves the runtime's gate acts on that agreement, because a refactor
+ * that computed the right blocker and dispatched anyway would leave the verdict
+ * table green.
+ */
+describe('merge dispatch enforcement', () => {
+  const RECEIPT_REF = 'merge-verification:142@aaaaaaaaaaa';
+
+  function serviceFor(
+    scenario: Scenario,
+    dispatched: GuardedMergeDispatchRequest[],
+  ): GuardedMergeService {
+    return new GuardedMergeService(
+      {
+        async getByRef(receiptRef: string): Promise<GuardedMergeReceiptRecord | undefined> {
+          const receipt = runtimeReceipt(scenario);
+          return receipt === undefined ? undefined : { receiptRef, receipt };
+        },
+      },
+      {
+        async dispatchMerge(request: GuardedMergeDispatchRequest): Promise<void> {
+          dispatched.push(request);
+        },
+      },
+      {
+        async read(): Promise<GuardedMergeAuthoritativeSubject> {
+          // The provider agrees with the caller, so only the evidence rule can
+          // refuse a row: the enforcement claim stays about the shared rule.
+          const subject = subjectFor(scenario);
+          return { headSha: subject.headSha, baseBranch: subject.baseBranch, baseSha: BASE };
+        },
+      },
+    );
+  }
+
+  it('never dispatches a blocked row and dispatches the allowed one exactly once', async () => {
+    const failures: string[] = [];
+    for (const scenario of SCENARIOS) {
+      const dispatched: GuardedMergeDispatchRequest[] = [];
+      const result = await serviceFor(scenario, dispatched).dispatch({
+        policy: runtimePolicy(),
+        subject: subjectFor(scenario),
+        receiptRef: RECEIPT_REF,
+      });
+
+      const expectedStatus = scenario.expected === 'allowed' ? 'dispatched' : 'blocked';
+      if (result.status !== expectedStatus) {
+        failures.push(`${scenario.name}: the service returned ${result.status}, expected ${expectedStatus}`);
+      }
+      const expectedDispatches = scenario.expected === 'allowed' ? 1 : 0;
+      if (dispatched.length !== expectedDispatches) {
+        failures.push(`${scenario.name}: dispatched ${String(dispatched.length)} merge(s), expected ${String(expectedDispatches)}`);
+      }
+      if (scenario.expected === 'allowed' && dispatched[0]?.subject.headSha !== HEAD) {
+        failures.push(`${scenario.name}: dispatched a subject other than the verified head`);
+      }
+    }
+
+    expect(failures).toEqual([]);
+  });
+
+  it('refuses a caller subject the provider no longer holds', async () => {
+    const dispatched: GuardedMergeDispatchRequest[] = [];
+    const receipt = runtimeReceipt(PASSING_ROW);
+    if (receipt === undefined) throw new Error('the passing row must carry a receipt');
+    const service = new GuardedMergeService(
+      {
+        async getByRef(receiptRef: string): Promise<GuardedMergeReceiptRecord> {
+          return { receiptRef, receipt };
+        },
+      },
+      {
+        async dispatchMerge(request: GuardedMergeDispatchRequest): Promise<void> {
+          dispatched.push(request);
+        },
+      },
+      {
+        async read(): Promise<GuardedMergeAuthoritativeSubject> {
+          return { headSha: OTHER_HEAD, baseBranch: 'main', baseSha: BASE };
+        },
+      },
+    );
+
+    await expect(service.dispatch({
+      policy: runtimePolicy(),
+      subject: subjectFor(PASSING_ROW),
+      receiptRef: RECEIPT_REF,
+    })).resolves.toMatchObject({ status: 'inspect_required', reason: 'subject_mismatch' });
+    expect(dispatched).toEqual([]);
   });
 });

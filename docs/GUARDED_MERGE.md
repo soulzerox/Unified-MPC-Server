@@ -5,6 +5,11 @@ refuses to merge unless the host can prove, from durable local state, that the
 exact current head was verified. The GitHub-side provider then repeats the head
 check so a branch that moved after verification is rejected by GitHub itself.
 
+The caller names the pull request it wants merged; it does not get to say what
+that pull request is. Before any receipt is read, the runtime asks GitHub for the
+current head, base branch and base commit and refuses when the caller's subject
+disagrees. A receipt can only authorize the pull request the provider holds.
+
 ---
 
 ## 1. Evidence Chain
@@ -16,8 +21,9 @@ merge_verification_run      clean registered workspace at the exact PR head
 durable verification receipt (SQLite, keyed by repository + PR + head SHA)
         |
         v
-guarded_pr_merge            host-owned merge policy + receipt evidence
-        |                   caller cannot supply policy, gates or verdict
+guarded_pr_merge ────────── reads the PR again: current head, base branch
+        |                   and base commit. A stale caller subject is
+        |                   refused before the receipt is read.
         v
 provider merge              exact expected head SHA sent with the request
         |
@@ -27,7 +33,10 @@ GitHub                      rejects the merge if the head moved
 
 The evidence evaluation lives inside `GuardedMergeService`; it is not a registry
 approval that Trusted Full Bypass can skip. Missing, stale, rejected or
-mismatched evidence keeps the result `blocked` before any provider call.
+mismatched evidence keeps the result `blocked` before any provider call. A
+subject that cannot be confirmed is a different answer: the result is
+`inspect_required` with `subject_unavailable` or `subject_mismatch`, because the
+caller has to re-read the pull request rather than collect more evidence.
 
 An identical repeat request — same head, base, verification mode and review
 evidence — returns the persisted receipt with its original `receiptRef` instead of
@@ -116,6 +125,8 @@ error with sanitized detail and no credentials.
 | Condition | Tool result |
 |---|---|
 | No authoritative merge policy for the repository | `PERMISSION_DENIED` |
+| Pull request closed, merged, or unreadable | `CONFLICT` (`subject_unavailable`) |
+| Caller subject no longer matches the pull request | `CONFLICT` (`subject_mismatch`) |
 | Receipt missing, stale, rejected, or for another head | `PERMISSION_DENIED` (blocked by evidence) |
 | Built-in CLI missing, unauthenticated, or network failure | `CONFLICT` (`merge_dispatch_error`) |
 | GitHub refuses the merge (head moved, not mergeable, protected branch) | `CONFLICT` (`merge_dispatch_error`) |
@@ -135,6 +146,14 @@ request proves what GitHub is merging. Both must match the same commit:
 - If the receipt is for another head, `GuardedMergeService` blocks locally.
 - If the branch moves after verification, GitHub rejects the stale `sha`.
 - A concurrent push can therefore never inherit an older verification.
+
+The same provider read is what makes the base branch check honest. The policy
+names a default branch, and the evaluator compares the caller's `baseBranch`
+against it — but a comparison against a caller's claim only proves the caller can
+read the policy. A caller that names `main` for a pull request GitHub says targets
+`release` is refused with `subject_mismatch` before the policy check can be
+satisfied by the claim, so a merge cannot land on a branch the policy was never
+written for.
 
 ---
 

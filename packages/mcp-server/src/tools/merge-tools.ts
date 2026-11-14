@@ -86,7 +86,7 @@ export function mergeTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'guarded_pr_merge',
-      description: 'Merge one pull request only through the host-owned repository policy and a durable exact-head verification receipt. Caller-supplied policy overrides are not accepted. The provider merge is bound to the requested exact head and is never dispatched when evidence is missing, stale, rejected, or unavailable.',
+      description: 'Merge one pull request only through the host-owned repository policy and a durable exact-head verification receipt. Caller-supplied policy overrides are not accepted. The pull request is read from GitHub first: a caller subject whose head, base branch or base commit no longer matches is refused instead of merged. The provider merge is bound to the requested exact head and is never dispatched when evidence is missing, stale, rejected, or unavailable.',
       permission: 'DANGEROUS',
       annotations: {
         readOnlyHint: false,

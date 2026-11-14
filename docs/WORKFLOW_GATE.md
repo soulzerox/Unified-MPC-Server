@@ -176,7 +176,7 @@ Required evidence per gate, all keyed by the resolved subject:
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
 | `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
-| `close` | merge evidence for the head, base revision known, cleanup disposition `retention_candidate` | partially (cleanup evaluation and `goalCompletionWorktreeBlockers` exist; the workflow gate does not) |
+| `close` | cleanup disposition `retention_candidate`, worktree removal `clean`, no completion blocker; merge evidence and a known base are the routing inputs a later step adds | partially: #828 ships the decision over the three close inputs and a decision receipt; it reads no head, base or merge evidence yet (see "Status after step 3a") |
 
 Workflows are versioned data, not code: a profile names the phases and gates it
 requires. The engine owns the semantics.

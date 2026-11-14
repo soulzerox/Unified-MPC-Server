@@ -27,7 +27,8 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  * command yet. Wiring the ports needs a worktree-removal preview that can run as
  * the session that owns the worktree, and a durable-reference source for
  * `evaluateGoalWorkspaceCleanup`; until both exist the command would refuse every
- * goal. Those are the step 3b prerequisites in `docs/WORKFLOW_GATE.md`.
+ * goal. Those are the step 3b prerequisites recorded in `docs/WORKFLOW_GATE.md`
+ * ("Status after step 3a").
  */
 
 /** Worktree safety as the `git_worktree_remove` dry run reports it. */
@@ -43,7 +44,12 @@ export interface CloseGateRemovalPreview {
 export interface CloseGateInput {
   readonly workspaceId: string;
   readonly goalId?: string;
-  /** Every cleanup evaluation the caller could produce; rows for other goals are ignored. */
+  /**
+   * Every cleanup evaluation the caller could produce. When `goalId` is set,
+   * rows for other goals and other workspaces are ignored. Without `goalId` the
+   * decision is workspace-only, so every row in the workspace is in scope and a
+   * sibling goal's disposition can refuse the close.
+   */
   readonly cleanup: readonly WorkspaceLifecycleCleanupEvaluation[];
   readonly removals: readonly CloseGateRemovalPreview[];
   readonly completion: readonly GoalCompletionWorktreeBlocker[];
@@ -143,8 +149,13 @@ export function evaluateCloseGate(input: CloseGateInput): CloseGateVerdict {
  * Canonical, decision-relevant projection of the inputs.
  *
  * `evaluations` is the filtered set the verdict actually used, not every row the
- * caller produced: an unrelated goal's cleanup state changing must not invalidate
- * a receipt that describes this goal.
+ * caller produced: in goal mode, an unrelated goal's cleanup state changing must
+ * not invalidate a receipt that describes this goal. Workspace-only mode
+ * deliberately uses every row in the workspace.
+ *
+ * The projection is independent of input order even when two rows share a sort
+ * key: the sort compares the whole canonical row as a tie-breaker, and the string
+ * comparison is by code unit rather than locale data.
  */
 function closeGateFingerprint(
   input: CloseGateInput,
@@ -159,22 +170,30 @@ function closeGateFingerprint(
         workspaceId: evaluation.workspaceId,
         goalId: evaluation.goalId ?? null,
         disposition: evaluation.disposition,
-        blockers: [...evaluation.blockers].sort(),
+        blockers: [...evaluation.blockers].sort(compareText),
       }))
-      .sort((left, right) => (left.goalId ?? '').localeCompare(right.goalId ?? '')
-        || left.workspaceId.localeCompare(right.workspaceId)),
+      .sort((left, right) => compareText(left.goalId ?? '', right.goalId ?? '')
+        || compareText(left.workspaceId, right.workspaceId)
+        || compareText(JSON.stringify(left), JSON.stringify(right))),
     removals: input.removals
       .map((removal) => ({
         worktreePath: removal.worktreePath,
         status: removal.status,
-        blockers: [...removal.blockers].sort(),
+        blockers: [...removal.blockers].sort(compareText),
       }))
-      .sort((left, right) => left.worktreePath.localeCompare(right.worktreePath)),
+      .sort((left, right) => compareText(left.worktreePath, right.worktreePath)
+        || compareText(JSON.stringify(left), JSON.stringify(right))),
     completion: input.completion
-      .map((entry) => ({ worktreePath: entry.worktreePath, blockers: [...entry.blockers].sort() }))
-      .sort((left, right) => left.worktreePath.localeCompare(right.worktreePath)),
+      .map((entry) => ({ worktreePath: entry.worktreePath, blockers: [...entry.blockers].sort(compareText) }))
+      .sort((left, right) => compareText(left.worktreePath, right.worktreePath)
+        || compareText(JSON.stringify(left), JSON.stringify(right))),
   });
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
+/** Code-unit order: unlike `localeCompare`, it does not depend on ICU data. */
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 /**
@@ -287,6 +306,10 @@ function parseCloseGateBlocker(value: unknown): CloseGateBlocker | undefined {
     case 'cleanup':
       return typeof value.workspaceId === 'string'
         && isCleanupDisposition(value.disposition)
+        // `evaluateCloseGate` skips a candidate row, so it never emits a cleanup
+        // blocker with a passing disposition; accepting one would let a foreign
+        // file print "refused ... is retention_candidate".
+        && value.disposition !== 'retention_candidate'
         && isStringArray(value.reasons)
         ? { kind: 'cleanup', workspaceId: value.workspaceId, disposition: value.disposition, reasons: [...value.reasons] }
         : undefined;
@@ -366,7 +389,7 @@ function describeBlocker(blocker: CloseGateBlocker): string {
     case 'cleanup':
       return `  workspace ${blocker.workspaceId} is ${blocker.disposition}${blocker.reasons.length === 0 ? '' : ` (${blocker.reasons.join(', ')})`}`;
     case 'cleanup_unclassified':
-      return `  workspace ${blocker.workspaceId} has no cleanup evaluation for this goal`;
+      return `  workspace ${blocker.workspaceId} has no cleanup evaluation in scope`;
     case 'removal':
       return `  worktree ${blocker.worktreePath} removal is ${blocker.status}${blocker.blockers.length === 0 ? '' : ` (${blocker.blockers.join(', ')})`}`;
     case 'completion':

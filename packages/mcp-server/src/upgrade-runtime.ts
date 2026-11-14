@@ -12,7 +12,11 @@ import {
   type InvocationAuthorization,
   type Result,
 } from '@unified-mpc/domain';
-import { goalWorktreeRemovalBlockers, type FileActor, type GoalWorktreeBlocker } from '@unified-mpc/application';
+import {
+  goalWorktreeRemovalPreview,
+  type FileActor,
+  type GoalWorktreeBlocker,
+} from '@unified-mpc/application';
 import { capabilityDescriptors, EventLogCapabilityBackend, type CapabilityDescriptor } from '@unified-mpc/capabilities';
 import { skillQueryIsRanked } from '@unified-mpc/extensions';
 import { createProcessTreeTerminator } from '@unified-mpc/process';
@@ -2156,14 +2160,14 @@ export class UpgradeRuntimeService {
         true,
       ));
     }
-    const blockers = goalWorktreeRemovalBlockers(entry.blockers);
+    const preview = goalWorktreeRemovalPreview(entry);
     return ok({
-      status: blockers.length === 0 ? 'clean' : 'blocked',
-      blockers,
-      blockerDetails: entry.blockerDetails,
+      status: preview.status,
+      blockers: preview.blockers,
+      blockerDetails: preview.blockerDetails,
       // `path_missing` returns before any removal blocker is derived, so a
       // missing path never weakens a refusal that holds recoverable work.
-      pathMissing: entry.blockers.includes('path_missing'),
+      pathMissing: preview.pathMissing,
     });
   }
 

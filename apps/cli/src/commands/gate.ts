@@ -14,8 +14,9 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  *
  * - `WorkspaceService.evaluateGoalWorkspaceCleanup` owns workspace disposition
  *   (`blocked` | `retention_pending` | `retention_candidate`).
- * - the `git_worktree_remove` dry run owns worktree safety per path
- *   (`clean` | `blocked` | `unavailable`).
+ * - `createGoalWorktreeRemovalPreviewPort` owns worktree safety per path
+ *   (`clean` | `blocked`), with the same question answerable by the
+ *   `git_worktree_remove` dry run when the asking session owns the worktree.
  * - `goalCompletionWorktreeBlockers` owns goal-completion blockers
  *   (`dirty` | `unmerged_changes` | `probe_failed`).
  *
@@ -24,14 +25,20 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  * takes its three inputs as ports instead of reaching for a runtime.
  *
  * This slice stops at the decision: `apps/cli/src/index.ts` routes no `gate`
- * command yet. Wiring the ports needs a worktree-removal preview that can run as
- * the session that owns the worktree, and a durable-reference source for
- * `evaluateGoalWorkspaceCleanup`; until both exist the command would refuse every
- * goal. Those are the step 3b prerequisites recorded in `docs/WORKFLOW_GATE.md`
- * ("Status after step 3a").
+ * command yet. Wiring the ports needs a durable-reference source for
+ * `evaluateGoalWorkspaceCleanup`; until it exists the command would refuse every
+ * goal. The removal preview is no longer a blocker: the client-scoped
+ * `createGoalWorktreeRemovalPreviewPort` in `packages/application` answers it
+ * without the owning session (open question 5). This is recorded in
+ * `docs/WORKFLOW_GATE.md` ("Status after step 3a").
  */
 
-/** Worktree safety as the `git_worktree_remove` dry run reports it. */
+/**
+ * Worktree safety per path. The client-scoped removal preview reports
+ * `clean` | `blocked`; the `git_worktree_remove` dry run can additionally report
+ * `unavailable` when its safety evidence is missing. Every status other than
+ * `clean` refuses the close.
+ */
 export interface CloseGateRemovalPreview {
   readonly worktreePath: string;
   readonly status: 'clean' | 'blocked' | 'unavailable';

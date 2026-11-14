@@ -23,9 +23,10 @@ runtime adapter over the same rule. That rule — evidence must exist, and it mu
 name this exact pull request, head and base, with a review that is not a
 rejection — has one owner, the conformance corpus in
 `apps/cli/src/workflow-gate-conformance.test.ts`, and both evaluators are
-adapters it holds to it. The runtime receipt additionally names a repository;
-the CLI profile receipt has no such field, so that clause is recorded as
-runtime-only rather than folded into the shared set. They are not copies of one
+adapters it holds to it. Both receipts also record a repository, but only the
+runtime evaluator compares it — the CLI review receipt's `repository` field is
+written and never read — so that clause is recorded as runtime-only rather than
+folded into the shared set or quietly dropped. They are not copies of one
 function: the runtime receipt carries a verification mode, a gate list and a
 review outcome, while the CLI receipt carries a profile version, a clean-tree
 diff fingerprint and a findings document. Forcing those into one shape would
@@ -409,29 +410,30 @@ the same decision: the passing row, then exactly one field broken per row —
 missing verification, missing review, a rejected review, a foreign head on either
 receipt, a foreign base commit, a foreign base branch, a foreign pull request.
 `runtime-only` rows exist where
-only one world records the field: the runtime receipt names a repository and the
-CLI profile receipt does not, so the corpus pins the runtime's refusal and
-records the asymmetry instead of claiming a CLI assertion it cannot make.
+only one evaluator compares the field. Both receipts record a repository; the
+runtime refuses a foreign one and `evaluateReviewEvidence` never looks at it, so
+the row asserts the runtime's refusal *and* that the CLI still allows the head.
+That records the gap instead of hiding it, and fails the day the CLI starts
+enforcing the clause — which is when the row must move to the shared table.
 
 Every blocked row also names the refusal it must produce (`receipt_head_stale`
 and `/verification receipt was produced for a different head/`, and so on), so a
 row cannot be satisfied by an unrelated blocker that fires first. The suite also
 pins that the corpus is not vacuous — one passing row, eight distinct shared
 refusals with a CLI counterpart each — so an evaluator that refuses everything
-cannot satisfy it. Rows are added when a shared clause is found rather than when
-a reviewer asks: the base-branch row exists because the first two heads varied
-the base commit but never the branch, and both evaluators check both.
+cannot satisfy it.
 
 The corpus binds the two profile rules through `createGatePolicy`'s injected
 `{ profileVersion, fingerprintFor }` instead of reading this checkout's profile,
 which is the seam #821 built for exactly this. It reads no files and runs no
 commands. It does import `@unified-mpc/domain`, whose `exports` maps the
-`development` condition to its source and `default` to its `dist`: under the
-merge profile's vitest run (`NODE_ENV` unset) that is the source, so the suite
-needs no build, and with `NODE_ENV=production` it needs one. It runs in
-`apps/cli`'s `test:cli` step rather than the pre-build `.mjs` gate step, and adds
-no workspace project and no profile step, so neither the merge step set nor
-`PROFILE_VERSION` changes.
+`development` condition to its source and `default` to its `dist`. With
+`NODE_ENV` unset — the default for `verify:local`, which inherits the ambient
+environment — that is the source, so the suite needs no build; under
+`NODE_ENV=production` it resolves `dist` and needs one. It runs in `apps/cli`'s
+`test:cli` step rather than the pre-build `.mjs` gate step, and adds no workspace
+project and no profile step, so neither the merge step set nor `PROFILE_VERSION`
+changes.
 
 Nothing else about step 2 changes: `GuardedMergeService` keeps its own receipt
 reader and its `MergeEvidenceBlocker` vocabulary. Step 4 is the slice that
@@ -488,9 +490,10 @@ bump.
    exist, and it must name this exact pull request, head and base, with a review
    that is not a rejection*. That rule is now owned by
    `apps/cli/src/workflow-gate-conformance.test.ts`, which runs both real
-   evaluators over one scenario table and fails if they disagree. The runtime's
-   repository clause is recorded as `runtime-only`, because the CLI receipt has
-   no field for it.
+   evaluators over one scenario table and fails if they disagree. The repository
+   clause is recorded as `runtime-only`: both receipts carry the field, but only
+   the runtime evaluator compares it, and `evaluateReviewEvidence` has no
+   repository to compare against.
 
    Rejected route 1 (build-free package with hand-written declarations) because
    the declarations would be a hand-maintained mirror of the implementation, and

@@ -23,17 +23,22 @@ import { describe, expect, it } from 'vitest';
  * disagree fails here. It is the only place allowed to import both worlds —
  * `apps/cli` is the composition root that already binds both.
  *
- * A row is either `shared` (both worlds carry the field, and both must reach the
- * same decision) or `runtime-only` (only the runtime receipt records it, so the
- * corpus pins the runtime's refusal and records that the CLI cannot express the
- * clause). Marking a clause shared when one side has no field for it would let
- * the corpus claim coverage it does not have.
+ * A row is either `shared` (both evaluators compare the field, and both must
+ * reach the same decision) or `runtime-only` (only the runtime evaluator compares
+ * it). The distinction is about enforcement, not about the receipt shape: the CLI
+ * review receipt does record `repository`, but `evaluateReviewEvidence` has no
+ * repository to compare it against and never looks at it, while
+ * `evaluateMergeEvidence` refuses a foreign one. A `runtime-only` row therefore
+ * asserts the runtime's refusal *and* that the CLI still allows the head — so the
+ * corpus records the gap instead of hiding it, and fails the day the CLI starts
+ * enforcing the clause, which is the signal to promote the row to `shared`.
  *
  * It imports `@unified-mpc/domain`, whose `exports` maps the `development`
- * condition to its source and `default` to its `dist`. Under the merge profile's
- * vitest run (`NODE_ENV` unset) that is the source, so this file needs no build;
- * it still runs in `test:cli`, after `build`, rather than in the pre-build
- * `.mjs` gate step.
+ * condition to its source and `default` to its `dist`. With `NODE_ENV` unset —
+ * the default for `verify:local` — that is the source, so this file needs no
+ * build; the merge profile inherits the ambient environment, so under
+ * `NODE_ENV=production` it resolves `dist` and needs one. It runs in `test:cli`,
+ * after `build`, rather than in the pre-build `.mjs` gate step.
  */
 
 const HEAD = 'a'.repeat(40);
@@ -66,7 +71,10 @@ interface Scenario {
   readonly pullRequest: 'subject' | 'other';
   /** The subject targets another base branch. Both worlds compare it. */
   readonly baseBranch?: 'subject' | 'other';
-  /** Evidence names another repository. Only the runtime receipt records it. */
+  /**
+   * Evidence names another repository. Both receipts record it; only the runtime
+   * evaluator compares it.
+   */
   readonly repository?: 'subject' | 'other';
   readonly expected: 'allowed' | 'blocked';
   /**
@@ -262,6 +270,7 @@ function cliVerdict(scenario: Scenario, modules: CliModules): { allowed: boolean
   const review = scenario.review
     ? {
         role: 'reviewer',
+        repository: scenario.repository === 'other' ? 'someone/else' : REPOSITORY,
         prNumber: scenario.pullRequest === 'other' ? PULL_REQUEST + 1 : PULL_REQUEST,
         baseSha: scenario.base === 'subject' ? BASE : OTHER_BASE,
         headSha: scenario.reviewHead === 'subject' ? HEAD : OTHER_HEAD,
@@ -343,23 +352,25 @@ describe('merge evidence conformance', () => {
     expect(failures).toEqual([]);
   });
 
-  it('runtime-only rows: the runtime refuses and the row claims no CLI proof', () => {
+  it('runtime-only rows: the runtime refuses the head the CLI still allows', async () => {
+    const modules = await loadCliModules();
     const failures = SCENARIOS.filter((scenario) => scenario.scope === 'runtime-only').flatMap((scenario) => {
       const runtime = runtimeVerdict(scenario);
+      const cli = cliVerdict(scenario, modules);
       const problems: string[] = [];
+
       if (runtime.allowed) problems.push(`${scenario.name}: runtime allowed the head`);
-      if (scenario.proof !== null) {
-        if (!runtime.codes.includes(scenario.proof.runtime)) {
-          problems.push(`${scenario.name}: runtime did not report ${scenario.proof.runtime} (got ${runtime.codes.join(', ')})`);
-        }
-        // Nothing to assert on the CLI side: its profile receipt has no
-        // repository field, so this adapter cannot vary it and no assertion here
-        // could detect the CLI gaining one. The row records the asymmetry rather
-        // than pretending to test it; a future CLI receipt that carries a
-        // repository needs a new shared row, not a tightened check in this one.
-        if (scenario.proof.cli !== null) {
-          problems.push(`${scenario.name}: a runtime-only row must not claim a CLI proof`);
-        }
+      if (scenario.proof !== null && !runtime.codes.includes(scenario.proof.runtime)) {
+        problems.push(`${scenario.name}: runtime did not report ${scenario.proof.runtime} (got ${runtime.codes.join(', ')})`);
+      }
+      // The known gap is part of the record. If the CLI starts refusing this
+      // head the clause is enforced on both sides, and the row must move to the
+      // shared table rather than keep asserting a gap that no longer exists.
+      if (!cli.allowed) {
+        problems.push(`${scenario.name}: the CLI now refuses this head, so the clause is shared — move the row to SCENARIOS as scope 'shared'`);
+      }
+      if (scenario.proof !== null && scenario.proof.cli !== null) {
+        problems.push(`${scenario.name}: a runtime-only row asserts that the CLI allows, so it must not also claim a CLI refusal`);
       }
       return problems;
     });

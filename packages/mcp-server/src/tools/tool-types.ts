@@ -328,7 +328,7 @@ export interface McpApplicationServices {
   readonly projectSnapshot?: ProjectSnapshotPort;
   readonly project?: Pick<ProjectService, 'detect'>;
   readonly file?: Pick<FileService, 'readFile' | 'readFiles' | 'writeFile' | 'applyPatch' | 'editFile' | 'moveFile' | 'copyFile' | 'deleteFile' | 'listRecoveryItems' | 'restoreDeletedFile' | 'prepareExternalFileMutation'>;
-  readonly checkpoint?: Pick<CheckpointService, 'list' | 'restore'>;
+  readonly checkpoint?: Pick<CheckpointService, 'get' | 'list' | 'restore'>;
   /** Internal durable resource ownership store; raw host identities never cross MCP responses. */
   readonly managedResourceBindings?: ManagedResourceBindingPort;
   readonly goals?: Pick<GoalContinuationService, 'runGoal' | 'getGoal' | 'getGoalExecution' | 'checkpointGoal' | 'finishGoal' | 'cancelGoal' | 'cancelGoalExecution' | 'reconcileGoals' | 'listGoals'>;

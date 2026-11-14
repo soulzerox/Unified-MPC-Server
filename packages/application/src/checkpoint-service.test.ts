@@ -74,6 +74,35 @@ describe('CheckpointService', () => {
     expect(JSON.stringify(listed)).not.toContain('secret-before-content');
   });
 
+  it('reads one checkpoint by id without scanning or leaking another workspace', async () => {
+    const { workspace, checkpoints } = await setup();
+    await checkpoints.insert({
+      id: 'checkpoint-old', workspaceId: workspace.id, createdAt: new Date(0).toISOString(),
+      files: [{ path: 'src/old.ts', content: 'secret-old-content', contentSha256: 'hash-1', size: 18 }],
+    });
+    await checkpoints.insert({
+      id: 'checkpoint-foreign', workspaceId: 'workspace-2', createdAt: new Date(0).toISOString(),
+      files: [{ path: 'src/foreign.ts', content: 'secret-foreign-content', contentSha256: 'hash-2', size: 22 }],
+    });
+    const service = new CheckpointService(workspaces(workspace), checkpoints);
+
+    // The id is the subject: an old checkpoint answers exactly like a new one,
+    // which is what stops "older than the scan window" from reading as "nothing
+    // to prepare".
+    const found = await service.get(workspace.id, 'checkpoint-old');
+    expect(found).toMatchObject({ ok: true, value: {
+      id: 'checkpoint-old',
+      workspaceId: workspace.id,
+      files: [{ path: 'src/old.ts', size: 18, contentSha256: 'hash-1' }],
+    } });
+    expect(JSON.stringify(found)).not.toContain('secret-old-content');
+
+    // An id that belongs to another workspace is reported as absent, so the
+    // caller cannot learn that it exists.
+    await expect(service.get(workspace.id, 'checkpoint-foreign')).resolves.toEqual({ ok: true, value: null });
+    await expect(service.get(workspace.id, 'checkpoint-missing')).resolves.toEqual({ ok: true, value: null });
+  });
+
   it('uses the current permission profile when restoring without an explicit override', async () => {
     const { workspace, checkpoints } = await setup();
     const target = path.join(workspace.rootPath, 'src', 'profile.txt');

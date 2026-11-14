@@ -92,16 +92,23 @@ export class CheckpointService implements CheckpointServicePort {
     const workspace = await this.getWorkspace(workspaceId);
     if (!workspace.ok) return workspace;
     const checkpoints = await this.repository.list(workspaceId, limit);
-    return ok(checkpoints.map((checkpoint) => ({
-      id: checkpoint.id,
-      workspaceId: checkpoint.workspaceId,
-      createdAt: checkpoint.createdAt,
-      files: checkpoint.files.map((file) => ({
-        path: file.path,
-        contentSha256: file.contentSha256,
-        size: file.size,
-      })),
-    })));
+    return ok(checkpoints.map(summarizeCheckpoint));
+  }
+
+  /**
+   * One checkpoint by id, for a caller that needs the subject a restore names
+   * rather than a listing. A checkpoint that belongs to another workspace is
+   * reported as absent on purpose: the caller must not learn that it exists, and
+   * the mutating path refuses that case explicitly in `restore`.
+   *
+   * This is the read that lets `restore_checkpoint` resolve its subject from the
+   * id it was given instead of scanning a window of recent checkpoints and
+   * treating "not in the window" as "nothing to prepare".
+   */
+  public async get(workspaceId: string, checkpointId: string): Promise<Result<CheckpointSummary | null>> {
+    const checkpoint = await this.repository.get(checkpointId);
+    if (checkpoint === null || checkpoint.workspaceId !== workspaceId) return ok(null);
+    return ok(summarizeCheckpoint(checkpoint));
   }
 
   public async restore(
@@ -177,4 +184,17 @@ export class CheckpointService implements CheckpointServicePort {
 
 function hash(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function summarizeCheckpoint(checkpoint: Checkpoint): CheckpointSummary {
+  return {
+    id: checkpoint.id,
+    workspaceId: checkpoint.workspaceId,
+    createdAt: checkpoint.createdAt,
+    files: checkpoint.files.map((file) => ({
+      path: file.path,
+      contentSha256: file.contentSha256,
+      size: file.size,
+    })),
+  };
 }

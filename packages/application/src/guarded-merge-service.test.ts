@@ -6,12 +6,15 @@ import type {
 } from '@unified-mpc/domain';
 import {
   GuardedMergeService,
+  type GuardedMergeAuthoritativeSubject,
   type GuardedMergeDispatchPort,
   type GuardedMergeDispatchRequest,
   type GuardedMergeReceiptReader,
+  type GuardedMergeSubjectSource,
 } from './guarded-merge-service.js';
 
 const HEAD = '1111111111111111111111111111111111111111';
+const LETTERED_HEAD = 'abcdef0123456789abcdef0123456789abcdef01';
 const STALE_HEAD = '2222222222222222222222222222222222222222';
 const BASE = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const RECEIPT_REF = 'merge-verification:pr276@1111111';
@@ -90,10 +93,22 @@ function dispatchPort(
   };
 }
 
+function subjectSource(
+  overrides: Partial<GuardedMergeAuthoritativeSubject> = {},
+  reads?: { count: number },
+): GuardedMergeSubjectSource {
+  return {
+    async read(): Promise<GuardedMergeAuthoritativeSubject> {
+      if (reads !== undefined) reads.count += 1;
+      return { headSha: HEAD, baseBranch: 'main', baseSha: BASE, ...overrides };
+    },
+  };
+}
+
 describe('GuardedMergeService', () => {
   it('fails closed without a durable verification receipt and never dispatches', async () => {
     const calls: GuardedMergeDispatchRequest[] = [];
-    const service = new GuardedMergeService(reader(undefined), dispatchPort(calls));
+    const service = new GuardedMergeService(reader(undefined), dispatchPort(calls), subjectSource());
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toMatchObject({
       status: 'blocked',
@@ -111,6 +126,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt(STALE_HEAD) }),
       dispatchPort(calls),
+      subjectSource(),
     );
 
     const result = await service.dispatch({ policy, subject, receiptRef: RECEIPT_REF });
@@ -149,6 +165,7 @@ describe('GuardedMergeService', () => {
         },
       }),
       dispatchPort(calls),
+      subjectSource(),
     );
 
     const result = await service.dispatch({ policy, subject, receiptRef: RECEIPT_REF });
@@ -172,6 +189,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
       dispatchPort(calls),
+      subjectSource(),
     );
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
@@ -187,6 +205,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
       dispatchPort(calls),
+      subjectSource(),
     );
 
     await expect(service.dispatch({
@@ -204,7 +223,7 @@ describe('GuardedMergeService', () => {
         throw new Error('storage unavailable');
       },
     };
-    const service = new GuardedMergeService(failingReader, dispatchPort(calls));
+    const service = new GuardedMergeService(failingReader, dispatchPort(calls), subjectSource());
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
       status: 'inspect_required',
@@ -219,6 +238,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: 'merge-verification:other', receipt: receipt() }),
       dispatchPort(calls),
+      subjectSource(),
     );
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
@@ -238,6 +258,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
       failingPort,
+      subjectSource(),
     );
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
@@ -259,6 +280,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
       failingPort,
+      subjectSource(),
     );
 
     const result = await service.dispatch({ policy, subject, receiptRef: RECEIPT_REF });
@@ -285,6 +307,7 @@ describe('GuardedMergeService', () => {
     const service = new GuardedMergeService(
       reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
       failingPort,
+      subjectSource(),
     );
 
     await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
@@ -296,13 +319,14 @@ describe('GuardedMergeService', () => {
 
   it('rejects an empty receipt ref before reading storage or dispatching', async () => {
     let reads = 0;
+    const subjectReads = { count: 0 };
     const calls: GuardedMergeDispatchRequest[] = [];
     const service = new GuardedMergeService({
       async getByRef(): Promise<undefined> {
         reads += 1;
         return undefined;
       },
-    }, dispatchPort(calls));
+    }, dispatchPort(calls), subjectSource({}, subjectReads));
 
     await expect(service.dispatch({ policy, subject, receiptRef: '   ' })).resolves.toEqual({
       status: 'inspect_required',
@@ -310,6 +334,97 @@ describe('GuardedMergeService', () => {
       receiptRef: '',
     });
     expect(reads).toBe(0);
+    expect(subjectReads.count).toBe(0);
     expect(calls).toEqual([]);
+  });
+
+  it('refuses a head the provider no longer holds, before reading the receipt', async () => {
+    let reads = 0;
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const service = new GuardedMergeService(
+      {
+        async getByRef(): Promise<undefined> {
+          reads += 1;
+          return undefined;
+        },
+      },
+      dispatchPort(calls),
+      subjectSource({ headSha: STALE_HEAD }),
+    );
+
+    await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
+      status: 'inspect_required',
+      reason: 'subject_mismatch',
+      receiptRef: RECEIPT_REF,
+      detail: 'the pull request head is no longer the head the caller named',
+    });
+    expect(reads).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a base branch the provider does not hold', async () => {
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      dispatchPort(calls),
+      subjectSource({ baseBranch: 'release' }),
+    );
+
+    await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toMatchObject({
+      status: 'inspect_required',
+      reason: 'subject_mismatch',
+      detail: 'the pull request targets a different base branch than the caller named',
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a base commit the provider does not hold', async () => {
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      dispatchPort(calls),
+      subjectSource({ baseSha: STALE_HEAD }),
+    );
+
+    await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toMatchObject({
+      status: 'inspect_required',
+      reason: 'subject_mismatch',
+      detail: 'the pull request base commit is no longer the base the caller named',
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('fails closed when the provider cannot confirm the subject', async () => {
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt() }),
+      dispatchPort(calls),
+      {
+        async read(): Promise<never> {
+          throw new Error('provider unavailable');
+        },
+      },
+    );
+
+    await expect(service.dispatch({ policy, subject, receiptRef: RECEIPT_REF })).resolves.toEqual({
+      status: 'inspect_required',
+      reason: 'subject_unavailable',
+      receiptRef: RECEIPT_REF,
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('compares hex SHAs case-insensitively while the evidence check stays exact', async () => {
+    const calls: GuardedMergeDispatchRequest[] = [];
+    const upper = { ...subject, headSha: LETTERED_HEAD.toUpperCase() };
+    const service = new GuardedMergeService(
+      reader({ receiptRef: RECEIPT_REF, receipt: receipt(upper.headSha) }),
+      dispatchPort(calls),
+      subjectSource({ headSha: LETTERED_HEAD, baseSha: BASE }),
+    );
+
+    await expect(service.dispatch({ policy, subject: upper, receiptRef: RECEIPT_REF }))
+      .resolves.toMatchObject({ status: 'dispatched' });
+    expect(calls).toHaveLength(1);
   });
 });

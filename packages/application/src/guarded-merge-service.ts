@@ -16,6 +16,28 @@ export interface GuardedMergeReceiptReader {
   getByRef(receiptRef: string): Promise<GuardedMergeReceiptRecord | undefined>;
 }
 
+/** The pull request identity the host provider holds right now. */
+export interface GuardedMergeAuthoritativeSubject {
+  readonly headSha: string;
+  readonly baseBranch: string;
+  readonly baseSha: string;
+}
+
+/**
+ * Authoritative subject source. The caller names the pull request it wants
+ * merged; this port proves that identity is still the one the provider holds,
+ * so the shared rule — evidence must name this exact repository, pull request,
+ * head and base — is evaluated against the provider instead of against the
+ * caller's claim. A source that cannot answer throws, and the merge is refused
+ * rather than guessed.
+ */
+export interface GuardedMergeSubjectSource {
+  read(request: {
+    readonly repository: string;
+    readonly pullRequest: number;
+  }): Promise<GuardedMergeAuthoritativeSubject>;
+}
+
 export interface GuardedMergeDispatchRequest {
   readonly receiptRef: string;
   readonly subject: MergeEvidenceSubject;
@@ -34,6 +56,8 @@ export interface GuardedMergeRequest {
 
 export type GuardedMergeInspectReason =
   | 'invalid_receipt_ref'
+  | 'subject_unavailable'
+  | 'subject_mismatch'
   | 'receipt_store_error'
   | 'receipt_identity_mismatch'
   | 'merge_dispatch_error';
@@ -60,6 +84,7 @@ export class GuardedMergeService {
   public constructor(
     private readonly receiptReader: GuardedMergeReceiptReader,
     private readonly dispatchPort: GuardedMergeDispatchPort,
+    private readonly subjectSource: GuardedMergeSubjectSource,
   ) {}
 
   public async dispatch(request: GuardedMergeRequest): Promise<GuardedMergeResult> {
@@ -69,6 +94,34 @@ export class GuardedMergeService {
         status: 'inspect_required',
         reason: 'invalid_receipt_ref',
         receiptRef,
+      };
+    }
+
+    // Resolve the subject before the evidence is read: a receipt can only
+    // authorize the pull request the provider holds, not the one the caller
+    // described. Without this, a caller could name the default branch for a PR
+    // that targets another one and still satisfy the policy's base check.
+    let authoritative: GuardedMergeAuthoritativeSubject;
+    try {
+      authoritative = await this.subjectSource.read({
+        repository: request.subject.repository,
+        pullRequest: request.subject.pullRequest,
+      });
+    } catch {
+      return {
+        status: 'inspect_required',
+        reason: 'subject_unavailable',
+        receiptRef,
+      };
+    }
+
+    const mismatch = subjectMismatch(request.subject, authoritative);
+    if (mismatch !== undefined) {
+      return {
+        status: 'inspect_required',
+        reason: 'subject_mismatch',
+        receiptRef,
+        detail: mismatch,
       };
     }
 
@@ -154,4 +207,35 @@ function dispatchFailureDetail(error: unknown): string | undefined {
   if (sanitized.length === 0) return undefined;
   if (sanitized.length <= MAX_DISPATCH_DETAIL_CHARS) return sanitized;
   return `${sanitized.slice(0, MAX_DISPATCH_DETAIL_CHARS - 1)}…`;
+}
+
+/**
+ * The caller's subject is the request; the provider's is the proof. A
+ * disagreement is never resolved in the caller's favour — the caller re-reads
+ * the pull request and asks again. Fixed messages keep the detail bounded and
+ * free of provider text.
+ *
+ * The optional `baseSha` is compared only when the caller names one. An absent
+ * base keeps the evidence rule unchanged: `evaluateMergeEvidence` skips the
+ * base-commit check unless both sides carry it.
+ */
+function subjectMismatch(
+  subject: MergeEvidenceSubject,
+  authoritative: GuardedMergeAuthoritativeSubject,
+): string | undefined {
+  if (!sameSha(subject.headSha, authoritative.headSha)) {
+    return 'the pull request head is no longer the head the caller named';
+  }
+  if (subject.baseBranch !== authoritative.baseBranch) {
+    return 'the pull request targets a different base branch than the caller named';
+  }
+  if (subject.baseSha !== undefined && !sameSha(subject.baseSha, authoritative.baseSha)) {
+    return 'the pull request base commit is no longer the base the caller named';
+  }
+  return undefined;
+}
+
+/** Hex SHAs name one commit in either case; the evidence check stays byte-exact. */
+function sameSha(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
 }

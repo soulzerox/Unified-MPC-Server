@@ -31,7 +31,10 @@ function: the runtime receipt carries a verification mode, a gate list and a
 review outcome, while the CLI receipt carries a profile version, a clean-tree
 diff fingerprint and a findings document. Forcing those into one shape would
 fabricate fields one side does not have, which is why step 4 repoints the runtime
-at the shared rule instead of converting its receipts.
+at the shared rule instead of converting its receipts. Repointing it also settles
+what "this exact subject" means on each side: the CLI reads the pull request from
+GitHub, and since step 4a so does the runtime, instead of trusting the identity
+the caller sent.
 
 ---
 
@@ -243,10 +246,11 @@ live at three seams; the engine extends them instead of adding a parallel gate:
 
 1. **Merge** — the CLI `merge:pr` script and the runtime `GuardedMergeService`.
    The CLI already delegates to the shared `evaluateMergeEligibility` and keeps
-   `--match-head-commit`; `GuardedMergeService` still holds its own receipt
-   reader, which is step 4. Neither side may change behaviour: the runtime keeps
-   its `MergeEvidenceBlocker` vocabulary and its SQLite receipts, and only the
-   shared subject rule becomes visible to both, through the conformance corpus.
+   `--match-head-commit`. The runtime keeps its own receipt reader, its SQLite
+   receipts and its `MergeEvidenceBlocker` vocabulary; what step 4a added is the
+   subject: both sides now resolve the pull request from the provider instead of
+   trusting the caller's description of it, and both refuse a subject that moved.
+   The conformance corpus is what keeps the shared rule in one place.
 2. **Cleanup** — three checks that are easy to conflate:
 
    - `WorkspaceService.evaluateGoalWorkspaceCleanup` returns a
@@ -302,7 +306,8 @@ Each step ships alone and leaves the repository working.
 | 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, eight shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
 | 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); **blocked** only on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
-| 4 | Repoint `GuardedMergeService` at the shared rule while it keeps its own evidence checks and blocker vocabulary, and wire `verify`/`review` through `receipts()` | the conformance corpus stays green while the runtime keeps reporting its richer `MergeEvidenceBlocker` codes; the CLI receipt format is unchanged |
+| 4a ✅ | Repoint `GuardedMergeService` at the shared rule: the subject it evaluates is now read from the provider, so a receipt can only authorize the pull request GitHub holds, and the gate acts on that decision | shipped in #834: `subject_mismatch`/`subject_unavailable` refuse before the receipt is read; the corpus gains an enforcement suite that fails if a blocked decision ever dispatches; the runtime keeps its `MergeEvidenceBlocker` vocabulary and the CLI receipt format is unchanged |
+| 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
 | 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
@@ -436,17 +441,50 @@ project and no profile step, so neither the merge step set nor `PROFILE_VERSION`
 changes.
 
 Nothing else about step 2 changes: `GuardedMergeService` keeps its own receipt
-reader and its `MergeEvidenceBlocker` vocabulary. Step 4 is the slice that
-repoints it, and the corpus is what makes that refactor safe to review.
+reader and its `MergeEvidenceBlocker` vocabulary.
 
-Step 4 is where the shared rule becomes load-bearing. `GuardedMergeService`
-already delegates to `evaluateMergeEvidence` in `packages/domain`, so it has one
-owner of its *own* policy; what it cannot do is see the CLI evaluator, and the
-CLI cannot see it. Both packaging routes were rejected after measuring what they
-cost (open question 4), so step 4 makes the runtime's shared clause answerable to
-the corpus in "Status after step 2" rather than to a second implementation. No
-package, no declarations, no new `.mjs` distribution path, and no profile-version
-bump.
+### Status after step 4a
+
+Step 2 proved the two evaluators agree. Step 4a is the step that makes the
+agreement load-bearing, and the thing it had to fix was not the evaluator:
+
+```text
+caller ── subject ──► GuardedMergeService ──► evaluateMergeEvidence
+                                  │                    │
+                                  │                    └─ receipt must name
+                                  │                       the *caller's* subject
+                                  ▼
+                          provider merge (sha = caller's head)
+```
+
+`GuardedMergeService` already delegated to `evaluateMergeEvidence` in
+`packages/domain`, so it had one owner of its own policy. What it did not have
+was an authoritative subject: `repository`, `pullRequest`, `headSha` and
+`baseBranch` all came from the caller, so the policy's default-branch check could
+be satisfied by a claim. The CLI cannot be fooled that way because it reads
+`pr.baseRefName` from GitHub.
+
+The service now takes a `GuardedMergeSubjectSource` and resolves the subject
+before it reads the receipt. `apps/cli` implements it with the same
+`observeOpenPullRequest` the verification runner uses — one provider read, two
+callers — and wires it at the composition root. A disagreement is
+`inspect_required` with `subject_mismatch`; an unreadable pull request is
+`subject_unavailable`. Neither dispatches, and neither is a
+`MergeEvidenceBlocker`: the evidence may be perfect for a subject that is no
+longer the one being merged.
+
+The corpus gained a second suite for exactly this. It runs the real
+`GuardedMergeService` over the same scenario table with a recording dispatch
+port: every blocked row must dispatch nothing, the allowed row must dispatch
+once, and a caller subject the provider no longer holds must be refused. Changing
+the service to dispatch despite a blocked decision fails that suite — the mutation
+was checked by making the block check unreachable.
+
+Step 4b is what remains of the original step: `verify`, `review` and `merge` each
+still read their own store, and the engine's `receipts(subject)` has no
+implementation to route them through. Converting the runtime's SQLite receipts
+into engine receipts is not a refactor that changes no behaviour, so it waits for
+the receipt store rather than being faked here (open question 3).
 
 ---
 

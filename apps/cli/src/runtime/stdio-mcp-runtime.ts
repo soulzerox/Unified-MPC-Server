@@ -117,6 +117,7 @@ import {
   type GitHubMergeApi,
 } from './guarded-merge-provider.js';
 import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApiReader } from './github-merge-observer.js';
+import { createAuthoritativeMergeSubjectSource } from './github-pull-request-subject.js';
 import { canonicalRefForBranch, createCanonicalMergeAdvance } from './canonical-merge-advance.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
@@ -733,6 +734,10 @@ export function createStdioMcpRuntime(
       ),
       createBuiltinGuardedMergeDispatchPort(options.githubMergeApi ?? createGitHubMergeApi()),
     ),
+    // The caller names the subject; GitHub proves it. A receipt can only
+    // authorize the pull request the provider holds, and a merge can only land
+    // into the base the provider reports.
+    createAuthoritativeMergeSubjectSource(githubApi),
   );
   const mergeReconciliation = new ObservedMergeReconciliationService(
     mergeObserver,

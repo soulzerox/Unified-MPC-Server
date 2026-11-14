@@ -29,6 +29,7 @@ import type {
   ResourceAdmissionSnapshot,
 } from '@unified-mpc/workspace';
 import type { GitHubApiReader } from './github-merge-observer.js';
+import { observeOpenPullRequest, type OpenPullRequestSubject } from './github-pull-request-subject.js';
 import { githubRepositoryFromRemote } from './github-remote.js';
 
 const LOCAL_GATE_TIMEOUT_MS = 20 * 60_000;
@@ -745,14 +746,6 @@ async function runLocalGate(
   }
 }
 
-interface OpenPullRequestSubject {
-  readonly repository: string;
-  readonly pullRequest: number;
-  readonly headSha: string;
-  readonly baseSha: string;
-  readonly baseBranch: string;
-}
-
 interface GitHubWorkflowRun {
   readonly id: number;
   readonly name: string;
@@ -761,38 +754,6 @@ interface GitHubWorkflowRun {
   readonly conclusion?: string;
   readonly htmlUrl?: string;
   readonly updatedAt?: string;
-}
-
-async function observeOpenPullRequest(
-  github: GitHubApiReader,
-  repository: string,
-  pullRequest: number,
-): Promise<Result<OpenPullRequestSubject>> {
-  try {
-    const { owner, repo } = repositoryCoordinates(repository);
-    const raw = requiredRecord(await github.get(
-      `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullRequest}`,
-    ), 'pull request');
-    if (raw.number !== pullRequest) return err(appError('CONFLICT', 'GitHub pull request identity mismatch'));
-    if (raw.state !== 'open' || raw.merged === true) {
-      return err(appError('CONFLICT', 'Merge verification receipts can only be produced for an open unmerged pull request'));
-    }
-    const head = requiredRecord(raw.head, 'pull request head');
-    const base = requiredRecord(raw.base, 'pull request base');
-    const baseRepository = requiredRecord(base.repo, 'pull request base repository');
-    if (baseRepository.full_name !== repository) {
-      return err(appError('CONFLICT', 'GitHub pull request repository identity mismatch'));
-    }
-    return ok({
-      repository,
-      pullRequest,
-      headSha: requiredSha(head.sha, 'pull request head SHA'),
-      baseSha: requiredSha(base.sha, 'pull request base SHA'),
-      baseBranch: requiredString(base.ref, 'pull request base branch', 256),
-    });
-  } catch {
-    return err(appError('CONFLICT', 'GitHub pull request state could not be observed', true));
-  }
 }
 
 async function readGitHubWorkflowRuns(

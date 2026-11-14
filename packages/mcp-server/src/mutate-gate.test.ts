@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { codeMutationPaths, isOpaqueMutationTool } from './harness-runtime.js';
 import {
@@ -226,5 +228,54 @@ describe('describeMutateBlockers', () => {
     const message = describeMutateBlockers(blockers);
     expect(message).toContain('src/file-4.ts and 3 more');
     expect(message).not.toContain('src/file-5.ts');
+  });
+});
+
+/**
+ * The reach of the phase is stated in prose in several places, and four reviews
+ * of step 5b-2 found the same defect in it: one paragraph or table row naming
+ * three of the four tools. Prose cannot be derived from the set, so the document
+ * gets one sentence that *is* the list, and the checks below keep the rest of it
+ * from disagreeing with that sentence.
+ */
+describe('the document states the phase reach once', () => {
+  const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
+
+  it('names the four tools in the sentence the rest of the document refers to', () => {
+    const canonical = /The phase reaches exactly these four tools: ((?:`[a-z_]+`(?:,\s*|\s+and\s+)?)+)\./.exec(doc);
+    expect(canonical).not.toBeNull();
+    const named = [...canonical![1].matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
+    // The sentence is the list: it cannot name a tool the phase does not reach,
+    // and it cannot be one of two sentences that disagree.
+    expect(named.filter(isOpaqueMutationTool)).toEqual(named);
+    expect(named).toHaveLength(4);
+    expect(doc.match(/The phase reaches exactly these four tools:/g)).toHaveLength(1);
+  });
+
+  it('never names a subset of those four in one paragraph or table row', () => {
+    // A mention of two or more is an enumeration, and an enumeration that stops
+    // at three is the defect. A single mention is prose about one tool.
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = (): void => {
+      if (current.length > 0) blocks.push(current.join(' '));
+      current = [];
+    };
+    for (const line of doc.split('\n')) {
+      if (line.trim() === '') flush();
+      else if (line.trimStart().startsWith('|')) { flush(); blocks.push(line); }
+      else current.push(line);
+    }
+    flush();
+
+    const offenders = blocks
+      .map((block) => ({
+        block,
+        named: ['shell', 'wsl_exec', 'git', 'process_start']
+          .filter((tool) => new RegExp(`\`${tool}\`(?![\\w-])`).test(block)),
+      }))
+      .filter(({ named }) => named.length >= 2 && named.length < 4)
+      .map(({ block, named }) => `${named.join('+')}: ${block.slice(0, 90)}`);
+    expect(offenders).toEqual([]);
   });
 });

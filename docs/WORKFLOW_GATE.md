@@ -628,6 +628,12 @@ decision, and makes the decision visible:
 { "workflowGate": { "mutate": "require_preparation", "mutateOpaque": "refuse" } }
 ```
 
+The phase reaches exactly these four tools: `shell`, `wsl_exec`, `git` and
+`process_start`. That sentence is the list; everything below and elsewhere in
+this document refers to it rather than restating it, and a test fails if it
+disagrees with `isOpaqueMutationTool` or if any paragraph or table row here
+enumerates a subset of it.
+
 - the command-shaped tools now reach the seam instead of skipping it. Before this
   step `validateHarnessMutation` was never called for them, because
   `isCodingMutation` is a question about request shape and a command has no path

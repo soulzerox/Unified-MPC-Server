@@ -48,11 +48,13 @@ function createHarnessServices(): {
   restores: string[];
   setRecoveryItems(items: readonly RecoveryFixture[]): void;
   setCheckpoints(value: readonly CheckpointFixture[]): void;
+  hideCheckpointsFromListing(): void;
 } {
   const writes: string[] = [];
   const restores: string[] = [];
   let recoveryItems: readonly RecoveryFixture[] = [];
   const checkpoints: CheckpointFixture[] = [];
+  let checkpointsHiddenFromListing = false;
   const childCalls: string[] = [];
   const nativeRagCalls: string[] = [];
   const nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
@@ -101,7 +103,13 @@ function createHarnessServices(): {
     },
     checkpoint: {
       async list() {
-        return ok(checkpoints);
+        return ok(checkpointsHiddenFromListing ? [] : checkpoints);
+      },
+      async get(workspaceId: string, checkpointId: string) {
+        // Workspace-scoped like the real service, so a resolver that asked for
+        // the wrong workspace would resolve this checkpoint to an opaque subject
+        // and the gate would let the restore through.
+        return ok(checkpoints.find((entry) => entry.id === checkpointId && entry.workspaceId === workspaceId) ?? null);
       },
     },
     git: {
@@ -209,6 +217,9 @@ function createHarnessServices(): {
     restores,
     setRecoveryItems(items: readonly RecoveryFixture[]): void { recoveryItems = [...items]; },
     setCheckpoints(value: readonly CheckpointFixture[]): void { checkpoints.splice(0, checkpoints.length, ...value); },
+    // Models a store whose listing window does not reach a checkpoint it can
+    // still read by id: resolution must use the id, not the listing.
+    hideCheckpointsFromListing(): void { checkpointsHiddenFromListing = true; },
     childCalls,
     nativeRagCalls,
     nativeRagArguments,
@@ -415,7 +426,7 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('treats a checkpoint restore as the paths it will write', async () => {
-    const { services, setFileContent, setCheckpoints } = createHarnessServices();
+    const { services, setFileContent, setCheckpoints, hideCheckpointsFromListing } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
     setCheckpoints([{
       id: '223e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', createdAt: '2026-01-01T00:00:00.000Z',
@@ -425,6 +436,10 @@ describe('workspace engineering harness enforcement', () => {
         { path: 'docs/readme.md', contentSha256: 'b'.repeat(64), size: 1 },
       ],
     }]);
+    // The id is the subject, so a checkpoint the listing window does not reach is
+    // still named by the gate. Resolving from a window made an old checkpoint
+    // look like an unknown one, which the gate allows.
+    hideCheckpointsFromListing();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
 

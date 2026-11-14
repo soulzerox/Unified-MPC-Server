@@ -1299,6 +1299,39 @@ export class ToolRegistry {
   }
 
   /**
+   * The one definition of "this target can carry a preparation in the mode that
+   * binds a receipt to it": the file service reads it as text.
+   * `prepare_code_change` binds to exactly this content, so a path that fails
+   * here cannot be prepared that way, and the mutate gate must not demand a
+   * preparation the same mode could not produce.
+   *
+   * Trusted Full Bypass is the exception and stays one: there
+   * `prepare_code_change` registers a path without reading it, so an absent
+   * target can carry a preparation. This predicate is the binding mode's
+   * definition on purpose — the reduction below is what keeps the opt-in mode
+   * satisfiable, and a bypass exists to skip evidence, not to require it.
+   *
+   * One predicate, because the two answers have to stay identical. If the
+   * binding side ever tightens — a size cap, a symlink rule, an identity check —
+   * a copy of this test would keep calling the path preparable, and the opt-in
+   * mode would go back to demanding evidence that cannot exist.
+   */
+  private async readPreparationTarget(workspaceId: string, filePath: string): Promise<Result<string>> {
+    const file = this.services.file;
+    if (file?.readFile === undefined) {
+      return err(appError('INTERNAL_ERROR', 'Pre-edit target content cannot be verified because the file service is unavailable', true));
+    }
+    const loaded = await file.readFile(this.actor, workspaceId, { path: filePath });
+    if (!loaded.ok) {
+      return err(appError('CONFLICT', `Pre-edit target cannot be read for revision binding: ${loaded.error.message}`, true, { reason: 'pre-edit-target-unreadable' }));
+    }
+    if (typeof loaded.value.content !== 'string') {
+      return err(appError('CONFLICT', 'Pre-edit target did not return readable text content for revision binding', true, { reason: 'pre-edit-target-unreadable' }));
+    }
+    return ok(loaded.value.content);
+  }
+
+  /**
    * #346 acceptance: a ready verdict must also match the admitted target's
    * current content. The provider names the content it analyzed, so read the
    * same path through the workspace-scoped file service and refuse the write
@@ -1312,18 +1345,9 @@ export class ToolRegistry {
     if (targetIdentity === undefined) {
       return err(appError('CONFLICT', 'Thai-RAG pre-edit evidence did not identify the target content', true, { reason: 'pre-edit-target-identity-missing' }));
     }
-    const file = this.services.file;
-    if (file?.readFile === undefined) {
-      return err(appError('INTERNAL_ERROR', 'Pre-edit target content cannot be verified because the file service is unavailable', true));
-    }
-    const loaded = await file.readFile(this.actor, workspaceId, { path: filePath });
-    if (!loaded.ok) {
-      return err(appError('CONFLICT', `Pre-edit target cannot be read for revision binding: ${loaded.error.message}`, true, { reason: 'pre-edit-target-unreadable' }));
-    }
-    if (typeof loaded.value.content !== 'string') {
-      return err(appError('CONFLICT', 'Pre-edit target did not return readable text content for revision binding', true, { reason: 'pre-edit-target-unreadable' }));
-    }
-    const contentHash = hashHarnessText(loaded.value.content);
+    const target = await this.readPreparationTarget(workspaceId, filePath);
+    if (!target.ok) return target;
+    const contentHash = hashHarnessText(target.value);
     if (contentHash !== targetIdentity) {
       return err(appError('CONFLICT', 'Thai-RAG pre-edit evidence is stale for the current target content; re-request evidence before mutating', true, { reason: 'pre-edit-target-stale' }));
     }
@@ -1884,12 +1908,12 @@ export class ToolRegistry {
     signal?: AbortSignal,
   ): Promise<HarnessMutationAdmission> {
     if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return { ok: true };
-    // A restore names its subject only through a store, and asking that store
-    // costs an enumeration of the recovery trash or a bounded checkpoint scan
-    // that reads every payload. The default mode keeps restores exactly as they
-    // were — auto-preparing one would read pre-edit context for a path that the
-    // restore exists because it is missing — so ask for the mode before paying
-    // for a lookup whose answer that mode would discard.
+    // A restore names its subject only through a store, so resolving it costs a
+    // store read: an enumeration of the recovery trash, or one checkpoint row
+    // read by id. The default mode keeps restores exactly as they were —
+    // auto-preparing one would read pre-edit context for a path that the restore
+    // exists because it is missing — so ask for the mode before paying for a
+    // lookup whose answer that mode would discard.
     const storeNamed = isRestoreMutationTool(toolName);
     const resolvedMode = storeNamed ? await this.resolveMutateMode(workspaceId) : undefined;
     if (storeNamed && resolvedMode === DEFAULT_MUTATE_MODE) return { ok: true };
@@ -1947,12 +1971,11 @@ export class ToolRegistry {
       // A store can name a path that does not exist, and a restore of a deleted
       // file is the normal case: file-service refuses to restore a `deleted`
       // item onto an existing target, so the path is absent by construction.
-      // Such a path cannot carry a preparation at all — `prepare_code_change`
-      // binds its receipt to the target's current content and refuses an absent
-      // target with `pre-edit-target-unreadable` — so demanding one would refuse
+      // Such a path cannot carry a preparation — `prepare_code_change` binds its
+      // receipt to the target's current content — so demanding one would refuse
       // the restore forever instead of gating it. Reduce a store-named subject
-      // to the paths that can be prepared; when none can, the restore keeps the
-      // behaviour it had before it had a subject.
+      // to the paths that can be prepared. The harness checks above have already
+      // run, so this is about the preparation only.
       const gatePaths = subject.origin === 'store'
         ? await this.preparableMutationPaths(workspaceId, paths)
         : paths;
@@ -1984,20 +2007,19 @@ export class ToolRegistry {
   }
 
   /**
-   * The subset of a store-named subject that can actually carry a preparation.
-   * `prepare_code_change` binds a receipt to the target's current content, so an
-   * absent or unreadable target can never be prepared; a path in that state has
-   * no gate to satisfy and must not be demanded as if it did. Absence is the
-   * normal case for a delete recovery, and refusing it would break the flow the
-   * recovery trash exists for.
+   * The subset of a store-named subject that can carry a binding preparation.
+   *
+   * A path that `prepare_code_change` could not bind has no gate to satisfy and
+   * must not be demanded as if it did: absence is the normal case for a delete
+   * recovery, and refusing it would break the flow the recovery trash exists
+   * for. The predicate is shared with the binding side, so the two can never
+   * disagree about which targets are preparable.
    */
   private async preparableMutationPaths(workspaceId: string, paths: readonly string[]): Promise<readonly string[]> {
-    const file = this.services.file;
-    if (file?.readFile === undefined) return [];
     const preparable: string[] = [];
     for (const path of paths) {
-      const loaded = await file.readFile(this.actor, workspaceId, { path });
-      if (loaded.ok && typeof loaded.value.content === 'string') preparable.push(path);
+      const target = await this.readPreparationTarget(workspaceId, path);
+      if (target.ok) preparable.push(path);
     }
     return preparable;
   }
@@ -2008,14 +2030,18 @@ export class ToolRegistry {
    * resolves those mutations to an opaque subject and keeps today's behaviour
    * rather than refusing on a lookup it cannot perform.
    *
-   * The checkpoint scan is bounded on purpose. `list` is the only read the
-   * service exposes, and an id older than the scan window resolves to
-   * `undefined` — an opaque subject, not an invented path list.
+   * The checkpoint read is by id. A listing was the only checkpoint read this
+   * seam had, and answering "is this id mine?" from the newest 500 rows made an
+   * older checkpoint indistinguishable from an unknown one — an opaque subject,
+   * which the opt-in gate allows. `get` answers the question the gate asks, and
+   * it reads one row instead of decrypting a window of payloads. The recovery
+   * read stays a listing: the trash is enumerated as a whole, and the id is
+   * answered from it.
    */
   private mutationSubjectResolvers(workspaceId: string): MutationSubjectResolvers | undefined {
     const file = this.services.file;
     const checkpoint = this.services.checkpoint;
-    if (file?.listRecoveryItems === undefined && checkpoint?.list === undefined) return undefined;
+    if (file?.listRecoveryItems === undefined && checkpoint?.get === undefined) return undefined;
     return {
       recoveryPaths: async (recoveryId: string): Promise<readonly string[] | undefined> => {
         if (file?.listRecoveryItems === undefined) return undefined;
@@ -2025,11 +2051,10 @@ export class ToolRegistry {
         return item === undefined ? undefined : [item.relativePath];
       },
       checkpointPaths: async (checkpointId: string): Promise<readonly string[] | undefined> => {
-        if (checkpoint?.list === undefined) return undefined;
-        const listed = await checkpoint.list(workspaceId, CHECKPOINT_SUBJECT_SCAN_LIMIT);
-        if (!listed.ok) return undefined;
-        const found = listed.value.find((entry) => entry.id === checkpointId);
-        return found === undefined ? undefined : found.files.map((file) => file.path);
+        if (checkpoint?.get === undefined) return undefined;
+        const found = await checkpoint.get(workspaceId, checkpointId);
+        if (!found.ok || found.value === null) return undefined;
+        return found.value.files.map((file) => file.path);
       },
     };
   }
@@ -3289,14 +3314,6 @@ function prohibitedInvocationReason(toolName: string, input: unknown): string | 
 }
 
 const LOCAL_MUTATION_TOOLS = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
-
-/**
- * How far the checkpoint store is scanned to resolve a `restore_checkpoint`
- * into the paths it will write. `CheckpointService.list` is the only read the
- * service pick exposes; a checkpoint older than this window resolves to an
- * opaque subject instead of a guessed path list.
- */
-const CHECKPOINT_SUBJECT_SCAN_LIMIT = 500;
 
 /**
  * The outcome of the mutate-phase seam. `claimedPaths` is present exactly when

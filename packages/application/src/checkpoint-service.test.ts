@@ -29,7 +29,10 @@ class MemoryCheckpointRepository implements CheckpointRepository {
   private readonly checkpoints: Checkpoint[] = [];
   public async insert(value: Checkpoint): Promise<void> { this.checkpoints.push(value); }
   public async get(id: string): Promise<Checkpoint | null> { return this.checkpoints.find((entry) => entry.id === id) ?? null; }
+  /** Counts listing reads, so a test can prove a by-id lookup never took one. */
+  public listCalls = 0;
   public async list(workspaceId: string, limit = 100): Promise<Checkpoint[]> {
+    this.listCalls += 1;
     return this.checkpoints.filter((entry) => entry.workspaceId === workspaceId).slice(0, limit);
   }
 }
@@ -72,6 +75,40 @@ describe('CheckpointService', () => {
       files: [{ path: path.join('src', 'file.txt'), size: Buffer.byteLength('secret-before-content'), contentSha256: expect.any(String) }],
     }] });
     expect(JSON.stringify(listed)).not.toContain('secret-before-content');
+  });
+
+  it('reads one checkpoint by id without scanning or leaking another workspace', async () => {
+    const { workspace, checkpoints } = await setup();
+    await checkpoints.insert({
+      id: 'checkpoint-old', workspaceId: workspace.id, createdAt: new Date(0).toISOString(),
+      files: [{ path: 'src/old.ts', content: 'secret-old-content', contentSha256: 'hash-1', size: 18 }],
+    });
+    await checkpoints.insert({
+      id: 'checkpoint-foreign', workspaceId: 'workspace-2', createdAt: new Date(0).toISOString(),
+      files: [{ path: 'src/foreign.ts', content: 'secret-foreign-content', contentSha256: 'hash-2', size: 22 }],
+    });
+    const service = new CheckpointService(workspaces(workspace), checkpoints);
+
+    // The id is the subject: an old checkpoint answers exactly like a new one,
+    // which is what stops "older than the scan window" from reading as "nothing
+    // to prepare".
+    const found = await service.get(workspace.id, 'checkpoint-old');
+    expect(found).toMatchObject({ ok: true, value: {
+      id: 'checkpoint-old',
+      workspaceId: workspace.id,
+      files: [{ path: 'src/old.ts', size: 18, contentSha256: 'hash-1' }],
+    } });
+    expect(JSON.stringify(found)).not.toContain('secret-old-content');
+
+    // An id that belongs to another workspace is reported as absent, so this
+    // read cannot confirm that it exists.
+    await expect(service.get(workspace.id, 'checkpoint-foreign')).resolves.toEqual({ ok: true, value: null });
+    await expect(service.get(workspace.id, 'checkpoint-missing')).resolves.toEqual({ ok: true, value: null });
+
+    // The point of the by-id read is that no listing is taken at all: a window
+    // is what made an old checkpoint look unknown, so the service must not scan
+    // one to answer.
+    expect(checkpoints.listCalls).toBe(0);
   });
 
   it('uses the current permission profile when restoring without an explicit override', async () => {

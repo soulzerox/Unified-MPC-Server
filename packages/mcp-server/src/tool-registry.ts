@@ -2030,10 +2030,13 @@ export class ToolRegistry {
    * resolves those mutations to an opaque subject and keeps today's behaviour
    * rather than refusing on a lookup it cannot perform.
    *
-   * Both reads are by id. A listing was the only checkpoint read this seam had,
-   * and answering "is this id mine?" from the newest 500 rows made an older
-   * checkpoint indistinguishable from an unknown one — an opaque subject, which
-   * the opt-in gate allows. `get` answers the question the gate actually asks.
+   * The checkpoint read is by id. A listing was the only checkpoint read this
+   * seam had, and answering "is this id mine?" from the newest 500 rows made an
+   * older checkpoint indistinguishable from an unknown one — an opaque subject,
+   * which the opt-in gate allows. `get` answers the question the gate asks, and
+   * it reads one row instead of decrypting a window of payloads. The recovery
+   * read stays a listing: the trash is enumerated as a whole, and the id is
+   * answered from it.
    */
   private mutationSubjectResolvers(workspaceId: string): MutationSubjectResolvers | undefined {
     const file = this.services.file;

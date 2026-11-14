@@ -29,7 +29,10 @@ class MemoryCheckpointRepository implements CheckpointRepository {
   private readonly checkpoints: Checkpoint[] = [];
   public async insert(value: Checkpoint): Promise<void> { this.checkpoints.push(value); }
   public async get(id: string): Promise<Checkpoint | null> { return this.checkpoints.find((entry) => entry.id === id) ?? null; }
+  /** Counts listing reads, so a test can prove a by-id lookup never took one. */
+  public listCalls = 0;
   public async list(workspaceId: string, limit = 100): Promise<Checkpoint[]> {
+    this.listCalls += 1;
     return this.checkpoints.filter((entry) => entry.workspaceId === workspaceId).slice(0, limit);
   }
 }
@@ -97,10 +100,15 @@ describe('CheckpointService', () => {
     } });
     expect(JSON.stringify(found)).not.toContain('secret-old-content');
 
-    // An id that belongs to another workspace is reported as absent, so the
-    // caller cannot learn that it exists.
+    // An id that belongs to another workspace is reported as absent, so this
+    // read cannot confirm that it exists.
     await expect(service.get(workspace.id, 'checkpoint-foreign')).resolves.toEqual({ ok: true, value: null });
     await expect(service.get(workspace.id, 'checkpoint-missing')).resolves.toEqual({ ok: true, value: null });
+
+    // The point of the by-id read is that no listing is taken at all: a window
+    // is what made an old checkpoint look unknown, so the service must not scan
+    // one to answer.
+    expect(checkpoints.listCalls).toBe(0);
   });
 
   it('uses the current permission profile when restoring without an explicit override', async () => {

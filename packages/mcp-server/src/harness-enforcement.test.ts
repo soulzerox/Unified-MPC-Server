@@ -105,8 +105,11 @@ function createHarnessServices(): {
       async list() {
         return ok(checkpointsHiddenFromListing ? [] : checkpoints);
       },
-      async get(_workspaceId: string, checkpointId: string) {
-        return ok(checkpoints.find((entry) => entry.id === checkpointId) ?? null);
+      async get(workspaceId: string, checkpointId: string) {
+        // Workspace-scoped like the real service, so a resolver that asked for
+        // the wrong workspace would resolve this checkpoint to an opaque subject
+        // and the gate would let the restore through.
+        return ok(checkpoints.find((entry) => entry.id === checkpointId && entry.workspaceId === workspaceId) ?? null);
       },
     },
     git: {

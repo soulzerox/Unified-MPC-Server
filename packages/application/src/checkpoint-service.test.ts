@@ -109,6 +109,12 @@ describe('CheckpointService', () => {
     // is what made an old checkpoint look unknown, so the service must not scan
     // one to answer.
     expect(checkpoints.listCalls).toBe(0);
+
+    // A workspace that does not exist is an error, not an absence: this read
+    // validates like every other read on the class, so a caller cannot mistake a
+    // typo in the workspace id for a checkpoint that is not there.
+    await expect(service.get('workspace-missing', 'checkpoint-old'))
+      .resolves.toMatchObject({ ok: false, error: { code: 'WORKSPACE_NOT_FOUND' } });
   });
 
   it('uses the current permission profile when restoring without an explicit override', async () => {

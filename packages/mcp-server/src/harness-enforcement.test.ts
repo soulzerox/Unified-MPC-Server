@@ -425,6 +425,35 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual([]);
   });
 
+  it('refuses a store-named restore in an opt-in workspace with no active harness', async () => {
+    const { services, restores, setFileContent, setCheckpoints } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    setCheckpoints([{
+      id: '223e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', createdAt: '2026-01-01T00:00:00.000Z',
+      files: [{ path: 'src/app.ts', contentSha256: 'a'.repeat(64), size: 1 }],
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    // No `workspace_bootstrap`. The subject is what makes this restore reach the
+    // phase's harness checks at all, and that refusal is the one behaviour it
+    // added: before it had a subject the restore ran ungated. The preparation
+    // reduction does not rescue it either — the artifact is named, so the gate
+    // would demand a preparation next.
+    await expect(registry.invoke('restore_checkpoint', {
+      workspaceId: 'workspace-1', checkpointId: '223e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('workspace_bootstrap'),
+          details: { phase: 'mutate', reason: 'harness_inactive' },
+        },
+      },
+    });
+    expect(restores).toEqual([]);
+  });
+
   it('treats a checkpoint restore as the paths it will write', async () => {
     const { services, setFileContent, setCheckpoints, hideCheckpointsFromListing } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));

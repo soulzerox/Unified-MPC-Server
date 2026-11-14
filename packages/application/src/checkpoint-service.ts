@@ -97,15 +97,19 @@ export class CheckpointService implements CheckpointServicePort {
 
   /**
    * One checkpoint by id, for a caller that needs the subject a restore names
-   * rather than a listing. A checkpoint that belongs to another workspace is
-   * reported as absent, so this read cannot confirm that it exists; `restore` is
-   * the path that names that case explicitly with `PERMISSION_DENIED`.
+   * rather than a listing. The workspace is validated first, like every other
+   * read on this class, so an unknown workspace is an error and not an absence;
+   * a checkpoint that belongs to another workspace is still reported as absent,
+   * because this read must not confirm that it exists. `restore` is the path
+   * that names that case explicitly with `PERMISSION_DENIED`.
    *
    * This is the read that lets `restore_checkpoint` resolve its subject from the
    * id it was given instead of scanning a window of recent checkpoints and
    * treating "not in the window" as "nothing to prepare".
    */
   public async get(workspaceId: string, checkpointId: string): Promise<Result<CheckpointSummary | null>> {
+    const workspace = await this.getWorkspace(workspaceId);
+    if (!workspace.ok) return workspace;
     const checkpoint = await this.repository.get(checkpointId);
     if (checkpoint === null || checkpoint.workspaceId !== workspaceId) return ok(null);
     return ok(summarizeCheckpoint(checkpoint));

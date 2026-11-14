@@ -1,4 +1,6 @@
 import {
+  CHECKPOINT_MUTATION_TOOLS,
+  RECOVERY_MUTATION_TOOLS,
   codeMutationPaths,
   isDevelopmentArtifactPath,
   isPathExtractorTool,
@@ -46,14 +48,6 @@ export type MutationSubject =
     readonly origin: 'request' | 'store';
   }
   | { readonly kind: 'opaque'; readonly reason: OpaqueMutationReason };
-
-/** Tools whose request names a stored subject instead of an artifact path. */
-const RECOVERY_MUTATION_TOOLS = new Set(['restore_deleted_file', 'restore_recovery_item']);
-const CHECKPOINT_MUTATION_TOOLS = new Set(['restore_checkpoint']);
-
-export function isRestoreMutationTool(toolName: string): boolean {
-  return RECOVERY_MUTATION_TOOLS.has(toolName) || CHECKPOINT_MUTATION_TOOLS.has(toolName);
-}
 
 /**
  * A resolver answers with the paths the store holds for that id, or `undefined`

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { isRestoreMutationTool } from './harness-runtime.js';
 import {
-  isRestoreMutationTool,
   resolveMutationSubjects,
   type MutationSubjectResolvers,
 } from './mutation-subject.js';

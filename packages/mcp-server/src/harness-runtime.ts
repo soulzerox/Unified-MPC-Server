@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { classifyWorkspaceSourceEvidence, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { MandatoryMcpBootstrapResult, MandatoryMcpServerStatus } from '@unified-mpc/extensions';
+import type { MutationPolicyDecision } from './mutation-policy.js';
 
 export interface HarnessActivationContext {
   readonly sessionId: string;
@@ -168,19 +169,47 @@ export function isPathExtractorTool(toolName: string): boolean {
 export type OpaqueMutationReason = 'command' | 'unresolved';
 
 /**
- * The command-shaped tools. They mutate through an executable, so a request
- * carries no artifact path for a preparation to bind to, and this list is the
- * call-site answer to "should the mutate phase see this call at all?".
- *
- * It is deliberately not derived from "not a path extractor": every opaque
- * mutation would then reach the phase, including `mcp_call` and `computer_use`,
- * whose refusal belongs to the opaque-mutation rule the mutation policy already
- * applies. This is the set step 5b-2 covers.
- *
- * Exported as a list as well as a set so the documentation check can compare
- * the prose against the code instead of against a second copy of the names.
+ * The tools whose request names a stored subject instead of an artifact path.
+ * They live next to the path extractors because the mutate gate needs one
+ * answer to "does this request name its own subject?" and the two halves of
+ * that answer must not drift apart.
  */
-export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = ['shell', 'wsl_exec', 'git', 'process_start'];
+export const RECOVERY_MUTATION_TOOLS: ReadonlySet<string> = new Set(['restore_deleted_file', 'restore_recovery_item']);
+export const CHECKPOINT_MUTATION_TOOLS: ReadonlySet<string> = new Set(['restore_checkpoint']);
+
+export function isRestoreMutationTool(toolName: string): boolean {
+  return RECOVERY_MUTATION_TOOLS.has(toolName) || CHECKPOINT_MUTATION_TOOLS.has(toolName);
+}
+
+/**
+ * The tools the registry scopes to the active workspace because they mutate
+ * local state. `requiresActiveWorkspaceScope` asks this same set, so "a local
+ * mutation" has one definition: the set a mutating call is scoped by is also
+ * the set the mutate phase decides.
+ */
+export const LOCAL_MUTATION_TOOLS: ReadonlySet<string> = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
+
+/** Output media the registry scopes only when the policy says the call replaces a target. */
+export const LOCAL_OUTPUT_REPLACEMENT_TOOLS: ReadonlySet<string> = new Set(['audio', 'screen_record']);
+
+export function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
+  return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));
+}
+
+/**
+ * The mutate phase's reach: every local mutation whose request names no path a
+ * preparation could bind to and whose subject no store can name. It is derived
+ * rather than listed, so adding a tool to `LOCAL_MUTATION_TOOLS` extends the
+ * phase and there is no second list to forget.
+ *
+ * The line is deliberate: remote, desktop and gateway-mediated effects
+ * (`mcp_call`, `computer_use`, `web_fetch`, `dom_cdp`) are not local mutations,
+ * so their refusal stays with the mutation policy's own `opaque_mutation`
+ * vocabulary instead of becoming a second gate that would also refuse reads.
+ */
+export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [...LOCAL_MUTATION_TOOLS]
+  .filter((tool) => !isPathExtractorTool(tool) && !isRestoreMutationTool(tool))
+  .sort();
 const OPAQUE_MUTATION_TOOLS = new Set(OPAQUE_MUTATION_TOOL_NAMES);
 
 export function isOpaqueMutationTool(toolName: string): boolean {

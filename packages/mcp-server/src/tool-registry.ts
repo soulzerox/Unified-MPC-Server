@@ -56,8 +56,8 @@ import { hasExplicitUserConfirmation } from './destructive-policy.js';
 import { isScopedAutoApprovalAllowed, type WorkspaceScope, type WorkspaceScopeUnavailable } from './destructive-scope.js';
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
-import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, isOpaqueMutationTool, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
-import { isRestoreMutationTool, resolveMutationSubjects, type MutationSubjectResolvers } from './mutation-subject.js';
+import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, isOpaqueMutationTool, isRestoreMutationTool, requiresActiveWorkspaceScope, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
+import { resolveMutationSubjects, type MutationSubjectResolvers } from './mutation-subject.js';
 import {
   DEFAULT_MUTATE_MODE,
   DEFAULT_OPAQUE_MUTATE_POLICY,
@@ -3350,8 +3350,6 @@ function prohibitedInvocationReason(toolName: string, input: unknown): string | 
   return undefined;
 }
 
-const LOCAL_MUTATION_TOOLS = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
-
 /**
  * The outcome of the mutate-phase seam. `claimedPaths` is present exactly when
  * the opt-in phase claimed its preparations at authorization, which tells the
@@ -3387,10 +3385,6 @@ function appendGateNote(detail: ActivityTargetDetail, note: string): ActivityTar
   }
 }
 
-const LOCAL_OUTPUT_REPLACEMENT_TOOLS = new Set(['audio', 'screen_record']);
-function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
-  return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));
-}
 function requiresNativePathScope(toolName: string, input: unknown): boolean {
   if (!NATIVE_ACTIVE_SCOPE_TOOLS.has(toolName) || !isRecord(input)) return false;
   for (const key of ['file_path', 'target_path', 'output_path'] as const) {

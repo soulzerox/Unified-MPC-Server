@@ -624,6 +624,40 @@ describe('workspace engineering harness enforcement', () => {
       .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
   });
 
+  it('refuses the local mutations 5b-2 left out when the workspace refuses what it cannot gate', async () => {
+    // Step 5b-3 derives the reach from `LOCAL_MUTATION_TOOLS`, so these families
+    // now arrive at the same decision as a command: they mutate local state and
+    // name no path a preparation could bind to.
+    const { services, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    for (const [tool, input] of [
+      ['git_publish', { remote: 'origin', branch: 'feat/opaque', expectedSha: 'a'.repeat(40), approvalId: 'approval-1' }],
+      ['office', { app: 'word', action: 'write', file_path: 'report.docx' }],
+    ] as const) {
+      await expect(registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input }), tool).resolves.toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: 'CONFLICT',
+            message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
+            details: { phase: 'mutate', reason: 'opaque_mutation' },
+          },
+        },
+      });
+    }
+
+    // A gateway call is not a local mutation: refusing it outright would also
+    // refuse the reads it carries, so the mutation policy keeps that decision.
+    expect((await registry.invoke('mcp_call', {
+      workspaceId: 'workspace-1', server: 'filesystem', tool: 'read_file', arguments: { path: 'src/app.ts' },
+    })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+  });
+
   it('admits a command mutation and records that it had no prepared evidence', async () => {
     const { services, setFileContent } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool } from './harness-runtime.js';
+import { LOCAL_MUTATION_TOOLS, OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isPathExtractorTool, isRestoreMutationTool } from './harness-runtime.js';
 import {
   DEFAULT_MUTATE_MODE,
   DEFAULT_OPAQUE_MUTATE_POLICY,
@@ -83,22 +83,6 @@ describe('opaque mutate policy', () => {
     expect(note).toContain('admitted git');
     expect(note).toContain('no prepared path');
     expect(note).toContain('workflowGate.mutateOpaque is allow');
-  });
-});
-
-describe('opaque mutation tools', () => {
-  it('routes the command-shaped tools and leaves the rest to the mutation policy', () => {
-    // The list is the statement, not a derivation: a tool that is removed from
-    // it silently stops reaching the phase, so it is pinned in both directions.
-    // The negative names are a sample of what the exclusion means - a path tool,
-    // a store-named tool, a path-less tool the mutation policy already refuses
-    // as `opaque_mutation`, and the project commands whose configured argv is
-    // not the caller's - not a claim that these are every excluded tool.
-    expect(['shell', 'wsl_exec', 'git', 'process_start'].filter((tool) => !isOpaqueMutationTool(tool))).toEqual([]);
-    expect([
-      'write_file', 'restore_deleted_file', 'mcp_call', 'computer_use', 'process_stop',
-      'project_test', 'project_build', 'codex_run',
-    ].filter(isOpaqueMutationTool)).toEqual([]);
   });
 });
 
@@ -232,57 +216,37 @@ describe('describeMutateBlockers', () => {
 });
 
 /**
- * The reach of the phase is stated in prose in several places, and four reviews
- * of step 5b-2 found the same defect in it: one paragraph or table row naming
- * three of the four tools. Prose cannot be derived from the set, so the document
- * gets one sentence that *is* the list, and the checks below keep the rest of it
- * from disagreeing with that sentence.
+ * The reach of the phase used to be a list of four names, restated in prose in
+ * several places, and five reviews found the same defect in it: one paragraph
+ * naming three of the four. The list is gone. The phase decides every local
+ * mutation whose request names no path, derived from the registry's own
+ * `LOCAL_MUTATION_TOOLS`, so a tool added there extends the phase and there is
+ * no second list to forget. The document states that rule once, by name.
  */
-describe('the document states the phase reach once', () => {
+describe('the phase reach is derived from the local mutation set', () => {
   const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
-  const reach = [...OPAQUE_MUTATION_TOOL_NAMES].sort();
-  const countWords = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
 
-  it('names exactly the tools the phase reaches, and only once', () => {
-    const canonical = /The phase reaches exactly these (\w+) tools: ((?:`[a-z_]+`(?:,\s*|\s+and\s+)?)+)\./.exec(doc);
-    expect(canonical).not.toBeNull();
-    const named = [...canonical![2].matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
-    // Set equality in both directions, not "every name is a real tool": a
-    // repeated name must not stand in for a missing one, and a tool the reach
-    // gains must be added to the sentence. Sorting leaves the prose free to
-    // order the tools for reading.
-    expect([...named].sort()).toEqual(reach);
-    // The count word is a copy of the list length too, so "these four tools"
-    // cannot survive a fifth.
-    expect(canonical![1]).toBe(countWords[reach.length]);
-    expect(doc.match(/The phase reaches exactly these \w+ tools:/g)).toHaveLength(1);
+  it('decides every local mutation that names no path, and nothing else', () => {
+    expect([...OPAQUE_MUTATION_TOOL_NAMES]).toEqual(
+      [...LOCAL_MUTATION_TOOLS].filter((tool) => !isPathExtractorTool(tool) && !isRestoreMutationTool(tool)).sort(),
+    );
+    // A path extractor and a restore name their subject another way, so they
+    // never arrive at the opaque decision.
+    expect(OPAQUE_MUTATION_TOOL_NAMES.filter(isPathExtractorTool)).toEqual([]);
+    expect(OPAQUE_MUTATION_TOOL_NAMES.filter(isRestoreMutationTool)).toEqual([]);
+    // The families 5b-2 left out now reach the phase.
+    for (const tool of ['git_publish', 'codex_run', 'agent_swarm_run', 'self_heal_apply', 'office', 'docx_merge', 'process_stop']) {
+      expect(OPAQUE_MUTATION_TOOL_NAMES, tool).toContain(tool);
+    }
+    // Remote, desktop and gateway-mediated effects are not local mutations, so
+    // refusing `mcp_call` cannot also refuse the reads it carries.
+    for (const tool of ['mcp_call', 'computer_use', 'web_fetch', 'dom_cdp', 'project_test']) {
+      expect(OPAQUE_MUTATION_TOOL_NAMES, tool).not.toContain(tool);
+    }
   });
 
-  it('never names a subset of the reach in one document block', () => {
-    // A mention of two or more is an enumeration, and an enumeration that stops
-    // short of the whole list is the defect. A single mention is prose about one
-    // tool. Blocks are blank-line-separated, so an adjacent run of list items is
-    // checked as one unit — which is how the document reads.
-    const blocks: string[] = [];
-    let current: string[] = [];
-    const flush = (): void => {
-      if (current.length > 0) blocks.push(current.join(' '));
-      current = [];
-    };
-    for (const line of doc.split('\n')) {
-      if (line.trim() === '') flush();
-      else if (line.trimStart().startsWith('|')) { flush(); blocks.push(line); }
-      else current.push(line);
-    }
-    flush();
-
-    const offenders = blocks
-      .map((block) => ({
-        block,
-        named: OPAQUE_MUTATION_TOOL_NAMES.filter((tool) => new RegExp(`\`${tool}\`(?![\\w-])`).test(block)),
-      }))
-      .filter(({ named }) => named.length >= 2 && named.length < OPAQUE_MUTATION_TOOL_NAMES.length)
-      .map(({ block, named }) => `${named.join('+')}: ${block.slice(0, 90)}`);
-    expect(offenders).toEqual([]);
+  it('states the rule once in the document instead of listing the tools', () => {
+    expect(doc.match(/The phase decides every local mutation that names no\s+path/g)).toHaveLength(1);
+    expect(doc).toContain('LOCAL_MUTATION_TOOLS');
   });
 });

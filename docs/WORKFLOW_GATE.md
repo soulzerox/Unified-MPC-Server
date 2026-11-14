@@ -249,18 +249,16 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    - the MCP `git_worktree_remove` tool's `worktreeCleanupSafety` returns
      `clean` | `blocked` | `unavailable` from `goalWorktreeRemovalBlockers` and
      refuses an unverifiable classification. It is a private method of
-     `UpgradeRuntimeService`, and it stays private: its own dry run already
-     returns the same verdict without mutating anything — it reads the ownership
-     ledger and runs read-only Git probes, and the test that proves it
-     (`upgrade-runtime-worktree-safety.test.ts`, "reports the classification in a
-     dry run without touching git or the ledger") asserts an empty removal-side
-     Git call list, not an absence of reads. The close gate therefore asks
-     the tool for a preview rather than reaching into the class, so there is one
-     removal decision and not a second copy of it. The preview is ownership-scoped
-     before it returns, so a session that does not own the worktree gets
-     `PERMISSION_DENIED` rather than a preview: the close gate must ask as the
-     owning session, or this tool needs a read-only viewer that reports the same
-     verdict without the ownership check.
+     `UpgradeRuntimeService`, and it stays private: it is the destructive path's
+     own answer, and the close gate must not reach into the class for it. Both
+     paths derive their blockers from the same classifier, so there is one
+     removal decision and not a second copy of it. The tool's preview is
+     ownership-scoped before it returns, so a session that does not own the
+     worktree gets `PERMISSION_DENIED` rather than a preview. The close gate
+     therefore uses `createGoalWorktreeRemovalPreviewPort`, a read-only
+     client-scoped composition of the same classifier (open question 5): it
+     reports the same derivation without granting deletion, while the
+     destructive path keeps its stricter session check.
    - goal completion's `goalCompletionWorktreeBlockers` returns entries for
      `dirty`, `unmerged_changes` and `probe_failed`; `unintegrated_head` is
      deliberately not blocking because the merge flow squash-merges. It is
@@ -294,7 +292,7 @@ Each step ships alone and leaves the repository working.
 | 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
 | 2 ⏸ | Make the shared core importable from TypeScript: a build-free ESM package, or an injected evaluator at the composition root | **deferred**: not needed by step 3, required by step 4; see "Status" below |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
-| 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | **blocked** on a removal preview that can classify a worktree the asking session does not own (open question 5) and on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
+| 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); **blocked** only on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
 | 4 | Convert runtime merge evidence to the shared model, repoint `GuardedMergeService`, wire `verify`/`review` through `receipts()` | runtime gate tests pass unchanged; existing runtime receipts are converted, not silently invalidated; the CLI receipt format is unchanged |
 | 5 | Extend `validateHarnessMutation` with the `mutate` phase behind a profile flag | opt-in only; default profile unchanged; all mutation tools covered, and a missing preparation refuses instead of auto-preparing |
 
@@ -326,14 +324,14 @@ application state, and all three are reachable from `apps/cli` today:
 
 | Question | Reached through | Caveat |
 |---|---|---|
-| may this worktree be removed? | the `git_worktree_remove` **dry run**, which returns the same safety verdict and performs no mutation (it reads the ownership ledger and runs read-only Git probes) | the preview is ownership-scoped *before* the dry-run return, so a session that does not own the worktree gets `PERMISSION_DENIED` instead of a preview: it must ask as the owning session, or the tool needs an explicit read-only viewer |
-| may this goal complete? | the exported `goalCompletionWorktreeBlockers` over `GoalWorktreeReconciliationPort.classify` with `ownershipScope: 'client'`, the port `apps/cli` already builds | already enforced at completion; nothing to add. Client scope compares the entry owner to the asking client id, so an MCP-spawned (`cli-mcp-stdio`) row is same-client here — only the preview above mismatches |
+| may this worktree be removed? | `createGoalWorktreeRemovalPreviewPort` over `GoalWorktreeReconciliationPort.classify` with `ownershipScope: 'client'`, or the `git_worktree_remove` **dry run** for the owning session | the dry run is ownership-scoped *before* the dry-run return, so a session that does not own the worktree gets `PERMISSION_DENIED` instead of a preview; the client-scoped preview is the read-only viewer for that case (open question 5) |
+| may this goal complete? | the exported `goalCompletionWorktreeBlockers` over `GoalWorktreeReconciliationPort.classify` with `ownershipScope: 'client'`, the port `apps/cli` already builds | already enforced at completion; nothing to add. It and the preview both compare the entry owner to the asking client id, so the two agree after a session handoff |
 | is this workspace cleanup-eligible? | `WorkspaceService.evaluateGoalWorkspaceCleanup`, already called from `apps/cli/src/commands/web.ts` | `retention_pending` is a waiting state, not a blocker |
 
 So step 3 lands in `apps/cli`, next to the other commands. It does not need the
 core, because it does not re-derive any policy — it reports three existing
 decisions. Step 3a ships the decision and the receipt; step 3b ships the command,
-and is blocked on the two prerequisites recorded below.
+and is blocked on the remaining prerequisite recorded below.
 
 ### Status after step 3a
 
@@ -352,15 +350,37 @@ being folded into a verdict, and a goal with no cleanup row in scope refuses as
 rows the decision used, and the reader narrows the verdict and every blocker
 instead of casting, so a foreign file is refused rather than formatted.
 
-Step 3b is blocked on two things, and neither is a guess:
+Step 3b is blocked on one remaining prerequisite, and it is not a guess:
 
-1. a removal preview that can classify a worktree the asking session does not own
-   (open question 5 below), and
-2. `goalDurableReferenceStates`, without which
-   `evaluateGoalWorkspaceCleanup` reports `durable_references_unknown` for every
-   goal (#170).
+1. `goalDurableReferenceStates`, without which `evaluateGoalWorkspaceCleanup`
+   reports `durable_references_unknown` for every goal (#170).
 
-Wiring the command before both land would ship a gate that refuses everything —
+The other prerequisite — a removal preview that can classify a worktree the
+asking session does not own — is answered by open question 5 and shipped as
+`createGoalWorktreeRemovalPreviewPort` in
+`packages/application/src/goal-worktree-removal-preview.ts`:
+
+```ts
+const previews = createGoalWorktreeRemovalPreviewPort({ reconciliation });
+const preview = await previews.preview({ workspaceId, worktreePath, actor });
+// { worktreePath, status: 'clean' | 'blocked', blockers, blockerDetails,
+//   owner, externallyOwned, activeLease, pathMissing }
+```
+
+It reuses the reconciliation port the completion gate already builds, asks with
+`ownershipScope: 'client'`, and returns the same `status`/`blockers` shape the
+CLI's removal port expects, so a session that did not spawn the worktree can
+still preview it after a handoff. It is read-only; deletion keeps going through
+`git_worktree_remove`, which keeps its session check and confirmation gate.
+
+`externally_owned` stays a blocker here, unlike in
+`goalCompletionWorktreeBlockers`: completion says which work a goal is
+responsible for, while this preview says whether one specific path is removable.
+Returning `clean` for a path the destructive path would refuse would make the
+close receipt claim something that is not true. A path the ownership ledger does
+not record is refused as `CONFLICT` instead of being assumed removable.
+
+Wiring the command before #170 lands would ship a gate that refuses every goal —
 fail-closed, but not a working feature.
 
 Step 4 is where packaging becomes real. `GuardedMergeService` must delegate to
@@ -419,7 +439,17 @@ This is the decision to make before step 4, not before step 3.
    "Status after step 1". It is listed here rather than settled because both
    routes are honest and the choice depends on whether the repository wants to
    own hand-maintained type declarations at all.
-5. **Does the close gate ask as the owning session, or does
-   `git_worktree_remove` grow a read-only viewer?** The preview's ownership check
-   makes that preview unreachable from a session that did not create the
-   worktree, which is the common case when a goal is closed after a handoff.
+5. ~~Does the close gate ask as the owning session, or does
+   `git_worktree_remove` grow a read-only viewer?~~ **Answered: the tool does not
+   grow a second mode, and the gate does not ask as the owning session.** The
+   ownership check makes the dry-run preview unreachable from a session that did
+   not create the worktree, which is the common case when a goal is closed after
+   a handoff. Adding a viewer mode to the destructive tool would put two
+   ownership rules in one place; asking as the owning session is impossible once
+   that session is gone. Instead `createGoalWorktreeRemovalPreviewPort` composes
+   the existing read-only port with `ownershipScope: 'client'`: the client that
+   owns the goal is stable across a session handoff, so the preview follows the
+   goal while deletion keeps its stricter session check. It also keeps every
+   removal blocker, including `externally_owned`, because a preview that says
+   `clean` where the destructive path refuses would make the close receipt lie;
+   only the same-client case is relaxed.

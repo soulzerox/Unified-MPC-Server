@@ -25,6 +25,7 @@ export * from './goal-workspace-retention-evidence-sealing-service.js';
 export * from './goal-worktree-reconciliation-service.js';
 export * from './goal-worktree-git-port.js';
 export * from './goal-worktree-reconciliation-port.js';
+export * from './goal-worktree-removal-preview.js';
 export * from './goal-runtime-reconciliation-service.js';
 export * from './managed-resource-recovery-service.js';
 export * from './heavy-job-queue-recovery-service.js';

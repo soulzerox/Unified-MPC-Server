@@ -24,7 +24,12 @@ export interface CloseGatePorts {
   /** Cleanup rows for this workspace, already evaluated by `WorkspaceService`. */
   readonly cleanup: (request: { readonly workspaceId: string; readonly goalId?: string }) =>
   Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>>;
-  /** The `git_worktree_remove` dry run, which owns worktree safety per path. */
+  /**
+   * Worktree safety per path. The intended composition is
+   * `createGoalWorktreeRemovalPreviewPort` (client-scoped, so it survives a
+   * session handoff); the `git_worktree_remove` dry run is the same question
+   * asked as the owning session.
+   */
   readonly removal: (request: { readonly workspaceId: string; readonly worktreePath: string }) =>
   Promise<Result<CloseGateRemovalPreview>>;
   /** Completion blockers for this goal, from the reconciliation port. */

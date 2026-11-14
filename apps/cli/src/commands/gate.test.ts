@@ -225,12 +225,26 @@ describe('close gate fingerprint', () => {
       evaluateCloseGate(input({ removals: [removal({ worktreePath: 'other' })] })),
       // A completion row, which has no disposition at all.
       evaluateCloseGate(input({ completion: [{ worktreePath: WORKTREE, blockers: ['dirty'] }] })),
-      // The subject itself.
-      evaluateCloseGate(input({ workspaceId: 'ws_other', cleanup: [cleanup({ workspaceId: 'ws_other' })] })),
-      evaluateCloseGate(input({ goalId: 'goal_other', cleanup: [cleanup({ goalId: 'goal_other' })] })),
     ];
     expect(new Set([base.fingerprint, ...variants.map((verdict) => verdict.fingerprint)]).size)
       .toBe(variants.length + 1);
+  });
+
+  it('binds the subject itself, even when no cleanup row carries it', () => {
+    // The cleanup row is empty, so only the top-level subject can move the hash.
+    // Without this case a subject variant could pass on its cleanup row alone.
+    const bare = evaluateCloseGate(input({ cleanup: [] }));
+    const otherWorkspace = evaluateCloseGate(input({ cleanup: [], workspaceId: 'ws_other' }));
+    const otherGoal = evaluateCloseGate(input({ cleanup: [], goalId: 'goal_other' }));
+    expect(new Set([bare.fingerprint, otherWorkspace.fingerprint, otherGoal.fingerprint]).size).toBe(3);
+  });
+
+  it('does not depend on input order when two rows share a sort key', () => {
+    const dirty = { status: 'blocked' as const, blockers: ['dirty'] };
+    const unmerged = { status: 'blocked' as const, blockers: ['unmerged_changes'] };
+    const forward = evaluateCloseGate(input({ removals: [removal(dirty), removal(unmerged)] }));
+    const reversed = evaluateCloseGate(input({ removals: [removal(unmerged), removal(dirty)] }));
+    expect(reversed.fingerprint).toBe(forward.fingerprint);
   });
 });
 
@@ -320,8 +334,40 @@ describe('close gate receipts', () => {
           blockers: [{ kind: 'removal', worktreePath: WORKTREE, status: 'clean', blockers: [] }],
         },
       }],
+      ['a cleanup blocker with a passing disposition', {
+        ...base,
+        verdict: {
+          ...verdict,
+          allowed: false,
+          blockers: [{ kind: 'cleanup', workspaceId: WORKSPACE, disposition: 'retention_candidate', reasons: [] }],
+        },
+      }],
       ['a non-string headSha', { ...base, headSha: 42 }],
       ['a non-string goalId', { ...base, verdict: { ...verdict, goalId: 42 } }],
+    ];
+    for (const [name, body] of mutations) {
+      const candidate = path.join(directory, `${name.replace(/\W+/g, '-')}.json`);
+      await writeFile(candidate, JSON.stringify(body), 'utf8');
+      expect((await readCloseGateReceipt(candidate)).ok, name).toBe(false);
+    }
+  });
+
+  it('refuses a receipt whose envelope is not the one this module writes', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-'));
+    temporaryDirectories.push(directory);
+    const verdict = evaluateCloseGate(input());
+    const base = {
+      kind: 'workflow-gate',
+      phase: 'close',
+      version: 1,
+      gateId: 'g',
+      createdAt: '2026-11-14T00:00:00.000Z',
+      verdict,
+    };
+    const mutations: readonly (readonly [string, unknown])[] = [
+      ['another version', { ...base, version: 2 }],
+      ['no gate id', { ...base, gateId: undefined }],
+      ['a non-string createdAt', { ...base, createdAt: 42 }],
     ];
     for (const [name, body] of mutations) {
       const candidate = path.join(directory, `${name.replace(/\W+/g, '-')}.json`);

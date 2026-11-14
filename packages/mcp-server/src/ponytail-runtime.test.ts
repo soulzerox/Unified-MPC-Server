@@ -5,8 +5,8 @@ import {
   BUNDLED_PONYTAIL_SKILL_ID,
   PonytailActivationLedger,
   isCodingMutation,
-  isDevelopmentArtifactPath,
 } from './ponytail-runtime.js';
+import { codeMutationPaths, isDevelopmentArtifactPath } from './harness-runtime.js';
 
 const context = { sessionId: 'session-1', workspaceId: 'workspace-1', goalId: 'goal-1' } as const;
 const full: ResolvedPonytailPolicy = { mode: 'full', source: 'goal' };
@@ -71,5 +71,16 @@ describe('Ponytail coding mutation classification', () => {
     expect(isCodingMutation('move_file', { sourcePath: 'src/a.ts', destinationPath: 'src/b.ts' })).toBe(true);
     expect(isCodingMutation('lsp_rename', { workspaceId: 'workspace-1' })).toBe(true);
     expect(isCodingMutation('project_build', { workspaceId: 'workspace-1' })).toBe(false);
+  });
+
+  it('classifies path-naming mutations exactly like the harness gate', () => {
+    // Two vocabularies for the same question drift apart silently: ponytail
+    // would demand its skill while the harness gate saw no path to prepare.
+    // Both now call one classifier, and this pins the agreement for the
+    // spellings that used to differ (a backslash on POSIX, a cased marker).
+    for (const path of ['src/app.ts', 'App.TS', 'Dockerfile', 'tools\\Dockerfile', 'README.md', 'vite.config.ts']) {
+      expect(codeMutationPaths('write_file', { path }).length > 0, path)
+        .toBe(isCodingMutation('write_file', { path }));
+    }
   });
 });

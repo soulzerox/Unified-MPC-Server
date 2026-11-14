@@ -1933,6 +1933,12 @@ export class ToolRegistry {
           paths: decision.blockers.flatMap((blocker) => blocker.path === undefined ? [] : [blocker.path]),
         }));
       }
+      // Claim the preparation here, not after the mutation lands. Two concurrent
+      // writes to the same path would otherwise both validate against the same
+      // ledger row, and the second would mutate on evidence the first had
+      // already spent. A claim is fail-closed on failure: a write that fails may
+      // still have changed the file, so the next attempt must re-prepare.
+      for (const path of paths) this.harnessActivation.consumePath(context, path);
       return undefined;
     }
 

@@ -1,5 +1,6 @@
 import type { WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { ResolvedPonytailPolicy } from '@unified-mpc/shared';
+import { isDevelopmentArtifactPath } from './harness-runtime.js';
 
 export const BUNDLED_PONYTAIL_SKILL_ID = 'bundled:agent-skills/ponytail';
 export const BUNDLED_PONYTAIL_REVIEW_SKILL_ID = 'bundled:agent-skills/ponytail-review';
@@ -131,21 +132,6 @@ export function isCodingMutation(toolName: string, input: unknown): boolean {
     return false;
   }
   return paths.some(isDevelopmentArtifactPath);
-}
-
-export function isDevelopmentArtifactPath(value: string): boolean {
-  const normalized = value.replaceAll('\\', '/').toLowerCase();
-  const basename = normalized.slice(normalized.lastIndexOf('/') + 1);
-  const codeExtensions = [
-    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.java', '.kt', '.kts', '.cs',
-    '.c', '.cc', '.cpp', '.h', '.hpp', '.swift', '.rb', '.php', '.vue', '.svelte', '.sql', '.proto', '.graphql', '.gql',
-  ];
-  if (codeExtensions.some((extension) => basename.endsWith(extension))) return true;
-  if (basename === 'package.json' || basename === 'dockerfile' || basename === 'makefile' || basename === 'cargo.toml') return true;
-  if (/^tsconfig(?:\.[^.]+)?\.json$/.test(basename)) return true;
-  if (/^(?:vite|vitest|jest|eslint|prettier|webpack|rollup|babel|electron-builder|docker-compose)(?:\.config)?\.(?:js|cjs|mjs|ts|json|ya?ml|toml)$/.test(basename)) return true;
-  if (/^[^.]+\.config\.(?:js|cjs|mjs|ts|json|ya?ml|toml)$/.test(basename)) return true;
-  return false;
 }
 
 function activationKey(context: PonytailActivationContext): string {

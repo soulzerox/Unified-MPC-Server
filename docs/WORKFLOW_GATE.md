@@ -629,10 +629,15 @@ decision, and makes the decision visible:
 ```
 
 The phase reaches exactly these four tools: `shell`, `wsl_exec`, `git` and
-`process_start`. That sentence is the list; everything below and elsewhere in
-this document refers to it rather than restating it, and a test fails if it
-disagrees with `isOpaqueMutationTool` or if any paragraph or table row here
-enumerates a subset of it.
+`process_start`. That sentence is the list. A test compiles it against the
+exported `OPAQUE_MUTATION_TOOL_NAMES` and compares the two as sets, so a tool the
+reach gains, a name the sentence drops, a name it repeats and the count word
+itself each fail the suite instead of passing on a stale copy. A second test
+reads this document as blank-line-separated blocks — a paragraph, an adjacent
+run of list items, or one table row — and fails when a block names two or three
+of the four in backticks without naming all four. Restating the full list is
+allowed and already happens above and in the step table; a partial enumeration
+is not.
 
 - the command-shaped tools now reach the seam instead of skipping it. Before this
   step `validateHarnessMutation` was never called for them, because

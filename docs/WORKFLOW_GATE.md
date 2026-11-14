@@ -24,9 +24,9 @@ name this exact pull request, head and base, with a review that is not a
 rejection — has one owner, the conformance corpus in
 `apps/cli/src/workflow-gate-conformance.test.ts`, and both evaluators are
 adapters it holds to it. Both receipts also record a repository, but only the
-runtime evaluator compares it — the CLI review receipt's `repository` field is
-written and never read — so that clause is recorded as runtime-only rather than
-folded into the shared set or quietly dropped. They are not copies of one
+runtime evaluator compares it — the CLI merge gate never looks at the field,
+although the backlog summary does — so that clause is recorded as runtime-only
+rather than folded into the shared set or quietly dropped. They are not copies of one
 function: the runtime receipt carries a verification mode, a gate list and a
 review outcome, while the CLI receipt carries a profile version, a clean-tree
 diff fingerprint and a findings document. Forcing those into one shape would
@@ -492,8 +492,8 @@ bump.
    `apps/cli/src/workflow-gate-conformance.test.ts`, which runs both real
    evaluators over one scenario table and fails if they disagree. The repository
    clause is recorded as `runtime-only`: both receipts carry the field, but only
-   the runtime evaluator compares it, and `evaluateReviewEvidence` has no
-   repository to compare against.
+   the runtime evaluator compares it — the CLI merge gate has no repository
+   input, and `evaluateReviewEvidence` never reads the receipt's copy.
 
    Rejected route 1 (build-free package with hand-written declarations) because
    the declarations would be a hand-maintained mirror of the implementation, and

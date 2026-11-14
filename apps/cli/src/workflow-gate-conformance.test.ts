@@ -79,8 +79,10 @@ interface Scenario {
   readonly expected: 'allowed' | 'blocked';
   /**
    * The refusal each world must report, so a row cannot pass because of an
-   * unrelated blocker. `cli: null` means the CLI receipt has no field for this
-   * clause. `proof` is `null` for the row that must be allowed.
+   * unrelated blocker. `cli: null` marks a `runtime-only` row: the CLI receipt
+   * carries the field but its merge gate does not compare it, so that row
+   * asserts the opposite — that the CLI still allows the head. `proof` is `null`
+   * for the row that must be allowed.
    */
   readonly proof: { readonly cli: RegExp | null; readonly runtime: MergeEvidenceBlockerCode } | null;
 }
@@ -168,8 +170,8 @@ const SCENARIOS: readonly Scenario[] = [
     scope: 'runtime-only',
     repository: 'other',
     expected: 'blocked',
-    // The CLI profile receipt has no repository field: its identity is the PR
-    // number plus the head and base it named.
+    // The CLI review receipt records `repository`, but its merge gate never
+    // compares it, so the CLI head passes and the row pins that gap.
     proof: { cli: null, runtime: 'repository_mismatch' },
   },
 ];

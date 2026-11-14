@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { codeMutationPaths, isOpaqueMutationTool } from './harness-runtime.js';
+import { OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool } from './harness-runtime.js';
 import {
   DEFAULT_MUTATE_MODE,
   DEFAULT_OPAQUE_MUTATE_POLICY,
@@ -226,5 +228,61 @@ describe('describeMutateBlockers', () => {
     const message = describeMutateBlockers(blockers);
     expect(message).toContain('src/file-4.ts and 3 more');
     expect(message).not.toContain('src/file-5.ts');
+  });
+});
+
+/**
+ * The reach of the phase is stated in prose in several places, and four reviews
+ * of step 5b-2 found the same defect in it: one paragraph or table row naming
+ * three of the four tools. Prose cannot be derived from the set, so the document
+ * gets one sentence that *is* the list, and the checks below keep the rest of it
+ * from disagreeing with that sentence.
+ */
+describe('the document states the phase reach once', () => {
+  const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
+  const reach = [...OPAQUE_MUTATION_TOOL_NAMES].sort();
+  const countWords = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
+
+  it('names exactly the tools the phase reaches, and only once', () => {
+    const canonical = /The phase reaches exactly these (\w+) tools: ((?:`[a-z_]+`(?:,\s*|\s+and\s+)?)+)\./.exec(doc);
+    expect(canonical).not.toBeNull();
+    const named = [...canonical![2].matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
+    // Set equality in both directions, not "every name is a real tool": a
+    // repeated name must not stand in for a missing one, and a tool the reach
+    // gains must be added to the sentence. Sorting leaves the prose free to
+    // order the tools for reading.
+    expect([...named].sort()).toEqual(reach);
+    // The count word is a copy of the list length too, so "these four tools"
+    // cannot survive a fifth.
+    expect(canonical![1]).toBe(countWords[reach.length]);
+    expect(doc.match(/The phase reaches exactly these \w+ tools:/g)).toHaveLength(1);
+  });
+
+  it('never names a subset of the reach in one document block', () => {
+    // A mention of two or more is an enumeration, and an enumeration that stops
+    // short of the whole list is the defect. A single mention is prose about one
+    // tool. Blocks are blank-line-separated, so an adjacent run of list items is
+    // checked as one unit — which is how the document reads.
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = (): void => {
+      if (current.length > 0) blocks.push(current.join(' '));
+      current = [];
+    };
+    for (const line of doc.split('\n')) {
+      if (line.trim() === '') flush();
+      else if (line.trimStart().startsWith('|')) { flush(); blocks.push(line); }
+      else current.push(line);
+    }
+    flush();
+
+    const offenders = blocks
+      .map((block) => ({
+        block,
+        named: OPAQUE_MUTATION_TOOL_NAMES.filter((tool) => new RegExp(`\`${tool}\`(?![\\w-])`).test(block)),
+      }))
+      .filter(({ named }) => named.length >= 2 && named.length < OPAQUE_MUTATION_TOOL_NAMES.length)
+      .map(({ block, named }) => `${named.join('+')}: ${block.slice(0, 90)}`);
+    expect(offenders).toEqual([]);
   });
 });

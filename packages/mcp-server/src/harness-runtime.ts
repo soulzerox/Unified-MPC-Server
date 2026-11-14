@@ -176,8 +176,12 @@ export type OpaqueMutationReason = 'command' | 'unresolved';
  * mutation would then reach the phase, including `mcp_call` and `computer_use`,
  * whose refusal belongs to the opaque-mutation rule the mutation policy already
  * applies. This is the set step 5b-2 covers.
+ *
+ * Exported as a list as well as a set so the documentation check can compare
+ * the prose against the code instead of against a second copy of the names.
  */
-const OPAQUE_MUTATION_TOOLS = new Set(['shell', 'wsl_exec', 'git', 'process_start']);
+export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = ['shell', 'wsl_exec', 'git', 'process_start'];
+const OPAQUE_MUTATION_TOOLS = new Set(OPAQUE_MUTATION_TOOL_NAMES);
 
 export function isOpaqueMutationTool(toolName: string): boolean {
   return OPAQUE_MUTATION_TOOLS.has(toolName);

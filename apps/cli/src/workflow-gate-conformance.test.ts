@@ -25,9 +25,13 @@ import { describe, expect, it } from 'vitest';
  *
  * A row is either `shared` (both worlds carry the field, and both must reach the
  * same decision) or `runtime-only` (only the runtime receipt records it, so the
- * corpus pins the runtime's refusal and states that the CLI cannot express the
+ * corpus pins the runtime's refusal and records that the CLI cannot express the
  * clause). Marking a clause shared when one side has no field for it would let
  * the corpus claim coverage it does not have.
+ *
+ * It imports `@unified-mpc/domain`, which resolves to the package's `dist`, so
+ * this file runs in the merge profile's `test:cli` step, after `build` — it does
+ * not run pre-build like the `.mjs` gate suites.
  */
 
 const HEAD = 'a'.repeat(40);
@@ -328,8 +332,7 @@ describe('merge evidence conformance', () => {
     expect(failures).toEqual([]);
   });
 
-  it('runtime-only rows: the runtime refuses and the CLI has no field for the clause', async () => {
-    const modules = await loadCliModules();
+  it('runtime-only rows: the runtime refuses and the row claims no CLI proof', () => {
     const failures = SCENARIOS.filter((scenario) => scenario.scope === 'runtime-only').flatMap((scenario) => {
       const runtime = runtimeVerdict(scenario);
       const problems: string[] = [];
@@ -338,11 +341,13 @@ describe('merge evidence conformance', () => {
         if (!runtime.codes.includes(scenario.proof.runtime)) {
           problems.push(`${scenario.name}: runtime did not report ${scenario.proof.runtime} (got ${runtime.codes.join(', ')})`);
         }
-        // The row exists because one world cannot express the clause. If the CLI
-        // ever gains the field, this assertion is what forces the row back into
-        // the shared set instead of leaving stale coverage behind.
-        if (scenario.proof.cli === null && !cliVerdict(scenario, modules).allowed) {
-          problems.push(`${scenario.name}: the CLI now refuses this head, so the clause is shared and belongs in the shared table`);
+        // Nothing to assert on the CLI side: its profile receipt has no
+        // repository field, so this adapter cannot vary it and no assertion here
+        // could detect the CLI gaining one. The row records the asymmetry rather
+        // than pretending to test it; a future CLI receipt that carries a
+        // repository needs a new shared row, not a tightened check in this one.
+        if (scenario.proof.cli !== null) {
+          problems.push(`${scenario.name}: a runtime-only row must not claim a CLI proof`);
         }
       }
       return problems;

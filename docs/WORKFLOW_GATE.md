@@ -20,15 +20,17 @@ in, and a migration that changes no behaviour on the way.
 
 The runtime merge gate is not a fourth gate and not future work: it is the
 runtime adapter over the same rule. That rule — evidence must exist, and it must
-name this exact repository, pull request, head and base, with a review that is
-not a rejection — has one owner, the conformance corpus in
+name this exact pull request, head and base, with a review that is not a
+rejection — has one owner, the conformance corpus in
 `apps/cli/src/workflow-gate-conformance.test.ts`, and both evaluators are
-adapters it holds to it. They are not copies of one function: the runtime
-receipt carries repository, pull request, head, optional base, verification mode,
-a gate list and a review outcome, while the CLI receipt carries a profile
-version, a clean-tree diff fingerprint and a findings document. Forcing those
-into one shape would fabricate fields one side does not have, which is why step 4
-repoints the runtime at the shared rule instead of converting its receipts.
+adapters it holds to it. The runtime receipt additionally names a repository;
+the CLI profile receipt has no such field, so that clause is recorded as
+runtime-only rather than folded into the shared set. They are not copies of one
+function: the runtime receipt carries a verification mode, a gate list and a
+review outcome, while the CLI receipt carries a profile version, a clean-tree
+diff fingerprint and a findings document. Forcing those into one shape would
+fabricate fields one side does not have, which is why step 4 repoints the runtime
+at the shared rule instead of converting its receipts.
 
 ---
 
@@ -407,9 +409,8 @@ the same decision: the passing row, then exactly one field broken per row —
 missing verification, missing review, a rejected review, a foreign head on either
 receipt, a foreign base, a foreign pull request. `runtime-only` rows exist where
 only one world records the field: the runtime receipt names a repository and the
-CLI profile receipt does not, so the corpus pins the runtime's refusal and fails
-if the CLI ever starts refusing that head, which is the signal to promote the row
-to `shared` instead of leaving coverage that is no longer accurate.
+CLI profile receipt does not, so the corpus pins the runtime's refusal and
+records the asymmetry instead of claiming a CLI assertion it cannot make.
 
 Every blocked row also names the refusal it must produce (`receipt_head_stale`
 and `/verification receipt was produced for a different head/`, and so on), so a
@@ -420,9 +421,12 @@ cannot satisfy it.
 
 The corpus binds the two profile rules through `createGatePolicy`'s injected
 `{ profileVersion, fingerprintFor }` instead of reading this checkout's profile,
-which is the seam #821 built for exactly this. It reads no files, runs no
-commands and needs no build, so it lives in `apps/cli`'s existing suite and
-changes neither the merge profile's step set nor `PROFILE_VERSION`.
+which is the seam #821 built for exactly this. It reads no files and runs no
+commands, but it does import `@unified-mpc/domain`, which resolves to that
+package's `dist`. It therefore runs in `apps/cli`'s `test:cli` step, after
+`build` — unlike the `.mjs` gate suites, it is not a pre-build check. It changes
+neither the merge profile's step set nor `PROFILE_VERSION`, because it adds no
+workspace project and no profile step.
 
 Nothing else about step 2 changes: `GuardedMergeService` keeps its own receipt
 reader and its `MergeEvidenceBlocker` vocabulary. Step 4 is the slice that
@@ -476,20 +480,22 @@ bump.
    fingerprint, a findings document and a bundled skill hash. Merging them would
    fabricate fields one side does not have or drop checks the other enforces.
    What they genuinely share is smaller than either route's cost: *evidence must
-   exist, and it must name this exact repository, pull request, head and base,
-   with a review that is not a rejection*. That rule is now owned by
+   exist, and it must name this exact pull request, head and base, with a review
+   that is not a rejection*. That rule is now owned by
    `apps/cli/src/workflow-gate-conformance.test.ts`, which runs both real
-   evaluators over one scenario table and fails if they disagree.
+   evaluators over one scenario table and fails if they disagree. The runtime's
+   repository clause is recorded as `runtime-only`, because the CLI receipt has
+   no field for it.
 
    Rejected route 1 (build-free package with hand-written declarations) because
    the declarations would be a hand-maintained mirror of the implementation, and
    rejected route 2 (evaluator injected at a `.mjs` composition root) because the
    shipped CLI is `dist/index.js` with no `.mjs` asset pipeline, so the injector
-   would need a new distribution path before it could exist. Both also carry a
-   cost neither route mentioned: a new workspace project changes the merge
-   profile's step set, which bumps `PROFILE_VERSION` and invalidates every
-   in-flight verification receipt — including other sessions' open PRs — for a
-   refactor that changes no behaviour.
+   would need a new distribution path before it could exist. Route 1 also carries
+   a cost the proposal did not mention: a new workspace project that defines a
+   `test` script joins the merge profile's step set, which bumps `PROFILE_VERSION`
+   and invalidates every in-flight verification receipt — including other
+   sessions' open PRs — for a refactor that changes no behaviour.
 
 5. ~~Does the close gate ask as the owning session, or does
    `git_worktree_remove` grow a read-only viewer?~~ **Answered: the tool does not

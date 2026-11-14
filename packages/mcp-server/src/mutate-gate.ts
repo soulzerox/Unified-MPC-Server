@@ -76,8 +76,10 @@ export type MutateGateDecision =
  *
  * A mutation that names no development artifact path has nothing to bind a
  * preparation to, so it is allowed. That is the honest limit of this phase and
- * not a claim about opaque mutations: `shell`, `git` and `restore_deleted_file`
- * never reach it, because `codeMutationPaths` returns nothing for them.
+ * not a claim about opaque mutations: `shell`, `git` and `process_start` never
+ * reach it, because no lookup names a file for them. Since step 5b-1 the restore
+ * tools do reach it — the caller resolves their subject through
+ * `mutation-subject.ts` before asking this decision.
  */
 export function evaluateMutateGate(request: MutateGateRequest): MutateGateDecision {
   if (request.mode === 'auto_prepare') return { allowed: true };

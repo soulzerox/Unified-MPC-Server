@@ -6,6 +6,7 @@ import {
   ok,
   type CommandSpec,
   type GoalLeaseProof,
+  type AppError,
   type InvocationAuthorization,
   type InvocationAuthorizationMode,
   type InvocationAuthorizationSource,
@@ -55,6 +56,7 @@ import { isScopedAutoApprovalAllowed, type WorkspaceScope, type WorkspaceScopeUn
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
+import { isRestoreMutationTool, resolveMutationSubjects, type MutationSubjectResolvers } from './mutation-subject.js';
 import { DEFAULT_MUTATE_MODE, describeMutateBlockers, evaluateMutateGate, workspaceMutateMode, type MutateMode } from './mutate-gate.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
@@ -682,18 +684,20 @@ export class ToolRegistry {
       const codingMutation = mutationDecision.kind !== 'read' && isCodingMutation(tool.name, activeRoutedInput);
       const admissionIdentityMutation = mutationDecision.kind !== 'read'
         && isWorkspaceAdmissionIdentityMutation(tool.name, activeRoutedInput);
-      if (codingMutation) {
-        const harnessError = await this.validateHarnessMutation(
+      let claimedHarnessPaths: readonly string[] | undefined;
+      if (codingMutation || (mutationDecision.kind !== 'read' && isRestoreMutationTool(tool.name))) {
+        const harnessAdmission = await this.validateHarnessMutation(
           mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId,
           tool.name,
           activeRoutedInput,
           parentSignal,
         );
-        if (harnessError !== undefined && !harnessError.ok) {
-          const response = mapError(harnessError.error);
-          await this.activity.end(callId, harnessError.error.code, Date.now() - started, harnessError.error.message);
+        if (!harnessAdmission.ok) {
+          const response = mapError(harnessAdmission.error);
+          await this.activity.end(callId, harnessAdmission.error.code, Date.now() - started, harnessAdmission.error.message);
           return response;
         }
+        claimedHarnessPaths = harnessAdmission.claimedPaths;
       }
       const ponytailInvocation = codingMutation
         ? await this.resolvePonytailInvocation(mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId, goalLease?.goalId)
@@ -1007,7 +1011,12 @@ export class ToolRegistry {
       this.rememberActivityContext(name, response, activityWorkspaceId, resultTargetSummary ?? resolvedTargetSummary);
       if (response.isError !== true && codingMutation) {
         const harnessWorkspaceId = mutationFenceWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId;
-        if (harnessWorkspaceId !== undefined) {
+        // The opt-in phase claims its preparations at authorization, so this
+        // call already spent exactly the paths it named. Consuming again from the
+        // routed input would delete a preparation for a path this invocation
+        // never claimed — normally a no-op, but a routed input that differs from
+        // the validated one would spend someone else's evidence.
+        if (harnessWorkspaceId !== undefined && claimedHarnessPaths === undefined) {
           const harnessContext = this.harnessContext(harnessWorkspaceId);
           for (const path of codeMutationPaths(name, activeRoutedInput)) this.harnessActivation.consumePath(harnessContext, path);
         }
@@ -1873,13 +1882,20 @@ export class ToolRegistry {
     toolName: string,
     input: unknown,
     signal?: AbortSignal,
-  ): Promise<ReturnType<typeof err> | undefined> {
-    if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return undefined;
-    const paths = codeMutationPaths(toolName, input);
-    if (paths.length === 0) return undefined;
+  ): Promise<HarnessMutationAdmission> {
+    if (workspaceId === undefined || this.services.extensions?.bootstrapMandatoryMcpServers === undefined) return { ok: true };
+    const subject = await resolveMutationSubjects(toolName, input, this.mutationSubjectResolvers(workspaceId));
+    if (subject.kind === 'opaque') return { ok: true };
+    const paths = subject.paths;
+    if (paths.length === 0) return { ok: true };
     const context = this.harnessContext(workspaceId);
     const operationSignal = signal ?? new AbortController().signal;
     const mode = await this.resolveMutateMode(workspaceId);
+    // A store-named subject is a restore, and the default mode keeps restores
+    // exactly as they were: auto-preparing one would read pre-edit context for a
+    // path that the restore exists because it is missing. Only the opt-in mode,
+    // where the agent has to prepare explicitly, asks about it.
+    if (mode === DEFAULT_MUTATE_MODE && subject.origin === 'store') return { ok: true };
 
     let state = this.harnessActivation.state(context);
     if (state === undefined) {
@@ -1892,7 +1908,7 @@ export class ToolRegistry {
           { phase: 'mutate', reason: 'harness_inactive' }));
       }
       const bootstrapped = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
-      if (!bootstrapped.ok) return bootstrapped;
+      if (!bootstrapped.ok) return err(bootstrapped.error);
       state = this.harnessActivation.state(context);
       if (state === undefined) {
         return err(appError('CONFLICT', 'Workspace engineering harness could not be activated for code mutation', true));
@@ -1900,13 +1916,13 @@ export class ToolRegistry {
     }
 
     const sourceIdentity = await this.observeWorkspaceSourceIdentity(workspaceId, operationSignal);
-    if (!sourceIdentity.ok) return sourceIdentity;
+    if (!sourceIdentity.ok) return err(sourceIdentity.error);
     if (sourceIdentity.value !== undefined) this.harnessActivation.synchronizeSource(context, sourceIdentity.value);
 
     const currentHash = await this.currentAgentsMdHash(workspaceId);
     if (!currentHash.ok) {
       this.harnessActivation.invalidate(context);
-      return currentHash;
+      return err(currentHash.error);
     }
     if (currentHash.value !== state.agentsMdHash) {
       this.harnessActivation.invalidate(context);
@@ -1916,7 +1932,7 @@ export class ToolRegistry {
           { phase: 'mutate', reason: 'harness_stale' }));
       }
       const reloaded = await this.bootstrapWorkspaceHarness(workspaceId, operationSignal);
-      if (!reloaded.ok) return reloaded;
+      if (!reloaded.ok) return err(reloaded.error);
       state = this.harnessActivation.state(context);
       if (state === undefined) {
         return err(appError('CONFLICT', 'Workspace engineering harness could not be reactivated after harness change', true));
@@ -1939,15 +1955,47 @@ export class ToolRegistry {
       // already spent. A claim is fail-closed on failure: a write that fails may
       // still have changed the file, so the next attempt must re-prepare.
       for (const path of paths) this.harnessActivation.consumePath(context, path);
-      return undefined;
+      return { ok: true, claimedPaths: paths };
     }
 
     for (const path of paths) {
       if (this.harnessActivation.isPathPrepared(context, path)) continue;
       const prepared = await this.prepareCodeChange(workspaceId, path, undefined, false, operationSignal, true);
-      if (!prepared.ok) return prepared;
+      if (!prepared.ok) return err(prepared.error);
     }
-    return undefined;
+    return { ok: true };
+  }
+
+  /**
+   * Store lookups for the mutations that name their subject indirectly. Both
+   * services are optional picks, so a deployment that does not wire a store
+   * resolves those mutations to an opaque subject and keeps today's behaviour
+   * rather than refusing on a lookup it cannot perform.
+   *
+   * The checkpoint scan is bounded on purpose. `list` is the only read the
+   * service exposes, and an id older than the scan window resolves to
+   * `undefined` — an opaque subject, not an invented path list.
+   */
+  private mutationSubjectResolvers(workspaceId: string): MutationSubjectResolvers | undefined {
+    const file = this.services.file;
+    const checkpoint = this.services.checkpoint;
+    if (file?.listRecoveryItems === undefined && checkpoint?.list === undefined) return undefined;
+    return {
+      recoveryPaths: async (recoveryId: string): Promise<readonly string[] | undefined> => {
+        if (file?.listRecoveryItems === undefined) return undefined;
+        const listed = await file.listRecoveryItems(workspaceId);
+        if (!listed.ok) return undefined;
+        const item = listed.value.items.find((entry) => entry.recoveryId === recoveryId);
+        return item === undefined ? undefined : [item.relativePath];
+      },
+      checkpointPaths: async (checkpointId: string): Promise<readonly string[] | undefined> => {
+        if (checkpoint?.list === undefined) return undefined;
+        const listed = await checkpoint.list(workspaceId, CHECKPOINT_SUBJECT_SCAN_LIMIT);
+        if (!listed.ok) return undefined;
+        const found = listed.value.find((entry) => entry.id === checkpointId);
+        return found === undefined ? undefined : found.files.map((file) => file.path);
+      },
+    };
   }
 
   /**
@@ -3205,6 +3253,23 @@ function prohibitedInvocationReason(toolName: string, input: unknown): string | 
 }
 
 const LOCAL_MUTATION_TOOLS = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
+
+/**
+ * How far the checkpoint store is scanned to resolve a `restore_checkpoint`
+ * into the paths it will write. `CheckpointService.list` is the only read the
+ * service pick exposes; a checkpoint older than this window resolves to an
+ * opaque subject instead of a guessed path list.
+ */
+const CHECKPOINT_SUBJECT_SCAN_LIMIT = 500;
+
+/**
+ * The outcome of the mutate-phase seam. `claimedPaths` is present exactly when
+ * the opt-in phase claimed its preparations at authorization, which tells the
+ * caller not to consume them a second time after the mutation lands.
+ */
+type HarnessMutationAdmission =
+  | { readonly ok: true; readonly claimedPaths?: readonly string[] }
+  | { readonly ok: false; readonly error: AppError };
 const LOCAL_OUTPUT_REPLACEMENT_TOOLS = new Set(['audio', 'screen_record']);
 function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
   return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));

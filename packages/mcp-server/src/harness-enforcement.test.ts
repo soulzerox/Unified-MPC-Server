@@ -7,6 +7,23 @@ import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type Wo
 import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
+
+interface RecoveryFixture {
+  readonly recoveryId: string;
+  readonly workspaceId: string;
+  readonly relativePath: string;
+  readonly deletedAt: string;
+  readonly isDirectory: boolean;
+  readonly payloadAvailable: boolean;
+  readonly kind: 'deleted' | 'replacement_backup';
+}
+
+interface CheckpointFixture {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly createdAt: string;
+  readonly files: ReadonlyArray<{ readonly path: string; readonly contentSha256: string; readonly size: number }>;
+}
 const activeWorkspaceScopeProvider = async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/tmp/workspace-1' });
 
 function createHarnessServices(): {
@@ -28,8 +45,14 @@ function createHarnessServices(): {
   setThaiRagPreEditPayload(payload: Record<string, unknown> | undefined): void;
   setFileContent(path: string, content: string): void;
   setFileMissing(path: string): void;
+  restores: string[];
+  setRecoveryItems(items: readonly RecoveryFixture[]): void;
+  setCheckpoints(value: readonly CheckpointFixture[]): void;
 } {
   const writes: string[] = [];
+  const restores: string[] = [];
+  let recoveryItems: readonly RecoveryFixture[] = [];
+  const checkpoints: CheckpointFixture[] = [];
   const childCalls: string[] = [];
   const nativeRagCalls: string[] = [];
   const nativeRagArguments: Array<{ tool: string; args: Readonly<Record<string, unknown>> }> = [];
@@ -64,6 +87,21 @@ function createHarnessServices(): {
       async writeFile(_actor: unknown, _workspaceId: string, request: { path: string }) {
         writes.push(request.path);
         return ok({ path: request.path, replacedExisting: false });
+      },
+      async listRecoveryItems() {
+        return ok({ recoveryTrashRoot: null, items: recoveryItems });
+      },
+      async restoreDeletedFile(_actor: unknown, _workspaceId: string, request: { recoveryId: string }) {
+        restores.push(request.recoveryId);
+        const item = recoveryItems.find((entry) => entry.recoveryId === request.recoveryId);
+        return item === undefined
+          ? err(appError('FILE_NOT_FOUND', 'Recovery item was not found'))
+          : ok({ recoveryId: item.recoveryId, path: item.relativePath });
+      },
+    },
+    checkpoint: {
+      async list() {
+        return ok(checkpoints);
       },
     },
     git: {
@@ -168,6 +206,9 @@ function createHarnessServices(): {
   return {
     services,
     writes,
+    restores,
+    setRecoveryItems(items: readonly RecoveryFixture[]): void { recoveryItems = [...items]; },
+    setCheckpoints(value: readonly CheckpointFixture[]): void { checkpoints.splice(0, checkpoints.length, ...value); },
     childCalls,
     nativeRagCalls,
     nativeRagArguments,
@@ -305,6 +346,102 @@ describe('workspace engineering harness enforcement', () => {
     ]);
     expect(writes).toEqual(['src/app.ts']);
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
+  });
+
+  it('treats a recovery restore as a path subject once the workspace opts into the mutate phase', async () => {
+    const { services, restores, setFileContent, setRecoveryItems } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    setRecoveryItems([{
+      recoveryId: '123e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/app.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    // The request names a recoveryId, not a path. The store names the path, so
+    // the gate has a subject to ask about instead of skipping the mutation.
+    await expect(registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '123e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('prepare_code_change for src/app.ts'),
+          details: { phase: 'mutate', reason: 'preparation_missing', paths: ['src/app.ts'] },
+        },
+      },
+    });
+    expect(restores).toEqual([]);
+
+    expect((await registry.invoke('prepare_code_change', { workspaceId: 'workspace-1', filePath: 'src/app.ts' })).isError).not.toBe(true);
+    expect((await registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '123e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).isError).not.toBe(true);
+    expect(restores).toEqual(['123e4567-e89b-42d3-a456-426614174000']);
+
+    // The restore spent the preparation, so the same restore cannot land twice
+    // on evidence that was read once.
+    await expect(registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '123e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+    expect(restores).toEqual(['123e4567-e89b-42d3-a456-426614174000']);
+  });
+
+  it('treats a checkpoint restore as the paths it will write', async () => {
+    const { services, setFileContent, setCheckpoints } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    setCheckpoints([{
+      id: '223e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', createdAt: '2026-01-01T00:00:00.000Z',
+      files: [
+        { path: 'src/app.ts', contentSha256: 'a'.repeat(64), size: 1 },
+        // A non-artifact in the checkpoint is not something to prepare for.
+        { path: 'docs/readme.md', contentSha256: 'b'.repeat(64), size: 1 },
+      ],
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    await expect(registry.invoke('restore_checkpoint', {
+      workspaceId: 'workspace-1', checkpointId: '223e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { details: { phase: 'mutate', reason: 'preparation_missing', paths: ['src/app.ts'] } } },
+    });
+  });
+
+  it('leaves a restore ungated when its subject cannot be resolved', async () => {
+    const { services, restores, setFileContent, setRecoveryItems } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    // The store holds a different item, so this id resolves to no path at all.
+    setRecoveryItems([{
+      recoveryId: '323e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/other.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    // An unresolvable subject keeps today's behaviour rather than refusing on a
+    // lookup that could not answer; step 5b-2 is where that gap closes.
+    expect((await registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '423e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    }))).toMatchObject({ isError: true, structuredContent: { error: { code: 'FILE_NOT_FOUND' } } });
+    expect(restores).toEqual(['423e4567-e89b-42d3-a456-426614174000']);
+  });
+
+  it('leaves a recovery restore ungated while the workspace keeps automatic preparation', async () => {
+    const { services, restores, nativeRagCalls, setRecoveryItems } = createHarnessServices();
+    setRecoveryItems([{
+      recoveryId: '523e4567-e89b-42d3-a456-426614174000', workspaceId: 'workspace-1', relativePath: 'src/app.ts',
+      deletedAt: '2026-01-01T00:00:00.000Z', isDirectory: false, payloadAvailable: true, kind: 'deleted',
+    }]);
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    expect((await registry.invoke('restore_deleted_file', {
+      workspaceId: 'workspace-1', recoveryId: '523e4567-e89b-42d3-a456-426614174000', userConfirmed: true,
+    })).isError).not.toBe(true);
+    expect(restores).toEqual(['523e4567-e89b-42d3-a456-426614174000']);
+    expect(nativeRagCalls).toEqual([]);
   });
 
   it('keeps automatic preparation when the profile cannot be read as an opt-in', async () => {

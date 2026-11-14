@@ -183,7 +183,7 @@ Required evidence per gate, all keyed by the resolved subject:
 | Phase | Evidence | Enforced today |
 |---|---|---|
 | `intake` / `discover` / `prepare` | none defined yet | no |
-| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, and opaque mutations are step 5b (see §4) |
+| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, restores are a subject since 5b-1, and opaque mutations are step 5b-2 (see §4) |
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
 | `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
@@ -282,15 +282,15 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    completion already blocks `unmerged_changes` in a goal worktree, but a
    repository branch outside a goal worktree has no equivalent check.
 3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam. It is
-   still narrower than "every edit fails closed": it runs only when
-   `isCodingMutation` is true, covers the fixed file-tool set in
-   `codeMutationPaths` (so `shell`, `git` and `restore_deleted_file` are not
-   covered), and returns allow when no `workspaceId` is resolved. Step 5a made
-   the rest opt-in: in `require_preparation` mode the seam refuses instead of
+   still narrower than "every edit fails closed": it covers the file-tool set
+   in `codeMutationPaths` plus, since step 5b-1, the restore tools whose paths a
+   store names (`shell`, `git` and `process_start` remain uncovered), and it
+   returns allow when no `workspaceId` is resolved. Step 5a made the rest
+   opt-in: in `require_preparation` mode the seam refuses instead of
    bootstrapping the harness and auto-preparing each path, and the default
    `auto_prepare` keeps the old behaviour for every workspace that does not opt
-   in. The remaining coverage — opaque and unscoped mutations — is step 5b, and
-   it must not become a second CLI gate that an MCP edit bypasses.
+   in. The remaining coverage — opaque and unscoped mutations — is step 5b-2,
+   and it must not become a second CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -313,7 +313,8 @@ Each step ships alone and leaves the repository working.
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
 | 5a ✅ | Extend `validateHarnessMutation` with the `mutate` phase behind a workspace profile flag: `require_preparation` refuses rather than auto-preparing | shipped in #837: `mutate-gate.ts` owns the pure decision, the opt-in is `{ "workflowGate": { "mutate": "require_preparation" } }` in `.unified-mpc/project-profile.json`, an inactive or stale harness and every unprepared path are named refusals, and the default `auto_prepare` is unchanged |
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
-| 5b ⏸ | Cover opaque and unscoped mutations: `shell`, `git`, `restore_deleted_file`, and any mutation with no resolved workspace | blocked on the evidence shape: those mutations name no development artifact path, so a per-path preparation cannot bind to them; the phase has to decide whether a workspace-scoped preparation or command classification is the subject, and a token check would be worse than the gap |
+| 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in this PR: a restore in the opt-in mode is refused until its development artifacts are prepared and spends that preparation when it lands; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore |
+| 5b-2 ⏸ | Cover what is left: `shell`, `git`, `process_start` and any mutation with no resolved workspace | blocked on the evidence shape: those mutations name no development artifact path even indirectly, so a per-path preparation cannot bind to them; the phase has to decide whether a workspace-scoped preparation or command classification is the subject, and a token check would be worse than the gap |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -556,13 +557,35 @@ answer different questions — ponytail also treats `lsp_rename` as a coding
 mutation, which names no file — but they now share the predicate that decides
 what counts as an artifact.
 
-Step 5b is the rest of the phase's coverage. `codeMutationPaths` returns nothing
-for `shell`, `git` and `restore_deleted_file`, so those mutations never reach
-this decision, and a mutation with no resolved workspace returns allow before the
-mode is even read. Binding evidence to an opaque mutation is a different design
-question — a workspace-scoped preparation, or classification of the command — and
-answering it with a token check would be the same mistake as auto-preparation
-with fewer steps. It is recorded as `5b ⏸`, not claimed.
+Step 5b-1 gave the phase a subject. `mutation-subject.ts` is the seam
+`request -> what this mutates`, and it knows three answers: a path the request
+spells, a path a store spells for it, and nothing it can name at all.
+
+```text
+write_file     path: 'src/app.ts'       ── request named ──► prepare that path
+restore_deleted_file  recoveryId: '…'   ── store named ────► prepare what it restores
+shell          command: 'rm src/app.ts' ── opaque ─────────► unchanged (5b-2)
+```
+
+The gain is narrow and real: a restore used to escape the opt-in mode because
+`codeMutationPaths` could not see through an id. It now resolves through the
+recovery store or the checkpoint store, so in `require_preparation` mode a
+restore of `src/app.ts` is refused until `src/app.ts` is prepared, and it spends
+that preparation when it lands. Three limits are deliberate:
+
+- a store that cannot answer — an unknown id, an unreadable store, a scan window
+  older than the checkpoint — resolves to an opaque subject, not to an invented
+  path list. That keeps today's behaviour instead of refusing a restore on a
+  lookup failure, and it is why the copy is still "path-bearing", not "covered";
+- the default mode does not auto-prepare a restore. Auto-preparing one would read
+  pre-edit context for a path that the restore exists because it is missing; the
+  opt-in mode is the one where the agent prepares explicitly, so it is the one
+  that asks;
+- `shell`, `git` and `process_start` still name no artifact, not even indirectly.
+  Binding evidence to them is the remaining design question — a workspace-scoped
+  preparation, or classification of the command — and answering it with a token
+  check would be the same mistake as auto-preparation with fewer steps. It is
+  recorded as `5b-2 ⏸`, not claimed.
 
 Three limits are worth stating plainly rather than discovering later:
 

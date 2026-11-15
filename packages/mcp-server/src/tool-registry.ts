@@ -695,9 +695,10 @@ export class ToolRegistry {
       const codingMutation = mutationDecision.kind !== 'read' && isCodingMutation(tool.name, activeRoutedInput);
       const admissionIdentityMutation = mutationDecision.kind !== 'read'
         && isWorkspaceAdmissionIdentityMutation(tool.name, activeRoutedInput);
-      // A restore names its subject through a store and a command names none at
-      // all, so neither is a coding mutation by request shape. They still reach
-      // the same seam: the phase decides what a subject it cannot see is worth.
+      // A restore names its subject through a store, and a command or a host task
+      // names none at all, so none of them is a coding mutation by request shape.
+      // They still reach the same seam: the phase decides what a subject it
+      // cannot see is worth.
       const subjectSeamTool = isRestoreMutationTool(tool.name) || isOpaqueMutationTool(tool.name);
       let claimedHarnessPaths: readonly string[] | undefined;
       let harnessGateNote: string | undefined;

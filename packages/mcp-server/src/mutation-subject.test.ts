@@ -58,16 +58,16 @@ describe('resolveMutationSubjects', () => {
     }))).resolves.toEqual({ kind: 'opaque', reason: 'unresolved' });
   });
 
-  it('is opaque about a command, which names no artifact at all', async () => {
-    for (const tool of ['shell', 'wsl_exec', 'process_start', 'git', 'git_publish', 'codex_run', 'agent_swarm_run']) {
+  it('is opaque about a mutation whose request names no artifact it can turn into a path', async () => {
+    for (const tool of ['shell', 'wsl_exec', 'process_start', 'git', 'git_publish', 'codex_run', 'agent_swarm_run', 'office']) {
       await expect(resolveMutationSubjects(tool, { command: 'rm src/app.ts' }), tool).resolves.toEqual({
-        kind: 'opaque', reason: 'command',
+        kind: 'opaque', reason: 'shape',
       });
     }
     // A restore request that does not even name its subject is the same case:
     // the store could not have answered a request with no id.
     await expect(resolveMutationSubjects('restore_deleted_file', { userConfirmed: true })).resolves.toEqual({
-      kind: 'opaque', reason: 'command',
+      kind: 'opaque', reason: 'shape',
     });
   });
 

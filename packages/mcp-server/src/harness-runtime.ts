@@ -159,14 +159,15 @@ export function isPathExtractorTool(toolName: string): boolean {
 }
 
 /**
- * Why a mutation has no subject the gate can prepare. `command` says the tool
- * mutates by running something and no request field names an artifact;
- * `unresolved` says the request did name a subject (`recoveryId`,
- * `checkpointId`) that no store could answer for. The two are recorded
- * differently because they are fixed differently: the first is a limit of the
- * tool shape, the second is a store that could not answer.
+ * Why a mutation has no subject the gate can prepare. `shape` says the phase's
+ * extractor table cannot turn this request into an artifact — a command, a
+ * document action it does not model, a host scheduler entry. `unresolved` says
+ * the request did name a subject (`recoveryId`, `checkpointId`) that no store
+ * could answer for. The two are recorded differently because they are fixed
+ * differently: the first is a limit of the tool shape, the second is a store
+ * that could not answer.
  */
-export type OpaqueMutationReason = 'command' | 'unresolved';
+export type OpaqueMutationReason = 'shape' | 'unresolved';
 
 /**
  * The tools whose request names a stored subject instead of an artifact path.
@@ -189,6 +190,16 @@ export function isRestoreMutationTool(toolName: string): boolean {
  */
 export const LOCAL_MUTATION_TOOLS: ReadonlySet<string> = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
 
+/**
+ * Tools that mutate host state instead of a workspace. They belong in the mutate
+ * phase's reach for the same reason a command does, but not in
+ * `LOCAL_MUTATION_TOOLS`: that set is also the registry's answer to "must this
+ * call be scoped to an Active Project?", and a scheduled task names no
+ * workspace. Scoping it to one would invent a `workspaceId` its request cannot
+ * carry.
+ */
+export const HOST_MUTATION_TOOLS: ReadonlySet<string> = new Set(['scheduler']);
+
 /** Output media the registry scopes only when the policy says the call replaces a target. */
 export const LOCAL_OUTPUT_REPLACEMENT_TOOLS: ReadonlySet<string> = new Set(['audio', 'screen_record']);
 
@@ -197,17 +208,18 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
 }
 
 /**
- * The mutate phase's reach: every local mutation whose request names no path a
- * preparation could bind to and whose subject no store can name. It is derived
- * rather than listed, so adding a tool to `LOCAL_MUTATION_TOOLS` extends the
- * phase and there is no second list to forget.
+ * The mutate phase's reach: every local or host mutation the phase cannot turn
+ * into a path — no extractor table answers for its request, and no store names
+ * its subject. It is derived rather than listed, so adding a tool to
+ * `LOCAL_MUTATION_TOOLS` or `HOST_MUTATION_TOOLS` extends the phase and there is
+ * no second list to forget.
  *
  * The line is deliberate: remote, desktop and gateway-mediated effects
  * (`mcp_call`, `computer_use`, `web_fetch`, `dom_cdp`) are not local mutations,
  * so their refusal stays with the mutation policy's own `opaque_mutation`
  * vocabulary instead of becoming a second gate that would also refuse reads.
  */
-export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [...LOCAL_MUTATION_TOOLS]
+export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [...LOCAL_MUTATION_TOOLS, ...HOST_MUTATION_TOOLS]
   .filter((tool) => !isPathExtractorTool(tool) && !isRestoreMutationTool(tool))
   .sort();
 const OPAQUE_MUTATION_TOOLS = new Set(OPAQUE_MUTATION_TOOL_NAMES);

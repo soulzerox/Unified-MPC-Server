@@ -607,7 +607,7 @@ describe('workspace engineering harness enforcement', () => {
           error: {
             code: 'CONFLICT',
             message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
-            details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'command' },
+            details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' },
           },
         },
       });
@@ -624,10 +624,11 @@ describe('workspace engineering harness enforcement', () => {
       .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
   });
 
-  it('refuses the local mutations 5b-2 left out when the workspace refuses what it cannot gate', async () => {
-    // Step 5b-3 derives the reach from `LOCAL_MUTATION_TOOLS`, so these families
-    // now arrive at the same decision as a command: they mutate local state and
-    // name no path a preparation could bind to.
+  it('refuses the local and host mutations 5b-2 left out when the workspace refuses what it cannot gate', async () => {
+    // Step 5b-3 derives the reach from `LOCAL_MUTATION_TOOLS` and
+    // `HOST_MUTATION_TOOLS`, so these families now arrive at the same decision as
+    // a command: they mutate local or host state and name no path a preparation
+    // could bind to.
     const { services, setFileContent } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
       workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
@@ -650,6 +651,22 @@ describe('workspace engineering harness enforcement', () => {
         },
       });
     }
+
+    // `scheduler` is a host mutation: its request carries no `workspaceId`, so
+    // the phase falls back to the active workspace scope. It reaches the same
+    // decision as a command, which is why it is in the reach.
+    await expect(registry.invoke('scheduler', {
+      action: 'create', task_name: 'nightly', command: 'echo', schedule: 'DAILY', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
+          details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' },
+        },
+      },
+    });
 
     // A gateway call is not a local mutation: refusing it outright would also
     // refuse the reads it carries, so the mutation policy keeps that decision.
@@ -679,7 +696,7 @@ describe('workspace engineering harness enforcement', () => {
 
     const completed = audited.find((entry) => entry.event.toolName === 'shell' && entry.event.phase === 'completed');
     expect(completed?.detail?.items).toContain(
-      'mutate: admitted shell with an opaque command subject and no prepared path (workflowGate.mutateOpaque is allow)',
+      'mutate: admitted shell with an opaque shape subject and no prepared path (workflowGate.mutateOpaque is allow)',
     );
   });
 

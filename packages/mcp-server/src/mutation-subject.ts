@@ -74,7 +74,7 @@ export async function resolveMutationSubjects(
   const checkpointId = CHECKPOINT_MUTATION_TOOLS.has(toolName) ? readId(input, 'checkpointId') : undefined;
   // A request that does not even name its subject is the opaque case, not an
   // unresolved one: the store could not have answered this.
-  if (recoveryId === undefined && checkpointId === undefined) return { kind: 'opaque', reason: 'command' };
+  if (recoveryId === undefined && checkpointId === undefined) return { kind: 'opaque', reason: 'shape' };
   if (resolvers === undefined) return { kind: 'opaque', reason: 'unresolved' };
 
   const resolved = recoveryId !== undefined

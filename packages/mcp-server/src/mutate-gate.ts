@@ -178,20 +178,22 @@ export function evaluateOpaqueMutateGate(request: OpaqueMutateRequest): OpaqueMu
 /**
  * One sentence for the refusal. It says what the tool did, why that leaves
  * nothing to prepare, and the two ways out, because the strict posture is
- * surprising by construction: it refuses commands, not just edits.
+ * surprising by construction: it refuses every mutation the phase cannot turn
+ * into a path, not just an edit whose preparation is missing.
  *
- * The two ways out are per reason, because the faults are different. A command
- * is refused for its shape, so naming the artifact with a path tool is a way
- * out. An unresolvable stored subject is a lookup that could not answer for an
- * id the caller supplied, so switching tools would abandon the restore rather
- * than fix it: the way out is to name a subject this workspace can resolve.
+ * The two ways out are per reason, because the faults are different. A mutation
+ * refused for its shape is refused because the phase cannot name its artifact,
+ * so naming the artifact with a path tool is a way out. An unresolvable stored
+ * subject is a lookup that could not answer for an id the caller supplied, so
+ * switching tools would abandon the restore rather than fix it: the way out is
+ * to name a subject this workspace can resolve.
  */
 export function describeOpaqueMutateRefusal(toolName: string, reason: OpaqueMutationReason): string {
-  const subject = reason === 'command'
-    ? `${toolName} mutates by running a command, so it names no file a preparation could bind to`
+  const subject = reason === 'shape'
+    ? `${toolName} does not name a file the phase can turn into a preparation`
     : `${toolName} names a stored subject this workspace cannot resolve, so it names no file a preparation could bind to`;
-  const wayOut = reason === 'command'
-    ? 'use a path tool with prepare_code_change'
+  const wayOut = reason === 'shape'
+    ? 'name the file with a path tool and prepare_code_change'
     : 'name a subject this workspace can resolve';
   return `${subject}. This workspace refuses mutations it cannot gate (workflowGate.mutateOpaque is refuse); ${wayOut}, or set workflowGate.mutateOpaque back to allow`;
 }

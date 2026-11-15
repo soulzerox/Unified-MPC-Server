@@ -655,8 +655,10 @@ shell task, a goal rebase and a merge in that gap, one per round.
   cover this?" is answerable from the same audit row as the mutation;
 - `refuse` answers CONFLICT with `details: { phase: 'mutate', reason:
   'opaque_mutation', opaqueReason: 'shape' | 'unresolved' }` and a message that
-  names the tool, the missing subject and both ways out. It refuses on the
-  subject, not on a guess about the effect, so it cannot be fooled by a spelling;
+  names the tool, the missing subject and the ways out: relaxing the setting, and —
+  only where the change has one — a form whose request names the file it writes.
+  It refuses on the subject, not on a guess about the effect, so it cannot be
+  fooled by a spelling;
 - a call the mutation policy already classifies `read` — a task `status`, a
   `dry_run`, a read-only git subcommand, an `office` read, a `screen_record`
   status — never reaches the phase. Everything else that mutates does, so `refuse`
@@ -664,10 +666,12 @@ shell task, a goal rebase and a merge in that gap, one per round.
   `task_create`, `guarded_pr_merge` and a plugin install alike, because the
   gateway cannot prove any of them harmless. It also refuses the `stop` that would
   end a recording or a process, because the phase decides by tool shape rather
-  than by action: a strict workspace should not start what it could not stop.
-  That is the honest cost of `refuse`: it is a posture for a workspace whose
-  mutations must all be path-bearing, not a filter that lets "ordinary" commands
-  through.
+  than by action: a strict workspace should not start what it could not stop. A
+  stop that was already running when the workspace opted in is the same trap, and
+  the honest answer is the setting, not the phase — relax `mutateOpaque` for the
+  stop. That is the cost of a shape-based posture, stated rather than discovered:
+  `refuse` is a posture for a workspace whose mutations must all be path-bearing,
+  not a filter that lets "ordinary" commands through.
 
 Widening the call site has one cost worth stating: a non-`read` call to a tool that
 is not delegated now reads the workspace profile before the phase is known to be
@@ -715,18 +719,18 @@ group is there for a reason that would not hold for a mutation:
 `git_publish` is in the reach even though it changes a remote: it is a workspace
 mutation gated by a local single-use receipt, and the phase decides it by the same
 rule. `guarded_pr_merge` and `rebase_goal_workspace` are in the reach for the same
-reason, which is why a `refuse` workspace cannot merge or rebase until the posture
-is relaxed or the change names a path.
+reason, which is why a `refuse` workspace cannot merge or rebase: none of the three
+has a path-bearing form, so relaxing `mutateOpaque` is the only way through.
 
 The reach, not a category, is the answer: `isPhaseDecidedMutation` is the
-complement of a twenty-name list, and four tests hold it — the delegation list
-itself, every name in it and in the families the phase now reaches being a tool
-the registry actually routes, every mutation the registry's catalog declares, and
-the registry's own always-confirm list. A new tool is decided by default, so it
-cannot leave coverage by being declared somewhere this step did not read. It also
-does not gate a mutation that resolves no workspace: `validateHarnessMutation`
-still allows it before the profile is read. Both are stated here rather than
-discovered later.
+complement of a twenty-name list, and four tests across the two files hold it — the
+delegation list itself, every name in the delegation list and in the always-confirm
+list or the catalog being a tool the registry actually routes, every mutation the
+catalog declares, and the registry's own always-confirm list. A new tool is decided
+by default, so it cannot leave coverage by being declared somewhere this step did
+not read. It also does not gate a mutation that resolves no workspace:
+`validateHarnessMutation` still allows it before the profile is read. Both are
+stated here rather than discovered later.
 
 Three limits are worth stating plainly rather than discovering later:
 

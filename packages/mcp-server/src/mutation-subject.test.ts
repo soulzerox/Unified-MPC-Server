@@ -59,11 +59,18 @@ describe('resolveMutationSubjects', () => {
   });
 
   it('is opaque about a mutation whose request names no artifact it can turn into a path', async () => {
-    for (const tool of ['shell', 'wsl_exec', 'process_start', 'git', 'git_publish', 'codex_run', 'agent_swarm_run', 'office']) {
+    for (const tool of ['shell', 'wsl_exec', 'process_start', 'git', 'git_publish', 'codex_run', 'agent_swarm_run']) {
       await expect(resolveMutationSubjects(tool, { command: 'rm src/app.ts' }), tool).resolves.toEqual({
         kind: 'opaque', reason: 'shape',
       });
     }
+    // `office` is the other case: it *does* name its target, in `file_path`, and
+    // the extractor table is what does not answer for that field. A later step
+    // that adds it moves office into the path-bearing route, and this expectation
+    // is what would have to change with it.
+    await expect(resolveMutationSubjects('office', { app: 'word', action: 'write', file_path: 'report.docx' })).resolves.toEqual({
+      kind: 'opaque', reason: 'shape',
+    });
     // A restore request that does not even name its subject is the same case:
     // the store could not have answered a request with no id.
     await expect(resolveMutationSubjects('restore_deleted_file', { userConfirmed: true })).resolves.toEqual({

@@ -64,21 +64,26 @@ describe('opaque mutate policy', () => {
       .toEqual({ allowed: false, code: 'opaque_mutation', reason: 'unresolved' });
   });
 
-  it('names the tool, the missing subject and both ways out in the refusal', () => {
+  it('names the tool, the missing subject and the ways out in the refusal', () => {
     const command = describeOpaqueMutateRefusal('shell', 'shape');
     expect(command).toContain('shell does not name a file the phase can turn into a preparation');
     expect(command).not.toContain('running a command');
     expect(command).toContain('workflowGate.mutateOpaque is refuse');
+    // Relaxing the setting is the one way out that always exists, so every shape
+    // refusal names it first and the path-bearing form only as a condition.
+    expect(command).toContain('set workflowGate.mutateOpaque back to allow');
+    expect(command).toContain('if the change has a form whose request names the file it writes');
     expect(command).toContain('prepare_code_change');
-    expect(command).toContain('allow');
     // `office` names its target, but not in a field the extractor table answers
     // for, so the same sentence has to describe it without calling it a command.
     expect(describeOpaqueMutateRefusal('office', 'shape'))
       .toContain('office does not name a file the phase can turn into a preparation');
     // `process_stop` has no path-bearing form at all, so the sentence offers the
-    // preparation as a condition to meet rather than a tool to switch to.
-    expect(describeOpaqueMutateRefusal('process_stop', 'shape'))
-      .toContain('express the change as a tool whose request names the file it writes');
+    // preparation as a condition to meet rather than a tool to switch to: this is
+    // the case that made the unconditional phrasing wrong.
+    const stop = describeOpaqueMutateRefusal('process_stop', 'shape');
+    expect(stop).toContain('if the change has a form whose request names the file it writes');
+    expect(stop).not.toContain('express the change as a tool whose request names the file it writes and prepare_code_change');
 
     const unresolved = describeOpaqueMutateRefusal('restore_deleted_file', 'unresolved');
     expect(unresolved).toContain('restore_deleted_file names a stored subject this workspace cannot resolve');
@@ -86,6 +91,7 @@ describe('opaque mutate policy', () => {
     // Switching tools would abandon the restore, not resolve it, so the way out
     // for an unresolvable subject is to name one this workspace can resolve.
     expect(unresolved).toContain('name a subject this workspace can resolve');
+    expect(unresolved).toContain('set workflowGate.mutateOpaque back to allow');
     expect(unresolved).not.toContain('prepare_code_change');
   });
 
@@ -265,20 +271,17 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     }
   });
 
-  it('leaves the delegated effects and the path tools out of the opaque route', () => {
+  it('keeps the delegated effects out of the path and restore routes', () => {
     // A delegated effect stays with the mutation policy's approval gate, so it is
     // not an opaque subject — its reason is that the phase does not decide it, not
-    // that it would have no subject. The path and restore tools are the ones that
-    // name their own subject, and no delegated effect is one of them.
+    // that it would have no subject. The disjointness is what matters here: a name
+    // in both lists would be decided twice, with the delegation silently winning.
+    // That the path and restore tools do extract their subject is pinned where it
+    // is observable, by the `codeMutationPaths` and `resolveMutationSubjects` cases
+    // in this file and in `mutation-subject.test.ts`.
     for (const tool of DELEGATED_EFFECT_TOOLS) {
       expect(isPathExtractorTool(tool), tool).toBe(false);
       expect(isRestoreMutationTool(tool), tool).toBe(false);
-    }
-    for (const tool of [
-      'write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file', 'apply_patch', 'lsp_rename',
-      'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint',
-    ]) {
-      expect(isPathExtractorTool(tool) || isRestoreMutationTool(tool), tool).toBe(true);
     }
   });
 

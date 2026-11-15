@@ -181,15 +181,16 @@ export function evaluateOpaqueMutateGate(request: OpaqueMutateRequest): OpaqueMu
  * by construction: it refuses every mutation the phase cannot turn into a path,
  * not just an edit whose preparation is missing.
  *
- * Relaxing the setting is the one way out that always exists, so it is named
- * first. The second is per reason, because the faults are different. A mutation
- * refused for its shape was refused because the phase cannot name its artifact,
- * and a path-bearing form is a real way out only where such a form exists: a
- * task, a recording, a push, a merge or a stop has none, so the sentence offers
- * the form as a condition to meet rather than a tool to switch to. An
- * unresolvable stored subject is a lookup that could not answer for an id the
- * caller supplied, so switching tools would abandon the restore rather than fix
- * it: there the way out is to name a subject this workspace can resolve.
+ * Relaxing the setting is the one way out that always exists, so the shape
+ * message names it first. The second is per reason, because the faults are
+ * different. A mutation refused for its shape was refused because the phase
+ * cannot name its artifact, and a path-bearing form is a real way out only where
+ * such a form exists: a task, a recording, a push, a merge or a stop has none, so
+ * the sentence offers the form as a condition to meet rather than a tool to
+ * switch to. An unresolvable stored subject is a lookup that could not answer for
+ * an id the caller supplied, so switching tools would abandon the restore rather
+ * than fix it: there the way out is to name a subject this workspace can resolve,
+ * and the setting is named after it.
  */
 export function describeOpaqueMutateRefusal(toolName: string, reason: OpaqueMutationReason): string {
   const subject = reason === 'shape'

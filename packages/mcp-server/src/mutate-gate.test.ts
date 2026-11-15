@@ -313,12 +313,14 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     }
   });
 
-  it('leaves the phase every mutation the registry always confirms, except the gateway and the stops', () => {
+  it('leaves the phase every mutation the registry always confirms, except the delegated gateway, desktop and control-plane names', () => {
     // The registry's confirmation list is a third opinion: it asks before a call
     // that writes. Handing one of those back to the policy as a delegated effect
     // would return the strict posture's decision to the gate it is stricter than,
     // so the intersection is compared with the names whose reason covers a
-    // confirmation — a gateway call, a desktop tool, a stop — and nothing else.
+    // confirmation — a gateway call, a desktop tool the registry confirms, a
+    // control-plane stop — and nothing else. Six of the seven desktop names are
+    // confirmed; `notification` is not, so its absence here is deliberate.
     const expected = [
       'accessibility', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard', 'computer_use',
       'dom_cdp', 'input_event', 'mcp_call', 'ui_target_action', 'web_fetch', 'window',
@@ -329,8 +331,10 @@ describe('the phase decides every mutation it was not told to delegate', () => {
   it('states the rule once in the document instead of listing the tools', () => {
     expect(doc.match(/The phase decides every mutation it\s+cannot\s+turn\s+into\s+a\s+path, except the effects it\s+delegates/g)).toHaveLength(1);
     expect(doc).toContain('DELEGATED_EFFECT_TOOLS');
-    for (const retired of ['OPAQUE_MUTATION_TOOL_NAMES', 'HOST_MUTATION_TOOLS', 'ALIASED_WORK_MUTATION_TOOLS', 'LOCAL_MUTATION_TOOLS', 'LOCAL_OUTPUT_REPLACEMENT_TOOLS']) {
-      expect(doc, retired).not.toContain(retired);
+    // The four retired sets and the two kept sets that no longer define the
+    // reach: none of them belongs in the document's explanation any more.
+    for (const absent of ['OPAQUE_MUTATION_TOOL_NAMES', 'HOST_MUTATION_TOOLS', 'ALIASED_WORK_MUTATION_TOOLS', 'LOCAL_MUTATION_TOOLS', 'LOCAL_OUTPUT_REPLACEMENT_TOOLS']) {
+      expect(doc, absent).not.toContain(absent);
     }
   });
 });

@@ -211,8 +211,11 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
  * - the project-command tools run a command the workspace configured, not an
  *   argv the caller chose, and refusing them would refuse the verification step
  *   inside the very workspace that opted in;
- * - the control-plane stops end work rather than write, and a posture that could
- *   start a goal but never cancel it would trap the workspace.
+ * - the control-plane stops end durable work the phase does not own: a goal or a
+ *   scheduled continuation can predate the opt-in or belong to another client,
+ *   and `cancel_scheduled_continuation` is part of the goal-completion contract,
+ *   so refusing it would make a strict workspace unable to finish a goal it did
+ *   not start.
  */
 export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
   'mcp_call', 'web_fetch', 'dom_cdp',

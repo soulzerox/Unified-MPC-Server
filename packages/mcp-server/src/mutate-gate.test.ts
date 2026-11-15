@@ -323,7 +323,9 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     // profile tool's strict schema admits `workspaceId` and `profile`, so the
     // handler always answers with the dry-run preview, and `recipe_run` answers
     // with its plan labelled `sideEffectsStarted: false`, so neither can run the
-    // thing it names.
+    // thing it names. The name list here is only the classification; the
+    // behaviour behind it is pinned by the runtime contract fixture, which runs
+    // `recipe_run` with the `dryRun: false` that would enable the run.
     const contractPreviews = ['project_profile_set', 'recipe_run'];
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');

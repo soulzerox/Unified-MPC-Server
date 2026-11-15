@@ -26,6 +26,15 @@ export interface ToolRuntimeOracle {
     readonly input: Readonly<Record<string, unknown>>;
     readonly expected: Readonly<Record<string, unknown>>;
   };
+  /**
+   * Further inputs the same oracle must hold for. A tool whose output depends on
+   * an input that enables a side effect needs the enabling value here, because a
+   * single fixture input can leave the decisive branch unexercised.
+   */
+  readonly alternates?: readonly {
+    readonly input: Readonly<Record<string, unknown>>;
+    readonly expected: Readonly<Record<string, unknown>>;
+  }[];
   readonly state?: 'cache_generation' | 'hook_registered' | 'hook_removed' | 'session_checkpoint';
 }
 
@@ -276,6 +285,9 @@ export const PHASE_5_TO_18_TOOL_RUNTIME_FIXTURES = {
   recipe_run: deterministic({ prompt: 'debug a smoke failure', dryRun: true }, {
     expected: { route: 'debug', operations: ['workspace_context', 'git_context', 'live_logs_query', 'test_context'], permissions: ['filesystem.read', 'git.read'], dryRun: true, sideEffectsStarted: false },
     alternate: { input: { prompt: 'test the smoke project', dryRun: true }, expected: { route: 'test', operations: ['workspace_context', 'discover_tests', 'test_context'] } },
+    // The delegation reason says the handler never runs the recipe it names, so
+    // the input that asks it to is the one that has to answer with the preview.
+    alternates: [{ input: { prompt: 'debug a smoke failure', dryRun: false }, expected: { dryRun: false, sideEffectsStarted: false } }],
   }),
   dry_run: deterministic({ prompt: 'build the smoke project' }, {
     expected: { route: 'workspace', operations: ['workspace_context', 'repo_map'], permissions: ['filesystem.read', 'git.read'], sideEffects: { writes: [], shell: [], gitMutations: [], network: [] }, sideEffectsStarted: false },

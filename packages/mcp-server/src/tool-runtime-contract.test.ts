@@ -255,6 +255,12 @@ describe('tool runtime delivery contract', () => {
       if (alternate.ok) expect(record(alternate.value)).toMatchObject(oracle.alternate.expected);
     }
 
+    for (const alternate of oracle.alternates ?? []) {
+      const result = await executeDefinition(registry, name, alternate.input);
+      expect(result, `${name} alternate input result`).toMatchObject({ ok: true });
+      if (result.ok) expect(record(result.value), `${name} alternate input output`).toMatchObject(alternate.expected);
+    }
+
     if (oracle.state === 'cache_generation') {
       expect(generationBefore).toBeTypeOf('number');
       expect(await cacheGeneration(registry)).toBeGreaterThan(generationBefore ?? -1);

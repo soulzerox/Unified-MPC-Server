@@ -639,6 +639,8 @@ describe('workspace engineering harness enforcement', () => {
     for (const [tool, input] of [
       ['git_publish', { remote: 'origin', branch: 'feat/opaque', expectedSha: 'a'.repeat(40), approvalId: 'approval-1' }],
       ['office', { app: 'word', action: 'write', file_path: 'report.docx' }],
+      ['audio', { action: 'record', output_path: 'capture.wav' }],
+      ['screen_record', { action: 'start', output_path: 'capture.mp4' }],
     ] as const) {
       await expect(registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input }), tool).resolves.toMatchObject({
         isError: true,

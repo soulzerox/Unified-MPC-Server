@@ -3404,7 +3404,7 @@ function commandExecutionLeavesActiveWorkspace(toolName: string, input: unknown,
   return !scopePathContains(pathApi, pathApi.resolve(root), pathApi.resolve(cwd));
 }
 function isDestructiveMutation(decision: MutationPolicyDecision): boolean { return decision.kind === 'replace' || decision.kind === 'delete' || decision.kind === 'opaque_mutation'; }
-const ALWAYS_CONFIRM_MUTATION_TOOLS = new Set([
+export const ALWAYS_CONFIRM_MUTATION_TOOLS: ReadonlySet<string> = new Set([
   'codex_run', 'codex_stop', 'agent_swarm_run', 'cancel_goal', 'cancel_scheduled_continuation', 'mcp_call', 'web_fetch', 'scheduler',
   'office', 'office_ppt', 'docx_merge', 'dom_cdp', 'computer_use',
   'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard',

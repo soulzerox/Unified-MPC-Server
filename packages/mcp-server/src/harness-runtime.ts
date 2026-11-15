@@ -200,7 +200,12 @@ export const LOCAL_MUTATION_TOOLS: ReadonlySet<string> = new Set(['write_file', 
  */
 export const HOST_MUTATION_TOOLS: ReadonlySet<string> = new Set(['scheduler']);
 
-/** Output media the registry scopes only when the policy says the call replaces a target. */
+/**
+ * Output media the registry scopes only when the policy says the call replaces a
+ * target. They are also an input to the mutate phase's reach: a recording writes
+ * a workspace file through `output_path`, a field the extractor table does not
+ * name, so a `refuse` workspace would otherwise admit a write it says it refuses.
+ */
 export const LOCAL_OUTPUT_REPLACEMENT_TOOLS: ReadonlySet<string> = new Set(['audio', 'screen_record']);
 
 export function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
@@ -208,18 +213,23 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
 }
 
 /**
- * The mutate phase's reach: every local or host mutation the phase cannot turn
- * into a path — no extractor table answers for its request, and no store names
- * its subject. It is derived rather than listed, so adding a tool to
- * `LOCAL_MUTATION_TOOLS` or `HOST_MUTATION_TOOLS` extends the phase and there is
- * no second list to forget.
+ * The mutate phase's reach: every workspace, host-task or media mutation the
+ * phase cannot turn into a path — no extractor table answers for its request,
+ * and no store names its subject. It is derived rather than listed, so adding a
+ * tool to any of the three input sets extends the phase and there is no second
+ * list to forget.
  *
- * The line is deliberate: remote, desktop and gateway-mediated effects
- * (`mcp_call`, `computer_use`, `web_fetch`, `dom_cdp`) are not local mutations,
- * so their refusal stays with the mutation policy's own `opaque_mutation`
- * vocabulary instead of becoming a second gate that would also refuse reads.
+ * The line is deliberate: gateway-mediated calls and desktop effects
+ * (`mcp_call`, `computer_use`, `web_fetch`, `dom_cdp`, the UI tools) are not
+ * workspace mutations, so their refusal stays with the mutation policy's own
+ * `opaque_mutation` vocabulary instead of becoming a second gate that would also
+ * refuse reads.
  */
-export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [...LOCAL_MUTATION_TOOLS, ...HOST_MUTATION_TOOLS]
+export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [
+  ...LOCAL_MUTATION_TOOLS,
+  ...HOST_MUTATION_TOOLS,
+  ...LOCAL_OUTPUT_REPLACEMENT_TOOLS,
+]
   .filter((tool) => !isPathExtractorTool(tool) && !isRestoreMutationTool(tool))
   .sort();
 const OPAQUE_MUTATION_TOOLS = new Set(OPAQUE_MUTATION_TOOL_NAMES);

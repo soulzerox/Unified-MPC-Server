@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { HOST_MUTATION_TOOLS, LOCAL_MUTATION_TOOLS, OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool, isPathExtractorTool, isRestoreMutationTool } from './harness-runtime.js';
+import { OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool, isPathExtractorTool, isRestoreMutationTool } from './harness-runtime.js';
+import { ALWAYS_CONFIRM_MUTATION_TOOLS } from './tool-registry.js';
 import {
   DEFAULT_MUTATE_MODE,
   DEFAULT_OPAQUE_MUTATE_POLICY,
@@ -223,10 +224,11 @@ describe('describeMutateBlockers', () => {
 /**
  * The reach of the phase used to be a list of four names, restated in prose in
  * several places, and five reviews found the same defect in it: one paragraph
- * naming three of the four. The list is gone. The phase decides every local or
- * host mutation it cannot turn into a path, derived from the registry's own
- * `LOCAL_MUTATION_TOOLS` and `HOST_MUTATION_TOOLS`, so a tool added there
- * extends the phase and there is no second list to forget.
+ * naming three of the four. The list is gone. The phase decides every workspace,
+ * host-task or media mutation it cannot turn into a path, derived from the
+ * registry's own `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS` and
+ * `LOCAL_OUTPUT_REPLACEMENT_TOOLS`, so a tool added there extends the phase and
+ * there is no second list to forget.
  */
 describe('the phase reach is derived from the mutation sets', () => {
   const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
@@ -236,33 +238,49 @@ describe('the phase reach is derived from the mutation sets', () => {
     // that rebuilds the production expression compares the reach with itself and
     // cannot fail when a tool is silently dropped from it.
     expect(OPAQUE_MUTATION_TOOL_NAMES).toEqual([
-      'agent_swarm_run', 'codex_run', 'codex_stop', 'docx_merge', 'git', 'git_publish',
+      'agent_swarm_run', 'audio', 'codex_run', 'codex_stop', 'docx_merge', 'git', 'git_publish',
       'git_worktree_remove', 'git_worktree_spawn', 'office', 'office_ppt', 'process_start',
-      'process_stop', 'publish_approve', 'scheduler', 'self_heal_apply', 'shell', 'wsl_exec',
+      'process_stop', 'publish_approve', 'scheduler', 'screen_record', 'self_heal_apply',
+      'shell', 'wsl_exec',
     ]);
   });
 
-  it('leaves out only the mutations whose subject it can see', () => {
-    const mutations = [...LOCAL_MUTATION_TOOLS, ...HOST_MUTATION_TOOLS];
-    for (const tool of OPAQUE_MUTATION_TOOL_NAMES) {
-      expect(mutations, tool).toContain(tool);
+  it('leaves path tools, restores, gateway calls and desktop effects alone', () => {
+    // Explicit names, not a re-run of the derivation: these are the boundaries
+    // the reach is defined by, and a dropped exclusion must fail here.
+    for (const tool of [
+      'write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file', 'apply_patch', 'lsp_rename',
+      'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint',
+    ]) {
+      expect(isOpaqueMutationTool(tool), tool).toBe(false);
     }
-    // A mutation the phase does not decide must be one it can turn into a path
-    // or look up in a store. A new tool that is neither is a silent gap.
-    for (const tool of mutations) {
-      if (isOpaqueMutationTool(tool)) continue;
-      expect(isPathExtractorTool(tool) || isRestoreMutationTool(tool), tool).toBe(true);
-    }
-    // Remote, desktop and gateway-mediated effects are not local mutations, so
-    // refusing `mcp_call` cannot also refuse the reads it carries.
-    for (const tool of ['mcp_call', 'computer_use', 'web_fetch', 'dom_cdp', 'project_test', 'project_build']) {
+    for (const tool of [
+      'mcp_call', 'computer_use', 'web_fetch', 'dom_cdp', 'accessibility', 'input_event',
+      'ui_target_action', 'window', 'clipboard', 'notification',
+      'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
+    ]) {
       expect(isOpaqueMutationTool(tool), tool).toBe(false);
     }
   });
 
+  it('decides every mutation the registry always confirms', () => {
+    // An independent list, not another view of the three input sets: a new tool
+    // that mutates enough to demand confirmation has to be decided by the phase
+    // or named as a delegated effect here.
+    const delegated = new Set([
+      'mcp_call', 'web_fetch', 'dom_cdp', 'computer_use', 'accessibility', 'input_event',
+      'ui_target_action', 'window', 'clipboard', 'cancel_goal', 'cancel_scheduled_continuation',
+    ]);
+    for (const tool of ALWAYS_CONFIRM_MUTATION_TOOLS) {
+      if (delegated.has(tool)) continue;
+      expect(isOpaqueMutationTool(tool) || isPathExtractorTool(tool) || isRestoreMutationTool(tool), tool).toBe(true);
+    }
+  });
+
   it('states the rule once in the document instead of listing the tools', () => {
-    expect(doc.match(/The phase decides every local mutation it cannot turn\s+into a path/g)).toHaveLength(1);
+    expect(doc.match(/The phase decides every workspace, host-task and media\s+mutation it cannot\s+turn into a path/g)).toHaveLength(1);
     expect(doc).toContain('LOCAL_MUTATION_TOOLS');
     expect(doc).toContain('HOST_MUTATION_TOOLS');
+    expect(doc).toContain('LOCAL_OUTPUT_REPLACEMENT_TOOLS');
   });
 });

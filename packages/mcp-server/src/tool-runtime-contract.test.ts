@@ -256,9 +256,13 @@ describe('tool runtime delivery contract', () => {
     }
 
     for (const alternate of oracle.alternates ?? []) {
+      const alternateCallsBefore = calls.length;
       const result = await executeDefinition(registry, name, alternate.input);
       expect(result, `${name} alternate input result`).toMatchObject({ ok: true });
       if (result.ok) expect(record(result.value), `${name} alternate input output`).toMatchObject(alternate.expected);
+      // An input that asks for the work must not reach a backing service on the
+      // way to reporting that it did nothing.
+      expect(calls.slice(alternateCallsBefore), `${name} alternate input dispatched an unexpected backing service`).toEqual([]);
     }
 
     if (oracle.state === 'cache_generation') {

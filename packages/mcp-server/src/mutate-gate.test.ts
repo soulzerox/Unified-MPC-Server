@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DELEGATED_EFFECT_TOOLS, codeMutationPaths, isPathExtractorTool, isPhaseDecidedMutation, isRestoreMutationTool } from './harness-runtime.js';
 import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
+import { upgradeToolInputSchema } from './upgrade-tool-contracts.js';
 import { ALWAYS_CONFIRM_MUTATION_TOOLS } from './tool-registry.js';
 import {
   DEFAULT_MUTATE_MODE,
@@ -347,6 +348,19 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     for (const name of contractPreviews) {
       expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} is a preview whose contract cannot write and must be delegated`).toBe(true);
     }
+    // The profile tool's reason is a claim about its input contract, so the field
+    // that would reach the handler's `writeFile` is checked against the schema
+    // the registry actually validates with: admitting `dryRun` there has to fail
+    // here, not in a review.
+    const profileEntry = UPGRADE_TOOL_CATALOG.find((entry) => entry.name === 'project_profile_set');
+    expect(profileEntry, 'project_profile_set has to be a catalog entry to have a contract').toBeDefined();
+    if (profileEntry !== undefined) {
+      const schema = upgradeToolInputSchema(profileEntry);
+      expect(schema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' } }).success).toBe(true);
+      for (const enabling of [{ dryRun: false }, { dry_run: false }, { write: true }]) {
+        expect(schema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' }, ...enabling }).success, Object.keys(enabling)[0]).toBe(false);
+      }
+    }
   });
 
   it('leaves the phase every mutation the registry always confirms, except the delegated gateway, desktop and control-plane names', () => {
@@ -355,8 +369,9 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     // would return the strict posture's decision to the gate it is stricter than,
     // so the intersection is compared with the names whose reason covers a
     // confirmation — a gateway call, a desktop tool the registry confirms, a
-    // control-plane stop — and nothing else. Six of the seven desktop names are
-    // confirmed; `notification` is not, so its absence here is deliberate.
+    // control-plane stop — and nothing else. Six of the eight delegated desktop
+    // names are confirmed; `notification` and `file_dialog` are not, so their
+    // absence here is deliberate.
     const expected = [
       'accessibility', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard', 'computer_use',
       'dom_cdp', 'input_event', 'mcp_call', 'ui_target_action', 'web_fetch', 'window',

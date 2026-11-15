@@ -698,12 +698,14 @@ describe('workspace engineering harness enforcement', () => {
 
   it('hands the durable control plane and the provider memory to the policy when the workspace refuses what it cannot gate', async () => {
     // `refuse` decides workspace mutations, and the phase's subject is a path. A
-    // goal, its checkpoints and the memory the harness mandates are durable state
-    // the phase does not own: they name no path, `finish_goal` is required before
-    // any completion report, and the code index is the evidence the phase reads
-    // back. Refusing them would be a posture no strict workspace could work
-    // under, so they are delegated like the two cancels — the mutation policy
-    // still classifies them and asks for whatever its own profile requires.
+    // goal that already exists, its checkpoints and the memory the harness
+    // mandates are durable state the phase does not own: they name no path,
+    // `finish_goal` is required before any completion report, and the code index
+    // is the evidence the phase reads back. Refusing them would be a posture no
+    // strict workspace could work under, so they are delegated like the two
+    // cancels — the mutation policy still classifies them and asks for whatever
+    // its own profile requires. `run_goal` is the exception: starting a goal
+    // creates its Goal Workspace, so the phase decides it.
     const { services, setFileContent, nativeRagCalls } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
       workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
@@ -721,7 +723,6 @@ describe('workspace engineering harness enforcement', () => {
 
     for (const [tool, input] of [
       ['rag_remember', { workspaceId: 'workspace-1', content: 'durable decision', category: 'decision' }],
-      ['run_goal', { workspaceId: 'workspace-1', goalKey: 'smoke-goal', objective: 'Smoke durable goal contract' }],
       ['checkpoint_goal', {
         goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',
         stepUpdates: [], nextAction: '', blockers: [], evidence: [], activeTaskIds: [],
@@ -737,6 +738,15 @@ describe('workspace engineering harness enforcement', () => {
       expect((await registry.invoke(tool, input)).structuredContent, tool)
         .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
     }
+
+    // Starting a goal creates its Goal Workspace worktree and branch, so the
+    // phase decides it: `refuse` must not create a workspace by another name.
+    await expect(registry.invoke('run_goal', {
+      workspaceId: 'workspace-1', goalKey: 'smoke-goal', objective: 'Smoke durable goal contract',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' } } },
+    });
 
     // And the posture still refuses the workspace mutation it exists for, so the
     // delegation did not widen into "anything without a path".

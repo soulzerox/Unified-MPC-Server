@@ -249,30 +249,46 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     expect([...DELEGATED_EFFECT_TOOLS].sort()).toEqual([
       'accessibility', 'benchmark_run', 'cancel_goal', 'cancel_scheduled_continuation', 'checkpoint_goal',
       'claim_scheduled_continuation', 'clipboard', 'computer_use', 'dom_cdp',
-      'expedite_scheduled_continuation', 'finish_goal', 'input_event', 'mcp_call', 'notification',
-      'prepare_scheduled_continuation', 'project_build', 'project_dev', 'project_lint', 'project_test',
-      'project_typecheck', 'rag_adopt_legacy_index', 'rag_cancel_index', 'rag_code_index',
+      'expedite_scheduled_continuation', 'file_dialog', 'finish_goal', 'input_event', 'mcp_call', 'notification',
+      'prepare_scheduled_continuation', 'project_build', 'project_dev', 'project_lint', 'project_profile_set',
+      'project_test', 'project_typecheck', 'rag_adopt_legacy_index', 'rag_cancel_index', 'rag_code_index',
       'rag_code_reconcile', 'rag_forget', 'rag_memory_reconcile', 'rag_remember', 'rag_resolve_constraint',
       'recipe_run', 'reconcile_goals', 'record_scheduled_continuation_receipt',
-      'retry_goal_workspace_admission', 'run_affected_tests', 'run_goal', 'ui_target_action', 'web_fetch',
-      'window', 'working_memory_record', 'workspace_memory_record',
+      'retry_goal_workspace_admission', 'run_affected_tests', 'ui_target_action', 'verify_incremental', 'web_fetch',
+      'window', 'working_memory_record', 'workspace_activate', 'workspace_deactivate', 'workspace_memory_record',
+      'workspace_set_primary',
     ]);
   });
 
   it('decides the work a tool name hides, not just the name it was copied from', () => {
     // Every one of these mutates, and every one of them was outside the phase at
     // some point in this step's review: a scheduled task, a recording, a
-    // background shell task, a goal rebase, a merge, an install.
+    // background shell task, a goal rebase, a merge, an install. `run_goal` is
+    // here because starting a goal creates its Goal Workspace.
     for (const tool of [
       'shell', 'wsl_exec', 'git', 'git_publish', 'publish_approve', 'process_start', 'process_stop',
       'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge',
       'self_heal_apply', 'git_worktree_spawn', 'git_worktree_remove', 'scheduler', 'audio',
       'screen_record', 'task_create', 'task_cancel', 'delegate', 'parallel_delegate',
       'delegate_cancel', 'guarded_pr_merge', 'rebase_goal_workspace', 'merge_verification_run',
-      'verify_incremental', 'mcp_install', 'skills_install', 'plugin_install', 'hook_register',
-      'cache_clear', 'session_checkpoint', 'tool_schema_register', 'project_profile_set',
+      'mcp_install', 'skills_install', 'plugin_install', 'hook_register',
+      'cache_clear', 'session_checkpoint', 'tool_schema_register', 'run_goal',
     ]) {
       expect(isPhaseDecidedMutation(tool), tool).toBe(true);
+    }
+  });
+
+  it('hands the phase only calls whose reachable contract can write', () => {
+    // A name in the delegation list is a promise that the phase has nothing to
+    // decide. Three families keep that promise for a reason other than "not a
+    // workspace file": a configured command (`verify_incremental` runs the same
+    // project `typecheck` as `project_typecheck`), runtime selection state, and a
+    // preview whose strict contract admits no way to ask for the write
+    // (`project_profile_set` fields are `workspaceId` and `profile`, so the
+    // handler always answers with the dry-run preview).
+    for (const tool of ['verify_incremental', 'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'file_dialog', 'project_profile_set']) {
+      expect(DELEGATED_EFFECT_TOOLS.has(tool), tool).toBe(true);
+      expect(isPhaseDecidedMutation(tool), tool).toBe(false);
     }
   });
 
@@ -299,6 +315,12 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     // says so literally: a configured command that leaves the catalog fails here
     // rather than disappearing with it.
     const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'recipe_run', 'run_affected_tests', 'benchmark_run'];
+    // A delegated catalog mutation has to be one the phase has no subject for
+    // either because the workspace configured its command or because the tool's
+    // own contract cannot reach a write. `project_profile_set` is the second
+    // kind: its strict schema admits `workspaceId` and `profile`, so the handler
+    // always answers with the dry-run preview.
+    const contractPreviews = ['project_profile_set'];
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
     expect(nonRead.length).toBeGreaterThan(20);
@@ -306,12 +328,12 @@ describe('the phase decides every mutation it was not told to delegate', () => {
       'recipe_run', 'run_affected_tests', 'benchmark_run',
     ]);
     // Every catalog mutation that is delegated has to be one of the configured
-    // commands, and every configured command the catalog names has to be
-    // delegated: the two directions are checked separately so a new delegation and
-    // a missing one are different failures.
+    // commands or a contract-level preview, and every configured command the
+    // catalog names has to be delegated: the two directions are checked
+    // separately so a new delegation and a missing one are different failures.
     for (const entry of nonRead) {
       if (!DELEGATED_EFFECT_TOOLS.has(entry.name)) continue;
-      expect(configuredCommands, `${entry.name} is delegated but is not a configured command`).toContain(entry.name);
+      expect([...configuredCommands, ...contractPreviews], `${entry.name} is delegated but is neither a configured command nor a contract-level preview`).toContain(entry.name);
     }
     for (const name of ['recipe_run', 'run_affected_tests', 'benchmark_run']) {
       expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} runs the workspace's command and must be delegated`).toBe(true);

@@ -211,11 +211,23 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
  * - the project-command tools run a command the workspace configured, not an
  *   argv the caller chose, and refusing them would refuse the verification step
  *   inside the very workspace that opted in;
- * - the durable control plane — the goal and scheduled-continuation lifecycle —
- *   writes state the phase does not own: the goal can predate the opt-in or
- *   belong to another client, and `finish_goal` is part of the goal-completion
- *   contract the runtime already enforces, so refusing it would leave a strict
- *   workspace unable to finish, recover or abandon a goal it did not start;
+ * - a goal that already exists is durable state the phase does not own: it can
+ *   predate the opt-in, and `finish_goal` is part of the goal-completion
+ *   contract the runtime already enforces, so refusing the lifecycle would
+ *   leave a strict workspace unable to finish, recover or abandon that goal.
+ *   `run_goal` is decided rather than delegated, because starting one creates a
+ *   Goal Workspace worktree and branch — the same mutation `git_worktree_spawn`
+ *   performs, which the phase refuses;
+ * - runtime selection state — activating, deactivating or promoting a
+ *   registered project — names no file, and the phase answers with the *target*
+ *   workspace's profile. Deciding it would let the strict posture refuse the
+ *   call that turns the posture on: an inactive strict workspace could not be
+ *   activated again, because only an active one can be mutated.
+ * - the registry's previews — a file dialog and `project_profile_set` — cannot
+ *   write through their contracts: the dialog returns a chosen path, and the
+ *   profile tool's contract admits only `workspaceId` and `profile`, so its
+ *   handler always answers with the dry-run preview. A fail-closed policy
+ *   classification would otherwise be a refusal of a call that mutates nothing;
  * - the native provider's durable state — memory records, their constraints and
  *   the code index behind them — is evidence the phase reads rather than work it
  *   decides, so a refusal there would forbid the memory the harness itself
@@ -223,17 +235,22 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
  */
 export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
   'mcp_call', 'web_fetch', 'dom_cdp',
-  'computer_use', 'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard', 'notification',
+  'computer_use', 'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard', 'notification', 'file_dialog',
   'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
-  'recipe_run', 'run_affected_tests', 'benchmark_run',
-  // The durable control plane, created and completed outside the workspace file
-  // set: a goal starts, checkpoints, recovers and finishes through lease and
-  // revision compare-and-swap the runtime enforces, and a scheduled continuation
-  // records the receipt the completion contract asks for.
-  'run_goal', 'checkpoint_goal', 'finish_goal', 'reconcile_goals', 'retry_goal_workspace_admission',
+  'recipe_run', 'run_affected_tests', 'benchmark_run', 'verify_incremental',
+  // The durable lifecycle of a goal that already exists, and the scheduled
+  // continuation the completion contract asks for. `run_goal` is deliberately
+  // absent: it creates the Goal Workspace, so the phase decides it.
+  'checkpoint_goal', 'finish_goal', 'reconcile_goals', 'retry_goal_workspace_admission',
   'prepare_scheduled_continuation', 'claim_scheduled_continuation',
   'record_scheduled_continuation_receipt', 'expedite_scheduled_continuation',
   'cancel_goal', 'cancel_scheduled_continuation',
+  // Runtime selection state, which the phase must not decide: it resolves the
+  // profile of the workspace being selected, so a strict workspace could never
+  // be activated or deactivated again.
+  'workspace_activate', 'workspace_deactivate', 'workspace_set_primary',
+  // Previews whose registry contract admits no write.
+  'project_profile_set',
   // The native provider's durable state, which lives in the provider's stores
   // rather than in workspace files: the memory records the harness asks for, the
   // constraints recorded against them, and the code index the phase reads back as

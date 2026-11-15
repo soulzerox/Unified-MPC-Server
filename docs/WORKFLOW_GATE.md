@@ -323,7 +323,7 @@ Each step ships alone and leaves the repository working.
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
-| 5b-3 ✅ | Decide the residual the phase still cannot see: the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`). A mutation with no resolved `workspaceId` was listed in the same residue; without a workspace there is no profile, so the phase allows it by policy rather than deciding it from a posture | shipped in #846: the four-tool list is gone, and so is the union of "tools that mutate" sets it was replaced with — five reviews each found one more declaration outside the union (a scheduled task, a recording, a background shell task, a goal rebase, a merge). The reach is now the complement of `DELEGATED_EFFECT_TOOLS`: every non-`read` mutation the extractor table cannot turn into a path is decided, including `publish_approve`, `codex_stop`, the git worktree tools, `scheduler`, `audio`, `screen_record`, `task_create`, `task_cancel`, `delegate`, `parallel_delegate`, `delegate_cancel`, `guarded_pr_merge` and `rebase_goal_workspace`; what stays delegated is the gateway (`mcp_call`, `web_fetch`, `dom_cdp`), the desktop tools, the commands the workspace configured, the durable goal and scheduled-continuation control plane, and the native provider's own memory and code index, each with a stated reason. A mutation with no resolved `workspaceId` is still allowed: without a workspace there is no profile, so the phase allows it by policy, and that half of the original residue is a limit rather than something this step decided |
+| 5b-3 ✅ | Decide the residual the phase still cannot see: the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`). A mutation with no resolved `workspaceId` was listed in the same residue; without a workspace there is no profile, so the phase allows it by policy rather than deciding it from a posture | shipped in #846: the four-tool list is gone, and so is the union of "tools that mutate" sets it was replaced with — five reviews each found one more declaration outside the union (a scheduled task, a recording, a background shell task, a goal rebase, a merge). The reach is now the complement of `DELEGATED_EFFECT_TOOLS`: every non-`read` mutation the extractor table cannot turn into a path is decided, including `publish_approve`, `codex_stop`, the git worktree tools, `scheduler`, `audio`, `screen_record`, `task_create`, `task_cancel`, `delegate`, `parallel_delegate`, `delegate_cancel`, `guarded_pr_merge` and `rebase_goal_workspace`; what stays delegated is the gateway (`mcp_call`, `web_fetch`, `dom_cdp`), the desktop tools and the file dialog, the commands the workspace configured, the lifecycle of a goal that already exists with its scheduled continuation, runtime selection state, a preview whose contract admits no write, and the native provider's own memory and code index, each with a stated reason. `run_goal` is decided, because starting a goal creates its Goal Workspace, so `refuse` cannot create a worktree by another name; a strict workspace therefore cannot start or resume a goal, and relaxing `mutateOpaque` is the way through. A mutation with no resolved `workspaceId` is still allowed: without a workspace there is no profile, so the phase allows it by policy, and that half of the original residue is a limit rather than something this step decided |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -674,13 +674,15 @@ shell task, a goal rebase and a merge in that gap, one per round.
   tool shape rather than by action: a strict workspace should not start what it
   could not stop. A stop that was already running when the workspace opted in is
   the same trap, and the honest answer is the setting, not the phase — relax
-  `mutateOpaque` for the stop. The durable control plane and the native provider's
-  own store are the exception §5b names, for the reasons given there: refusing a
-  goal's completion, or the memory the workflow records, would decide state the
-  phase does not own. That is the cost of a shape-based posture, stated rather
-  than discovered: `refuse` is a posture for a workspace whose mutations must all
-  be path-bearing, and the state a tool keeps about that workspace is not one of
-  them — it is not a filter that lets "ordinary" commands through.
+  `mutateOpaque` for the stop. The lifecycle of a goal that already exists and the
+  native provider's own store are the exception §5b names, for the reasons given
+  there: refusing a goal's completion, or the memory the workflow records, would
+  decide state the phase does not own. Starting a goal is not an exception — it
+  creates the Goal Workspace, so the phase decides it. That is the cost of a
+  shape-based posture, stated rather than discovered: `refuse` is a posture for a
+  workspace whose mutations must all be path-bearing, and the state a tool keeps
+  about that workspace is not one of them — it is not a filter that lets
+  "ordinary" commands through.
 
 Widening the call site has one cost worth stating: a non-`read` call to a tool that
 is not delegated now reads the workspace profile before the phase is known to be
@@ -694,11 +696,13 @@ group is there for a reason that would not hold for a mutation:
 
 - the project-command tools — `project_dev`, `project_test`, `project_lint`,
   `project_typecheck`, `project_build`, and `recipe_run`, `run_affected_tests`,
-  `benchmark_run` — run a command the workspace configured, not an argv the caller
-  chose, so they are not the arbitrary-write hole `shell` is. For `recipe_run` the
-  command is a recipe plan the workspace's catalog names; for `run_affected_tests`
-  and `benchmark_run` it is the managed process service's `test` and `benchmark`
-  project command, resolved from the workspace rather than from the request.
+  `benchmark_run`, plus `verify_incremental`, which asks the managed process
+  service for the same `typecheck` project command `project_typecheck` runs — run
+  a command the workspace configured, not an argv the caller chose, so they are
+  not the arbitrary-write hole `shell` is. For `recipe_run` the command is a recipe
+  plan the workspace's catalog names; for `run_affected_tests` and `benchmark_run`
+  it is the managed process service's `test` and `benchmark` project command,
+  resolved from the workspace rather than from the request.
   Refusing them would also block the verification step inside the very workspace
   that opted in. The asymmetry is worth naming: `shell` with a `pnpm test` argv is
   refused, `project_test` is not, because the second cannot be pointed at a
@@ -706,7 +710,8 @@ group is there for a reason that would not hold for a mutation:
   contain it either;
 - gateway-mediated calls and desktop effects — `mcp_call`, `web_fetch`,
   `dom_cdp`, `computer_use`, and the desktop tools (`accessibility`,
-  `input_event`, `ui_target_action`, `window`, `clipboard`, `notification`) — are
+  `input_event`, `ui_target_action`, `window`, `clipboard`, `notification`,
+  `file_dialog`) — are
   not workspace mutations: they reach a remote system or drive the host UI, and
   their refusal belongs to the mutation policy's approval gate. This is the other
   place `refuse` is not containment, and it is stated rather than implied:
@@ -718,20 +723,37 @@ group is there for a reason that would not hold for a mutation:
   its approval asks about the unproven calls and not the proven ones. `refuse` does
   not reach either kind: the gateway call is delegated whole, which is why a
   strict workspace still has to read the approval prompt rather than the phase for
-  it;
-- the durable control plane — the goal lifecycle (`run_goal`, `checkpoint_goal`,
-  `finish_goal`, `reconcile_goals`, `retry_goal_workspace_admission`), the
-  scheduled-continuation lifecycle (`prepare_`, `claim_`,
-  `record_scheduled_continuation_receipt`, `expedite_scheduled_continuation`) and
-  the two stops — writes state the phase does not own: a goal or a continuation
-  can predate the opt-in or be owned by another client, and `finish_goal` is part
-  of the goal-completion contract the runtime already enforces. The phase decides
-  the starts of workspace-owned work, so their stops stay inside it and the
-  setting answers the pre-opt-in case; it does not own a goal or a scheduled task,
-  so refusing its lifecycle would leave a strict workspace unable to finish,
-  recover or abandon a goal it did not start. The `stop` of a recording, a
-  process, a task or a codex run stays in the phase, because those are the
-  counterpart of a mutation the same workspace could start;
+  it. `file_dialog` belongs here for the narrower reason that it opens a host
+  dialog and returns the chosen path: it writes nothing, so a fail-closed
+  classification would be the only thing refusing it;
+- the lifecycle of a goal that already exists — `checkpoint_goal`, `finish_goal`,
+  `reconcile_goals`, `retry_goal_workspace_admission` — the
+  scheduled-continuation lifecycle (`prepare_scheduled_continuation`,
+  `claim_scheduled_continuation`, `record_scheduled_continuation_receipt`,
+  `expedite_scheduled_continuation`) and the two stops writes state the phase does
+  not own: a goal or a continuation can predate the opt-in or be owned by another
+  client, and `finish_goal` is part of the goal-completion contract the runtime
+  already enforces. Refusing it would leave a strict workspace unable to finish,
+  recover or abandon a goal it did not start, and the setting is the answer to the
+  pre-opt-in case, exactly as it is for a stop. `run_goal` is not in this group:
+  starting a goal creates its Goal Workspace worktree and `goal/<id>` branch, the
+  same mutation `git_worktree_spawn` performs, so the phase decides it — `refuse`
+  cannot create a workspace by another name. The cost is stated rather than
+  discovered: a strict workspace cannot start or resume a goal, and relaxing
+  `mutateOpaque` is the way through. The `stop` of a recording, a process, a task
+  or a codex run stays in the phase too, because those are the counterpart of a
+  mutation the same workspace could start;
+- runtime selection state — `workspace_activate`, `workspace_deactivate`,
+  `workspace_set_primary` — is not workspace content, and the phase would answer
+  it with the *target* workspace's profile, because the call names the workspace it
+  selects. Deciding it would make the strict posture refuse the call that turns the
+  posture on: an inactive strict workspace can only be mutated once it is active,
+  so it could never be activated again, and it could not be deactivated either;
+- the registry's previews — `project_profile_set` — cannot write through their
+  contracts. Its strict input contract admits `workspaceId` and `profile` only, so
+  the handler always answers with the dry-run preview and has no route to
+  `writeFile`; a fail-closed classification would be the only thing refusing it. If
+  the contract ever admits a dry-run switch, the tool has to leave this list;
 - the native provider's durable state — `working_memory_record`,
   `workspace_memory_record`, `rag_remember`, `rag_forget`,
   `rag_resolve_constraint`, `rag_memory_reconcile`, `rag_code_reconcile`,
@@ -752,8 +774,9 @@ reason, which is why a `refuse` workspace cannot merge or rebase: none of the th
 has a path-bearing form, so relaxing `mutateOpaque` is the only way through.
 
 The reach, not a category, is the answer: `isPhaseDecidedMutation` is the
-complement of a written-out exception list, and four tests across the two files
-hold it — the delegation list itself, every name in the delegation list and in the
+complement of a written-out exception list, and five tests across the two files
+hold it — the delegation list itself, the shape of each delegated family, every
+name in the delegation list and in the
 always-confirm list or the catalog being a tool the registry actually routes, every
 mutation the catalog declares, and the registry's own always-confirm list. A new
 tool is decided by default, so it cannot leave coverage by being declared somewhere

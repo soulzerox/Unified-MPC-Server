@@ -211,18 +211,36 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
  * - the project-command tools run a command the workspace configured, not an
  *   argv the caller chose, and refusing them would refuse the verification step
  *   inside the very workspace that opted in;
- * - the control-plane stops end durable work the phase does not own: a goal or a
- *   scheduled continuation can predate the opt-in or belong to another client,
- *   and `cancel_scheduled_continuation` is part of the goal-completion contract,
- *   so refusing it would make a strict workspace unable to finish a goal it did
- *   not start.
+ * - the durable control plane — the goal and scheduled-continuation lifecycle —
+ *   writes state the phase does not own: the goal can predate the opt-in or
+ *   belong to another client, and `finish_goal` is part of the goal-completion
+ *   contract the runtime already enforces, so refusing it would leave a strict
+ *   workspace unable to finish, recover or abandon a goal it did not start;
+ * - the native provider's durable state — memory records, their constraints and
+ *   the code index behind them — is evidence the phase reads rather than work it
+ *   decides, so a refusal there would forbid the memory the harness itself
+ *   mandates and leave the index the gate depends on stale.
  */
 export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
   'mcp_call', 'web_fetch', 'dom_cdp',
   'computer_use', 'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard', 'notification',
   'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
   'recipe_run', 'run_affected_tests', 'benchmark_run',
+  // The durable control plane, created and completed outside the workspace file
+  // set: a goal starts, checkpoints, recovers and finishes through lease and
+  // revision compare-and-swap the runtime enforces, and a scheduled continuation
+  // records the receipt the completion contract asks for.
+  'run_goal', 'checkpoint_goal', 'finish_goal', 'reconcile_goals', 'retry_goal_workspace_admission',
+  'prepare_scheduled_continuation', 'claim_scheduled_continuation',
+  'record_scheduled_continuation_receipt', 'expedite_scheduled_continuation',
   'cancel_goal', 'cancel_scheduled_continuation',
+  // The native provider's durable state, which lives in the provider's stores
+  // rather than in workspace files: the memory records the harness asks for, the
+  // constraints recorded against them, and the code index the phase reads back as
+  // its own evidence.
+  'working_memory_record', 'workspace_memory_record', 'rag_remember', 'rag_forget',
+  'rag_resolve_constraint', 'rag_memory_reconcile', 'rag_code_reconcile',
+  'rag_code_index', 'rag_cancel_index', 'rag_adopt_legacy_index',
 ]);
 
 /**

@@ -247,10 +247,15 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     // The whole exception list, written out rather than recomputed. Adding a name
     // here is a policy decision, so it has to show up in a diff that says so.
     expect([...DELEGATED_EFFECT_TOOLS].sort()).toEqual([
-      'accessibility', 'benchmark_run', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard',
-      'computer_use', 'dom_cdp', 'input_event', 'mcp_call', 'notification', 'project_build',
-      'project_dev', 'project_lint', 'project_test', 'project_typecheck', 'recipe_run',
-      'run_affected_tests', 'ui_target_action', 'web_fetch', 'window',
+      'accessibility', 'benchmark_run', 'cancel_goal', 'cancel_scheduled_continuation', 'checkpoint_goal',
+      'claim_scheduled_continuation', 'clipboard', 'computer_use', 'dom_cdp',
+      'expedite_scheduled_continuation', 'finish_goal', 'input_event', 'mcp_call', 'notification',
+      'prepare_scheduled_continuation', 'project_build', 'project_dev', 'project_lint', 'project_test',
+      'project_typecheck', 'rag_adopt_legacy_index', 'rag_cancel_index', 'rag_code_index',
+      'rag_code_reconcile', 'rag_forget', 'rag_memory_reconcile', 'rag_remember', 'rag_resolve_constraint',
+      'recipe_run', 'reconcile_goals', 'record_scheduled_continuation_receipt',
+      'retry_goal_workspace_admission', 'run_affected_tests', 'run_goal', 'ui_target_action', 'web_fetch',
+      'window', 'working_memory_record', 'workspace_memory_record',
     ]);
   });
 

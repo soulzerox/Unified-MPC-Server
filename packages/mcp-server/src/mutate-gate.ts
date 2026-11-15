@@ -105,11 +105,12 @@ export type MutateGateDecision =
  *
  * A mutation that names no development artifact path has nothing to bind a
  * preparation to, so it is allowed. That is the honest limit of this decision,
- * which decides paths and nothing else: `shell`, `wsl_exec`, `git` and
- * `process_start` reach the same seam since step 5b-2, but they never arrive
- * here as paths — the registry asks `evaluateOpaqueMutateGate` instead. Since
- * step 5b-1 the restore tools do arrive here — the caller resolves their subject
- * through `mutation-subject.ts` before asking this decision.
+ * which decides paths and nothing else: an opaque mutation — a command, a
+ * scheduled task, a recording — reaches the same seam since step 5b-2, but never
+ * arrives here as a path: the registry asks `evaluateOpaqueMutateGate` for the
+ * subjects it cannot see. Since step 5b-1 the restore tools do arrive here — the
+ * caller resolves their subject through `mutation-subject.ts` before asking this
+ * decision.
  */
 export function evaluateMutateGate(request: MutateGateRequest): MutateGateDecision {
   if (request.mode === 'auto_prepare') return { allowed: true };

@@ -696,6 +696,58 @@ describe('workspace engineering harness enforcement', () => {
     })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
   });
 
+  it('hands the durable control plane and the provider memory to the policy when the workspace refuses what it cannot gate', async () => {
+    // `refuse` decides workspace mutations, and the phase's subject is a path. A
+    // goal, its checkpoints and the memory the harness mandates are durable state
+    // the phase does not own: they name no path, `finish_goal` is required before
+    // any completion report, and the code index is the evidence the phase reads
+    // back. Refusing them would be a posture no strict workspace could work
+    // under, so they are delegated like the two cancels — the mutation policy
+    // still classifies them and asks for whatever its own profile requires.
+    const { services, setFileContent, nativeRagCalls } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    // The memory record runs end to end: the gate admits it and the provider
+    // records it, so the delegation is a hand-off rather than a hole in the call.
+    const recorded = await registry.invoke('working_memory_record', {
+      workspaceId: 'workspace-1', name: 'goal:smoke', observations: ['progress'],
+    });
+    expect(recorded.isError, JSON.stringify(recorded.structuredContent)).not.toBe(true);
+    expect(nativeRagCalls).toContain('record_event');
+
+    for (const [tool, input] of [
+      ['rag_remember', { workspaceId: 'workspace-1', content: 'durable decision', category: 'decision' }],
+      ['run_goal', { workspaceId: 'workspace-1', goalKey: 'smoke-goal', objective: 'Smoke durable goal contract' }],
+      ['checkpoint_goal', {
+        goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',
+        stepUpdates: [], nextAction: '', blockers: [], evidence: [], activeTaskIds: [],
+      }],
+      ['finish_goal', { goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, status: 'completed', summary: 'smoke', evidence: [] }],
+      ['prepare_scheduled_continuation', {
+        goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',
+        stepUpdates: [], nextAction: 'continue smoke', blockers: [], evidence: [], activeTaskIds: [],
+        successorDelayMinutes: 25, executionPreference: 'cloud',
+      }],
+      ['claim_scheduled_continuation', { continuationId: 'continuation-1' }],
+    ] as const) {
+      expect((await registry.invoke(tool, input)).structuredContent, tool)
+        .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+    }
+
+    // And the posture still refuses the workspace mutation it exists for, so the
+    // delegation did not widen into "anything without a path".
+    await expect(registry.invoke('shell', {
+      workspaceId: 'workspace-1', executable: 'touch', arguments: ['src/new.ts'], userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' } } },
+    });
+  });
+
   it('names only tools the registry routes, in each of the three policy sets', async () => {
     // The oracles in `mutate-gate.test.ts` compare names, so a name no tool answers
     // to would survive all of them and a policy list that lost a tool would read as

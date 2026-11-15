@@ -284,10 +284,11 @@ live at three seams; the engine extends them instead of adding a parallel gate:
 3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam. It is
    still narrower than "every edit fails closed": it covers the file-tool set
    in `codeMutationPaths`, since step 5b-1 the restore tools whose paths a store
-   names, and since step 5b-3 every tool in `LOCAL_MUTATION_TOOLS` or
-   `HOST_MUTATION_TOOLS` whose mutation decision is not `read`. That last half is
-   derived rather than listed, so the seam covers a new local or host mutation as
-   soon as the registry declares it. It returns
+   names, and since step 5b-3 every tool in `LOCAL_MUTATION_TOOLS`,
+   `HOST_MUTATION_TOOLS` or `LOCAL_OUTPUT_REPLACEMENT_TOOLS` whose mutation
+   decision is not `read`. That last half is
+   derived rather than listed, so the seam covers a new local, host or media
+   mutation as soon as the registry declares it. It returns
    allow when no `workspaceId` is resolved. Step 5a made the rest opt-in: in
    `require_preparation` mode the seam refuses instead of bootstrapping the
    harness and auto-preparing each path, and the default `auto_prepare` keeps the
@@ -319,7 +320,7 @@ Each step ships alone and leaves the repository working.
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
-| 5b-3 ✅ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`) | shipped in #846: the four-tool list is gone; the phase decides every tool in `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS` or `LOCAL_OUTPUT_REPLACEMENT_TOOLS` that the extractor table cannot turn into a path, so the local families now reach the seam (including `publish_approve`, `codex_stop` and the git worktree tools the old list omitted), `scheduler` reaches it as a host task and `audio`/`screen_record` as workspace media output, and `refuse` refuses them; `mcp_call`, `computer_use`, `web_fetch` and `dom_cdp` stay delegated to the mutation policy because they are not workspace mutations, and refusing `mcp_call` would refuse the reads it carries; a mutation with no resolved `workspaceId` is still allowed |
+| 5b-3 ✅ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`) | shipped in #846: the four-tool list is gone; the phase decides every tool in `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS` or `LOCAL_OUTPUT_REPLACEMENT_TOOLS` that the extractor table cannot turn into a path, so the local families now reach the seam (including `publish_approve`, `codex_stop` and the git worktree tools the old list omitted), `scheduler` reaches it as a host task and `audio`/`screen_record` as workspace media output, and `refuse` refuses them; `mcp_call`, `computer_use`, `web_fetch` and `dom_cdp` stay delegated to the mutation policy because they are not workspace mutations, and refusing `mcp_call` in the phase would refuse the child reads it cannot prove read-only; a mutation with no resolved `workspaceId` is still allowed |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -647,7 +648,9 @@ to forget and no prose list to stop one name short.
   `validateHarnessMutation` was never called for them, because `isCodingMutation`
   is a question about request shape and a command has no path shape. The reach is
   not "not a path extractor": that would also put `mcp_call` in the phase, and a
-  gateway call is opaque for every child tool, including the reads it carries;
+  gateway call names no artifact of its own — the child it reaches may be a read,
+  a delete, or a write whose target the gateway cannot prepare — so the phase
+  would have nothing to decide it from;
 - `mutateOpaque` is a setting *of* the phase. With `mutate: auto_prepare` it is
   never consulted: a workspace that has not opted in keeps its old behaviour and
   gets no audit note, because nothing decided anything. This is one opt-in with
@@ -699,9 +702,12 @@ effect, and the mutation policy already gates each:
   other place `refuse` is not containment, and it is stated rather than implied:
   `mcp_call` can still reach a child tool that writes, and a synthetic
   `input_event` can type into an editor, because the gateway cannot classify
-  either effect. `git_publish` is in the reach even though it changes a remote:
-  it is a workspace mutation gated by a local single-use receipt, and the phase
-  decides it by the same rule.
+  either effect. The policy does classify a child it can prove read-only — an
+  exact child tool the runtime policy lists in `readOnlyTools`, whose live
+  descriptor and catalog fingerprints still match — so `refuse` contains the
+  unproven reads rather than the proven ones. `git_publish` is in the reach even
+  though it changes a remote: it is a workspace mutation gated by a local
+  single-use receipt, and the phase decides it by the same rule.
 
 The reach, not a category, is the answer: `isOpaqueMutationTool` derives from
 `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS` and `LOCAL_OUTPUT_REPLACEMENT_TOOLS`

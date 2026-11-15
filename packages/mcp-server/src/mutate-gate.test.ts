@@ -74,6 +74,10 @@ describe('opaque mutate policy', () => {
     // for, so the same sentence has to describe it without calling it a command.
     expect(describeOpaqueMutateRefusal('office', 'shape'))
       .toContain('office does not name a file the phase can turn into a preparation');
+    // `process_stop` has no path-bearing form at all, so the sentence offers the
+    // preparation as a condition to meet rather than a tool to switch to.
+    expect(describeOpaqueMutateRefusal('process_stop', 'shape'))
+      .toContain('express the change as a tool whose request names the file it writes');
 
     const unresolved = describeOpaqueMutateRefusal('restore_deleted_file', 'unresolved');
     expect(unresolved).toContain('restore_deleted_file names a stored subject this workspace cannot resolve');

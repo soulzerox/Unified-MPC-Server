@@ -670,8 +670,10 @@ describe('workspace engineering harness enforcement', () => {
       },
     });
 
-    // A gateway call is not a local mutation: refusing it outright would also
-    // refuse the reads it carries, so the mutation policy keeps that decision.
+    // A gateway call is not a workspace mutation: refusing it in the phase would
+    // also refuse a child read the gateway cannot prove read-only — this one is
+    // not in the runtime policy's `readOnlyTools` — so the mutation policy keeps
+    // that decision.
     expect((await registry.invoke('mcp_call', {
       workspaceId: 'workspace-1', server: 'filesystem', tool: 'read_file', arguments: { path: 'src/app.ts' },
     })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });

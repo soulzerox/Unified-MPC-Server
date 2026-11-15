@@ -183,17 +183,20 @@ export function evaluateOpaqueMutateGate(request: OpaqueMutateRequest): OpaqueMu
  *
  * The two ways out are per reason, because the faults are different. A mutation
  * refused for its shape is refused because the phase cannot name its artifact,
- * so naming the artifact with a path tool is a way out. An unresolvable stored
- * subject is a lookup that could not answer for an id the caller supplied, so
- * switching tools would abandon the restore rather than fix it: the way out is
- * to name a subject this workspace can resolve.
+ * so expressing the change as a tool whose request names the file, and preparing
+ * that file, is a way out — where such a form exists: a task, a recording or a
+ * push has none, so the sentence offers the preparation as a condition to meet
+ * rather than a tool to switch to. An unresolvable stored subject is a lookup
+ * that could not answer for an id the caller supplied, so switching tools would
+ * abandon the restore rather than fix it: the way out is to name a subject this
+ * workspace can resolve.
  */
 export function describeOpaqueMutateRefusal(toolName: string, reason: OpaqueMutationReason): string {
   const subject = reason === 'shape'
     ? `${toolName} does not name a file the phase can turn into a preparation`
     : `${toolName} names a stored subject this workspace cannot resolve, so it names no file a preparation could bind to`;
   const wayOut = reason === 'shape'
-    ? 'name the file with a path tool and prepare_code_change'
+    ? 'express the change as a tool whose request names the file it writes and prepare_code_change that file'
     : 'name a subject this workspace can resolve';
   return `${subject}. This workspace refuses mutations it cannot gate (workflowGate.mutateOpaque is refuse); ${wayOut}, or set workflowGate.mutateOpaque back to allow`;
 }

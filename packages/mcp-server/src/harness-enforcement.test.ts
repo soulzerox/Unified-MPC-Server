@@ -5,7 +5,8 @@ import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { ActivityTracker, type ActivitySinkEvent } from './activity-tracker.js';
-import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
+import { ToolRegistry, ALWAYS_CONFIRM_MUTATION_TOOLS, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
+import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
 import { DELEGATED_EFFECT_TOOLS, HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
@@ -695,21 +696,21 @@ describe('workspace engineering harness enforcement', () => {
     })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
   });
 
-  it('names only tools the registry routes, in the reach and in the delegation list', async () => {
-    // The set comparisons in `mutate-gate.test.ts` compare names, so a name no
-    // tool answers to would survive all of them, and a reviewed policy list that
-    // lost a tool would read as coverage. This is the one check that every name
-    // the policy mentions is a tool the registry actually routes.
+  it('names only tools the registry routes, in each of the three policy sets', async () => {
+    // The oracles in `mutate-gate.test.ts` compare names, so a name no tool answers
+    // to would survive all of them and a policy list that lost a tool would read as
+    // coverage. This is the one check that every name those oracles mention is a
+    // tool the registry actually routes: the delegation list, the calls the
+    // registry always confirms, and every mutation its catalog declares.
     const { services } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     const registered = new Set(registry.listAll().map((tool) => tool.name));
-    for (const tool of DELEGATED_EFFECT_TOOLS) expect(registered.has(tool), tool).toBe(true);
-    for (const tool of [
-      'shell', 'git', 'scheduler', 'audio', 'screen_record', 'task_create', 'delegate',
-      'guarded_pr_merge', 'rebase_goal_workspace', 'plugin_install', 'mcp_install',
-    ]) {
-      expect(registered.has(tool), tool).toBe(true);
-    }
+    const policyNames = [
+      ...DELEGATED_EFFECT_TOOLS,
+      ...ALWAYS_CONFIRM_MUTATION_TOOLS,
+      ...UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ').map((entry) => entry.name),
+    ];
+    for (const tool of policyNames) expect(registered.has(tool), tool).toBe(true);
   });
 
   it('admits a command mutation and records that it had no prepared evidence', async () => {

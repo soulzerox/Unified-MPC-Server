@@ -682,12 +682,15 @@ group is there for a reason that would not hold for a mutation:
 - the project-command tools — `project_dev`, `project_test`, `project_lint`,
   `project_typecheck`, `project_build`, and `recipe_run`, `run_affected_tests`,
   `benchmark_run` — run a command the workspace configured, not an argv the caller
-  chose, so they are not the arbitrary-write hole `shell` is. Refusing them would
-  also block the verification step inside the very workspace that opted in. The
-  asymmetry is worth naming: `shell` with a `pnpm test` argv is refused,
-  `project_test` is not, because the second cannot be pointed at a different
-  command. A configured command can still write, so `refuse` does not contain it
-  either;
+  chose, so they are not the arbitrary-write hole `shell` is. For `recipe_run` the
+  command is a recipe plan the workspace's catalog names; for `run_affected_tests`
+  and `benchmark_run` it is the managed process service's `test` and `benchmark`
+  project command, resolved from the workspace rather than from the request.
+  Refusing them would also block the verification step inside the very workspace
+  that opted in. The asymmetry is worth naming: `shell` with a `pnpm test` argv is
+  refused, `project_test` is not, because the second cannot be pointed at a
+  different command. A configured command can still write, so `refuse` does not
+  contain it either;
 - gateway-mediated calls and desktop effects — `mcp_call`, `web_fetch`,
   `dom_cdp`, `computer_use`, and the desktop tools (`accessibility`,
   `input_event`, `ui_target_action`, `window`, `clipboard`, `notification`) — are
@@ -696,10 +699,13 @@ group is there for a reason that would not hold for a mutation:
   place `refuse` is not containment, and it is stated rather than implied:
   `mcp_call` can still reach a child tool that writes, and a synthetic
   `input_event` can type into an editor, because the gateway cannot classify
-  either effect. The policy does classify a child it can prove read-only — an
-  exact child tool the runtime policy lists in `readOnlyTools`, whose live
-  descriptor and catalog fingerprints still match — so `refuse` contains the
-  unproven reads rather than the proven ones;
+  either effect. The mutation policy's own gate is narrower: it classifies a child
+  it can prove read-only — an exact child tool the runtime policy lists in
+  `readOnlyTools`, whose live descriptor and catalog fingerprints still match — so
+  its approval asks about the unproven calls and not the proven ones. `refuse` does
+  not reach either kind: the gateway call is delegated whole, which is why a
+  strict workspace still has to read the approval prompt rather than the phase for
+  it;
 - the control-plane stops — `cancel_goal`, `cancel_scheduled_continuation` — end
   work instead of writing, and a posture that could start a goal but never cancel
   one would trap the workspace. The `stop` of a recording, a process, a task or a

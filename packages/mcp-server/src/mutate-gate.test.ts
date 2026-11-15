@@ -266,11 +266,13 @@ describe('the phase decides every mutation it was not told to delegate', () => {
   });
 
   it('leaves the delegated effects and the path tools out of the opaque route', () => {
-    // A delegated effect stays with the mutation policy's approval gate, and a
-    // path tool is decided by the path it names, so neither is an opaque subject.
+    // A delegated effect stays with the mutation policy's approval gate, so it is
+    // not an opaque subject — its reason is that the phase does not decide it, not
+    // that it would have no subject. The path and restore tools are the ones that
+    // name their own subject, and no delegated effect is one of them.
     for (const tool of DELEGATED_EFFECT_TOOLS) {
-      expect(isPhaseDecidedMutation(tool), tool).toBe(false);
       expect(isPathExtractorTool(tool), tool).toBe(false);
+      expect(isRestoreMutationTool(tool), tool).toBe(false);
     }
     for (const tool of [
       'write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file', 'apply_patch', 'lsp_rename',
@@ -282,18 +284,28 @@ describe('the phase decides every mutation it was not told to delegate', () => {
 
   it('decides every catalog mutation it does not name as a configured command', () => {
     // The catalog is one of the places the registry declares tools, and it is the
-    // one that names a severity, so it is a second opinion about what mutates. The
-    // only delegation the phase allows among catalog mutations is the
-    // configured-command group the document names, so the two sides are compared
-    // as sets: a new mutation delegated for a convenient reason fails here, and so
-    // does a configured command that quietly leaves the catalog.
+    // one that names a severity, so it is a second opinion about what mutates.
+    // Three of the eight configured commands are catalog mutations, and the pin
+    // says so literally: a configured command that leaves the catalog fails here
+    // rather than disappearing with it.
     const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'recipe_run', 'run_affected_tests', 'benchmark_run'];
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
     expect(nonRead.length).toBeGreaterThan(20);
-    const present = (name: string): boolean => nonRead.some((entry) => entry.name === name);
-    expect(nonRead.filter((entry) => DELEGATED_EFFECT_TOOLS.has(entry.name)).map((entry) => entry.name).sort())
-      .toEqual(configuredCommands.filter(present).sort());
+    expect(configuredCommands.filter((name) => nonRead.some((entry) => entry.name === name))).toEqual([
+      'recipe_run', 'run_affected_tests', 'benchmark_run',
+    ]);
+    // Every catalog mutation that is delegated has to be one of the configured
+    // commands, and every configured command the catalog names has to be
+    // delegated: the two directions are checked separately so a new delegation and
+    // a missing one are different failures.
+    for (const entry of nonRead) {
+      if (!DELEGATED_EFFECT_TOOLS.has(entry.name)) continue;
+      expect(configuredCommands, `${entry.name} is delegated but is not a configured command`).toContain(entry.name);
+    }
+    for (const name of ['recipe_run', 'run_affected_tests', 'benchmark_run']) {
+      expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} runs the workspace's command and must be delegated`).toBe(true);
+    }
   });
 
   it('leaves the phase every mutation the registry always confirms, except the gateway and the stops', () => {
@@ -312,7 +324,8 @@ describe('the phase decides every mutation it was not told to delegate', () => {
   it('states the rule once in the document instead of listing the tools', () => {
     expect(doc.match(/The phase decides every mutation it\s+cannot\s+turn\s+into\s+a\s+path, except the effects it\s+delegates/g)).toHaveLength(1);
     expect(doc).toContain('DELEGATED_EFFECT_TOOLS');
-    expect(doc).not.toContain('ALIASED_WORK_MUTATION_TOOLS');
-    expect(doc).not.toContain('HOST_MUTATION_TOOLS');
+    for (const retired of ['OPAQUE_MUTATION_TOOL_NAMES', 'HOST_MUTATION_TOOLS', 'ALIASED_WORK_MUTATION_TOOLS', 'LOCAL_MUTATION_TOOLS', 'LOCAL_OUTPUT_REPLACEMENT_TOOLS']) {
+      expect(doc, retired).not.toContain(retired);
+    }
   });
 });

@@ -699,8 +699,9 @@ export class ToolRegistry {
       // names none at all, so none of them is a coding mutation by request shape.
       // They still reach the same seam: the phase decides what a subject it
       // cannot see is worth. The reach is the complement of the delegation list,
-      // so a tool that mutates cannot leave it by being added under a new name.
-      const subjectSeamTool = isRestoreMutationTool(tool.name) || isPhaseDecidedMutation(tool.name);
+      // so the restore case is not a second branch — a tool that mutates cannot
+      // leave it by being added under a new name.
+      const subjectSeamTool = isPhaseDecidedMutation(tool.name);
       let claimedHarnessPaths: readonly string[] | undefined;
       let harnessGateNote: string | undefined;
       if (codingMutation || (mutationDecision.kind !== 'read' && subjectSeamTool)) {

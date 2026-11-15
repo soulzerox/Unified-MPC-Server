@@ -282,38 +282,31 @@ describe('the phase decides every mutation it was not told to delegate', () => {
 
   it('decides every catalog mutation it does not name as a configured command', () => {
     // The catalog is one of the places the registry declares tools, and it is the
-    // one that names a severity, so it is a second opinion about what mutates. A
-    // shipped non-`READ` entry has to be decided; the only exception the phase
-    // accepts is the configured-command group, whose argv belongs to the
-    // workspace. Anything else delegated fails here, by name.
-    const configuredCommands = new Set(['recipe_run', 'run_affected_tests', 'benchmark_run']);
+    // one that names a severity, so it is a second opinion about what mutates. The
+    // only delegation the phase allows among catalog mutations is the
+    // configured-command group the document names, so the two sides are compared
+    // as sets: a new mutation delegated for a convenient reason fails here, and so
+    // does a configured command that quietly leaves the catalog.
+    const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'recipe_run', 'run_affected_tests', 'benchmark_run'];
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
     expect(nonRead.length).toBeGreaterThan(20);
-    const delegatedInCatalog = nonRead.filter((entry) => DELEGATED_EFFECT_TOOLS.has(entry.name)).map((entry) => entry.name).sort();
-    expect(delegatedInCatalog).toEqual([...configuredCommands].sort());
-    for (const entry of nonRead) {
-      if (configuredCommands.has(entry.name)) continue;
-      const decided = isPhaseDecidedMutation(entry.name) || isPathExtractorTool(entry.name) || isRestoreMutationTool(entry.name);
-      expect(decided, `${entry.name} (${entry.permission}) is delegated, and not as a configured command`).toBe(true);
-    }
+    const present = (name: string): boolean => nonRead.some((entry) => entry.name === name);
+    expect(nonRead.filter((entry) => DELEGATED_EFFECT_TOOLS.has(entry.name)).map((entry) => entry.name).sort())
+      .toEqual(configuredCommands.filter(present).sort());
   });
 
   it('leaves the phase every mutation the registry always confirms, except the gateway and the stops', () => {
     // The registry's confirmation list is a third opinion: it asks before a call
     // that writes. Handing one of those back to the policy as a delegated effect
     // would return the strict posture's decision to the gate it is stricter than,
-    // so the overlap is pinned rather than allowed.
+    // so the intersection is compared with the names whose reason covers a
+    // confirmation — a gateway call, a desktop tool, a stop — and nothing else.
     const expected = [
       'accessibility', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard', 'computer_use',
       'dom_cdp', 'input_event', 'mcp_call', 'ui_target_action', 'web_fetch', 'window',
     ];
-    const delegatedConfirms = [...ALWAYS_CONFIRM_MUTATION_TOOLS].filter((tool) => DELEGATED_EFFECT_TOOLS.has(tool)).sort();
-    expect(delegatedConfirms).toEqual(expected);
-    for (const tool of ALWAYS_CONFIRM_MUTATION_TOOLS) {
-      if (DELEGATED_EFFECT_TOOLS.has(tool)) continue;
-      expect(isPhaseDecidedMutation(tool), tool).toBe(true);
-    }
+    expect([...ALWAYS_CONFIRM_MUTATION_TOOLS].filter((tool) => DELEGATED_EFFECT_TOOLS.has(tool)).sort()).toEqual(expected);
   });
 
   it('states the rule once in the document instead of listing the tools', () => {

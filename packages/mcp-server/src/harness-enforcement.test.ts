@@ -6,7 +6,7 @@ import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { ActivityTracker, type ActivitySinkEvent } from './activity-tracker.js';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
-import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
+import { DELEGATED_EFFECT_TOOLS, HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 
@@ -672,6 +672,20 @@ describe('workspace engineering harness enforcement', () => {
       },
     });
 
+    // A call the mutation policy classifies `read` never reaches the phase, so a
+    // strict workspace can still look: a task listing, a document read, a
+    // recording status and a dry run are observations, not mutations. The policy
+    // decides this per action, which is why the same tool appears on both sides.
+    for (const [tool, input] of [
+      ['scheduler', { action: 'list' }],
+      ['office', { app: 'word', action: 'read', file_path: 'report.docx' }],
+      ['screen_record', { action: 'status' }],
+      ['audio', { action: 'record', output_path: 'capture.wav', dry_run: true }],
+    ] as const) {
+      expect((await registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input })).structuredContent, tool)
+        .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+    }
+
     // A gateway call is not a workspace mutation: refusing it in the phase would
     // also refuse a child read the gateway cannot prove read-only — this one is
     // not in the runtime policy's `readOnlyTools` — so the mutation policy keeps
@@ -679,6 +693,23 @@ describe('workspace engineering harness enforcement', () => {
     expect((await registry.invoke('mcp_call', {
       workspaceId: 'workspace-1', server: 'filesystem', tool: 'read_file', arguments: { path: 'src/app.ts' },
     })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+  });
+
+  it('names only tools the registry routes, in the reach and in the delegation list', async () => {
+    // The set comparisons in `mutate-gate.test.ts` compare names, so a name no
+    // tool answers to would survive all of them, and a reviewed policy list that
+    // lost a tool would read as coverage. This is the one check that every name
+    // the policy mentions is a tool the registry actually routes.
+    const { services } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    const registered = new Set(registry.listAll().map((tool) => tool.name));
+    for (const tool of DELEGATED_EFFECT_TOOLS) expect(registered.has(tool), tool).toBe(true);
+    for (const tool of [
+      'shell', 'git', 'scheduler', 'audio', 'screen_record', 'task_create', 'delegate',
+      'guarded_pr_merge', 'rebase_goal_workspace', 'plugin_install', 'mcp_install',
+    ]) {
+      expect(registered.has(tool), tool).toBe(true);
+    }
   });
 
   it('admits a command mutation and records that it had no prepared evidence', async () => {

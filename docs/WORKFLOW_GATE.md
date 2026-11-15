@@ -611,9 +611,14 @@ evidence, not to require it. Three further limits are deliberate:
   store: auto-preparing one would read pre-edit context for a path that the
   restore exists because it is missing. That is the one mode where a restore
   answers a question it is never asked, so the lookup is skipped before it runs;
-- a command names no artifact, not even indirectly, and neither does any other
-  mutation the extractor table does not cover. Steps 5b-2 and 5b-3
-  answer that with a decision rather than a parser — see below.
+- a command names no artifact the phase can parse, and a mutation whose target the
+  extractor table does not model — `office`'s `file_path`, `audio`'s and
+  `screen_record`'s `output_path` — names one the table cannot turn into a
+  subject. The distinction matters: the request may well name its target, it is
+  the table that does not answer for the field, so a later step that adds those
+  fields moves the family into the path-bearing route instead of contradicting
+  this limit. Steps 5b-2 and 5b-3 answer the residue with a decision rather than a
+  parser — see below.
 
 ### Steps 5b-2 and 5b-3: what the phase does with a subject it cannot see
 
@@ -708,12 +713,14 @@ reason, which is why a `refuse` workspace cannot merge or rebase until the postu
 is relaxed or the change names a path.
 
 The reach, not a category, is the answer: `isPhaseDecidedMutation` is the
-complement of a twenty-name list, and three tests pin it — the delegation list
-itself, every tool the registry's catalog declares non-`READ`, and the registry's
-own always-confirm list. A new tool is decided by default, so it cannot leave
-coverage by being declared somewhere this step did not read. It also does not gate
-a mutation that resolves no workspace: `validateHarnessMutation` still allows it
-before the profile is read. Both are stated here rather than discovered later.
+complement of a twenty-name list, and four tests hold it — the delegation list
+itself, every name in it and in the families the phase now reaches being a tool
+the registry actually routes, every mutation the registry's catalog declares, and
+the registry's own always-confirm list. A new tool is decided by default, so it
+cannot leave coverage by being declared somewhere this step did not read. It also
+does not gate a mutation that resolves no workspace: `validateHarnessMutation`
+still allows it before the profile is read. Both are stated here rather than
+discovered later.
 
 Three limits are worth stating plainly rather than discovering later:
 

@@ -695,14 +695,13 @@ What the phase does not decide is the whole of `DELEGATED_EFFECT_TOOLS`, and eac
 group is there for a reason that would not hold for a mutation:
 
 - the project-command tools — `project_dev`, `project_test`, `project_lint`,
-  `project_typecheck`, `project_build`, and `recipe_run`, `run_affected_tests`,
-  `benchmark_run`, plus `verify_incremental`, which asks the managed process
-  service for the same `typecheck` project command `project_typecheck` runs — run
-  a command the workspace configured, not an argv the caller chose, so they are
-  not the arbitrary-write hole `shell` is. For `recipe_run` the command is a recipe
-  plan the workspace's catalog names; for `run_affected_tests` and `benchmark_run`
-  it is the managed process service's `test` and `benchmark` project command,
-  resolved from the workspace rather than from the request.
+  `project_typecheck`, `project_build`, `run_affected_tests`, `benchmark_run`,
+  plus `verify_incremental`, which asks the managed process service for the same
+  `typecheck` project command `project_typecheck` runs — run a command the
+  workspace configured, not an argv the caller chose, so they are not the
+  arbitrary-write hole `shell` is. For `run_affected_tests` and `benchmark_run`
+  the command is the managed process service's `test` and `benchmark` project
+  command, resolved from the workspace rather than from the request.
   Refusing them would also block the verification step inside the very workspace
   that opted in. The asymmetry is worth naming: `shell` with a `pnpm test` argv is
   refused, `project_test` is not, because the second cannot be pointed at a
@@ -753,11 +752,15 @@ group is there for a reason that would not hold for a mutation:
   an inactive strict workspace can only be mutated once it is active, so it could
   never be activated again, and it could not be deactivated either; a strict
   machine root could not register the project its own posture would then gate;
-- the registry's previews — `project_profile_set` — cannot write through their
-  contracts. Its strict input contract admits `workspaceId` and `profile` only, so
-  the handler always answers with the dry-run preview and has no route to
-  `writeFile`; a fail-closed classification would be the only thing refusing it. If
-  the contract ever admits a dry-run switch, the tool has to leave this list;
+- the registry's previews — `project_profile_set` and `recipe_run` — cannot write
+  through their reachable contracts. The profile tool's strict input contract
+  admits `workspaceId` and `profile` only, so the handler always answers with the
+  dry-run preview and has no route to `writeFile`; `recipe_run` answers with the
+  plan itself, `sideEffectsStarted: false`, even when the caller passes
+  `dryRun: false`, so it never runs the recipe it names. A fail-closed
+  classification would be the only thing refusing either. If the profile contract
+  ever admits a dry-run switch, the tool has to leave this list, and the same
+  holds for a recipe run that starts executing its plan;
 - the native provider's durable state — `working_memory_record`,
   `workspace_memory_record`, `rag_remember`, `rag_forget`,
   `rag_resolve_constraint`, `rag_memory_reconcile`, `rag_code_reconcile`,

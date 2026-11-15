@@ -228,11 +228,13 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
  *   workspace could not be activated again, because only an active one can be
  *   mutated, and a strict machine root could not register the project it would
  *   then gate;
- * - the registry's previews — a file dialog and `project_profile_set` — cannot
- *   write through their contracts: the dialog returns a chosen path, and the
- *   profile tool's contract admits only `workspaceId` and `profile`, so its
- *   handler always answers with the dry-run preview. A fail-closed policy
- *   classification would otherwise be a refusal of a call that mutates nothing;
+ * - the registry's previews — a file dialog, `project_profile_set` and
+ *   `recipe_run` — cannot write through their contracts: the dialog returns a
+ *   chosen path, the profile tool's contract admits only `workspaceId` and
+ *   `profile`, so its handler always answers with the dry-run preview, and a
+ *   recipe run answers with the plan itself, `sideEffectsStarted: false`, even
+ *   when the caller passes `dryRun: false`. A fail-closed policy classification
+ *   would otherwise be a refusal of a call that mutates nothing;
  * - the native provider's durable state — memory records, their constraints and
  *   the code index behind them — is evidence the phase reads rather than work it
  *   decides, so a refusal there would forbid the memory the harness itself
@@ -242,7 +244,7 @@ export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
   'mcp_call', 'web_fetch', 'dom_cdp',
   'computer_use', 'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard', 'notification', 'file_dialog',
   'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
-  'recipe_run', 'run_affected_tests', 'benchmark_run', 'verify_incremental',
+  'run_affected_tests', 'benchmark_run', 'verify_incremental',
   // The durable lifecycle of a goal that already exists, and the scheduled
   // continuation the completion contract asks for. `run_goal` is deliberately
   // absent: it creates the Goal Workspace, so the phase decides it.
@@ -256,8 +258,10 @@ export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
   // answered with the caller's own, so a strict machine root could not register the
   // project it would then gate.
   'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register',
-  // Previews whose registry contract admits no write.
-  'project_profile_set',
+  // Previews whose reachable contract cannot write: the profile tool's schema
+  // admits no dry-run switch, and a recipe run returns its plan with
+  // `sideEffectsStarted: false`.
+  'project_profile_set', 'recipe_run',
   // The native provider's durable state, which lives in the provider's stores
   // rather than in workspace files: the memory records the harness asks for, the
   // constraints recorded against them, and the code index the phase reads back as

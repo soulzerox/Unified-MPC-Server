@@ -313,32 +313,37 @@ describe('the phase decides every mutation it was not told to delegate', () => {
   it('decides every catalog mutation it does not name as a configured command', () => {
     // The catalog is one of the places the registry declares tools, and it is the
     // one that names a severity, so it is a second opinion about what mutates.
-    // Three of the eight configured commands are catalog mutations, and the pin
+    // Two of the seven configured commands are catalog mutations, and the pin
     // says so literally: a configured command that leaves the catalog fails here
     // rather than disappearing with it.
-    const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'recipe_run', 'run_affected_tests', 'benchmark_run'];
+    const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'run_affected_tests', 'benchmark_run'];
     // A delegated catalog mutation has to be one the phase has no subject for
     // either because the workspace configured its command or because the tool's
-    // own contract cannot reach a write. `project_profile_set` is the second
-    // kind: its strict schema admits `workspaceId` and `profile`, so the handler
-    // always answers with the dry-run preview.
-    const contractPreviews = ['project_profile_set'];
+    // own contract cannot reach a write. The second kind is a preview: the
+    // profile tool's strict schema admits `workspaceId` and `profile`, so the
+    // handler always answers with the dry-run preview, and `recipe_run` answers
+    // with its plan labelled `sideEffectsStarted: false`, so neither can run the
+    // thing it names.
+    const contractPreviews = ['project_profile_set', 'recipe_run'];
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
     expect(nonRead.length).toBeGreaterThan(20);
     expect(configuredCommands.filter((name) => nonRead.some((entry) => entry.name === name))).toEqual([
-      'recipe_run', 'run_affected_tests', 'benchmark_run',
+      'run_affected_tests', 'benchmark_run',
     ]);
     // Every catalog mutation that is delegated has to be one of the configured
-    // commands or a contract-level preview, and every configured command the
-    // catalog names has to be delegated: the two directions are checked
-    // separately so a new delegation and a missing one are different failures.
+    // commands or a contract-level preview, and every name in either list has to
+    // be delegated: the two directions are checked separately so a new delegation
+    // and a missing one are different failures.
     for (const entry of nonRead) {
       if (!DELEGATED_EFFECT_TOOLS.has(entry.name)) continue;
       expect([...configuredCommands, ...contractPreviews], `${entry.name} is delegated but is neither a configured command nor a contract-level preview`).toContain(entry.name);
     }
-    for (const name of ['recipe_run', 'run_affected_tests', 'benchmark_run']) {
+    for (const name of ['run_affected_tests', 'benchmark_run']) {
       expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} runs the workspace's command and must be delegated`).toBe(true);
+    }
+    for (const name of contractPreviews) {
+      expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} is a preview whose contract cannot write and must be delegated`).toBe(true);
     }
   });
 

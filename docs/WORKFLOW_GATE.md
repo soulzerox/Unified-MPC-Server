@@ -699,9 +699,11 @@ group is there for a reason that would not hold for a mutation:
   plus `verify_incremental`, which asks the managed process service for the same
   `typecheck` project command `project_typecheck` runs — run a command the
   workspace configured, not an argv the caller chose, so they are not the
-  arbitrary-write hole `shell` is. For `run_affected_tests` and `benchmark_run`
-  the command is the managed process service's `test` and `benchmark` project
-  command, resolved from the workspace rather than from the request.
+  arbitrary-write hole `shell` is. For `run_affected_tests` the command is the
+  managed process service's `test` project command, and for `benchmark_run` it is
+  the benchmark script the workspace's `package.json` declares — `benchmark_run`
+  detects it there and starts it through the managed process service — so both
+  are resolved from the workspace rather than from the request.
   Refusing them would also block the verification step inside the very workspace
   that opted in. The asymmetry is worth naming: `shell` with a `pnpm test` argv is
   refused, `project_test` is not, because the second cannot be pointed at a

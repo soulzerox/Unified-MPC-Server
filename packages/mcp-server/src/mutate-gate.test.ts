@@ -314,25 +314,26 @@ describe('the phase decides every mutation it was not told to delegate', () => {
   it('decides every catalog mutation it does not name as a configured command', () => {
     // The catalog is one of the places the registry declares tools, and it is the
     // one that names a severity, so it is a second opinion about what mutates.
-    // Two of the seven configured commands are catalog mutations, and the pin
-    // says so literally: a configured command that leaves the catalog fails here
+    // One of the six configured commands is a catalog mutation, and the pin says
+    // so literally: a configured command that leaves the catalog fails here
     // rather than disappearing with it.
-    const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'run_affected_tests', 'benchmark_run'];
+    const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'run_affected_tests'];
     // A delegated catalog mutation has to be one the phase has no subject for
     // either because the workspace configured its command or because the tool's
     // own contract cannot reach a write. The second kind is a preview: the
-    // profile tool's strict schema admits `workspaceId` and `profile`, so the
-    // handler always answers with the dry-run preview, and `recipe_run` answers
-    // with its plan labelled `sideEffectsStarted: false`, so neither can run the
-    // thing it names. The name list here is only the classification; the
-    // behaviour behind it is pinned by the runtime contract fixture, which runs
-    // `recipe_run` with the `dryRun: false` that would enable the run.
-    const contractPreviews = ['project_profile_set', 'recipe_run'];
+    // profile tool's strict schema admits `workspaceId` and `profile`, a recipe
+    // run answers with its plan labelled `sideEffectsStarted: false`, and the
+    // benchmark tool's schema admits no `dryRun` switch at all, so none of them
+    // can run the thing it names. The name list here is only the classification;
+    // the behaviour behind the recipe half is pinned by the runtime contract
+    // fixture, which runs `recipe_run` with the `dryRun: false` that would enable
+    // the run.
+    const contractPreviews = ['project_profile_set', 'recipe_run', 'benchmark_run'];
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
     expect(nonRead.length).toBeGreaterThan(20);
     expect(configuredCommands.filter((name) => nonRead.some((entry) => entry.name === name))).toEqual([
-      'run_affected_tests', 'benchmark_run',
+      'run_affected_tests',
     ]);
     // Every catalog mutation that is delegated has to be one of the configured
     // commands or a contract-level preview, and every name in either list has to
@@ -342,7 +343,7 @@ describe('the phase decides every mutation it was not told to delegate', () => {
       if (!DELEGATED_EFFECT_TOOLS.has(entry.name)) continue;
       expect([...configuredCommands, ...contractPreviews], `${entry.name} is delegated but is neither a configured command nor a contract-level preview`).toContain(entry.name);
     }
-    for (const name of ['run_affected_tests', 'benchmark_run']) {
+    for (const name of ['run_affected_tests']) {
       expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} runs the workspace's command and must be delegated`).toBe(true);
     }
     for (const name of contractPreviews) {
@@ -352,13 +353,23 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     // that would reach the handler's `writeFile` is checked against the schema
     // the registry actually validates with: admitting `dryRun` there has to fail
     // here, not in a review.
-    const profileEntry = UPGRADE_TOOL_CATALOG.find((entry) => entry.name === 'project_profile_set');
-    expect(profileEntry, 'project_profile_set has to be a catalog entry to have a contract').toBeDefined();
-    if (profileEntry !== undefined) {
-      const schema = upgradeToolInputSchema(profileEntry);
-      expect(schema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' } }).success).toBe(true);
+    const previewEntry = (name: string): ReturnType<typeof upgradeToolInputSchema> | undefined => {
+      const entry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === name);
+      expect(entry, `${name} has to be a catalog entry to have a contract`).toBeDefined();
+      return entry === undefined ? undefined : upgradeToolInputSchema(entry);
+    };
+    const profileSchema = previewEntry('project_profile_set');
+    if (profileSchema !== undefined) {
+      expect(profileSchema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' } }).success).toBe(true);
       for (const enabling of [{ dryRun: false }, { dry_run: false }, { write: true }]) {
-        expect(schema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' }, ...enabling }).success, Object.keys(enabling)[0]).toBe(false);
+        expect(profileSchema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' }, ...enabling }).success, Object.keys(enabling)[0]).toBe(false);
+      }
+    }
+    const benchmarkSchema = previewEntry('benchmark_run');
+    if (benchmarkSchema !== undefined) {
+      expect(benchmarkSchema.safeParse({ workspaceId: 'workspace-1', name: 'baseline' }).success).toBe(true);
+      for (const enabling of [{ dryRun: false }, { dry_run: false }, { scenario: 'baseline' }, { timeoutMs: 1 }]) {
+        expect(benchmarkSchema.safeParse({ workspaceId: 'workspace-1', ...enabling }).success, Object.keys(enabling)[0]).toBe(false);
       }
     }
   });

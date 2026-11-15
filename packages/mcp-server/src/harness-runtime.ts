@@ -218,11 +218,16 @@ export function requiresActiveWorkspaceScope(toolName: string, decision: Mutatio
  *   `run_goal` is decided rather than delegated, because starting one creates a
  *   Goal Workspace worktree and branch — the same mutation `git_worktree_spawn`
  *   performs, which the phase refuses;
- * - runtime selection state — activating, deactivating or promoting a
- *   registered project — names no file, and the phase answers with the *target*
- *   workspace's profile. Deciding it would let the strict posture refuse the
- *   call that turns the posture on: an inactive strict workspace could not be
- *   activated again, because only an active one can be mutated.
+ * - runtime selection and registration state — activating, deactivating or
+ *   promoting a registered project, and registering one — names no file, and the
+ *   phase answers with the *target* workspace's profile. Deciding it would let
+ *   the strict posture refuse the call that turns the posture on: an inactive
+ *   strict workspace could not be activated again, because only an active one can
+ *   be mutated, and a strict machine root could not register the project it would
+ *   then gate. The mutation policy already classifies `workspace_register` as a
+ *   bounded write that changes no project files — it records an admission in the
+ *   runtime's own store — so there is no workspace artifact for the phase to
+ *   decide.
  * - the registry's previews — a file dialog and `project_profile_set` — cannot
  *   write through their contracts: the dialog returns a chosen path, and the
  *   profile tool's contract admits only `workspaceId` and `profile`, so its
@@ -245,10 +250,11 @@ export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
   'prepare_scheduled_continuation', 'claim_scheduled_continuation',
   'record_scheduled_continuation_receipt', 'expedite_scheduled_continuation',
   'cancel_goal', 'cancel_scheduled_continuation',
-  // Runtime selection state, which the phase must not decide: it resolves the
-  // profile of the workspace being selected, so a strict workspace could never
-  // be activated or deactivated again.
-  'workspace_activate', 'workspace_deactivate', 'workspace_set_primary',
+  // Runtime selection and registration state, which the phase must not decide: it
+  // resolves the profile of the workspace being selected, so a strict workspace
+  // could never be activated or deactivated again, and a strict machine root
+  // could not register the project it would then gate.
+  'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register',
   // Previews whose registry contract admits no write.
   'project_profile_set',
   // The native provider's durable state, which lives in the provider's stores

@@ -256,7 +256,7 @@ describe('the phase decides every mutation it was not told to delegate', () => {
       'recipe_run', 'reconcile_goals', 'record_scheduled_continuation_receipt',
       'retry_goal_workspace_admission', 'run_affected_tests', 'ui_target_action', 'verify_incremental', 'web_fetch',
       'window', 'working_memory_record', 'workspace_activate', 'workspace_deactivate', 'workspace_memory_record',
-      'workspace_set_primary',
+      'workspace_register', 'workspace_set_primary',
     ]);
   });
 
@@ -286,7 +286,7 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     // preview whose strict contract admits no way to ask for the write
     // (`project_profile_set` fields are `workspaceId` and `profile`, so the
     // handler always answers with the dry-run preview).
-    for (const tool of ['verify_incremental', 'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'file_dialog', 'project_profile_set']) {
+    for (const tool of ['verify_incremental', 'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register', 'file_dialog', 'project_profile_set']) {
       expect(DELEGATED_EFFECT_TOOLS.has(tool), tool).toBe(true);
       expect(isPhaseDecidedMutation(tool), tool).toBe(false);
     }

@@ -183,7 +183,7 @@ Required evidence per gate, all keyed by the resolved subject:
 | Phase | Evidence | Enforced today |
 |---|---|---|
 | `intake` / `discover` / `prepare` | none defined yet | no |
-| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, restores are a subject since 5b-1, and since 5b-3 every mutation the extractor table cannot turn into a path — except the delegated effects named in §5b — is admitted-and-recorded or refused by policy, as is a restore whose store cannot resolve the id it was given (see §4) |
+| `mutate` | `prepare_code_change` / pre-edit context for each changed path, workspace scope current | partially: the decision ships in #837 as an opt-in workspace mode (`require_preparation` refuses instead of auto-preparing); the default still auto-prepares, restores are a subject since 5b-1, and since 5b-3 every mutation the extractor table cannot turn into a path — except the delegated effects named in §5b, and a mutation that resolves no `workspaceId`, for which there is no profile to read a posture from — is admitted-and-recorded or refused by policy, as is a restore whose store cannot resolve the id it was given (see §4) |
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
 | `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
@@ -291,10 +291,13 @@ live at three seams; the engine extends them instead of adding a parallel gate:
    allow when no `workspaceId` is resolved. Step 5a made the rest opt-in: in
    `require_preparation` mode the seam refuses instead of bootstrapping the
    harness and auto-preparing each path, and the default `auto_prepare` keeps the
-   old behaviour for every workspace that does not opt in. What is left is a
-   non-local effect — `mcp_call`, `computer_use`, a remote write — which stays
-   with the mutation policy rather than becoming a second gate that would refuse
-   reads. It is still not a second CLI gate that an MCP edit bypasses.
+   old behaviour for every workspace that does not opt in. What is left is the
+   delegated effect — a gateway call, a host UI action, a command the workspace
+   configured, a control-plane stop — which stays with the mutation policy rather
+   than becoming a second gate that would refuse reads. The configured command is
+   the local one of those, and it can write the workspace: `refuse` contains it no
+   more than it contains `mcp_call`, which §5b states as the cost of the setting.
+   It is still not a second CLI gate that an MCP edit bypasses.
 
 MCP exposure is a thin adapter over the same interface: one tool, one phase, one
 decision. It must not re-derive policy, and it must not become a second
@@ -319,7 +322,7 @@ Each step ships alone and leaves the repository working.
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
-| 5b-3 ✅ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`) | shipped in #846: the four-tool list is gone, and so is the union of "tools that mutate" sets it was replaced with — five reviews each found one more declaration outside the union (a scheduled task, a recording, a background shell task, a goal rebase, a merge). The reach is now the complement of `DELEGATED_EFFECT_TOOLS`: every non-`read` mutation the extractor table cannot turn into a path is decided, including `publish_approve`, `codex_stop`, the git worktree tools, `scheduler`, `audio`, `screen_record`, `task_create`, `task_cancel`, `delegate`, `parallel_delegate`, `delegate_cancel`, `guarded_pr_merge` and `rebase_goal_workspace`; what stays delegated is the gateway (`mcp_call`, `web_fetch`, `dom_cdp`), the desktop tools, the commands the workspace configured, and the two control-plane stops, each with a stated reason. A mutation with no resolved `workspaceId` is still allowed |
+| 5b-3 ✅ | Decide the residual the phase still cannot see: the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`). A mutation with no resolved `workspaceId` was listed in the same residue; it is not decidable by the phase and is a stated limit | shipped in #846: the four-tool list is gone, and so is the union of "tools that mutate" sets it was replaced with — five reviews each found one more declaration outside the union (a scheduled task, a recording, a background shell task, a goal rebase, a merge). The reach is now the complement of `DELEGATED_EFFECT_TOOLS`: every non-`read` mutation the extractor table cannot turn into a path is decided, including `publish_approve`, `codex_stop`, the git worktree tools, `scheduler`, `audio`, `screen_record`, `task_create`, `task_cancel`, `delegate`, `parallel_delegate`, `delegate_cancel`, `guarded_pr_merge` and `rebase_goal_workspace`; what stays delegated is the gateway (`mcp_call`, `web_fetch`, `dom_cdp`), the desktop tools, the commands the workspace configured, and the two control-plane stops, each with a stated reason. A mutation with no resolved `workspaceId` is still allowed: without a workspace there is no profile, so there is no posture to read, and that half of the original residue is a limit rather than something this step decided |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -655,8 +658,9 @@ shell task, a goal rebase and a merge in that gap, one per round.
   cover this?" is answerable from the same audit row as the mutation;
 - `refuse` answers CONFLICT with `details: { phase: 'mutate', reason:
   'opaque_mutation', opaqueReason: 'shape' | 'unresolved' }` and a message that
-  names the tool, the missing subject and the ways out: relaxing the setting, and —
-  only where the change has one — a form whose request names the file it writes.
+  names the tool, the missing subject and the ways out: relaxing the setting, and,
+  per reason, a form whose request names the file it writes (`shape`) or a subject
+  this workspace can resolve (`unresolved`).
   It refuses on the subject, not on a guess about the effect, so it cannot be
   fooled by a spelling;
 - a call the mutation policy already classifies `read` — a task `status`, a

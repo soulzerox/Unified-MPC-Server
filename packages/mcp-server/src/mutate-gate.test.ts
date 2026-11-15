@@ -274,11 +274,13 @@ describe('the phase decides every mutation it was not told to delegate', () => {
   it('keeps the delegated effects out of the path and restore routes', () => {
     // A delegated effect stays with the mutation policy's approval gate, so it is
     // not an opaque subject — its reason is that the phase does not decide it, not
-    // that it would have no subject. The disjointness is what matters here: a name
-    // in both lists would be decided twice, with the delegation silently winning.
-    // That the path and restore tools do extract their subject is pinned where it
-    // is observable, by the `codeMutationPaths` and `resolveMutationSubjects` cases
-    // in this file and in `mutation-subject.test.ts`.
+    // that it would have no subject. The disjointness keeps the two explanations
+    // from overlapping: the seam checks `codeMutationPaths` before the delegated
+    // predicate, so a name in both lists would be read as delegated while the path
+    // route still decides its path-bearing requests — the reach would depend on
+    // which branch ran first. That the path and restore tools do extract their
+    // subject is pinned where it is observable, by the `codeMutationPaths` and
+    // `resolveMutationSubjects` cases in this file and in `mutation-subject.test.ts`.
     for (const tool of DELEGATED_EFFECT_TOOLS) {
       expect(isPathExtractorTool(tool), tool).toBe(false);
       expect(isRestoreMutationTool(tool), tool).toBe(false);

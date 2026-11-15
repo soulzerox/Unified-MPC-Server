@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool, isPathExtractorTool, isRestoreMutationTool } from './harness-runtime.js';
+import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
 import { ALWAYS_CONFIRM_MUTATION_TOOLS } from './tool-registry.js';
 import {
   DEFAULT_MUTATE_MODE,
@@ -228,11 +229,12 @@ describe('describeMutateBlockers', () => {
 /**
  * The reach of the phase used to be a list of four names, restated in prose in
  * several places, and five reviews found the same defect in it: one paragraph
- * naming three of the four. The list is gone. The phase decides every workspace,
- * host-task or media mutation it cannot turn into a path, derived from the
- * registry's own `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS` and
- * `LOCAL_OUTPUT_REPLACEMENT_TOOLS`, so a tool added there extends the phase and
- * there is no second list to forget.
+ * naming three of the four. The list is gone. The phase decides every mutation
+ * it cannot turn into a path, derived from the registry's own
+ * `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS`
+ * and `ALIASED_WORK_MUTATION_TOOLS`, so a tool added there extends the phase and
+ * there is no second list to forget. What it delegates is a list of effects,
+ * each with a reason, pinned against the registry catalog below.
  */
 describe('the phase reach is derived from the mutation sets', () => {
   const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
@@ -242,11 +244,21 @@ describe('the phase reach is derived from the mutation sets', () => {
     // that rebuilds the production expression compares the reach with itself and
     // cannot fail when a tool is silently dropped from it.
     expect(OPAQUE_MUTATION_TOOL_NAMES).toEqual([
-      'agent_swarm_run', 'audio', 'codex_run', 'codex_stop', 'docx_merge', 'git', 'git_publish',
-      'git_worktree_remove', 'git_worktree_spawn', 'office', 'office_ppt', 'process_start',
-      'process_stop', 'publish_approve', 'scheduler', 'screen_record', 'self_heal_apply',
-      'shell', 'wsl_exec',
+      'agent_swarm_run', 'audio', 'codex_run', 'codex_stop', 'delegate', 'delegate_cancel',
+      'docx_merge', 'git', 'git_publish', 'git_worktree_remove', 'git_worktree_spawn', 'office',
+      'office_ppt', 'parallel_delegate', 'process_start', 'process_stop', 'publish_approve',
+      'scheduler', 'screen_record', 'self_heal_apply', 'shell', 'task_cancel', 'task_create', 'wsl_exec',
     ]);
+  });
+
+  it('decides the work a tool name hides, not just the name it was copied from', () => {
+    // `task_create` runs an argv through the same shell runtime as `shell`, and
+    // `delegate` starts the same provider work as `agent_swarm_run`. A strict
+    // workspace refused one spelling and admitted the other while these were
+    // outside the reach.
+    for (const tool of ['task_create', 'task_cancel', 'delegate', 'parallel_delegate', 'delegate_cancel']) {
+      expect(isOpaqueMutationTool(tool), tool).toBe(true);
+    }
   });
 
   it('leaves path tools, restores, gateway calls and desktop effects alone', () => {
@@ -267,8 +279,48 @@ describe('the phase reach is derived from the mutation sets', () => {
     }
   });
 
+  it('decides every catalog tool declared non-read, or records why it does not', () => {
+    // The registry's own catalog is an oracle independent of the four derivation
+    // inputs, so this can fail when a tool is added to the catalog and never
+    // reaches the phase. The always-confirm list above could not: it never held
+    // `task_create`, which is how the shell alias left the phase unnoticed.
+    const configuredCommands = new Set(['recipe_run', 'run_affected_tests', 'benchmark_run']);
+    const hostAbsent = new Set(['sandbox_exec', 'debug_attach', 'debug_step']);
+    const eventStream = new Set(['event_watch']);
+    const extensionState = new Set([
+      'cache_clear', 'cache_invalidate', 'hook_register', 'hook_remove', 'plugin_install',
+      'plugin_enable', 'plugin_disable', 'plugin_remove', 'session_checkpoint',
+      'tool_schema_register', 'project_profile_set', 'skills_import',
+    ]);
+    const exceptions = new Map<string, Set<string>>([
+      ['a command the workspace configured', configuredCommands],
+      ['a provider this host does not have', hostAbsent],
+      ['an event-log subscription', eventStream],
+      ['fixed extension state, not caller-supplied work', extensionState],
+    ]);
+    const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
+      && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
+    expect(nonRead.length).toBeGreaterThan(20);
+    for (const entry of nonRead) {
+      const decided = isOpaqueMutationTool(entry.name) || isPathExtractorTool(entry.name) || isRestoreMutationTool(entry.name);
+      if (decided) continue;
+      const reason = [...exceptions].find(([, names]) => names.has(entry.name));
+      expect(reason?.[0], `${entry.name} (${entry.permission}) is neither decided nor explained`).toBeDefined();
+    }
+    // A stale exception would quietly excuse a tool that has since joined the
+    // reach, so each group has to name real, non-read, undecided catalog tools.
+    for (const [reason, names] of exceptions) {
+      for (const name of names) {
+        const entry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === name);
+        expect(entry, `${name} (${reason})`).toBeDefined();
+        expect(entry?.permission, name).not.toBe('READ');
+        expect(isOpaqueMutationTool(name) || isPathExtractorTool(name) || isRestoreMutationTool(name), name).toBe(false);
+      }
+    }
+  });
+
   it('decides every mutation the registry always confirms', () => {
-    // An independent list, not another view of the three input sets: a new tool
+    // An independent list, not another view of the input sets: a new tool
     // that mutates enough to demand confirmation has to be decided by the phase
     // or named as a delegated effect here.
     const delegated = new Set([
@@ -282,9 +334,10 @@ describe('the phase reach is derived from the mutation sets', () => {
   });
 
   it('states the rule once in the document instead of listing the tools', () => {
-    expect(doc.match(/The phase decides every workspace, host-task and media\s+mutation it cannot\s+turn into a path/g)).toHaveLength(1);
+    expect(doc.match(/The phase decides every mutation it cannot\s+turn into a\s+path, except the effects it\s+delegates/g)).toHaveLength(1);
     expect(doc).toContain('LOCAL_MUTATION_TOOLS');
     expect(doc).toContain('HOST_MUTATION_TOOLS');
     expect(doc).toContain('LOCAL_OUTPUT_REPLACEMENT_TOOLS');
+    expect(doc).toContain('ALIASED_WORK_MUTATION_TOOLS');
   });
 });

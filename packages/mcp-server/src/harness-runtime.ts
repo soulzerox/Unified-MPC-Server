@@ -208,16 +208,29 @@ export const HOST_MUTATION_TOOLS: ReadonlySet<string> = new Set(['scheduler']);
  */
 export const LOCAL_OUTPUT_REPLACEMENT_TOOLS: ReadonlySet<string> = new Set(['audio', 'screen_record']);
 
+/**
+ * Tools that run caller-supplied work under a name of their own: a durable
+ * background shell task and its cancellation, and an agent delegation and its
+ * cancellation. They are the same effect as `process_start`, `process_stop` and
+ * `agent_swarm_run` under a second spelling, so leaving them out would let the
+ * strict posture be bypassed by a rename rather than by a decision. They are not
+ * in `LOCAL_MUTATION_TOOLS` because that set also answers "must this call be
+ * scoped to an Active Project?", and a background task names no workspace.
+ */
+export const ALIASED_WORK_MUTATION_TOOLS: ReadonlySet<string> = new Set([
+  'task_create', 'task_cancel', 'delegate', 'parallel_delegate', 'delegate_cancel',
+]);
+
 export function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
   return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));
 }
 
 /**
- * The mutate phase's reach: every workspace, host-task or media mutation the
- * phase cannot turn into a path — no extractor table answers for its request,
- * and no store names its subject. It is derived rather than listed, so adding a
- * tool to any of the three input sets extends the phase and there is no second
- * list to forget.
+ * The mutate phase's reach: every workspace, host-task, media or aliased-work
+ * mutation the phase cannot turn into a path — no extractor table answers for
+ * its request, and no store names its subject. It is derived rather than listed,
+ * so adding a tool to any of the four input sets extends the phase and there is
+ * no second list to forget.
  *
  * The line is deliberate: gateway-mediated calls and desktop effects
  * (`mcp_call`, `computer_use`, `web_fetch`, `dom_cdp`, the UI tools) are not
@@ -229,6 +242,7 @@ export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [
   ...LOCAL_MUTATION_TOOLS,
   ...HOST_MUTATION_TOOLS,
   ...LOCAL_OUTPUT_REPLACEMENT_TOOLS,
+  ...ALIASED_WORK_MUTATION_TOOLS,
 ]
   .filter((tool) => !isPathExtractorTool(tool) && !isRestoreMutationTool(tool))
   .sort();

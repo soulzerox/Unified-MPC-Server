@@ -625,9 +625,10 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('refuses the local and host mutations 5b-2 left out when the workspace refuses what it cannot gate', async () => {
-    // Step 5b-3 derives the reach from `LOCAL_MUTATION_TOOLS` and
-    // `HOST_MUTATION_TOOLS`, so these families now arrive at the same decision as
-    // a command: they mutate local or host state and name no path a preparation
+    // Step 5b-3 derives the reach from `LOCAL_MUTATION_TOOLS`,
+    // `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS` and
+    // `ALIASED_WORK_MUTATION_TOOLS`, so these families now arrive at the same
+    // decision as a command: they mutate state and name no path a preparation
     // could bind to.
     const { services, setFileContent } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
@@ -641,6 +642,9 @@ describe('workspace engineering harness enforcement', () => {
       ['office', { app: 'word', action: 'write', file_path: 'report.docx' }],
       ['audio', { action: 'record', output_path: 'capture.wav' }],
       ['screen_record', { action: 'start', output_path: 'capture.mp4' }],
+      // A background task runs the same argv `shell` runs, so a reach that
+      // held only `shell` would be a filter over names.
+      ['task_create', { executable: 'rm', arguments: ['-rf', 'build'] }],
     ] as const) {
       await expect(registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input }), tool).resolves.toMatchObject({
         isError: true,

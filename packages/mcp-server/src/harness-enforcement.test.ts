@@ -625,11 +625,9 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('refuses the local and host mutations 5b-2 left out when the workspace refuses what it cannot gate', async () => {
-    // Step 5b-3 derives the reach from `LOCAL_MUTATION_TOOLS`,
-    // `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS` and
-    // `ALIASED_WORK_MUTATION_TOOLS`, so these families now arrive at the same
-    // decision as a command: they mutate state and name no path a preparation
-    // could bind to.
+    // Step 5b-3 makes the phase decide every non-`read` mutation that is not in
+    // `DELEGATED_EFFECT_TOOLS`, so these families arrive at the same decision as
+    // a command: they mutate state and name no path a preparation could bind to.
     const { services, setFileContent } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
       workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },

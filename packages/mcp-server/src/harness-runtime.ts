@@ -185,71 +185,53 @@ export function isRestoreMutationTool(toolName: string): boolean {
 /**
  * The tools the registry scopes to the active workspace because they mutate
  * local state. `requiresActiveWorkspaceScope` asks this same set, so "a local
- * mutation" has one definition: the set a mutating call is scoped by is also
- * the set the mutate phase decides.
+ * mutation" has one definition. It is not the mutate phase's reach: the phase
+ * decides every mutation it is not told to delegate, and this set is the part
+ * that also names a workspace the call can be scoped to.
  */
 export const LOCAL_MUTATION_TOOLS: ReadonlySet<string> = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
 
-/**
- * Tools that mutate host state instead of a workspace. They belong in the mutate
- * phase's reach for the same reason a command does, but not in
- * `LOCAL_MUTATION_TOOLS`: that set is also the registry's answer to "must this
- * call be scoped to an Active Project?", and a scheduled task names no
- * workspace. Scoping it to one would invent a `workspaceId` its request cannot
- * carry.
- */
-export const HOST_MUTATION_TOOLS: ReadonlySet<string> = new Set(['scheduler']);
-
-/**
- * Output media the registry scopes only when the policy says the call replaces a
- * target. They are also an input to the mutate phase's reach: a recording writes
- * a workspace file through `output_path`, a field the extractor table does not
- * name, so a `refuse` workspace would otherwise admit a write it says it refuses.
- */
+/** Output media the registry scopes only when the policy says the call replaces a target. */
 export const LOCAL_OUTPUT_REPLACEMENT_TOOLS: ReadonlySet<string> = new Set(['audio', 'screen_record']);
-
-/**
- * Tools that run caller-supplied work under a name of their own: a durable
- * background shell task and its cancellation, and an agent delegation and its
- * cancellation. They are the same effect as `process_start`, `process_stop` and
- * `agent_swarm_run` under a second spelling, so leaving them out would let the
- * strict posture be bypassed by a rename rather than by a decision. They are not
- * in `LOCAL_MUTATION_TOOLS` because that set also answers "must this call be
- * scoped to an Active Project?", and a background task names no workspace.
- */
-export const ALIASED_WORK_MUTATION_TOOLS: ReadonlySet<string> = new Set([
-  'task_create', 'task_cancel', 'delegate', 'parallel_delegate', 'delegate_cancel',
-]);
 
 export function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
   return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));
 }
 
 /**
- * The mutate phase's reach: every workspace, host-task, media or aliased-work
- * mutation the phase cannot turn into a path — no extractor table answers for
- * its request, and no store names its subject. It is derived rather than listed,
- * so adding a tool to any of the four input sets extends the phase and there is
- * no second list to forget.
+ * The effects the mutate phase hands to the mutation policy's approval gate
+ * instead of deciding itself, each for a stated reason. This is the whole
+ * exception list: everything else that mutates is the phase's, which is what
+ * makes the containment claim structural rather than a promise about a list.
  *
- * The line is deliberate: gateway-mediated calls and desktop effects
- * (`mcp_call`, `computer_use`, `web_fetch`, `dom_cdp`, the UI tools) are not
- * workspace mutations, so their refusal stays with the mutation policy's own
- * `opaque_mutation` vocabulary instead of becoming a second gate that would also
- * refuse reads.
+ * - gateway and remote calls reach a system the phase cannot prepare a target
+ *   in, and `mcp_call` carries a child whose effect the gateway cannot classify;
+ * - desktop tools drive the host UI, where a synthetic input event can type into
+ *   an editor the phase never sees;
+ * - the project-command tools run a command the workspace configured, not an
+ *   argv the caller chose, and refusing them would refuse the verification step
+ *   inside the very workspace that opted in;
+ * - the control-plane stops end work rather than write, and a posture that could
+ *   start a goal but never cancel it would trap the workspace.
  */
-export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = [
-  ...LOCAL_MUTATION_TOOLS,
-  ...HOST_MUTATION_TOOLS,
-  ...LOCAL_OUTPUT_REPLACEMENT_TOOLS,
-  ...ALIASED_WORK_MUTATION_TOOLS,
-]
-  .filter((tool) => !isPathExtractorTool(tool) && !isRestoreMutationTool(tool))
-  .sort();
-const OPAQUE_MUTATION_TOOLS = new Set(OPAQUE_MUTATION_TOOL_NAMES);
+export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
+  'mcp_call', 'web_fetch', 'dom_cdp',
+  'computer_use', 'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard', 'notification',
+  'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
+  'recipe_run', 'run_affected_tests', 'benchmark_run',
+  'cancel_goal', 'cancel_scheduled_continuation',
+]);
 
-export function isOpaqueMutationTool(toolName: string): boolean {
-  return OPAQUE_MUTATION_TOOLS.has(toolName);
+/**
+ * Whether a mutating call belongs to the mutate phase. The reach is the
+ * complement of `DELEGATED_EFFECT_TOOLS`, not a union of mutation sets: five
+ * reviews found tools that mutated but were absent from one set or another — a
+ * scheduled task, a recording, a background shell task, a goal rebase, a merge —
+ * and every fix was another name. A predicate that answers "no" only for a short,
+ * documented list cannot be one name short.
+ */
+export function isPhaseDecidedMutation(toolName: string): boolean {
+  return !DELEGATED_EFFECT_TOOLS.has(toolName);
 }
 
 export function codeMutationPaths(toolName: string, input: unknown): readonly string[] {

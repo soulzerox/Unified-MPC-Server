@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool, isPathExtractorTool, isRestoreMutationTool } from './harness-runtime.js';
+import { DELEGATED_EFFECT_TOOLS, codeMutationPaths, isPathExtractorTool, isPhaseDecidedMutation, isRestoreMutationTool } from './harness-runtime.js';
 import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
 import { ALWAYS_CONFIRM_MUTATION_TOOLS } from './tool-registry.js';
 import {
@@ -227,117 +227,99 @@ describe('describeMutateBlockers', () => {
 });
 
 /**
- * The reach of the phase used to be a list of four names, restated in prose in
- * several places, and five reviews found the same defect in it: one paragraph
- * naming three of the four. The list is gone. The phase decides every mutation
- * it cannot turn into a path, derived from the registry's own
- * `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS`
- * and `ALIASED_WORK_MUTATION_TOOLS`, so a tool added there extends the phase and
- * there is no second list to forget. What it delegates is a list of effects,
- * each with a reason, pinned against the registry catalog below.
+ * The reach used to be a list of names, restated in prose, and every review of
+ * this step found the same defect in it: one name short. A union of "tools that
+ * mutate" sets cannot be complete, because the registry declares tools in more
+ * than one place. The reach is now the complement of a short delegation list, so
+ * the only tools the phase misses are the ones somebody chose to delegate and
+ * wrote down with a reason.
  */
-describe('the phase reach is derived from the mutation sets', () => {
+describe('the phase decides every mutation it was not told to delegate', () => {
   const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
 
-  it('decides exactly the mutations it cannot turn into a path', () => {
-    // The expected reach is written out rather than recomputed: an assertion
-    // that rebuilds the production expression compares the reach with itself and
-    // cannot fail when a tool is silently dropped from it.
-    expect(OPAQUE_MUTATION_TOOL_NAMES).toEqual([
-      'agent_swarm_run', 'audio', 'codex_run', 'codex_stop', 'delegate', 'delegate_cancel',
-      'docx_merge', 'git', 'git_publish', 'git_worktree_remove', 'git_worktree_spawn', 'office',
-      'office_ppt', 'parallel_delegate', 'process_start', 'process_stop', 'publish_approve',
-      'scheduler', 'screen_record', 'self_heal_apply', 'shell', 'task_cancel', 'task_create', 'wsl_exec',
+  it('delegates exactly these effects, and nothing else', () => {
+    // The whole exception list, written out rather than recomputed. Adding a name
+    // here is a policy decision, so it has to show up in a diff that says so.
+    expect([...DELEGATED_EFFECT_TOOLS].sort()).toEqual([
+      'accessibility', 'benchmark_run', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard',
+      'computer_use', 'dom_cdp', 'input_event', 'mcp_call', 'notification', 'project_build',
+      'project_dev', 'project_lint', 'project_test', 'project_typecheck', 'recipe_run',
+      'run_affected_tests', 'ui_target_action', 'web_fetch', 'window',
     ]);
   });
 
   it('decides the work a tool name hides, not just the name it was copied from', () => {
-    // `task_create` runs an argv through the same shell runtime as `shell`, and
-    // `delegate` starts the same provider work as `agent_swarm_run`. A strict
-    // workspace refused one spelling and admitted the other while these were
-    // outside the reach.
-    for (const tool of ['task_create', 'task_cancel', 'delegate', 'parallel_delegate', 'delegate_cancel']) {
-      expect(isOpaqueMutationTool(tool), tool).toBe(true);
+    // Every one of these mutates, and every one of them was outside the phase at
+    // some point in this step's review: a scheduled task, a recording, a
+    // background shell task, a goal rebase, a merge, an install.
+    for (const tool of [
+      'shell', 'wsl_exec', 'git', 'git_publish', 'publish_approve', 'process_start', 'process_stop',
+      'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge',
+      'self_heal_apply', 'git_worktree_spawn', 'git_worktree_remove', 'scheduler', 'audio',
+      'screen_record', 'task_create', 'task_cancel', 'delegate', 'parallel_delegate',
+      'delegate_cancel', 'guarded_pr_merge', 'rebase_goal_workspace', 'merge_verification_run',
+      'verify_incremental', 'mcp_install', 'skills_install', 'plugin_install', 'hook_register',
+      'cache_clear', 'session_checkpoint', 'tool_schema_register', 'project_profile_set',
+    ]) {
+      expect(isPhaseDecidedMutation(tool), tool).toBe(true);
     }
   });
 
-  it('leaves path tools, restores, gateway calls and desktop effects alone', () => {
-    // Explicit names, not a re-run of the derivation: these are the boundaries
-    // the reach is defined by, and a dropped exclusion must fail here.
+  it('leaves the delegated effects and the path tools out of the opaque route', () => {
+    // A delegated effect stays with the mutation policy's approval gate, and a
+    // path tool is decided by the path it names, so neither is an opaque subject.
+    for (const tool of DELEGATED_EFFECT_TOOLS) {
+      expect(isPhaseDecidedMutation(tool), tool).toBe(false);
+      expect(isPathExtractorTool(tool), tool).toBe(false);
+    }
     for (const tool of [
       'write_file', 'edit_file', 'delete_file', 'move_file', 'copy_file', 'apply_patch', 'lsp_rename',
       'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint',
     ]) {
-      expect(isOpaqueMutationTool(tool), tool).toBe(false);
-    }
-    for (const tool of [
-      'mcp_call', 'computer_use', 'web_fetch', 'dom_cdp', 'accessibility', 'input_event',
-      'ui_target_action', 'window', 'clipboard', 'notification',
-      'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
-    ]) {
-      expect(isOpaqueMutationTool(tool), tool).toBe(false);
+      expect(isPathExtractorTool(tool) || isRestoreMutationTool(tool), tool).toBe(true);
     }
   });
 
-  it('decides every catalog tool declared non-read, or records why it does not', () => {
-    // The registry's own catalog is an oracle independent of the four derivation
-    // inputs, so this can fail when a tool is added to the catalog and never
-    // reaches the phase. The always-confirm list above could not: it never held
-    // `task_create`, which is how the shell alias left the phase unnoticed.
+  it('decides every catalog mutation it does not name as a configured command', () => {
+    // The catalog is one of the places the registry declares tools, and it is the
+    // one that names a severity, so it is a second opinion about what mutates. A
+    // shipped non-`READ` entry has to be decided; the only exception the phase
+    // accepts is the configured-command group, whose argv belongs to the
+    // workspace. Anything else delegated fails here, by name.
     const configuredCommands = new Set(['recipe_run', 'run_affected_tests', 'benchmark_run']);
-    const hostAbsent = new Set(['sandbox_exec', 'debug_attach', 'debug_step']);
-    const eventStream = new Set(['event_watch']);
-    const extensionState = new Set([
-      'cache_clear', 'cache_invalidate', 'hook_register', 'hook_remove', 'plugin_install',
-      'plugin_enable', 'plugin_disable', 'plugin_remove', 'session_checkpoint',
-      'tool_schema_register', 'project_profile_set', 'skills_import',
-    ]);
-    const exceptions = new Map<string, Set<string>>([
-      ['a command the workspace configured', configuredCommands],
-      ['a provider this host does not have', hostAbsent],
-      ['an event-log subscription', eventStream],
-      ['fixed extension state, not caller-supplied work', extensionState],
-    ]);
     const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
       && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
     expect(nonRead.length).toBeGreaterThan(20);
+    const delegatedInCatalog = nonRead.filter((entry) => DELEGATED_EFFECT_TOOLS.has(entry.name)).map((entry) => entry.name).sort();
+    expect(delegatedInCatalog).toEqual([...configuredCommands].sort());
     for (const entry of nonRead) {
-      const decided = isOpaqueMutationTool(entry.name) || isPathExtractorTool(entry.name) || isRestoreMutationTool(entry.name);
-      if (decided) continue;
-      const reason = [...exceptions].find(([, names]) => names.has(entry.name));
-      expect(reason?.[0], `${entry.name} (${entry.permission}) is neither decided nor explained`).toBeDefined();
-    }
-    // A stale exception would quietly excuse a tool that has since joined the
-    // reach, so each group has to name real, non-read, undecided catalog tools.
-    for (const [reason, names] of exceptions) {
-      for (const name of names) {
-        const entry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === name);
-        expect(entry, `${name} (${reason})`).toBeDefined();
-        expect(entry?.permission, name).not.toBe('READ');
-        expect(isOpaqueMutationTool(name) || isPathExtractorTool(name) || isRestoreMutationTool(name), name).toBe(false);
-      }
+      if (configuredCommands.has(entry.name)) continue;
+      const decided = isPhaseDecidedMutation(entry.name) || isPathExtractorTool(entry.name) || isRestoreMutationTool(entry.name);
+      expect(decided, `${entry.name} (${entry.permission}) is delegated, and not as a configured command`).toBe(true);
     }
   });
 
-  it('decides every mutation the registry always confirms', () => {
-    // An independent list, not another view of the input sets: a new tool
-    // that mutates enough to demand confirmation has to be decided by the phase
-    // or named as a delegated effect here.
-    const delegated = new Set([
-      'mcp_call', 'web_fetch', 'dom_cdp', 'computer_use', 'accessibility', 'input_event',
-      'ui_target_action', 'window', 'clipboard', 'cancel_goal', 'cancel_scheduled_continuation',
-    ]);
+  it('leaves the phase every mutation the registry always confirms, except the gateway and the stops', () => {
+    // The registry's confirmation list is a third opinion: it asks before a call
+    // that writes. Handing one of those back to the policy as a delegated effect
+    // would return the strict posture's decision to the gate it is stricter than,
+    // so the overlap is pinned rather than allowed.
+    const expected = [
+      'accessibility', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard', 'computer_use',
+      'dom_cdp', 'input_event', 'mcp_call', 'ui_target_action', 'web_fetch', 'window',
+    ];
+    const delegatedConfirms = [...ALWAYS_CONFIRM_MUTATION_TOOLS].filter((tool) => DELEGATED_EFFECT_TOOLS.has(tool)).sort();
+    expect(delegatedConfirms).toEqual(expected);
     for (const tool of ALWAYS_CONFIRM_MUTATION_TOOLS) {
-      if (delegated.has(tool)) continue;
-      expect(isOpaqueMutationTool(tool) || isPathExtractorTool(tool) || isRestoreMutationTool(tool), tool).toBe(true);
+      if (DELEGATED_EFFECT_TOOLS.has(tool)) continue;
+      expect(isPhaseDecidedMutation(tool), tool).toBe(true);
     }
   });
 
   it('states the rule once in the document instead of listing the tools', () => {
-    expect(doc.match(/The phase decides every mutation it cannot\s+turn into a\s+path, except the effects it\s+delegates/g)).toHaveLength(1);
-    expect(doc).toContain('LOCAL_MUTATION_TOOLS');
-    expect(doc).toContain('HOST_MUTATION_TOOLS');
-    expect(doc).toContain('LOCAL_OUTPUT_REPLACEMENT_TOOLS');
-    expect(doc).toContain('ALIASED_WORK_MUTATION_TOOLS');
+    expect(doc.match(/The phase decides every mutation it\s+cannot\s+turn\s+into\s+a\s+path, except the effects it\s+delegates/g)).toHaveLength(1);
+    expect(doc).toContain('DELEGATED_EFFECT_TOOLS');
+    expect(doc).not.toContain('ALIASED_WORK_MUTATION_TOOLS');
+    expect(doc).not.toContain('HOST_MUTATION_TOOLS');
   });
 });

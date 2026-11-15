@@ -284,11 +284,10 @@ live at three seams; the engine extends them instead of adding a parallel gate:
 3. **Mutation** — `ToolRegistry.validateHarnessMutation` is the seam. It is
    still narrower than "every edit fails closed": it covers the file-tool set
    in `codeMutationPaths`, since step 5b-1 the restore tools whose paths a store
-   names, and since step 5b-3 every tool in `LOCAL_MUTATION_TOOLS`,
-   `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS` or
-   `ALIASED_WORK_MUTATION_TOOLS` whose mutation decision is not `read`. That last
-   half is derived rather than listed, so the seam covers a mutation in any of
-   those sets as soon as the registry declares it. It returns
+   names, and since step 5b-3 every non-`read` mutation that is not in
+   `DELEGATED_EFFECT_TOOLS`. That last half is the complement of a short list, so
+   the seam covers a mutation as soon as the registry declares it and its
+   spelling cannot take it out of coverage. It returns
    allow when no `workspaceId` is resolved. Step 5a made the rest opt-in: in
    `require_preparation` mode the seam refuses instead of bootstrapping the
    harness and auto-preparing each path, and the default `auto_prepare` keeps the
@@ -320,7 +319,7 @@ Each step ships alone and leaves the repository working.
 | 5a.1 ✅ | Harden what 5a claims: one artifact classifier shared with the ponytail vocabulary, the preparation claimed at authorization rather than after the write, and the refusal `details` pinned by tests | shipped in #838: a backslash path can no longer be a ponytail mutation and an invisible harness mutation at once, two concurrent writes to one path land once, and a dropped or renamed `{ phase, reason }` fails the suite |
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
-| 5b-3 ✅ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`) | shipped in #846: the four-tool list is gone; the phase decides every tool in `LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS` or `ALIASED_WORK_MUTATION_TOOLS` that the extractor table cannot turn into a path, so the local families now reach the seam (including `publish_approve`, `codex_stop` and the git worktree tools the old list omitted), `scheduler` reaches it as a host task, `audio`/`screen_record` as workspace media output, and `task_create`, `task_cancel`, `delegate`, `parallel_delegate` and `delegate_cancel` as the aliases that run the same work under another name, and `refuse` refuses them; `mcp_call`, `computer_use`, `web_fetch` and `dom_cdp` stay delegated to the mutation policy because they are not workspace mutations, and refusing `mcp_call` in the phase would refuse the child reads it cannot prove read-only; a mutation with no resolved `workspaceId` is still allowed |
+| 5b-3 ✅ | Decide the residual the phase still cannot see: a mutation with no resolved `workspaceId`, and the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`) | shipped in #846: the four-tool list is gone, and so is the union of "tools that mutate" sets it was replaced with — five reviews each found one more declaration outside the union (a scheduled task, a recording, a background shell task, a goal rebase, a merge). The reach is now the complement of `DELEGATED_EFFECT_TOOLS`: every non-`read` mutation the extractor table cannot turn into a path is decided, including `publish_approve`, `codex_stop`, the git worktree tools, `scheduler`, `audio`, `screen_record`, `task_create`, `task_cancel`, `delegate`, `parallel_delegate`, `delegate_cancel`, `guarded_pr_merge` and `rebase_goal_workspace`; what stays delegated is the gateway (`mcp_call`, `web_fetch`, `dom_cdp`), the desktop tools, the commands the workspace configured, and the two control-plane stops, each with a stated reason. A mutation with no resolved `workspaceId` is still allowed |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -630,34 +629,17 @@ decision, and makes the decision visible:
 ```
 
 As shipped in #844 the phase reached four command-shaped tools. Step 5b-3
-replaced that list with a rule, because the four were a copy of a set the
-registry already owns. **The phase decides every mutation it cannot turn into a
-path, except the effects it delegates.** `OPAQUE_MUTATION_TOOL_NAMES` is derived
-from four sets the registry already owns: `LOCAL_MUTATION_TOOLS` — the workspace
-mutations `requiresActiveWorkspaceScope` asks about before a call is scoped to
-the active workspace — `HOST_MUTATION_TOOLS` (`scheduler`, a task that runs a
-command after the call returns), `LOCAL_OUTPUT_REPLACEMENT_TOOLS` (`audio` and
-`screen_record`, whose recording target is a workspace file named by
-`output_path`), and `ALIASED_WORK_MUTATION_TOOLS` (`task_create`, `task_cancel`,
-`delegate`, `parallel_delegate`, `delegate_cancel`), which run caller-supplied
-work under a name of their own. The tools whose requests spell their paths
-(`PATH_EXTRACTORS`) and the restores, whose subject a store names, are removed. A
-tool added to any of the four sets joins the phase in the same commit, so there
-is no second list to forget and no prose list to stop one name short.
+replaced that list with a rule. **The phase decides every mutation it cannot turn
+into a path, except the effects it delegates.** The reach is the complement of
+`DELEGATED_EFFECT_TOOLS`, not a union of "tools that mutate" sets: the registry
+declares tools in more than one place, so every union was one declaration short,
+and the reviews of this step found a scheduled task, a recording, a background
+shell task, a goal rebase and a merge in that gap, one per round.
 
-- a mutation in one of those sets the extractor table cannot turn into a path now
-  reaches the seam instead of skipping it. Before step 5b-2
-  `validateHarnessMutation` was never called for them, because `isCodingMutation`
-  is a question about request shape and a command has no path shape. The reach is
-  not "not a path extractor": that would also put `mcp_call` in the phase, and a
-  gateway call names no artifact of its own — the child it reaches may be a read,
-  a delete, or a write whose target the gateway cannot prepare — so the phase
-  would have nothing to decide it from;
-- the aliased set is why the reach is about the work and not the spelling. A
-  `task_create` runs an argv through the same shell runtime as `shell`, and a
-  `delegate` starts the same provider work as `agent_swarm_run`, so a posture that
-  decided one name and admitted the other was a filter over names rather than a
-  boundary over effects;
+- a mutation the extractor table cannot turn into a path now reaches the seam
+  instead of skipping it. Before step 5b-2 `validateHarnessMutation` was never
+  called for them, because `isCodingMutation` is a question about request shape
+  and a command has no path shape;
 - `mutateOpaque` is a setting *of* the phase. With `mutate: auto_prepare` it is
   never consulted: a workspace that has not opted in keeps its old behaviour and
   gets no audit note, because nothing decided anything. This is one opt-in with
@@ -672,67 +654,64 @@ is no second list to forget and no prose list to stop one name short.
   subject, not on a guess about the effect, so it cannot be fooled by a spelling;
 - a call the mutation policy already classifies `read` — a task `status`, a
   `dry_run`, a read-only git subcommand, an `office` read, a `screen_record`
-  status — never reaches the phase. Everything in the reach that is not `read`
-  does, so `refuse` refuses `shell pnpm test`, `git commit`, `git_publish` and
-  `codex_run` alike, because the gateway cannot prove any of them harmless. It
-  also refuses the `stop` that would end a recording or a process, because the
-  phase decides by tool shape rather than by action: a strict workspace should
-  not start what it could not stop. That is the honest cost of `refuse`: it is a
-  posture for a workspace whose mutations must all be path-bearing, not a filter
-  that lets "ordinary" commands through.
+  status — never reaches the phase. Everything else that mutates does, so `refuse`
+  refuses `shell pnpm test`, `git commit`, `git_publish`, `codex_run`,
+  `task_create`, `guarded_pr_merge` and a plugin install alike, because the
+  gateway cannot prove any of them harmless. It also refuses the `stop` that would
+  end a recording or a process, because the phase decides by tool shape rather
+  than by action: a strict workspace should not start what it could not stop.
+  That is the honest cost of `refuse`: it is a posture for a workspace whose
+  mutations must all be path-bearing, not a filter that lets "ordinary" commands
+  through.
 
-Widening the call site has one cost worth stating: a non-`read` call to one of
-those tools now reads the workspace profile before the phase is known to be off,
-so a workspace that never opted in pays one file read per mutation in the reach —
-the same read a coding mutation already pays — and its decision is
-unchanged. Paying
-that read is what makes the phase's answer a property of the workspace rather
-than of the tool the caller happened to use.
+Widening the call site has one cost worth stating: a non-`read` call to a tool that
+is not delegated now reads the workspace profile before the phase is known to be
+off, so a workspace that never opted in pays one file read per mutation — the same
+read a coding mutation already pays — and its decision is unchanged. Paying that
+read is what makes the phase's answer a property of the workspace rather than of
+the tool the caller happened to use.
 
-What the phase does not decide stays with the mutation policy's approval gate, and
-each channel is stated with the reason it is not the phase's:
+What the phase does not decide is the whole of `DELEGATED_EFFECT_TOOLS`, and each
+group is there for a reason that would not hold for a mutation:
 
 - the project-command tools — `project_dev`, `project_test`, `project_lint`,
-  `project_typecheck`, `project_build` — run a command the workspace configured,
-  not an argv the caller chose, so they are not the arbitrary-write hole `shell`
-  is. Refusing them would also block the verification step inside the very
-  workspace that opted in. The asymmetry is real and worth naming: `shell` with a
-  `pnpm test` argv is refused, `project_test` is not, because the second cannot
-  be pointed at a different command. A configured command can still write, so
-  `refuse` does not contain it either. `recipe_run`, `run_affected_tests` and
-  `benchmark_run` are the same shape and stay with them;
-- fixed extension state — `cache_clear`, `cache_invalidate`, `hook_register`,
-  `hook_remove`, `plugin_install`, `plugin_enable`, `plugin_disable`,
-  `plugin_remove`, `session_checkpoint`, `tool_schema_register`,
-  `project_profile_set`, `skills_import` — writes through an operation the tool
-  chose, not caller-supplied work, so a spelling cannot run an arbitrary command
-  through it;
-- provider-absent tools — `sandbox_exec`, `debug_attach`, `debug_step` — answer
-  `truthfulUnavailable` on a host without Windows Sandbox or a loopback DAP
-  adapter, and `event_watch` subscribes to the event log rather than writing an
-  artifact; none of them has an effect to decide until its provider exists;
+  `project_typecheck`, `project_build`, and `recipe_run`, `run_affected_tests`,
+  `benchmark_run` — run a command the workspace configured, not an argv the caller
+  chose, so they are not the arbitrary-write hole `shell` is. Refusing them would
+  also block the verification step inside the very workspace that opted in. The
+  asymmetry is worth naming: `shell` with a `pnpm test` argv is refused,
+  `project_test` is not, because the second cannot be pointed at a different
+  command. A configured command can still write, so `refuse` does not contain it
+  either;
 - gateway-mediated calls and desktop effects — `mcp_call`, `web_fetch`,
-  `computer_use`, `dom_cdp`, and the desktop tools (`accessibility`,
-  `input_event`, `ui_target_action`, `window`, `clipboard`, `notification`) —
-  are not workspace mutations: they reach a remote system or drive the host UI,
-  and their refusal belongs to the mutation policy's approval gate. This is the
-  other place `refuse` is not containment, and it is stated rather than implied:
+  `dom_cdp`, `computer_use`, and the desktop tools (`accessibility`,
+  `input_event`, `ui_target_action`, `window`, `clipboard`, `notification`) — are
+  not workspace mutations: they reach a remote system or drive the host UI, and
+  their refusal belongs to the mutation policy's approval gate. This is the other
+  place `refuse` is not containment, and it is stated rather than implied:
   `mcp_call` can still reach a child tool that writes, and a synthetic
   `input_event` can type into an editor, because the gateway cannot classify
   either effect. The policy does classify a child it can prove read-only — an
   exact child tool the runtime policy lists in `readOnlyTools`, whose live
   descriptor and catalog fingerprints still match — so `refuse` contains the
-  unproven reads rather than the proven ones. `git_publish` is in the reach even
-  though it changes a remote: it is a workspace mutation gated by a local
-  single-use receipt, and the phase decides it by the same rule.
+  unproven reads rather than the proven ones;
+- the control-plane stops — `cancel_goal`, `cancel_scheduled_continuation` — end
+  work instead of writing, and a posture that could start a goal but never cancel
+  one would trap the workspace. The `stop` of a recording, a process, a task or a
+  codex run stays in the phase, because those are the counterpart of a mutation
+  the same workspace could start.
 
-The reach, not a category, is the answer: `isOpaqueMutationTool` derives from
-`LOCAL_MUTATION_TOOLS`, `HOST_MUTATION_TOOLS`, `LOCAL_OUTPUT_REPLACEMENT_TOOLS`
-and `ALIASED_WORK_MUTATION_TOOLS` (minus path extractors and restores), and three
-tests pin it: the expected names, the boundaries the derivation excludes with the
-registry's always-confirm list, and every non-`READ` entry in the registry's own
-catalog — which has to be decided or carry one of the reasons above — so a tool
-cannot fall out of coverage silently. It also does not gate
+`git_publish` is in the reach even though it changes a remote: it is a workspace
+mutation gated by a local single-use receipt, and the phase decides it by the same
+rule. `guarded_pr_merge` and `rebase_goal_workspace` are in the reach for the same
+reason, which is why a `refuse` workspace cannot merge or rebase until the posture
+is relaxed or the change names a path.
+
+The reach, not a category, is the answer: `isPhaseDecidedMutation` is the
+complement of a twenty-name list, and three tests pin it — the delegation list
+itself, every tool the registry's catalog declares non-`READ`, and the registry's
+own always-confirm list. A new tool is decided by default, so it cannot leave
+coverage by being declared somewhere this step did not read. It also does not gate
 a mutation that resolves no workspace: `validateHarnessMutation` still allows it
 before the profile is read. Both are stated here rather than discovered later.
 

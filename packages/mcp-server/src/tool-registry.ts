@@ -56,7 +56,7 @@ import { hasExplicitUserConfirmation } from './destructive-policy.js';
 import { isScopedAutoApprovalAllowed, type WorkspaceScope, type WorkspaceScopeUnavailable } from './destructive-scope.js';
 import { FilePageEngine } from './file-page-engine.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
-import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, isOpaqueMutationTool, isRestoreMutationTool, requiresActiveWorkspaceScope, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
+import { HarnessActivationLedger, codeMutationPaths, hashHarnessText, isPhaseDecidedMutation, isRestoreMutationTool, requiresActiveWorkspaceScope, type HarnessActivationContext, type PreparationReceipt } from './harness-runtime.js';
 import { resolveMutationSubjects, type MutationSubjectResolvers } from './mutation-subject.js';
 import {
   DEFAULT_MUTATE_MODE,
@@ -698,8 +698,9 @@ export class ToolRegistry {
       // A restore names its subject through a store, and a command or a host task
       // names none at all, so none of them is a coding mutation by request shape.
       // They still reach the same seam: the phase decides what a subject it
-      // cannot see is worth.
-      const subjectSeamTool = isRestoreMutationTool(tool.name) || isOpaqueMutationTool(tool.name);
+      // cannot see is worth. The reach is the complement of the delegation list,
+      // so a tool that mutates cannot leave it by being added under a new name.
+      const subjectSeamTool = isRestoreMutationTool(tool.name) || isPhaseDecidedMutation(tool.name);
       let claimedHarnessPaths: readonly string[] | undefined;
       let harnessGateNote: string | undefined;
       if (codingMutation || (mutationDecision.kind !== 'read' && subjectSeamTool)) {

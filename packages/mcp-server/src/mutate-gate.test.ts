@@ -278,14 +278,16 @@ describe('the phase decides every mutation it was not told to delegate', () => {
     }
   });
 
-  it('hands the phase only calls whose reachable contract can write', () => {
+  it('delegates only calls whose reachable contract leaves the phase nothing to decide', () => {
     // A name in the delegation list is a promise that the phase has nothing to
-    // decide. Three families keep that promise for a reason other than "not a
-    // workspace file": a configured command (`verify_incremental` runs the same
-    // project `typecheck` as `project_typecheck`), runtime selection state, and a
-    // preview whose strict contract admits no way to ask for the write
-    // (`project_profile_set` fields are `workspaceId` and `profile`, so the
-    // handler always answers with the dry-run preview).
+    // decide, and the promise has a different reason in each family:
+    // `verify_incremental` runs the workspace's configured `typecheck`, the same
+    // one `project_typecheck` runs; the runtime selection and registration tools
+    // update the runtime's own active set, which a strict workspace must still be
+    // able to do; `file_dialog` opens a host dialog, declares `readOnlyHint` and
+    // returns a chosen path; and `project_profile_set`'s strict contract admits no
+    // way to ask for the write (`workspaceId` and `profile` only, so the handler
+    // always answers with the dry-run preview).
     for (const tool of ['verify_incremental', 'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register', 'file_dialog', 'project_profile_set']) {
       expect(DELEGATED_EFFECT_TOOLS.has(tool), tool).toBe(true);
       expect(isPhaseDecidedMutation(tool), tool).toBe(false);

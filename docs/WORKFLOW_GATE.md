@@ -745,15 +745,14 @@ group is there for a reason that would not hold for a mutation:
   mutation the same workspace could start;
 - runtime selection and registration state — `workspace_activate`,
   `workspace_deactivate`, `workspace_set_primary`, `workspace_register` — is not
-  workspace content, and the phase would answer it with the *target* workspace's
-  profile, because the call names the workspace it selects. Deciding it would make
-  the strict posture refuse the call that turns the posture on: an inactive strict
-  workspace can only be mutated once it is active, so it could never be activated
-  again, and it could not be deactivated either. The same holds one step earlier, at
-  registration: the call names a directory that is not a workspace yet, the policy
-  already classifies it as a bounded write that changes no project files, and a
-  strict machine root would otherwise be unable to register the project its own
-  posture would then gate;
+  workspace content: it updates the runtime's active set, or records a
+  registration the mutation policy already classifies as a bounded write that
+  changes no project files. The phase answers a selection with the *target*
+  workspace's profile and a registration with the caller's own, so deciding
+  either would make the strict posture refuse the call that turns the posture on:
+  an inactive strict workspace can only be mutated once it is active, so it could
+  never be activated again, and it could not be deactivated either; a strict
+  machine root could not register the project its own posture would then gate;
 - the registry's previews — `project_profile_set` — cannot write through their
   contracts. Its strict input contract admits `workspaceId` and `profile` only, so
   the handler always answers with the dry-run preview and has no route to

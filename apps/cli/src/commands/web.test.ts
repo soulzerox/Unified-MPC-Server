@@ -316,7 +316,7 @@ describe('web CLI command', () => {
   });
 
   describe('workspace control', () => {
-    it('passes the journal projection into goal workspace cleanup evaluation', async () => {
+    it('passes the journal projection and the protection list into goal workspace cleanup evaluation', async () => {
       const goalWorkspace = {
         id: '22222222-2222-4222-8222-222222222222',
         displayName: 'Goal',
@@ -334,10 +334,11 @@ describe('web CLI command', () => {
           list: async () => [goalWorkspace],
           evaluateGoalWorkspaceCleanup: evaluate,
         } as never,
-        {} as never,
+        { get: () => null } as never,
         { forgetWorkspace: async () => undefined },
         { getGoalRuntimeSnapshot: async () => null },
         { goalDurableReferenceStates: references },
+        { countWorkspaceGoalsForHost: async () => 1 },
         { release: async () => true },
         { invalidate: async () => ({ ok: true as const, value: undefined }) },
       );
@@ -348,6 +349,9 @@ describe('web CLI command', () => {
       expect(references).toHaveBeenCalledWith(['goal-1']);
       expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({
         goalDurableReferenceStates: new Map([['goal-1', 'clear']]),
+        // A call site that forwards the projection but not the protection list
+        // reports this workspace as a `retention_candidate` the gate may allow.
+        protectedWorkspaceIds: [goalWorkspace.id],
       }));
     });
 
@@ -389,6 +393,7 @@ describe('web CLI command', () => {
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
           { goalDurableReferenceStates: () => new Map() },
+          { countWorkspaceGoalsForHost: async () => 0 },
           ledger,
           { invalidate },
         );
@@ -434,6 +439,7 @@ describe('web CLI command', () => {
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
           { goalDurableReferenceStates: () => new Map() },
+          { countWorkspaceGoalsForHost: async () => 0 },
           { release: async () => { throw new Error('ledger is read-only'); } },
           { invalidate: async () => ({ ok: true as const, value: undefined }) },
         );
@@ -474,6 +480,7 @@ describe('web CLI command', () => {
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
           { goalDurableReferenceStates: () => new Map() },
+          { countWorkspaceGoalsForHost: async () => 0 },
           { release },
           { invalidate: async () => ({ ok: false as const, error: { message: 'verification is read-only' } }) },
         );

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { classifyWorkspaceSourceEvidence, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { MandatoryMcpBootstrapResult, MandatoryMcpServerStatus } from '@unified-mpc/extensions';
+import type { MutationPolicyDecision } from './mutation-policy.js';
 
 export interface HarnessActivationContext {
   readonly sessionId: string;
@@ -158,33 +159,130 @@ export function isPathExtractorTool(toolName: string): boolean {
 }
 
 /**
- * Why a mutation has no subject the gate can prepare. `command` says the tool
- * mutates by running something and no request field names an artifact;
- * `unresolved` says the request did name a subject (`recoveryId`,
- * `checkpointId`) that no store could answer for. The two are recorded
- * differently because they are fixed differently: the first is a limit of the
- * tool shape, the second is a store that could not answer.
+ * Why a mutation has no subject the gate can prepare. `shape` says the phase's
+ * extractor table cannot turn this request into an artifact — a command, a
+ * document action it does not model, a host scheduler entry. `unresolved` says
+ * the request did name a subject (`recoveryId`, `checkpointId`) that no store
+ * could answer for. The two are recorded differently because they are fixed
+ * differently: the first is a limit of the tool shape, the second is a store
+ * that could not answer.
  */
-export type OpaqueMutationReason = 'command' | 'unresolved';
+export type OpaqueMutationReason = 'shape' | 'unresolved';
 
 /**
- * The command-shaped tools. They mutate through an executable, so a request
- * carries no artifact path for a preparation to bind to, and this list is the
- * call-site answer to "should the mutate phase see this call at all?".
- *
- * It is deliberately not derived from "not a path extractor": every opaque
- * mutation would then reach the phase, including `mcp_call` and `computer_use`,
- * whose refusal belongs to the opaque-mutation rule the mutation policy already
- * applies. This is the set step 5b-2 covers.
- *
- * Exported as a list as well as a set so the documentation check can compare
- * the prose against the code instead of against a second copy of the names.
+ * The tools whose request names a stored subject instead of an artifact path.
+ * They live next to the path extractors because the mutate gate needs one
+ * answer to "does this request name its own subject?" and the two halves of
+ * that answer must not drift apart.
  */
-export const OPAQUE_MUTATION_TOOL_NAMES: readonly string[] = ['shell', 'wsl_exec', 'git', 'process_start'];
-const OPAQUE_MUTATION_TOOLS = new Set(OPAQUE_MUTATION_TOOL_NAMES);
+export const RECOVERY_MUTATION_TOOLS: ReadonlySet<string> = new Set(['restore_deleted_file', 'restore_recovery_item']);
+export const CHECKPOINT_MUTATION_TOOLS: ReadonlySet<string> = new Set(['restore_checkpoint']);
 
-export function isOpaqueMutationTool(toolName: string): boolean {
-  return OPAQUE_MUTATION_TOOLS.has(toolName);
+export function isRestoreMutationTool(toolName: string): boolean {
+  return RECOVERY_MUTATION_TOOLS.has(toolName) || CHECKPOINT_MUTATION_TOOLS.has(toolName);
+}
+
+/**
+ * The tools the registry scopes to the active workspace because they mutate
+ * local state. `requiresActiveWorkspaceScope` asks this same set, so "a local
+ * mutation" has one definition. It is not the mutate phase's reach: the phase
+ * decides every mutation it is not told to delegate, and this set is the part
+ * that also names a workspace the call can be scoped to.
+ */
+export const LOCAL_MUTATION_TOOLS: ReadonlySet<string> = new Set(['write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_recovery_item', 'restore_checkpoint', 'git', 'publish_approve', 'git_publish', 'shell', 'wsl_exec', 'process_start', 'process_stop', 'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply']);
+
+/** Output media the registry scopes only when the policy says the call replaces a target. */
+export const LOCAL_OUTPUT_REPLACEMENT_TOOLS: ReadonlySet<string> = new Set(['audio', 'screen_record']);
+
+export function requiresActiveWorkspaceScope(toolName: string, decision: MutationPolicyDecision): boolean {
+  return decision.kind !== 'read' && (LOCAL_MUTATION_TOOLS.has(toolName) || (decision.kind === 'replace' && LOCAL_OUTPUT_REPLACEMENT_TOOLS.has(toolName)));
+}
+
+/**
+ * The effects the mutate phase hands to the mutation policy's approval gate
+ * instead of deciding itself, each for a stated reason. This is the whole
+ * exception list: everything else that mutates is the phase's, which is what
+ * makes the containment claim structural rather than a promise about a list.
+ *
+ * - gateway and remote calls reach a system the phase cannot prepare a target
+ *   in, and `mcp_call` carries a child whose effect the gateway cannot classify;
+ * - desktop tools drive the host UI, where a synthetic input event can type into
+ *   an editor the phase never sees;
+ * - the project-command tools run a command the workspace configured, not an
+ *   argv the caller chose, and refusing them would refuse the verification step
+ *   inside the very workspace that opted in;
+ * - a goal that already exists is durable state the phase does not own: it can
+ *   predate the opt-in, and `finish_goal` is part of the goal-completion
+ *   contract the runtime already enforces, so refusing the lifecycle would
+ *   leave a strict workspace unable to finish, recover or abandon that goal.
+ *   `run_goal` is decided rather than delegated, because starting one creates a
+ *   Goal Workspace worktree and branch — the same mutation `git_worktree_spawn`
+ *   performs, which the phase refuses;
+ * - runtime selection and registration state — activating, deactivating or
+ *   promoting a registered project, and registering one — writes no workspace
+ *   file: it updates the runtime's active set, or records a registration the
+ *   mutation policy already classifies as a bounded write that changes no project
+ *   files. The phase answers a selection with the *target* workspace's profile and
+ *   a registration with the caller's own, so deciding either would let the strict
+ *   posture refuse the call that turns the posture on: an inactive strict
+ *   workspace could not be activated again, because only an active one can be
+ *   mutated, and a strict machine root could not register the project it would
+ *   then gate;
+ * - the registry's previews — a file dialog, `project_profile_set`, `recipe_run`
+ *   and `benchmark_run` — cannot write through their reachable contracts: the
+ *   dialog returns a chosen path, the profile tool's contract admits only
+ *   `workspaceId` and `profile`, a recipe run answers with the plan itself,
+ *   `sideEffectsStarted: false`, even when the caller passes `dryRun: false`, and
+ *   the benchmark tool's contract admits only `workspaceId`, `name` and
+ *   `iterations`, so it never reaches the `dryRun` switch that would start the
+ *   script it detected. A fail-closed policy classification would otherwise be a
+ *   refusal of a call that mutates nothing;
+ * - the native provider's durable state — memory records, their constraints and
+ *   the code index behind them — is evidence the phase reads rather than work it
+ *   decides, so a refusal there would forbid the memory the harness itself
+ *   mandates and leave the index the gate depends on stale.
+ */
+export const DELEGATED_EFFECT_TOOLS: ReadonlySet<string> = new Set([
+  'mcp_call', 'web_fetch', 'dom_cdp',
+  'computer_use', 'accessibility', 'input_event', 'ui_target_action', 'window', 'clipboard', 'notification', 'file_dialog',
+  'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
+  'run_affected_tests', 'verify_incremental',
+  // The durable lifecycle of a goal that already exists, and the scheduled
+  // continuation the completion contract asks for. `run_goal` is deliberately
+  // absent: it creates the Goal Workspace, so the phase decides it.
+  'checkpoint_goal', 'finish_goal', 'reconcile_goals', 'retry_goal_workspace_admission',
+  'prepare_scheduled_continuation', 'claim_scheduled_continuation',
+  'record_scheduled_continuation_receipt', 'expedite_scheduled_continuation',
+  'cancel_goal', 'cancel_scheduled_continuation',
+  // Runtime selection and registration state, which the phase must not decide: a
+  // selection is answered with the target workspace's profile, so a strict
+  // workspace could never be activated or deactivated again, and a registration is
+  // answered with the caller's own, so a strict machine root could not register the
+  // project it would then gate.
+  'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register',
+  // Previews whose reachable contract cannot write: the profile and benchmark
+  // schemas admit no dry-run switch, and a recipe run returns its plan with
+  // `sideEffectsStarted: false`.
+  'project_profile_set', 'recipe_run', 'benchmark_run',
+  // The native provider's durable state, which lives in the provider's stores
+  // rather than in workspace files: the memory records the harness asks for, the
+  // constraints recorded against them, and the code index the phase reads back as
+  // its own evidence.
+  'working_memory_record', 'workspace_memory_record', 'rag_remember', 'rag_forget',
+  'rag_resolve_constraint', 'rag_memory_reconcile', 'rag_code_reconcile',
+  'rag_code_index', 'rag_cancel_index', 'rag_adopt_legacy_index',
+]);
+
+/**
+ * Whether a mutating call belongs to the mutate phase. The reach is the
+ * complement of `DELEGATED_EFFECT_TOOLS`, not a union of mutation sets: five
+ * reviews found tools that mutated but were absent from one set or another — a
+ * scheduled task, a recording, a background shell task, a goal rebase, a merge —
+ * and every fix was another name. A predicate that answers "no" only for a short,
+ * documented list cannot be one name short.
+ */
+export function isPhaseDecidedMutation(toolName: string): boolean {
+  return !DELEGATED_EFFECT_TOOLS.has(toolName);
 }
 
 export function codeMutationPaths(toolName: string, input: unknown): readonly string[] {

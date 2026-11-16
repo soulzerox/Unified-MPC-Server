@@ -105,11 +105,12 @@ export type MutateGateDecision =
  *
  * A mutation that names no development artifact path has nothing to bind a
  * preparation to, so it is allowed. That is the honest limit of this decision,
- * which decides paths and nothing else: `shell`, `wsl_exec`, `git` and
- * `process_start` reach the same seam since step 5b-2, but they never arrive
- * here as paths — the registry asks `evaluateOpaqueMutateGate` instead. Since
- * step 5b-1 the restore tools do arrive here — the caller resolves their subject
- * through `mutation-subject.ts` before asking this decision.
+ * which decides paths and nothing else: an opaque mutation — a command, a
+ * scheduled task, a recording — reaches the same seam since step 5b-2, but never
+ * arrives here as a path: the registry asks `evaluateOpaqueMutateGate` for the
+ * subjects it cannot see. Since step 5b-1 the restore tools do arrive here — the
+ * caller resolves their subject through `mutation-subject.ts` before asking this
+ * decision.
  */
 export function evaluateMutateGate(request: MutateGateRequest): MutateGateDecision {
   if (request.mode === 'auto_prepare') return { allowed: true };
@@ -177,23 +178,29 @@ export function evaluateOpaqueMutateGate(request: OpaqueMutateRequest): OpaqueMu
 
 /**
  * One sentence for the refusal. It says what the tool did, why that leaves
- * nothing to prepare, and the two ways out, because the strict posture is
- * surprising by construction: it refuses commands, not just edits.
+ * nothing to prepare, and the ways out, because the strict posture is surprising
+ * by construction: it refuses every mutation the phase cannot turn into a path,
+ * not just an edit whose preparation is missing.
  *
- * The two ways out are per reason, because the faults are different. A command
- * is refused for its shape, so naming the artifact with a path tool is a way
- * out. An unresolvable stored subject is a lookup that could not answer for an
- * id the caller supplied, so switching tools would abandon the restore rather
- * than fix it: the way out is to name a subject this workspace can resolve.
+ * Relaxing the setting is the one way out that always exists, so the shape
+ * message names it first. The second is per reason, because the faults are
+ * different. A mutation refused for its shape was refused because the phase
+ * cannot name its artifact, and a path-bearing form is a real way out only where
+ * such a form exists: a task, a recording, a push, a merge or a stop has none, so
+ * the sentence offers the form as a condition to meet rather than a tool to
+ * switch to. An unresolvable stored subject is a lookup that could not answer for
+ * an id the caller supplied, so switching tools would abandon the restore rather
+ * than fix it: there the way out is to name a subject this workspace can resolve,
+ * and the setting is named after it.
  */
 export function describeOpaqueMutateRefusal(toolName: string, reason: OpaqueMutationReason): string {
-  const subject = reason === 'command'
-    ? `${toolName} mutates by running a command, so it names no file a preparation could bind to`
+  const subject = reason === 'shape'
+    ? `${toolName} does not name a file the phase can turn into a preparation`
     : `${toolName} names a stored subject this workspace cannot resolve, so it names no file a preparation could bind to`;
-  const wayOut = reason === 'command'
-    ? 'use a path tool with prepare_code_change'
-    : 'name a subject this workspace can resolve';
-  return `${subject}. This workspace refuses mutations it cannot gate (workflowGate.mutateOpaque is refuse); ${wayOut}, or set workflowGate.mutateOpaque back to allow`;
+  const wayOut = reason === 'shape'
+    ? 'set workflowGate.mutateOpaque back to allow, or, if the change has a form whose request names the file it writes, express it that way and prepare_code_change that file'
+    : 'name a subject this workspace can resolve, or set workflowGate.mutateOpaque back to allow';
+  return `${subject}. This workspace refuses mutations it cannot gate (workflowGate.mutateOpaque is refuse); ${wayOut}`;
 }
 
 /**

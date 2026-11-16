@@ -5,8 +5,9 @@ import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
 import { ActivityTracker, type ActivitySinkEvent } from './activity-tracker.js';
-import { ToolRegistry, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
-import { HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
+import { ToolRegistry, ALWAYS_CONFIRM_MUTATION_TOOLS, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from './tool-registry.js';
+import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
+import { DELEGATED_EFFECT_TOOLS, HarnessActivationLedger, hashHarnessText } from './harness-runtime.js';
 
 const actor = { clientId: 'client-harness', clientName: 'Harness test', sessionId: 'session-harness' };
 
@@ -607,7 +608,7 @@ describe('workspace engineering harness enforcement', () => {
           error: {
             code: 'CONFLICT',
             message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
-            details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'command' },
+            details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' },
           },
         },
       });
@@ -622,6 +623,156 @@ describe('workspace engineering harness enforcement', () => {
     // does not reach it.
     expect((await registry.invoke('project_test', { workspaceId: 'workspace-1' })).structuredContent)
       .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+  });
+
+  it('refuses the local and host mutations 5b-2 left out when the workspace refuses what it cannot gate', async () => {
+    // Step 5b-3 makes the phase decide every non-`read` mutation that is not in
+    // `DELEGATED_EFFECT_TOOLS`, so these families arrive at the same decision as
+    // a command: they mutate state and name no path a preparation could bind to.
+    const { services, setFileContent } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    for (const [tool, input] of [
+      ['git_publish', { remote: 'origin', branch: 'feat/opaque', expectedSha: 'a'.repeat(40), approvalId: 'approval-1' }],
+      ['office', { app: 'word', action: 'write', file_path: 'report.docx' }],
+      ['audio', { action: 'record', output_path: 'capture.wav' }],
+      ['screen_record', { action: 'start', output_path: 'capture.mp4' }],
+      // A background task runs the same argv `shell` runs, so a reach that
+      // held only `shell` would be a filter over names.
+      ['task_create', { executable: 'rm', arguments: ['-rf', 'build'] }],
+    ] as const) {
+      await expect(registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input }), tool).resolves.toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: 'CONFLICT',
+            message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
+            details: { phase: 'mutate', reason: 'opaque_mutation' },
+          },
+        },
+      });
+    }
+
+    // `scheduler` is a host mutation: its request carries no `workspaceId`, so
+    // the phase falls back to the active workspace scope. It reaches the same
+    // decision as a command, which is why it is in the reach.
+    await expect(registry.invoke('scheduler', {
+      action: 'create', task_name: 'nightly', command: 'echo', schedule: 'DAILY', userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: 'CONFLICT',
+          message: expect.stringContaining('workflowGate.mutateOpaque is refuse'),
+          details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' },
+        },
+      },
+    });
+
+    // A call the mutation policy classifies `read` never reaches the phase, so a
+    // strict workspace can still look: a task listing, a document read, a
+    // recording status and a dry run are observations, not mutations. The policy
+    // decides this per action, which is why the same tool appears on both sides.
+    for (const [tool, input] of [
+      ['scheduler', { action: 'list' }],
+      ['office', { app: 'word', action: 'read', file_path: 'report.docx' }],
+      ['screen_record', { action: 'status' }],
+      ['audio', { action: 'record', output_path: 'capture.wav', dry_run: true }],
+    ] as const) {
+      expect((await registry.invoke(tool, { workspaceId: 'workspace-1', userConfirmed: true, ...input })).structuredContent, tool)
+        .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+    }
+
+    // A gateway call is not a workspace mutation: refusing it in the phase would
+    // also refuse a child read the gateway cannot prove read-only — this one is
+    // not in the runtime policy's `readOnlyTools` — so the mutation policy keeps
+    // that decision.
+    expect((await registry.invoke('mcp_call', {
+      workspaceId: 'workspace-1', server: 'filesystem', tool: 'read_file', arguments: { path: 'src/app.ts' },
+    })).structuredContent).not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+  });
+
+  it('hands the durable control plane and the provider memory to the policy when the workspace refuses what it cannot gate', async () => {
+    // `refuse` decides workspace mutations, and the phase's subject is a path. A
+    // goal that already exists, its checkpoints and the memory the harness
+    // mandates are durable state the phase does not own: they name no path,
+    // `finish_goal` is required before any completion report, and the code index
+    // is the evidence the phase reads back. Refusing them would be a posture no
+    // strict workspace could work under, so they are delegated like the two
+    // cancels — the mutation policy still classifies them and asks for whatever
+    // its own profile requires. `run_goal` is the exception: starting a goal
+    // creates its Goal Workspace, so the phase decides it.
+    const { services, setFileContent, nativeRagCalls } = createHarnessServices();
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({
+      workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' },
+    }));
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+
+    // The memory record runs end to end: the gate admits it and the provider
+    // records it, so the delegation is a hand-off rather than a hole in the call.
+    const recorded = await registry.invoke('working_memory_record', {
+      workspaceId: 'workspace-1', name: 'goal:smoke', observations: ['progress'],
+    });
+    expect(recorded.isError, JSON.stringify(recorded.structuredContent)).not.toBe(true);
+    expect(nativeRagCalls).toContain('record_event');
+
+    for (const [tool, input] of [
+      ['rag_remember', { workspaceId: 'workspace-1', content: 'durable decision', category: 'decision' }],
+      ['checkpoint_goal', {
+        goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',
+        stepUpdates: [], nextAction: '', blockers: [], evidence: [], activeTaskIds: [],
+      }],
+      ['finish_goal', { goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, status: 'completed', summary: 'smoke', evidence: [] }],
+      ['prepare_scheduled_continuation', {
+        goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 0, currentPhase: 'smoke', summary: 'smoke',
+        stepUpdates: [], nextAction: 'continue smoke', blockers: [], evidence: [], activeTaskIds: [],
+        successorDelayMinutes: 25, executionPreference: 'cloud',
+      }],
+      ['claim_scheduled_continuation', { continuationId: 'continuation-1' }],
+    ] as const) {
+      expect((await registry.invoke(tool, input)).structuredContent, tool)
+        .not.toMatchObject({ error: { details: { reason: 'opaque_mutation' } } });
+    }
+
+    // Starting a goal creates its Goal Workspace worktree and branch, so the
+    // phase decides it: `refuse` must not create a workspace by another name.
+    await expect(registry.invoke('run_goal', {
+      workspaceId: 'workspace-1', goalKey: 'smoke-goal', objective: 'Smoke durable goal contract',
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: 'CONFLICT', details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' } } },
+    });
+
+    // And the posture still refuses the workspace mutation it exists for, so the
+    // delegation did not widen into "anything without a path".
+    await expect(registry.invoke('shell', {
+      workspaceId: 'workspace-1', executable: 'touch', arguments: ['src/new.ts'], userConfirmed: true,
+    })).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { error: { details: { phase: 'mutate', reason: 'opaque_mutation', opaqueReason: 'shape' } } },
+    });
+  });
+
+  it('names only tools the registry routes, in each of the three policy sets', async () => {
+    // The oracles in `mutate-gate.test.ts` compare names, so a name no tool answers
+    // to would survive all of them and a policy list that lost a tool would read as
+    // coverage. This is the one check that every name those oracles mention is a
+    // tool the registry actually routes: the delegation list, the calls the
+    // registry always confirms, and every mutation its catalog declares.
+    const { services } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    const registered = new Set(registry.listAll().map((tool) => tool.name));
+    const policyNames = [
+      ...DELEGATED_EFFECT_TOOLS,
+      ...ALWAYS_CONFIRM_MUTATION_TOOLS,
+      ...UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ').map((entry) => entry.name),
+    ];
+    for (const tool of policyNames) expect(registered.has(tool), tool).toBe(true);
   });
 
   it('admits a command mutation and records that it had no prepared evidence', async () => {
@@ -645,7 +796,7 @@ describe('workspace engineering harness enforcement', () => {
 
     const completed = audited.find((entry) => entry.event.toolName === 'shell' && entry.event.phase === 'completed');
     expect(completed?.detail?.items).toContain(
-      'mutate: admitted shell with an opaque command subject and no prepared path (workflowGate.mutateOpaque is allow)',
+      'mutate: admitted shell with an opaque shape subject and no prepared path (workflowGate.mutateOpaque is allow)',
     );
   });
 

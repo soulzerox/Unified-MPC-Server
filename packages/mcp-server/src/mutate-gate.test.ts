@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OPAQUE_MUTATION_TOOL_NAMES, codeMutationPaths, isOpaqueMutationTool } from './harness-runtime.js';
+import { DELEGATED_EFFECT_TOOLS, codeMutationPaths, isPathExtractorTool, isPhaseDecidedMutation, isRestoreMutationTool } from './harness-runtime.js';
+import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
+import { upgradeToolInputSchema } from './upgrade-tool-contracts.js';
+import { ALWAYS_CONFIRM_MUTATION_TOOLS } from './tool-registry.js';
 import {
   DEFAULT_MUTATE_MODE,
   DEFAULT_OPAQUE_MUTATE_POLICY,
@@ -55,19 +58,33 @@ describe('opaque mutate policy', () => {
   });
 
   it('admits an opaque mutation under allow and refuses it under refuse', () => {
-    expect(evaluateOpaqueMutateGate({ policy: 'allow', reason: 'command' })).toEqual({ allowed: true });
-    expect(evaluateOpaqueMutateGate({ policy: 'refuse', reason: 'command' }))
-      .toEqual({ allowed: false, code: 'opaque_mutation', reason: 'command' });
+    expect(evaluateOpaqueMutateGate({ policy: 'allow', reason: 'shape' })).toEqual({ allowed: true });
+    expect(evaluateOpaqueMutateGate({ policy: 'refuse', reason: 'shape' }))
+      .toEqual({ allowed: false, code: 'opaque_mutation', reason: 'shape' });
     expect(evaluateOpaqueMutateGate({ policy: 'refuse', reason: 'unresolved' }))
       .toEqual({ allowed: false, code: 'opaque_mutation', reason: 'unresolved' });
   });
 
-  it('names the tool, the missing subject and both ways out in the refusal', () => {
-    const command = describeOpaqueMutateRefusal('shell', 'command');
-    expect(command).toContain('shell mutates by running a command');
+  it('names the tool, the missing subject and the ways out in the refusal', () => {
+    const command = describeOpaqueMutateRefusal('shell', 'shape');
+    expect(command).toContain('shell does not name a file the phase can turn into a preparation');
+    expect(command).not.toContain('running a command');
     expect(command).toContain('workflowGate.mutateOpaque is refuse');
+    // Relaxing the setting is the one way out that always exists, so every shape
+    // refusal names it first and the path-bearing form only as a condition.
+    expect(command).toContain('set workflowGate.mutateOpaque back to allow');
+    expect(command).toContain('if the change has a form whose request names the file it writes');
     expect(command).toContain('prepare_code_change');
-    expect(command).toContain('allow');
+    // `office` names its target, but not in a field the extractor table answers
+    // for, so the same sentence has to describe it without calling it a command.
+    expect(describeOpaqueMutateRefusal('office', 'shape'))
+      .toContain('office does not name a file the phase can turn into a preparation');
+    // `process_stop` has no path-bearing form at all, so the sentence offers the
+    // preparation as a condition to meet rather than a tool to switch to: this is
+    // the case that made the unconditional phrasing wrong.
+    const stop = describeOpaqueMutateRefusal('process_stop', 'shape');
+    expect(stop).toContain('if the change has a form whose request names the file it writes');
+    expect(stop).not.toContain('express the change as a tool whose request names the file it writes and prepare_code_change');
 
     const unresolved = describeOpaqueMutateRefusal('restore_deleted_file', 'unresolved');
     expect(unresolved).toContain('restore_deleted_file names a stored subject this workspace cannot resolve');
@@ -75,30 +92,15 @@ describe('opaque mutate policy', () => {
     // Switching tools would abandon the restore, not resolve it, so the way out
     // for an unresolvable subject is to name one this workspace can resolve.
     expect(unresolved).toContain('name a subject this workspace can resolve');
+    expect(unresolved).toContain('set workflowGate.mutateOpaque back to allow');
     expect(unresolved).not.toContain('prepare_code_change');
   });
 
   it('records the admission as a decision, not as ordinary traffic', () => {
-    const note = describeOpaqueMutateAdmission('git', 'command');
+    const note = describeOpaqueMutateAdmission('git', 'shape');
     expect(note).toContain('admitted git');
     expect(note).toContain('no prepared path');
     expect(note).toContain('workflowGate.mutateOpaque is allow');
-  });
-});
-
-describe('opaque mutation tools', () => {
-  it('routes the command-shaped tools and leaves the rest to the mutation policy', () => {
-    // The list is the statement, not a derivation: a tool that is removed from
-    // it silently stops reaching the phase, so it is pinned in both directions.
-    // The negative names are a sample of what the exclusion means - a path tool,
-    // a store-named tool, a path-less tool the mutation policy already refuses
-    // as `opaque_mutation`, and the project commands whose configured argv is
-    // not the caller's - not a claim that these are every excluded tool.
-    expect(['shell', 'wsl_exec', 'git', 'process_start'].filter((tool) => !isOpaqueMutationTool(tool))).toEqual([]);
-    expect([
-      'write_file', 'restore_deleted_file', 'mcp_call', 'computer_use', 'process_stop',
-      'project_test', 'project_build', 'codex_run',
-    ].filter(isOpaqueMutationTool)).toEqual([]);
   });
 });
 
@@ -232,57 +234,169 @@ describe('describeMutateBlockers', () => {
 });
 
 /**
- * The reach of the phase is stated in prose in several places, and four reviews
- * of step 5b-2 found the same defect in it: one paragraph or table row naming
- * three of the four tools. Prose cannot be derived from the set, so the document
- * gets one sentence that *is* the list, and the checks below keep the rest of it
- * from disagreeing with that sentence.
+ * The reach used to be a list of names, restated in prose, and every review of
+ * this step found the same defect in it: one name short. A union of "tools that
+ * mutate" sets cannot be complete, because the registry declares tools in more
+ * than one place. The reach is now the complement of a short delegation list, so
+ * the only tools the phase misses are the ones somebody chose to delegate and
+ * wrote down with a reason.
  */
-describe('the document states the phase reach once', () => {
+describe('the phase decides every mutation it was not told to delegate', () => {
   const doc = readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', 'docs', 'WORKFLOW_GATE.md'), 'utf8');
-  const reach = [...OPAQUE_MUTATION_TOOL_NAMES].sort();
-  const countWords = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'];
 
-  it('names exactly the tools the phase reaches, and only once', () => {
-    const canonical = /The phase reaches exactly these (\w+) tools: ((?:`[a-z_]+`(?:,\s*|\s+and\s+)?)+)\./.exec(doc);
-    expect(canonical).not.toBeNull();
-    const named = [...canonical![2].matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
-    // Set equality in both directions, not "every name is a real tool": a
-    // repeated name must not stand in for a missing one, and a tool the reach
-    // gains must be added to the sentence. Sorting leaves the prose free to
-    // order the tools for reading.
-    expect([...named].sort()).toEqual(reach);
-    // The count word is a copy of the list length too, so "these four tools"
-    // cannot survive a fifth.
-    expect(canonical![1]).toBe(countWords[reach.length]);
-    expect(doc.match(/The phase reaches exactly these \w+ tools:/g)).toHaveLength(1);
+  it('delegates exactly these effects, and nothing else', () => {
+    // The whole exception list, written out rather than recomputed. Adding a name
+    // here is a policy decision, so it has to show up in a diff that says so.
+    expect([...DELEGATED_EFFECT_TOOLS].sort()).toEqual([
+      'accessibility', 'benchmark_run', 'cancel_goal', 'cancel_scheduled_continuation', 'checkpoint_goal',
+      'claim_scheduled_continuation', 'clipboard', 'computer_use', 'dom_cdp',
+      'expedite_scheduled_continuation', 'file_dialog', 'finish_goal', 'input_event', 'mcp_call', 'notification',
+      'prepare_scheduled_continuation', 'project_build', 'project_dev', 'project_lint', 'project_profile_set',
+      'project_test', 'project_typecheck', 'rag_adopt_legacy_index', 'rag_cancel_index', 'rag_code_index',
+      'rag_code_reconcile', 'rag_forget', 'rag_memory_reconcile', 'rag_remember', 'rag_resolve_constraint',
+      'recipe_run', 'reconcile_goals', 'record_scheduled_continuation_receipt',
+      'retry_goal_workspace_admission', 'run_affected_tests', 'ui_target_action', 'verify_incremental', 'web_fetch',
+      'window', 'working_memory_record', 'workspace_activate', 'workspace_deactivate', 'workspace_memory_record',
+      'workspace_register', 'workspace_set_primary',
+    ]);
   });
 
-  it('never names a subset of the reach in one document block', () => {
-    // A mention of two or more is an enumeration, and an enumeration that stops
-    // short of the whole list is the defect. A single mention is prose about one
-    // tool. Blocks are blank-line-separated, so an adjacent run of list items is
-    // checked as one unit — which is how the document reads.
-    const blocks: string[] = [];
-    let current: string[] = [];
-    const flush = (): void => {
-      if (current.length > 0) blocks.push(current.join(' '));
-      current = [];
-    };
-    for (const line of doc.split('\n')) {
-      if (line.trim() === '') flush();
-      else if (line.trimStart().startsWith('|')) { flush(); blocks.push(line); }
-      else current.push(line);
+  it('decides the work a tool name hides, not just the name it was copied from', () => {
+    // Every one of these mutates, and every one of them was outside the phase at
+    // some point in this step's review: a scheduled task, a recording, a
+    // background shell task, a goal rebase, a merge, an install. `run_goal` is
+    // here because starting a goal creates its Goal Workspace.
+    for (const tool of [
+      'shell', 'wsl_exec', 'git', 'git_publish', 'publish_approve', 'process_start', 'process_stop',
+      'codex_run', 'codex_stop', 'agent_swarm_run', 'office', 'office_ppt', 'docx_merge',
+      'self_heal_apply', 'git_worktree_spawn', 'git_worktree_remove', 'scheduler', 'audio',
+      'screen_record', 'task_create', 'task_cancel', 'delegate', 'parallel_delegate',
+      'delegate_cancel', 'guarded_pr_merge', 'rebase_goal_workspace', 'merge_verification_run',
+      'mcp_install', 'skills_install', 'plugin_install', 'hook_register',
+      'cache_clear', 'session_checkpoint', 'tool_schema_register', 'run_goal',
+    ]) {
+      expect(isPhaseDecidedMutation(tool), tool).toBe(true);
     }
-    flush();
+  });
 
-    const offenders = blocks
-      .map((block) => ({
-        block,
-        named: OPAQUE_MUTATION_TOOL_NAMES.filter((tool) => new RegExp(`\`${tool}\`(?![\\w-])`).test(block)),
-      }))
-      .filter(({ named }) => named.length >= 2 && named.length < OPAQUE_MUTATION_TOOL_NAMES.length)
-      .map(({ block, named }) => `${named.join('+')}: ${block.slice(0, 90)}`);
-    expect(offenders).toEqual([]);
+  it('delegates only calls whose reachable contract leaves the phase nothing to decide', () => {
+    // A name in the delegation list is a promise that the phase has nothing to
+    // decide, and the promise has a different reason in each family:
+    // `verify_incremental` runs the workspace's configured `typecheck`, the same
+    // one `project_typecheck` runs; the runtime selection and registration tools
+    // update the runtime's own active set, which a strict workspace must still be
+    // able to do; `file_dialog` opens a host dialog, declares `readOnlyHint` and
+    // returns a chosen path; and `project_profile_set`'s strict contract admits no
+    // way to ask for the write (`workspaceId` and `profile` only, so the handler
+    // always answers with the dry-run preview).
+    for (const tool of ['verify_incremental', 'workspace_activate', 'workspace_deactivate', 'workspace_set_primary', 'workspace_register', 'file_dialog', 'project_profile_set']) {
+      expect(DELEGATED_EFFECT_TOOLS.has(tool), tool).toBe(true);
+      expect(isPhaseDecidedMutation(tool), tool).toBe(false);
+    }
+  });
+
+  it('keeps the delegated effects out of the path and restore routes', () => {
+    // A delegated effect stays with the mutation policy's approval gate, so it is
+    // not an opaque subject — its reason is that the phase does not decide it, not
+    // that it would have no subject. The disjointness keeps the two explanations
+    // from overlapping: the seam checks `codeMutationPaths` before the delegated
+    // predicate, so a name in both lists would be read as delegated while the path
+    // route still decides its path-bearing requests — the reach would depend on
+    // which branch ran first. That the path and restore tools do extract their
+    // subject is pinned where it is observable, by the `codeMutationPaths` and
+    // `resolveMutationSubjects` cases in this file and in `mutation-subject.test.ts`.
+    for (const tool of DELEGATED_EFFECT_TOOLS) {
+      expect(isPathExtractorTool(tool), tool).toBe(false);
+      expect(isRestoreMutationTool(tool), tool).toBe(false);
+    }
+  });
+
+  it('decides every catalog mutation it does not name as a configured command', () => {
+    // The catalog is one of the places the registry declares tools, and it is the
+    // one that names a severity, so it is a second opinion about what mutates.
+    // One of the six configured commands is a catalog mutation, and the pin says
+    // so literally: a configured command that leaves the catalog fails here
+    // rather than disappearing with it.
+    const configuredCommands = ['project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'run_affected_tests'];
+    // A delegated catalog mutation has to be one the phase has no subject for
+    // either because the workspace configured its command or because the tool's
+    // own contract cannot reach a write. The second kind is a preview: the
+    // profile tool's strict schema admits `workspaceId` and `profile`, a recipe
+    // run answers with its plan labelled `sideEffectsStarted: false`, and the
+    // benchmark tool's schema admits no `dryRun` switch at all, so none of them
+    // can run the thing it names. The name list here is only the classification;
+    // the behaviour behind the recipe half is pinned by the runtime contract
+    // fixture, which runs `recipe_run` with the `dryRun: false` that would enable
+    // the run.
+    const contractPreviews = ['project_profile_set', 'recipe_run', 'benchmark_run'];
+    const nonRead = UPGRADE_TOOL_CATALOG.filter((entry) => entry.permission !== 'READ'
+      && entry.deliveryState !== 'planned' && entry.deliveryState !== 'feature_disabled');
+    expect(nonRead.length).toBeGreaterThan(20);
+    expect(configuredCommands.filter((name) => nonRead.some((entry) => entry.name === name))).toEqual([
+      'run_affected_tests',
+    ]);
+    // Every catalog mutation that is delegated has to be one of the configured
+    // commands or a contract-level preview, and every name in either list has to
+    // be delegated: the two directions are checked separately so a new delegation
+    // and a missing one are different failures.
+    for (const entry of nonRead) {
+      if (!DELEGATED_EFFECT_TOOLS.has(entry.name)) continue;
+      expect([...configuredCommands, ...contractPreviews], `${entry.name} is delegated but is neither a configured command nor a contract-level preview`).toContain(entry.name);
+    }
+    for (const name of ['run_affected_tests']) {
+      expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} runs the workspace's command and must be delegated`).toBe(true);
+    }
+    for (const name of contractPreviews) {
+      expect(DELEGATED_EFFECT_TOOLS.has(name), `${name} is a preview whose contract cannot write and must be delegated`).toBe(true);
+    }
+    // The profile tool's reason is a claim about its input contract, so the field
+    // that would reach the handler's `writeFile` is checked against the schema
+    // the registry actually validates with: admitting `dryRun` there has to fail
+    // here, not in a review.
+    const previewEntry = (name: string): ReturnType<typeof upgradeToolInputSchema> | undefined => {
+      const entry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === name);
+      expect(entry, `${name} has to be a catalog entry to have a contract`).toBeDefined();
+      return entry === undefined ? undefined : upgradeToolInputSchema(entry);
+    };
+    const profileSchema = previewEntry('project_profile_set');
+    if (profileSchema !== undefined) {
+      expect(profileSchema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' } }).success).toBe(true);
+      for (const enabling of [{ dryRun: false }, { dry_run: false }, { write: true }]) {
+        expect(profileSchema.safeParse({ workspaceId: 'workspace-1', profile: { language: 'typescript' }, ...enabling }).success, Object.keys(enabling)[0]).toBe(false);
+      }
+    }
+    const benchmarkSchema = previewEntry('benchmark_run');
+    if (benchmarkSchema !== undefined) {
+      expect(benchmarkSchema.safeParse({ workspaceId: 'workspace-1', name: 'baseline' }).success).toBe(true);
+      for (const enabling of [{ dryRun: false }, { dry_run: false }, { scenario: 'baseline' }, { timeoutMs: 1 }]) {
+        expect(benchmarkSchema.safeParse({ workspaceId: 'workspace-1', ...enabling }).success, Object.keys(enabling)[0]).toBe(false);
+      }
+    }
+  });
+
+  it('leaves the phase every mutation the registry always confirms, except the delegated gateway, desktop and control-plane names', () => {
+    // The registry's confirmation list is a third opinion: it asks before a call
+    // that writes. Handing one of those back to the policy as a delegated effect
+    // would return the strict posture's decision to the gate it is stricter than,
+    // so the intersection is compared with the names whose reason covers a
+    // confirmation — a gateway call, a desktop tool the registry confirms, a
+    // control-plane stop — and nothing else. Six of the eight delegated desktop
+    // names are confirmed; `notification` and `file_dialog` are not, so their
+    // absence here is deliberate.
+    const expected = [
+      'accessibility', 'cancel_goal', 'cancel_scheduled_continuation', 'clipboard', 'computer_use',
+      'dom_cdp', 'input_event', 'mcp_call', 'ui_target_action', 'web_fetch', 'window',
+    ];
+    expect([...ALWAYS_CONFIRM_MUTATION_TOOLS].filter((tool) => DELEGATED_EFFECT_TOOLS.has(tool)).sort()).toEqual(expected);
+  });
+
+  it('states the rule once in the document instead of listing the tools', () => {
+    expect(doc.match(/The phase decides every mutation it\s+cannot\s+turn\s+into\s+a\s+path, except the effects it\s+delegates/g)).toHaveLength(1);
+    expect(doc).toContain('DELEGATED_EFFECT_TOOLS');
+    // The four retired sets and the two kept sets that no longer define the
+    // reach: none of them belongs in the document's explanation any more.
+    for (const absent of ['OPAQUE_MUTATION_TOOL_NAMES', 'HOST_MUTATION_TOOLS', 'ALIASED_WORK_MUTATION_TOOLS', 'LOCAL_MUTATION_TOOLS', 'LOCAL_OUTPUT_REPLACEMENT_TOOLS']) {
+      expect(doc, absent).not.toContain(absent);
+    }
   });
 });

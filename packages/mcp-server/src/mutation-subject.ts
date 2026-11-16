@@ -1,4 +1,6 @@
 import {
+  CHECKPOINT_MUTATION_TOOLS,
+  RECOVERY_MUTATION_TOOLS,
   codeMutationPaths,
   isDevelopmentArtifactPath,
   isPathExtractorTool,
@@ -47,14 +49,6 @@ export type MutationSubject =
   }
   | { readonly kind: 'opaque'; readonly reason: OpaqueMutationReason };
 
-/** Tools whose request names a stored subject instead of an artifact path. */
-const RECOVERY_MUTATION_TOOLS = new Set(['restore_deleted_file', 'restore_recovery_item']);
-const CHECKPOINT_MUTATION_TOOLS = new Set(['restore_checkpoint']);
-
-export function isRestoreMutationTool(toolName: string): boolean {
-  return RECOVERY_MUTATION_TOOLS.has(toolName) || CHECKPOINT_MUTATION_TOOLS.has(toolName);
-}
-
 /**
  * A resolver answers with the paths the store holds for that id, or `undefined`
  * when it cannot answer at all — an unknown id, an unreadable store, a service
@@ -80,7 +74,7 @@ export async function resolveMutationSubjects(
   const checkpointId = CHECKPOINT_MUTATION_TOOLS.has(toolName) ? readId(input, 'checkpointId') : undefined;
   // A request that does not even name its subject is the opaque case, not an
   // unresolved one: the store could not have answered this.
-  if (recoveryId === undefined && checkpointId === undefined) return { kind: 'opaque', reason: 'command' };
+  if (recoveryId === undefined && checkpointId === undefined) return { kind: 'opaque', reason: 'shape' };
   if (resolvers === undefined) return { kind: 'opaque', reason: 'unresolved' };
 
   const resolved = recoveryId !== undefined

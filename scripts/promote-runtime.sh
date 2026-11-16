@@ -84,8 +84,8 @@ if [[ "$candidate" != "$releases_dir/"* ]]; then
   fail 65 "RUNTIME_ROOT_DISPOSABLE: candidate must be materialized under '$releases_dir': '$candidate'"
 fi
 
-bash "$validator" mcp-http "$candidate" >/dev/null
-bash "$validator" web "$candidate" >/dev/null
+UNIFIED_MPC_NODE="$node_bin" bash "$validator" mcp-http "$candidate" >/dev/null
+UNIFIED_MPC_NODE="$node_bin" bash "$validator" web "$candidate" >/dev/null
 
 read_provenance() {
   local root="$1"
@@ -196,8 +196,8 @@ validate_rollback_target() {
   local -a provenance
   [[ -n "$target" && -d "$target" ]] || return 1
   [[ "$target" == "$releases_dir/"* ]] || return 1
-  bash "$validator" mcp-http "$target" >/dev/null 2>&1 || return 1
-  bash "$validator" web "$target" >/dev/null 2>&1 || return 1
+  UNIFIED_MPC_NODE="$node_bin" bash "$validator" mcp-http "$target" >/dev/null 2>&1 || return 1
+  UNIFIED_MPC_NODE="$node_bin" bash "$validator" web "$target" >/dev/null 2>&1 || return 1
   output="$(read_provenance "$target" 2>/dev/null)" || return 1
   mapfile -t provenance <<<"$output"
   [[ "${provenance[1]:-}" == "false" ]]

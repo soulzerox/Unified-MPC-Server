@@ -313,6 +313,8 @@ A deployment pipeline may build in an isolated Goal/build worktree, but it must 
 
 The release directory must already contain the runtime entrypoints, package/runtime dependencies required by those entrypoints, and `apps/cli/dist/build-provenance.json`. Do **not** pass a Goal/build worktree directly to the promoter and do not make a release symlink resolve back into a worktree.
 
+The runtime-root preflight also resolves the relative-import closure of every entry the release carries (`apps/cli/dist/index.js`, `apps/cli/dist/bin/mcp-http.js`, `apps/cli/dist/bin/mcp-stdio.js`, `apps/cli/dist/bin/publish-credential-helper.js`): a release whose entry imports a sibling file the release does not contain is refused (`RUNTIME_ARTIFACT_INCOMPLETE`) instead of being promoted and dying on the next restart with `ERR_MODULE_NOT_FOUND`. That check exists because a rebuild through a shared inode can rewrite a deployed `dist` in place while the new sibling files stay in the checkout (#835).
+
 Materialize the already-built clean worktree into a self-contained release first. The materializer uses the existing pnpm store with `--prefer-offline` and pnpm 10's portable workspace deploy mode; it writes through a staging directory, rejects any release symlink that resolves back outside the release, and publishes only after runtime-root validation succeeds:
 
 ```bash

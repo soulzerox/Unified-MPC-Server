@@ -27,6 +27,14 @@ test('the release gate boots the artifact it ships', () => {
   assert.ok(materialize > build, 'the materialized regression runs against built output, so it needs build first');
 });
 
+test('the release gate runs the runtime-root preflight regression', () => {
+  // #835: the preflight is the only thing standing between a release whose
+  // import closure is incomplete and a restart that dies with
+  // ERR_MODULE_NOT_FOUND, so its own regression must run in the gate.
+  const preflight = indexOfCommand((args) => args.includes('scripts/validate-runtime-root.test.sh'));
+  assert.notEqual(preflight, -1, 'release:verify must run the runtime-root preflight regression');
+});
+
 test('every repository script a release step runs exists', () => {
   const missing = [];
   for (const [, args] of RELEASE_COMMANDS) {

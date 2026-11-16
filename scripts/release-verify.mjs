@@ -30,6 +30,9 @@ export const RELEASE_COMMANDS = [
   // Run the destructive clean-build guard before recursive workspace tests.
   [process.execPath, ['scripts/verify-native-rag-migration.mjs']],
   [process.execPath, ['scripts/generate-tool-catalog.mjs', '--check']],
+  // #835: the entrypoint/provenance preflight is what refuses a release whose
+  // import closure is incomplete, so its regression belongs in the gate too.
+  ['bash', ['scripts/validate-runtime-root.test.sh']],
   ['corepack', ['pnpm', 'test']],
   ['corepack', ['pnpm', 'build']],
   [process.execPath, ['scripts/smoke-mcp-http-runtime.mjs']],

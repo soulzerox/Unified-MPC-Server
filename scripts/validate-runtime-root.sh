@@ -78,10 +78,17 @@ fi
 # runtime entry the release carries, so promotion refuses a release the service
 # could not boot.
 #
+# The live outage this guards was worse than a relative import: the release
+# carried a pnpm store copy of `@unified-mpc/mcp-server` whose own module
+# imports `mutation-subject.js`, which the store copy did not contain. A textual
+# relative scan never sees through node_modules, so workspace specifiers are
+# resolved the way the ESM loader would and their targets join the closure.
+#
 # ponytail: textual specifier scan, no comment/string stripping, so an
 # import-shaped comment or string in dist would be read as a dependency and
 # fail closed. Swap in a parser (es-module-lexer) only if dist ever embeds
-# import-shaped prose; today it does not.
+# import-shaped prose; today it does not. Literal exports entries only, no
+# wildcard patterns; widen if a workspace package starts exporting those.
 node_bin="${UNIFIED_MPC_NODE:-node}"
 if ! command -v "$node_bin" >/dev/null 2>&1; then
   fail 69 "RUNTIME_ROOT_INVALID: '$node_bin' is required to check the release import closure"
@@ -103,6 +110,82 @@ import path from "node:path";
 const root = path.resolve(process.argv[1]);
 const entries = process.argv.slice(2).map((entry) => path.resolve(root, entry));
 const relative = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)[\x27"](\.[^\x27"]*)[\x27"]/g;
+const workspace = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)[\x27"](@unified-mpc\/[^\x27"]*)[\x27"]/g;
+
+function insideRoot(file) {
+  const rel = path.relative(root, file);
+  return rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function firstExisting(candidates) {
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+function exportTarget(entry) {
+  if (typeof entry === "string") return entry;
+  if (entry === null || typeof entry !== "object") return undefined;
+  return exportTarget(entry.import) ?? exportTarget(entry.default) ?? exportTarget(entry.development) ?? exportTarget(entry.node);
+}
+
+function resolvePackageTarget(packageDir, subpath) {
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+  if (subpath.length > 0) {
+    // A workspace package can export a subpath whose target is not the literal
+    // path (`@unified-mpc/shared/date-time-display`), so follow its exports map
+    // before falling back to the file, which would refuse a carried file. A
+    // package that does declare exports refuses an undeclared subpath, so the
+    // fallback only applies to a package without an exports map.
+    const exported = exportTarget(manifest.exports?.["./" + subpath]);
+    if (typeof exported === "string") return path.resolve(packageDir, exported);
+    if (manifest.exports !== undefined) return undefined;
+    return firstExisting([
+      path.join(packageDir, subpath),
+      path.join(packageDir, subpath + ".js"),
+      path.join(packageDir, subpath, "index.js"),
+    ]);
+  }
+  const target = exportTarget(manifest.exports?.["."]) ?? manifest.main;
+  if (typeof target !== "string") return undefined;
+  return path.resolve(packageDir, target);
+}
+
+// Mirrors the node_modules walk the loader performs, bounded to the release so a
+// workspace package missing from it is reported instead of silently skipped.
+function resolveWorkspaceSpecifier(fromFile, specifier) {
+  const segments = specifier.split("/");
+  const packagePath = segments.slice(0, 2);
+  const subpath = segments.slice(2).join("/");
+  let candidateDir;
+  try {
+    // The loader resolves through package symlinks before walking node_modules,
+    // so a pnpm store copy must be walked from its realpath, not the link site.
+    candidateDir = path.dirname(fs.realpathSync(fromFile));
+  } catch {
+    candidateDir = path.dirname(fromFile);
+  }
+  for (;;) {
+    if (!insideRoot(candidateDir) && candidateDir !== root) return undefined;
+    const packageDir = path.join(candidateDir, "node_modules", ...packagePath);
+    if (fs.existsSync(path.join(packageDir, "package.json"))) {
+      // The gate answers "does this release carry what it imports", so a package
+      // that is a symlink out of the release must be refused, not followed: the
+      // materialized tree keeps `node_modules/.pnpm/node_modules/@unified-mpc/cli`
+      // pointing into the source checkout until after this check.
+      if (!insideRoot(fs.realpathSync(packageDir))) return undefined;
+      return resolvePackageTarget(packageDir, subpath);
+    }
+    if (candidateDir === root) return undefined;
+    const parent = path.dirname(candidateDir);
+    if (parent === candidateDir) return undefined;
+    candidateDir = parent;
+  }
+}
+
 const seen = new Set();
 const missing = new Set();
 const queue = [...entries];
@@ -125,6 +208,18 @@ while (queue.length > 0) {
   }
   for (const match of source.matchAll(relative)) {
     const resolved = path.resolve(path.dirname(file), match[1]);
+    if (!fs.existsSync(resolved)) {
+      missing.add(`${path.relative(root, resolved)} (imported by ${path.relative(root, file)})`);
+      continue;
+    }
+    if (/\.[cm]?js$/.test(resolved)) queue.push(resolved);
+  }
+  for (const match of source.matchAll(workspace)) {
+    const resolved = resolveWorkspaceSpecifier(file, match[1]);
+    if (resolved === undefined) {
+      missing.add(`${match[1]} (not resolvable from ${path.relative(root, file)})`);
+      continue;
+    }
     if (!fs.existsSync(resolved)) {
       missing.add(`${path.relative(root, resolved)} (imported by ${path.relative(root, file)})`);
       continue;

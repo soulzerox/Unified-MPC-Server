@@ -14,7 +14,6 @@ import {
   JsonWorkspaceIndexStore,
   WorkspaceIndexService,
   WorkspaceSelectionService,
-  workspaceSelectionReferences,
 } from '@unified-mpc/application';
 import {
   CANONICAL_LIFECYCLE_MAX_LIMIT,
@@ -75,6 +74,7 @@ import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
 import { reconcileProviderGenerations } from '../runtime/provider-generation-reconcile.js';
 import { missingOptionValue, unexpectedOption } from './options.js';
+import { goalWorkspaceCleanupInputs } from './workspace-cleanup-inputs.js';
 
 export interface WebCommand {
   readonly kind: 'web';
@@ -190,21 +190,20 @@ export async function runWeb(
       else policyRepairError = repaired.error.message;
     }
     const lifecycleCandidates = await workspaceService.list();
-    const protectedByOpenGoal: string[] = [];
     const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
     for (const workspace of lifecycleCandidates) {
-      if (await goalRepository.countWorkspaceGoalsForHost(workspace.id) > 0) protectedByOpenGoal.push(workspace.id);
       if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;
       const snapshot = await goalRuntimeSnapshots.getGoalRuntimeSnapshot(workspace.goalId);
       if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
     }
     const lifecycle = await workspaceService.reconcileLifecycle({
-      protectedWorkspaceIds: [
-        ...workspaceSelectionReferences(settings.get(USER_SETTING_KEYS.httpWorkspaceSelection)),
-        ...protectedByOpenGoal,
-      ],
       goalRuntimeProjections,
-      goalDurableReferenceStates: durableReferenceStatesFor(workspaceJournal, lifecycleCandidates),
+      ...await goalWorkspaceCleanupInputs({
+        settings,
+        goals: goalRepository,
+        journal: workspaceJournal,
+        workspaces: lifecycleCandidates,
+      }),
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
     // A registration can be archived outside the removal adapter (lifecycle
@@ -226,6 +225,7 @@ export async function runWeb(
       workspaceIndex,
       goalRuntimeSnapshots,
       workspaceJournal,
+      goalRepository,
       providerGenerations,
       providerVerifications,
     );
@@ -291,20 +291,6 @@ export function createWebGoalRuntimeProjection(
   });
 }
 
-/**
- * The durable-reference truth both cleanup entry points hand to the service.
- * One expression means a call site cannot forget the projection and silently
- * revert every goal to `durable_references_unknown`.
- */
-function durableReferenceStatesFor(
-  journal: Pick<SqliteWorkspaceJournalRepository, 'goalDurableReferenceStates'>,
-  workspaces: readonly { readonly goalId?: string | undefined }[],
-): ReturnType<SqliteWorkspaceJournalRepository['goalDurableReferenceStates']> {
-  return journal.goalDurableReferenceStates(
-    workspaces.flatMap((workspace) => (workspace.goalId === undefined ? [] : [workspace.goalId as string])),
-  );
-}
-
 export function createWorkspaceControl(
   workspaceRepository: SqliteWorkspaceRepository,
   workspaceService: WorkspaceService,
@@ -312,6 +298,7 @@ export function createWorkspaceControl(
   workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
   goalRuntimeSnapshots: Pick<SqliteGoalRuntimeSnapshotRepository, 'getGoalRuntimeSnapshot'>,
   workspaceJournal: Pick<SqliteWorkspaceJournalRepository, 'goalDurableReferenceStates'>,
+  goals: Pick<SqliteGoalRepository, 'countWorkspaceGoalsForHost'>,
   providerGenerations: Pick<ProviderGenerationLedger, 'release'>,
   providerVerifications: Pick<ThaiRagWorkspaceVerificationStore, 'invalidate'>,
 ): WorkspaceControlPort {
@@ -351,7 +338,7 @@ export function createWorkspaceControl(
       }
       return unwrap(workspaceService.evaluateGoalWorkspaceCleanup({
         goalRuntimeProjections,
-        goalDurableReferenceStates: durableReferenceStatesFor(workspaceJournal, workspaces),
+        ...await goalWorkspaceCleanupInputs({ settings, goals, journal: workspaceJournal, workspaces }),
       }));
     },
     selection: async (): Promise<WebWorkspaceSelectionSnapshot | null> => {

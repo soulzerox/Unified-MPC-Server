@@ -356,6 +356,43 @@ describe('WorkspaceService', () => {
     expect(unrelatedInspection?.unavailableSince).toBeUndefined();
   });
 
+  it('refuses to call a protected Goal Workspace a retention candidate', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-protected-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-protected',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') });
+    const options = {
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+      goalRetentionGraceMs: 0,
+    };
+
+    // The close gate passes the same protection `reconcileLifecycle` does; without
+    // it a protected worktree reads `retention_candidate` and the gate can allow
+    // a removal the lifecycle path would have refused.
+    const unprotected = await service.evaluateGoalWorkspaceCleanup(options);
+    expect(unprotected).toMatchObject({ ok: true, value: [{ workspaceId: 'goal-workspace-protected', disposition: 'retention_candidate' }] });
+
+    const protectedResult = await service.evaluateGoalWorkspaceCleanup({ ...options, protectedWorkspaceIds: ['goal-workspace-protected'] });
+    expect(protectedResult).toMatchObject({
+      ok: true,
+      value: [{ workspaceId: 'goal-workspace-protected', disposition: 'blocked', blockers: ['protected_workspace'] }],
+    });
+  });
+
   it('keeps a safe Goal Workspace in retention pending until the default grace elapses', async () => {
     const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-retention-pending-'));
     temporaryRoots.push(rootPath);

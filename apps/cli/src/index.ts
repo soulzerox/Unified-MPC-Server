@@ -52,10 +52,11 @@ import {
   type WorkspaceLifecycleCleanupEvaluation,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
+import { goalWorkspaceCleanupInputs } from './commands/workspace-cleanup-inputs.js';
 import { ThaiRagIndexJobStore, type ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqliteGoalRuntimeSnapshotRepository, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceJournalRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqliteGoalRepository, SqliteGoalRuntimeSnapshotRepository, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceJournalRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -1619,12 +1620,22 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
       }
       const preview = createGoalWorktreeRemovalPreviewPort({ reconciliation });
+      // The gate must refuse what the lifecycle path refuses. `reconcileLifecycle`
+      // protects the Active Project selection and any workspace an open goal is
+      // still attached to; without the same list here a protected workspace can
+      // be classified `retention_candidate` and the gate can report `allowed`
+      // for a worktree the lifecycle path would have called `protected_workspace`.
+      // Both paths ask the same assembly so the lists cannot drift apart.
+      const cleanupInputs = await goalWorkspaceCleanupInputs({
+        settings: state.settings,
+        goals: new SqliteGoalRepository(state.database),
+        journal,
+        workspaces,
+      });
       const ports: CloseGatePorts = {
         cleanup: async (): Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>> => state.service.evaluateGoalWorkspaceCleanup({
           goalRuntimeProjections,
-          goalDurableReferenceStates: journal.goalDurableReferenceStates(
-            workspaces.flatMap((workspace) => workspace.goalId === undefined ? [] : [workspace.goalId]),
-          ),
+          ...cleanupInputs,
         }),
         removal: async (request) => {
           const previewed = await preview.preview({ workspaceId: request.workspaceId, worktreePath: request.worktreePath, actor });

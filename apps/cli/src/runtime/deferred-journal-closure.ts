@@ -31,21 +31,29 @@ export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
 const RUNTIME_OBSERVED_FROM = new Date().toISOString();
 
 /**
- * Close the deferred calls this runtime can prove finished: no managed process of
- * the workspace is live, and the call was recorded while this runtime was up.
+ * Close the deferred call this request opened, once the workspace has no live
+ * managed process left.
  *
- * Coarse on purpose. One live process keeps every open call in the workspace
- * pinned, which errs closed; a store that cannot answer, or no process service at
- * all, closes nothing. Returns how many calls it closed.
+ * `callIds` is not an optimisation, it is the honesty boundary. `ProcessService`
+ * only lists the handles THIS runtime registered, while the journal is shared by
+ * every stdio host on the same database, so "no live process" is evidence about
+ * one call, never about a neighbouring host's call. Closing by workspace alone
+ * would read another host's running `project_dev` as finished.
+ *
+ * A store that cannot answer, or no process service at all, closes nothing. One
+ * live process keeps the call pinned, which also errs closed. Returns how many
+ * calls it closed.
  */
 export async function closeObservedDeferredCalls(options: {
   readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls'>;
   readonly processes?: Pick<ProcessService, 'list'>;
   readonly actor: FileActor;
   readonly workspaceId: string;
+  /** The call whose request just completed: the only one this runtime may answer. */
+  readonly callIds: readonly string[];
   readonly closedAt: string;
 }): Promise<number> {
-  if (options.processes === undefined) return 0;
+  if (options.processes === undefined || options.callIds.length === 0) return 0;
   const listed = await options.processes.list(options.actor, options.workspaceId);
   if (!listed.ok) return 0;
   if (listed.value.some(isLiveProcess)) return 0;
@@ -53,6 +61,7 @@ export async function closeObservedDeferredCalls(options: {
     workspaceId: options.workspaceId,
     operationKinds: [...PROCESS_HANDLE_DEFERRED_KINDS],
     recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
+    callIds: options.callIds,
     closureCode: NO_LIVE_PROCESS_CLOSURE_CODE,
     closedAt: options.closedAt,
   });

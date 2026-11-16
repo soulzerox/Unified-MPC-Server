@@ -1501,6 +1501,7 @@ export function createStdioMcpRuntime(
                 : { processes: deferredClosureServices.current.process }),
               actor,
               workspaceId: event.workspaceId,
+              callIds: [event.callId],
               closedAt: event.timestamp,
             });
           } catch (error) {

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok } from '@unified-mpc/domain';
 import type { GoalRuntimeProjection } from '@unified-mpc/domain';
@@ -65,8 +67,9 @@ describe('createGoalWorkspaceCleanupPort', () => {
     const seen: WorkspaceCleanupEvaluationOptions[] = [];
     const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
     const goalDurableReferenceStates = new Map([['goal-1', 'present' as const]]);
+    const cleanupInputs = { protectedWorkspaceIds: ['project-1'], goalDurableReferenceStates };
     const port = createGoalWorkspaceCleanupPort({
-      cleanupInputs: { protectedWorkspaceIds: ['project-1'], goalDurableReferenceStates },
+      cleanupInputs,
       goalRuntimeProjections,
       evaluate: async (input) => {
         seen.push(input);
@@ -78,10 +81,28 @@ describe('createGoalWorkspaceCleanupPort', () => {
 
     expect(result).toEqual(ok([]));
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toEqual({
-      goalRuntimeProjections,
-      protectedWorkspaceIds: ['project-1'],
-      goalDurableReferenceStates,
-    });
+    // Identity, not equality: a composition that rebuilt an empty projection map
+    // or a fresh protected list would satisfy a deep comparison while quietly
+    // dropping the caller's truth.
+    expect(seen[0]?.goalRuntimeProjections).toBe(goalRuntimeProjections);
+    expect(seen[0]?.protectedWorkspaceIds).toBe(cleanupInputs.protectedWorkspaceIds);
+    expect(seen[0]?.goalDurableReferenceStates).toBe(goalDurableReferenceStates);
+  });
+});
+
+/**
+ * The factory above is only worth its test if the composition root keeps calling
+ * it. Every `WorkspaceCleanupEvaluationOptions` field is optional, so re-inlining
+ * a narrowed `{ goalRuntimeProjections, protectedWorkspaceIds }` in the CLI's
+ * dependency builder typechecks and leaves every suite green — `index.test.ts`
+ * injects a fake `gateCheck` and never reaches this composition.
+ */
+describe('close gate cleanup port wiring', () => {
+  it('builds the port through the factory instead of spreading the inputs inline', () => {
+    const source = readFileSync(path.resolve(import.meta.dirname, '..', 'index.ts'), 'utf8');
+
+    expect(source).toContain('createGoalWorkspaceCleanupPort({');
+    expect(source).not.toMatch(/evaluateGoalWorkspaceCleanup\(\{/);
+    expect(source.match(/evaluateGoalWorkspaceCleanup\(/g)).toHaveLength(1);
   });
 });

@@ -18,7 +18,7 @@ The Control Plane is implemented in `apps/web/src/web-server.ts` as a Node.js HT
 +-------------------------------------------------------------+
 |               Unified-MPC ControlPlaneServer                |
 |  - Loopback-only origin validation                          |
-|  - In-memory rate & payload size guards (1MB limit)         |
+|  - Loopback origin guard + 1 MiB payload size limit         |
 +--------------+---------------+--------------+---------------+
                |               |              |
                v               v              v

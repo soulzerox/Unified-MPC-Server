@@ -1,6 +1,10 @@
 # Workflow Gate Engine
 
-Design proposal for #142. Status: proposed, not implemented.
+Design and implementation record for #142. Status: partially implemented.
+The shared rule, the phase vocabulary, the `close` decision (3a), the runtime
+merge subject check (4a) and the `mutate` phase (5a, 5b-1…5b-3) have shipped;
+`gate check --phase <phase>` does not exist yet, and the `close` phases still
+read no head, base or merge evidence (see the status sections in section 5).
 
 The repository already enforces gates, each with its own receipt store:
 

@@ -48,7 +48,7 @@ graph TD
         APP["packages/application<br/>(Durable Goals, Checkpoints)"]
         STORE["packages/storage<br/>(node:sqlite WAL Engine)"]
         CAP["packages/capabilities<br/>(Linux Shell, Process Supervision)"]
-        FS["packages/filesystem<br/>(Path Containment, Scoped I/O)"]
+        FS["packages/filesystem<br/>(Scoped I/O)"]
         PERM["packages/permissions<br/>(Safe / Balanced / Full Bypass)"]
         AUDIT["packages/audit<br/>(Cryptographic Secret Redactor)"]
     end
@@ -69,8 +69,8 @@ graph TD
 ## Core System Capabilities
 
 ### 1. Universal Multi-Client IDE Hub & Policy Sync
-- **Single Source of Truth**: Centrally manages tools, skills, and execution rules across **8 major AI developer environments**: Google Antigravity, Cursor, Claude Code / Desktop, Cline, OpenCode, Freebuff, Oh My Pi (OMP), and Codex CLI.
-- **Atomic Block Injection**: Automatically compiles and injects system instructions into target rule files (`GEMINI.md`, `.cursor/rules/`, `CLAUDE.md`, `.clinerules`, `AGENTS.md`) using bounded markers (`<!-- MCP-POLICY-START -->` ... `<!-- MCP-POLICY-END -->`). All user-defined rules outside the markers remain untouched.
+- **Single Source of Truth**: Centrally manages skills, policy blocks and execution rules across **8 AI environments**: Google Antigravity, Cursor, Claude Code / Desktop, Cline, OpenCode, Freebuff, Oh My Pi (OMP), and Codex CLI. MCP server installation covers the six clients that define an MCP config target: Antigravity, Cursor, Claude, Cline, OpenCode and Codex.
+- **Atomic Block Injection**: Automatically compiles and injects system instructions into target rule files (`GEMINI.md`, `.cursor/rules/`, `CLAUDE.md`, `.clinerules`, `AGENTS.md`) using bounded markers (`<!-- MCP-POLICY-START -->` ... `<!-- MCP-POLICY-END -->`). All user-defined rules outside the markers remain untouched. Targets that are generated files rather than marked blocks (the Cursor workspace rule and the global Antigravity rule) are rewritten whole.
 - **Zero Drift**: Ensures every AI client operating on your repository adheres to identical tool routing, workspace boundaries, and coding standards.
 
 ### 2. Dynamic User-Editable P1–Pn Runtime Policy
@@ -105,7 +105,7 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 - **Dedicated Workflows**: Separate validation pipelines and CLI subcommands (`unified-mpc install skill` vs `unified-mpc install server`), preventing corrupted server configs or misrouted skills.
 
 ### 5. Zero-Artifact Atomic Pruner
-- **Graceful Process Termination**: Halts running server processes with orderly `SIGTERM` signalling followed by bounded escalation to `SIGKILL`.
+- **Config, Skill and Runtime Cleanup**: Removes the server block, skill links and runtime data. When a session manager is injected (embedded hosts), pruning also drops that server's live MCP session; the CLI and Web Control Plane do not own server processes and therefore do not kill one.
 - **Multi-IDE Config Cleanup**: Purges uninstalled server blocks and skill links from all registered IDE configuration files simultaneously.
 - **Path Traversal Guards**: Verifies file boundaries before deletion (`isSafePurgePath`), cleaning up dangling symlinks, caches, and runtime data without risking system directories.
 
@@ -114,12 +114,13 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 - **Goal Continuation**: Allows AI agents to execute complex, multi-turn goals autonomously across session boundaries with goal leases and fencing tokens.
 - **Checkpoint State Machine**: Records point-in-time workspace snapshots and transaction journals, enabling safe rollbacks if an agent goes off course.
 - **Task Supervisor**: Differentiates between `blocking_job` (tasks that affect execution liveness) and `supporting_service` (background daemons), preventing zombie processes.
+- **Workspace Journal**: Records each workspace-scoped operation as a durable `started` row that is later completed, failed, cancelled or interrupted, and projects those rows into cleanup evidence, so a Goal Workspace with live work is never treated as a retention candidate.
 - **Transport vs Durable Continuity**: Legacy ChatGPT/Web MCP transport sessions use an inactivity TTL of **1 hour by default** (`UNIFIED_MPC_LEGACY_SESSION_TTL_MS`). Valid session activity refreshes that TTL. Transport eviction clears only session-scoped harness state; durable goals, checkpoints, worktrees, and lease generations remain in SQLite and can be resumed from a fresh transport.
 - **Early Orphan Lease Recovery**: A fresh `run_goal` may rotate an unexpired goal lease immediately only when trustworthy liveness proves zero live fenced calls, zero live/unknown blocking tasks, and no live scheduled owner. Ambiguous or unavailable liveness fails closed; the prior token is fenced by the atomic lease-generation update.
 
 ### 7. Hard-Gated Cloudflare Gateway for ChatGPT Web
 - **Outbound-Only Tunnel Companion**: Decoupled `apps/cf-gateway` companion establishes an outbound encrypted HTTPS tunnel via Cloudflare, eliminating the need to expose inbound ports on your host.
-- **4-State Lifecycle Machine**: Coordinates transitions through `DISCONNECTED` $\to$ `TUNNEL_STARTING` $\to$ `BRIDGE_PROBING` $\to$ `BRIDGE_HEALTHY`.
+- **5-State Lifecycle Machine**: Coordinates the bridge through `STOPPED`, `INITIALIZING`, `BRIDGE_HEALTHY`, `SESSION_CONNECTED` and `ERROR`, with generation-fenced start/stop so a stale completion cannot resurrect a stopped bridge.
 - **Fail-Closed 412 Gate**: The gateway returns `412 Precondition Failed` if the local MCP endpoint fails its health probe, ensuring external AI clients (like ChatGPT Web) are never connected to a dead, stale, or misconfigured bridge.
 
 ### 8. Senior Engineering Harness (Ponytail + Runtime Workspace Harness)
@@ -134,24 +135,30 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 
 ### 9. Zero-Overhead Local Web Control Plane
 - **Native HTTP Dashboard**: Zero-framework, ultra-fast Web Control Plane (`apps/web`) running at `http://127.0.0.1:3000/`.
-- **Obsidian Telemetry**: Real-time monitoring cards for active bridges, Cloudflare tunnels, installed skills, mounted MCP servers, and connected IDEs.
-- **Security by Default**: Enforces loopback `Host` and `Origin` validation, requires ownership tokens for pruning mutations, and enforces a strict 1 MiB body payload limit.
+- **Obsidian Telemetry**: Real-time monitoring cards for MCP servers, agent skills, policies, bridge state, the loopback port and MCP RSS.
+- **Security by Default**: Enforces loopback `Host` and `Origin` validation, requires the per-process capability cookie/header for mutations, and caps request bodies at 1 MiB.
 
 ### 10. Unified Headless CLI (`unified-mpc`)
 - **Developer & Agent Friendly**: Standalone executable CLI binary with deterministic POSIX exit codes (`0` for success, `1` for operational errors, `2` for syntax/argument errors).
 - **Headless Automation**: Designed for seamless integration into CI pipelines, shell scripts, and terminal-based coding agents (Claude Code, OpenCode CLI, Agy CLI).
 
+### 11. Evidence-Bound Integration: Merge, Publish & Workflow Gates
+- **Exact-Head Merge Only**: `guarded_pr_merge` is the only first-party path that merges a pull request. It re-reads the PR from GitHub, refuses a caller subject that no longer matches, spends a durable `merge_verification_run` receipt bound to repository + PR + head SHA, and sends the expected head SHA so GitHub itself rejects a branch that moved after verification.
+- **Approved Publish Path**: raw `git push` stays denied. `git_publish_preflight` (read-only diagnostics), `publish_approve` (one single-use receipt bound to an exact workspace/remote/branch/SHA for 15 minutes) and `git_publish` (host-built argv) publish only the exact approved commit.
+- **Publish Credential Mediation**: short-lived credential leases live in the Linux Secret Service and are spent through a promoted credential helper with a fingerprint-bound receipt, plus a revoke/expiry-sweep lifecycle. Secrets never reach the model, the transcript, or an audit row.
+- **One Gate Rule**: a phase may proceed only when durable evidence exists for the exact current input. The CLI gates (`verify:local`, `review:pr`, `merge:pr`) and the runtime gate are adapters over that one rule; the phase-by-phase migration is tracked in [`docs/WORKFLOW_GATE.md`](docs/WORKFLOW_GATE.md).
+
 ---
 
 ## Supported Clients & IDE Matrix
 
-| Client / Environment | Supported Form Factors | Configuration Path | Skill Discovery Roots | Rule / Policy Sync Target |
+| Client / Environment | Supported Form Factors | Configuration Path | Skill Discovery Roots (primary) | Rule / Policy Sync Target |
 |---|---|---|---|---|
-| **Google Antigravity** | VS Code Extension, Antigravity IDE, `agy` CLI | `~/.gemini/config/mcp_config.json`<br>`<workspace>/.gemini/mcp.json` | `~/.gemini/config/skills/`<br>`<workspace>/.gemini/skills/` | `~/.gemini/config/GEMINI.md`<br>`<workspace>/GEMINI.md` |
-| **Cursor** | Cursor IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`<workspace>/.cursor/skills/` | `.cursor/rules/00-mandatory-policy.mdc` |
-| **Claude** | Claude Desktop, Claude Code CLI | `~/.config/Claude/claude_desktop_config.json` | `~/.claude/skills/`<br>`<workspace>/.claude/skills/` | `~/.claude/CLAUDE.md`<br>`<workspace>/CLAUDE.md` |
+| **Google Antigravity** | VS Code Extension, Antigravity IDE, `agy` CLI | `~/.gemini/config/mcp_config.json`<br>`<workspace>/.gemini/mcp.json` | `~/.gemini/skills/`<br>`~/.gemini/config/skills/`<br>`<workspace>/.gemini/skills/` | `~/.gemini/antigravity/rules/mcp-policy.md` (generated file)<br>`<workspace>/GEMINI.md` |
+| **Cursor** | Cursor IDE | `~/.cursor/mcp.json`<br>`<workspace>/.cursor/mcp.json` | `~/.cursor/skills/`<br>`~/.cursor/skills-cursor/`<br>`<workspace>/.cursor/skills/`<br>`<workspace>/.cursor/skills-cursor/` | `.cursor/rules/00-mandatory-policy.mdc` (generated file) |
+| **Claude** | Claude Desktop (MCP), Claude Code CLI (policy/skills only) | `~/.config/Claude/claude_desktop_config.json` | `~/.claude/skills/`<br>`<workspace>/.claude/skills/` | `~/.claude/CLAUDE.md`<br>`<workspace>/CLAUDE.md` |
 | **Cline** | VS Code Extension, Cline CLI | `~/.config/Code/.../cline_mcp_settings.json`<br>`<workspace>/.cline/mcp.json` | `~/.cline/skills/`<br>`<workspace>/.cline/skills/` | `.clinerules`<br>`~/.cline/rules/` |
-| **OpenCode** | CLI, VS Code Extension | `~/.config/opencode/opencode.jsonc`<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md`<br>`~/.config/opencode/AGENTS.md` |
+| **OpenCode** | CLI, VS Code Extension | `~/.config/opencode/opencode.jsonc` (read)<br>`~/.config/opencode/opencode.json` (write)<br>`<workspace>/.opencode/mcp.json` | `~/.config/opencode/skill/`<br>`~/.config/opencode/skills/`<br>`<workspace>/.opencode/skill/`<br>`<workspace>/.opencode/skills/` | `AGENTS.md`<br>`~/.config/opencode/AGENTS.md` |
 | **Freebuff** | Desktop Agent | Loopback HTTP or workspace state | `.agents/skills/`<br>`<workspace>/skills/` | `AGENTS.md` |
 | **Oh My Pi (OMP)** | Terminal Agent CLI | `~/.omp/config.json` | `~/.omp/skills/`<br>`<workspace>/.omp/skills/` | `.omp/system.md` |
 | **Codex CLI** | CLI Tool | Managed write target: `$CODEX_HOME/mcp.json` (default `~/.codex/mcp.json`)<br>`<workspace>/.codex/mcp.json` | `$CODEX_HOME/skills/`<br>`$CODEX_HOME/plugins/cache/`<br>`<workspace>/.codex/skills/` | `AGENTS.md`<br>`$CODEX_HOME/AGENTS.md` |
@@ -163,7 +170,7 @@ For every user task, the public `task_bootstrap` primitive resolves the live pol
 ### Requirements
 - **Operating System**: Linux Ubuntu `>=22.04 LTS` (POSIX native)
 - **Node.js**: `>=22.0.0` (with native `node:sqlite`)
-- **Package Manager**: `pnpm >=10.0.0` (or via `corepack enable`)
+- **Package Manager**: `pnpm@10.15.0` via `corepack enable` (the version pinned in `packageManager`)
 
 ### Setup
 
@@ -196,7 +203,8 @@ unified-mpc status
 # Run comprehensive system diagnostics and path permission checks
 unified-mpc doctor
 
-# Synchronize the current user-edited P1–Pn runtime policy and MCP server lists across all IDEs
+# Synchronize the current user-edited P1–Pn runtime policy across all IDE rule files
+# (MCP server configs are written by `install server` / `prune server`)
 unified-mpc sync
 unified-mpc sync --targets antigravity,cursor,cline
 
@@ -220,7 +228,8 @@ unified-mpc install server remote-mcp \
 # Atomically prune a Skill
 unified-mpc prune skill my-skill
 
-# Atomically prune an MCP Server (terminates process and purges IDE configs)
+# Atomically prune an MCP Server (purges IDE configs and runtime data; it does
+# not kill a server process the CLI does not own)
 unified-mpc prune server sqlite-db
 
 # Launch the Local Web Control Plane
@@ -231,7 +240,12 @@ UNIFIED_MPC_WORKSPACE=/path/to/workspace unified-mpc-mcp-http
 
 # Direct tool inspection and execution
 unified-mpc tools list
-unified-mpc tools call memory__search_nodes '{"query": "capabilities"}'
+unified-mpc tools call rag_recall '{"workspaceId": "9628fc78-f52f-428e-b358-bbfb66037150", "query": "capabilities"}'
+
+# Further command families (see docs/CLI_REFERENCE.md):
+#   workspace add|list|active|activate|deactivate|use · mcp --stdio|--http
+#   storage recover|metrics · index status|revision|gc|maintenance|job|space
+#   publish-credential grant|revoke|status · skill audit · codex doctor
 ```
 
 ---
@@ -272,7 +286,7 @@ See [`docs/DEPLOYMENT_LINUX.md`](docs/DEPLOYMENT_LINUX.md) for installation, env
 |---|---|---|
 | **Loopback Origin Policy** | `packages/mcp-server/` & `apps/web/` | Blocks DNS rebinding and cross-site HTTP requests (403 Forbidden). |
 | **Fail-Closed Mutation Policy** | `packages/mcp-server/src/mutation-policy.ts` | Prevents unauthorized file writes, deletes, or command execution without explicit mode approval. |
-| **Workspace Path Containment** | `packages/filesystem/` & `packages/extensions/` | Blocks path traversal (`../`) attacks outside authorized project workspace boundaries. |
+| **Workspace Path Containment** | `packages/workspace/` (owner) + `packages/extensions/` (purge/skill boundaries) | Blocks path traversal (`../`) attacks outside authorized project workspace boundaries. |
 | **Cryptographic Secret Redaction** | `packages/audit/src/redactor.ts` | Automatically sanitizes API tokens, private keys, and passwords from logs and activity journals. |
 | **Self-Aggregation Block** | `packages/extensions/src/mcp-config-loader.ts` | Prevents infinite loops caused by Unified-MPC-Server discovering and invoking itself as a child. |
 | **Workspace Harness & Capability Trust** | `packages/mcp-server/src/harness-runtime.ts` + `packages/extensions/src/extensions-service.ts` | Requires a readable `AGENTS.md`, fingerprints policy and external MCP contracts, fails closed when required capabilities are unavailable, and consumes per-path pre-edit authorization after each successful code mutation. |
@@ -282,7 +296,7 @@ See [`docs/DEPLOYMENT_LINUX.md`](docs/DEPLOYMENT_LINUX.md) for installation, env
 
 ## Monorepo Architecture
 
-The repository contains 21 active workspace packages under the `@unified-mpc/*` namespace:
+The repository contains 21 active workspaces (3 applications and 18 packages) under the `@unified-mpc/*` namespace:
 
 ```text
 Unified-MPC-Server/
@@ -293,15 +307,16 @@ Unified-MPC-Server/
 ├── packages/
 │   ├── extensions/           # Multi-Client Ingestion, Pruner, Config Loader, Skill Catalog, IDE Sync
 │   ├── mcp-server/           # Core MCP server, Ponytail runtime, Two-Tier Catalog, Security policies
+│   ├── thai-rag/             # Native workspace-scoped RAG: provider contract, embedding index jobs, canonical revisions
 │   ├── application/          # Durable goal continuation, checkpoint service, agent swarm
 │   ├── storage/              # SQLite database engine (node:sqlite WAL mode), transaction store
 │   ├── capabilities/         # Linux process execution, shell task store, system probes, CDP
-│   ├── filesystem/           # Scoped workspace I/O, path containment, patch applier
+│   ├── filesystem/           # Scoped workspace I/O and patch applier (consumes workspace path guards)
 │   ├── process/              # Background process lifecycle, ring buffers, process supervision
-│   ├── git/                  # Guarded Git mutations, diff fingerprinting, stash rollback
+│   ├── git/                  # Guarded Git mutations (rebase/worktree safety, no-autostash rebase)
 │   ├── permissions/          # Permission profiles (safe, balanced, full bypass)
 │   ├── audit/                # Structured event logging with cryptographic secret redaction
-│   ├── search/               # ripgrep integration, structural symbol searching
+│   ├── search/               # ripgrep integration and context-economy result shaping (symbol search is Thai-RAG)
 │   ├── workspace/            # Workspace boundary manager, secret detection
 │   ├── project/              # Project type and toolchain detection
 │   ├── codex/                # Codex CLI delegation adapter and discovery
@@ -319,9 +334,14 @@ Unified-MPC-Server/
 - [`SPEC.md`](SPEC.md): Master technical specification and behavioral invariants.
 - [`CONTEXT.md`](CONTEXT.md): Living architectural context and domain glossary.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): In-depth system architecture and package dependency graph.
+- [`docs/CLI_REFERENCE.md`](docs/CLI_REFERENCE.md): Every `unified-mpc` subcommand, option and exit-code contract.
 - [`docs/USAGE_TH.md`](docs/USAGE_TH.md): Comprehensive user manual in Thai (คู่มือภาษาไทย).
 - [`docs/MULTI_CLIENT_SYNC.md`](docs/MULTI_CLIENT_SYNC.md): Multi-client synchronization protocol and block injection details.
 - [`docs/WEB_CONTROL_PLANE.md`](docs/WEB_CONTROL_PLANE.md): Web Control Plane architecture and API documentation.
+- [`docs/GUARDED_MERGE.md`](docs/GUARDED_MERGE.md): Exact-head merge evidence chain and the guarded merge providers.
+- [`docs/APPROVED_PUSH_PATH.md`](docs/APPROVED_PUSH_PATH.md): Approved publish path, `publish_approve` receipts and credential mediation.
+- [`docs/WORKFLOW_GATE.md`](docs/WORKFLOW_GATE.md): Phase model, the shared gate rule, and its migration status.
+- [`docs/architecture/TOOL_CONTRACT.md`](docs/architecture/TOOL_CONTRACT.md): Generated inventory of the live MCP tool registry.
 
 ---
 

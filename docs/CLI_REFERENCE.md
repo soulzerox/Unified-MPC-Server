@@ -33,6 +33,22 @@ $ unified-mpc doctor
 [WARN] codex: Codex is not installed
 ```
 
+### `unified-mpc mcp --stdio|--http [--workspace <id-or-path>]`
+Starts one MCP runtime in the foreground: `--stdio` for a host-connected STDIO
+session, `--http` for the loopback Streamable HTTP endpoint on
+`127.0.0.1:18765/mcp`. Exactly one transport flag is required; `--workspace`
+selects the Active Project context for the session instead of the registry
+default. The packaged entrypoints `unified-mpc-mcp-stdio` and
+`unified-mpc-mcp-http` expose the same two transports.
+
+### `unified-mpc help`
+`help`, `--help` and `-h` print the command summary.
+
+### `unified-mpc codex doctor`
+Optional Codex CLI discovery probe. It prints `Codex available` or
+`Codex not installed (optional)`, exits `0` in both cases, and exits `1` only
+when discovery itself fails.
+
 ---
 
 ## 2. Dynamic Ingestion Commands
@@ -83,10 +99,10 @@ unified-mpc prune skill local-helper --workspace /home/user/project
 ```
 
 ### `unified-mpc prune server`
-Terminates running server child processes (`SIGTERM` -> `SIGKILL`) and purges entries from all IDE config files.
+Purges the server entry from all target IDE config files and removes its skill links and runtime data. The CLI does not own the server process, so it does not signal or kill it; an embedded host that injects a session manager also drops that server's live MCP session.
 ```bash
 # Syntax
-unified-mpc prune server <name> [--targets <targets>] [--scope global|workspace] [--workspace <path>] [--no-kill]
+unified-mpc prune server <name> [--targets <targets>] [--scope global|workspace] [--workspace <path>]
 
 # Example
 unified-mpc prune server sqlite --targets cline,opencode
@@ -104,7 +120,8 @@ Compiles the persisted user-editable P1–Pn runtime policy and synchronizes it 
 # Syntax
 unified-mpc sync [--targets <t1,t2,...>] [--workspace <path>]
 
-# Supported targets: antigravity, cursor, claude, opencode, cline, omp, codex, all (default: all)
+# Supported targets: antigravity, cursor, claude, opencode, cline, omp, codex, agents, all (default: all)
+# Freebuff uses the OpenCode target's paths.
 
 # Example: Synchronize policy across all clients in workspace
 unified-mpc sync --workspace /home/user/my-project
@@ -930,7 +947,29 @@ use --json for the full inventory, including identical and unique names
 
 ---
 
-## 11. Exit Code Contract
+## 11. Workspace Registry Commands
+
+The registry is the source of truth for project roots: path containment, Active
+Project scope, and the HTTP/ChatGPT project context all resolve against it.
+
+- `unified-mpc workspace add <path>` — register one project root and print its
+  stable workspace id (`workspace added: <id>`). The display name defaults to the
+  directory's basename.
+- `unified-mpc workspace list` — print one tab-separated `id`, display name and
+  root path per registered workspace.
+- `unified-mpc workspace active` — print the ordered Active Project set used by
+  HTTP/ChatGPT sessions. The first entry is the Primary Project.
+- `unified-mpc workspace activate <id-or-path>` — add one registered project to
+  that set; `workspace deactivate <id-or-path>` removes it.
+- `unified-mpc workspace use <id-or-path>` — activate the project and make it
+  Primary in one step.
+
+`<id-or-path>` accepts either the workspace id printed by `workspace add` or the
+registered root path.
+
+---
+
+## 12. Exit Code Contract
 
 The `unified-mpc` CLI adheres to a deterministic exit code contract:
 - `0`: Success / normal termination.

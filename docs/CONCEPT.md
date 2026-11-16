@@ -32,7 +32,7 @@ Unified-MPC-Server enforces an architectural bifurcation at every level (TypeScr
 When a server or skill is removed, standard package managers often leave orphaned background processes, dangling symlinks, or dirty configuration files.
 
 Unified-MPC-Server provides an atomic **Zero-Artifact Pruner**:
-1. **Process Termination**: Sends `SIGTERM` to running child processes, escalating to `SIGKILL` after 3,000ms.
+1. **Session Release**: When the host injects a session manager, pruning drops that server's live MCP session. The CLI and Web Control Plane do not own server processes, so neither signals nor kills one.
 2. **Configuration Clean**: Rewrites all target IDE JSON/JSONC configuration files atomically, preserving valid syntax and other installed servers.
 3. **Storage Purge**: Deletes associated cache and data directories with strict path traversal boundaries (`isSafePurgePath`).
 4. **Symlink Sweep**: Cleans broken symlinks and empty parent directories to guarantee a clean system state.
@@ -66,9 +66,9 @@ The Ponytail harness embeds senior engineering discipline into every AI turn:
 - **YAGNI (You Aren't Gonna Need It)**: Refuse speculative abstractions, excessive layers, and unnecessary dependencies.
 - **Standard Library First**: Prioritize Node.js standard libraries and POSIX tools over external packages.
 - **Intensity Tiers**:
-  - `OFF`: Standard tool execution pass-through.
+  - `OFF` (Default): Standard tool execution pass-through.
   - `LITE`: Advisory warnings on large diffs and unreferenced imports.
-  - `FULL` (Default): Requires unit test verification before marking steps complete.
+  - `FULL`: Requires unit test verification before marking steps complete.
   - `ULTRA`: Strict red-green-refactor loop; blocks commits without passing tests.
 
 ---
@@ -92,9 +92,10 @@ This design separates **availability**, **trust**, and **policy enforcement**: a
 
 Injecting hundreds of tool schemas into an LLM's context window exhausts token budgets and degrades reasoning accuracy.
 
-Unified-MPC-Server solves this with a **Two-Tier Catalog**:
-- **Tier 1 (Core)**: 10–12 essential tools (`read_file`, `edit_file`, `run_command`, `git_status`, `catalog_list`, `call_tool_dynamic`) advertised in the primary system prompt.
-- **Tier 2 (On-Demand)**: Specialized downstream tools discovered dynamically via `catalog_list` metadata queries and invoked via `call_tool_dynamic(tool_name, args)`.
+Unified-MPC-Server solves this with a two-tier exposure model:
+- **Default tier**: `ToolRegistry.list()` advertises 270 of the 277 registered tool definitions in one `tools/list` — the file (`read_file`, `edit_file`), shell, git, search, workspace, goal, plan and integration surfaces, each with a typed schema.
+- **Opt-in tier**: the seven Codex/Agent-Swarm tools (`codex_status`, `codex_run`, `codex_task_list`, `codex_task_status`, `codex_task_logs`, `codex_stop`, `agent_swarm_run`) are advertised only when Codex delegation and Agent Swarm are enabled; `ToolRegistry.listAll()` then exposes all 277.
+- **Child MCP servers stay outside the catalog**: policy-vetted read-only calls execute through the parent, mutations keep the normal approval boundary, and idle children are released, so their schemas never enter the client context by default.
 
 ---
 

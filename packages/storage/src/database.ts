@@ -117,7 +117,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '046_workspace_journal' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '047_workspace_journal_closure' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -200,8 +200,8 @@ export class SqliteDatabase {
       sql: RETIRE_TURN_PERSISTENCE_MIGRATION_SQL,
       reclaimFreePages: true,
     });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_JOURNAL_MIGRATION_SQL });
-    this.applyMigration({ id: '047_workspace_journal_closure', sql: WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL });
+    this.applyMigration({ id: '046_workspace_journal', sql: WORKSPACE_JOURNAL_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

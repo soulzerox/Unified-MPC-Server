@@ -135,9 +135,10 @@ function resolvePackageTarget(packageDir, subpath) {
     return undefined;
   }
   if (subpath.length > 0) {
-    // Node refuses a specifier that walks out of its package, so a release must
-    // not be judged by a file the loader would never resolve.
-    if (subpath.split("/").includes("..")) return undefined;
+    // Node refuses a specifier that walks out of its package but accepts
+    // `pkg/a/../b.js`, so refuse on the resolved target rather than the spelling.
+    const subpathTarget = path.resolve(packageDir, subpath);
+    if (!subpathTarget.startsWith(packageDir + path.sep)) return undefined;
     // A workspace package can export a subpath whose target is not the literal
     // path (`@unified-mpc/shared/date-time-display`), so follow its exports map
     // before falling back to the file, which would refuse a carried file. A
@@ -189,6 +190,20 @@ function resolveWorkspaceSpecifier(fromFile, specifier) {
   }
 }
 
+// Every resolved specifier is checked, not only the JS closure pushed onto the
+// queue: a data file that is a symlink out of the release is the same defect as
+// a missing one — the service reads bytes the release does not carry.
+function memberProblem(resolved, fromFile) {
+  if (!fs.existsSync(resolved)) {
+    return `${path.relative(root, resolved)} (imported by ${path.relative(root, fromFile)})`;
+  }
+  const real = fs.realpathSync(resolved);
+  if (!insideRoot(real)) {
+    return `${path.relative(root, resolved)} (resolves outside the release to ${real})`;
+  }
+  return undefined;
+}
+
 const seen = new Set();
 const missing = new Set();
 const queue = [...entries];
@@ -229,8 +244,9 @@ while (queue.length > 0) {
   }
   for (const match of source.matchAll(relative)) {
     const resolved = path.resolve(path.dirname(file), match[1]);
-    if (!fs.existsSync(resolved)) {
-      missing.add(`${path.relative(root, resolved)} (imported by ${path.relative(root, file)})`);
+    const problem = memberProblem(resolved, file);
+    if (problem !== undefined) {
+      missing.add(problem);
       continue;
     }
     if (/\.[cm]?js$/.test(resolved)) queue.push(resolved);
@@ -241,8 +257,9 @@ while (queue.length > 0) {
       missing.add(`${match[1]} (not resolvable from ${path.relative(root, file)})`);
       continue;
     }
-    if (!fs.existsSync(resolved)) {
-      missing.add(`${path.relative(root, resolved)} (imported by ${path.relative(root, file)})`);
+    const problem = memberProblem(resolved, file);
+    if (problem !== undefined) {
+      missing.add(problem);
       continue;
     }
     if (/\.[cm]?js$/.test(resolved)) queue.push(resolved);

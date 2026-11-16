@@ -247,6 +247,29 @@ printf "export * from '@unified-mpc/plain/../../../leak.js';\n" \
   >"$closure_subpath_escape/apps/cli/dist/index.js"
 expect_fail 67 RUNTIME_ARTIFACT_INCOMPLETE web "$closure_subpath_escape"
 
+# A member imported as data counts too: the same escape must be refused one file
+# extension over, not only for the JS closure that gets queued.
+closure_data_escape="$TMP_ROOT/closure-data-escape"
+make_runtime "$closure_data_escape"
+printf "export { default } from './data.json' with { type: 'json' };\n" \
+  >"$closure_data_escape/apps/cli/dist/index.js"
+printf '{"carried":false}\n' >"$TMP_ROOT/outside-data.json"
+ln -s "$TMP_ROOT/outside-data.json" "$closure_data_escape/apps/cli/dist/data.json"
+expect_fail 67 RUNTIME_ARTIFACT_INCOMPLETE web "$closure_data_escape"
+
+# Node accepts a mid-path `..` (`pkg/a/../b.js`) and loads b.js, so refusing on
+# the spelling instead of the resolved target would refuse a valid release.
+closure_subpath_midway="$TMP_ROOT/closure-subpath-midway"
+make_runtime "$closure_subpath_midway"
+printf "export {};\n" >"$closure_subpath_midway/apps/cli/dist/bin/mcp-http.js"
+midway_package="$closure_subpath_midway/apps/cli/node_modules/@unified-mpc/plain"
+mkdir -p "$midway_package/a"
+printf '{"name":"@unified-mpc/plain","type":"module"}\n' >"$midway_package/package.json"
+printf 'export const target = 1;\n' >"$midway_package/b.js"
+printf "export * from '@unified-mpc/plain/a/../b.js';\n" \
+  >"$closure_subpath_midway/apps/cli/dist/index.js"
+expect_ok web "$closure_subpath_midway"
+
 # The link site and its store copy are one file, so a missing member reached
 # through both paths is reported once, not twice.
 set +e

@@ -187,7 +187,7 @@ Required evidence per gate, all keyed by the resolved subject:
 | `verify` | a `mergeReady` receipt whose `headSha` + `diffFingerprint` match, from the `merge` profile on a clean tree | yes |
 | `review` | a clean review receipt whose `headSha` + capsule `diffFingerprint` match, and a `verify` receipt for the head | yes |
 | `integrate` | `verify` + `review` allowed, PR open/non-draft, base unchanged, no retracted closing keyword | yes, in two receipt models; the draft and closing-keyword checks are CLI-only today |
-| `close` | cleanup disposition `retention_candidate`, worktree removal `clean`, no completion blocker; merge evidence and a known base are the routing inputs a later step adds | partially: #828 ships the decision over the three close inputs and a decision receipt; it reads no head, base or merge evidence yet (see "Status after step 3a") |
+| `close` | cleanup disposition `retention_candidate`, worktree removal `clean`, no completion blocker; merge evidence and a known base are the routing inputs a later step adds | partially: #828 ships the decision over the three close inputs and a decision receipt; it reads no head, base or merge evidence yet, and the durable-reference source it needs now exists as the #170 journal (see "Status after step 3a") |
 
 Workflows are versioned data, not code: a profile names the phases and gates it
 requires. The engine owns the semantics.
@@ -379,10 +379,17 @@ being folded into a verdict, and a goal with no cleanup row in scope refuses as
 rows the decision used, and the reader narrows the verdict and every blocker
 instead of casting, so a foreign file is refused rather than formatted.
 
-Step 3b is blocked on one remaining prerequisite, and it is not a guess:
+Step 3b's last prerequisite — the durable-reference source — ships as the #170
+workspace journal:
 
-1. `goalDurableReferenceStates`, without which `evaluateGoalWorkspaceCleanup`
-   reports `durable_references_unknown` for every goal (#170).
+1. `goalDurableReferenceStates` answers `clear`/`present` from
+   `workspace_journal_events`. A goal is `present` while one of its workspaces
+   owns a `started` row with no matching `completed` row, and `clear` otherwise,
+   so an operation that never reported an outcome keeps its worktree. `apps/cli`
+   passes that map into `reconcileLifecycle` and
+   `evaluateGoalWorkspaceCleanup`, so a live journal no longer reports
+   `durable_references_unknown`. Wiring `gate check --phase close` to those ports
+   is what remains: the truth exists, the command does not read it yet.
 
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as

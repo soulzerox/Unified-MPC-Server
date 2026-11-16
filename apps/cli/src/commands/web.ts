@@ -47,6 +47,7 @@ import {
   SqliteGoalRuntimeEventRepository,
   SqliteGoalRuntimeSnapshotRepository,
   SqliteSettingsRepository,
+  SqliteWorkspaceJournalRepository,
   SqliteWorkspaceRepository,
 } from '@unified-mpc/storage';
 import {
@@ -143,6 +144,7 @@ export async function runWeb(
     const goalRepository = new SqliteGoalRepository(database);
     const goalRuntimeEvents = new SqliteGoalRuntimeEventRepository(database);
     const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(database);
+    const workspaceJournal = new SqliteWorkspaceJournalRepository(database);
     const goalRuntimeRead: GoalRuntimeReadPort = serverOptions?.goalRuntimeRead ?? ((): GoalRuntimeReadPort => {
       const goalRuntimeProjection = createWebGoalRuntimeProjection(
         goalRepository,
@@ -202,6 +204,9 @@ export async function runWeb(
         ...protectedByOpenGoal,
       ],
       goalRuntimeProjections,
+      goalDurableReferenceStates: workspaceJournal.goalDurableReferenceStates(
+        lifecycleCandidates.flatMap((workspace) => workspace.goalId === undefined ? [] : [workspace.goalId]),
+      ),
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
     // A registration can be archived outside the removal adapter (lifecycle
@@ -222,6 +227,7 @@ export async function runWeb(
       settings,
       workspaceIndex,
       goalRuntimeSnapshots,
+      workspaceJournal,
       providerGenerations,
       providerVerifications,
     );
@@ -293,6 +299,7 @@ export function createWorkspaceControl(
   settings: SqliteSettingsRepository,
   workspaceIndex: Pick<WorkspaceIndexService, 'forgetWorkspace'>,
   goalRuntimeSnapshots: Pick<SqliteGoalRuntimeSnapshotRepository, 'getGoalRuntimeSnapshot'>,
+  workspaceJournal: Pick<SqliteWorkspaceJournalRepository, 'goalDurableReferenceStates'>,
   providerGenerations: Pick<ProviderGenerationLedger, 'release'>,
   providerVerifications: Pick<ThaiRagWorkspaceVerificationStore, 'invalidate'>,
 ): WorkspaceControlPort {
@@ -329,7 +336,13 @@ export function createWorkspaceControl(
         const snapshot = await goalRuntimeSnapshots.getGoalRuntimeSnapshot(workspace.goalId);
         if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
       }
-      return unwrap(workspaceService.evaluateGoalWorkspaceCleanup({ goalRuntimeProjections }));
+      const workspaces = await workspaceService.list();
+      return unwrap(workspaceService.evaluateGoalWorkspaceCleanup({
+        goalRuntimeProjections,
+        goalDurableReferenceStates: workspaceJournal.goalDurableReferenceStates(
+          workspaces.flatMap((workspace) => workspace.goalId === undefined ? [] : [workspace.goalId]),
+        ),
+      }));
     },
     selection: async (): Promise<WebWorkspaceSelectionSnapshot | null> => {
       const service = await selection();

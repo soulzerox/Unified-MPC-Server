@@ -91,6 +91,7 @@ import {
   SqlitePublishApprovalRepository,
   SqlitePublishCredentialRepository,
   SqliteSettingsRepository,
+  SqliteWorkspaceJournalRepository,
   SqliteWorkspaceRepository,
   assertStorageIdentitySafe,
 } from '@unified-mpc/storage';
@@ -193,6 +194,20 @@ const DEFAULT_THAI_RAG_START_RETRY_MS = 5_000;
  * interrupted instead of holding queue capacity forever.
  */
 const HEAVY_JOB_QUEUE_RECOVERY_INTERVAL_MS = 60_000;
+
+/**
+ * Tools whose call can leave work behind in a workspace, so the durable
+ * journal keeps a row for them (#170, first slice). Read-only and preview-only
+ * tools are deliberately absent: they cannot own a result worth recovering, and
+ * journaling them would turn a recovery index into a request log.
+ */
+const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
+  'task_create', 'task_cancel', 'process_start', 'process_stop',
+  'git_publish', 'guarded_pr_merge', 'run_goal', 'rebase_goal_workspace',
+  'run_affected_tests', 'benchmark_run', 'verify_incremental',
+  'project_test', 'project_build', 'project_lint', 'project_typecheck',
+  'codex_run', 'codex_stop', 'delegate', 'parallel_delegate', 'delegate_cancel',
+]);
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
@@ -362,6 +377,11 @@ export function createStdioMcpRuntime(
   // `AuditService` over the same SQLite ledger.
   const auditRepository = new SqliteAuditRepository(database);
   const auditService = new AuditService(auditRepository);
+  // #170 first slice: the durable-reference source the close gate needed. Rows
+  // are written beside the audit entry for the operations that can leave work
+  // behind, so a later session (or the close phase) can see that an operation
+  // touched a Goal Workspace without replaying chat context.
+  const workspaceJournal = new SqliteWorkspaceJournalRepository(database);
   const publishApprovals = new SqlitePublishApprovalRepository(database);
   // #297 S2c: the same lease ledger backs the publish path and the expiry sweep.
   const publishCredentials = new SqlitePublishCredentialRepository({
@@ -1438,6 +1458,25 @@ export function createStdioMcpRuntime(
         durationMs: event.durationMs,
         timestamp: event.timestamp,
       });
+      if (event.workspaceId !== undefined && RECOVERY_JOURNAL_TOOLS.has(event.toolName)) {
+        try {
+          workspaceJournal.append({
+            workspaceId: event.workspaceId,
+            operationKind: event.toolName,
+            toolName: event.toolName,
+            callId: event.callId,
+            phase: event.phase,
+            status: event.phase === 'started' ? 'started' : 'completed',
+            resultCode: event.resultCode,
+            ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+            ...(event.traceId === undefined ? {} : { traceId: event.traceId }),
+            recordedAt: event.timestamp,
+          });
+        } catch {
+          // Best-effort by contract: a journal write must never fail the tool
+          // call it describes. The audit entry above already succeeded.
+        }
+      }
     },
   });
   // #80 slice 3: read-only worktree lifecycle inspection. The ownership ledger

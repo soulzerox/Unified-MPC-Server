@@ -25,12 +25,12 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  * takes its three inputs as ports instead of reaching for a runtime.
  *
  * This slice stops at the decision: `apps/cli/src/index.ts` routes no `gate`
- * command yet. Wiring the ports needs a durable-reference source for
- * `evaluateGoalWorkspaceCleanup`; until it exists the command would refuse every
- * goal. The removal preview is no longer a blocker: the client-scoped
- * `createGoalWorktreeRemovalPreviewPort` in `packages/application` answers it
- * without the owning session (open question 5). This is recorded in
- * `docs/WORKFLOW_GATE.md` ("Status after step 3a").
+ * command yet. Both ports that were missing now exist — the #170 workspace
+ * journal answers `goalDurableReferenceStates`, and the client-scoped
+ * `createGoalWorktreeRemovalPreviewPort` in `packages/application` previews a
+ * worktree without the owning session (open question 5) — so the remaining work
+ * is wiring, not evidence. This is recorded in `docs/WORKFLOW_GATE.md`
+ * ("Status after step 3a").
  */
 
 /**

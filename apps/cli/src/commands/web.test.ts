@@ -353,6 +353,7 @@ describe('web CLI command', () => {
           {} as never,
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
+          { goalDurableReferenceStates: () => new Map() },
           ledger,
           { invalidate },
         );
@@ -397,6 +398,7 @@ describe('web CLI command', () => {
           {} as never,
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
+          { goalDurableReferenceStates: () => new Map() },
           { release: async () => { throw new Error('ledger is read-only'); } },
           { invalidate: async () => ({ ok: true as const, value: undefined }) },
         );
@@ -436,6 +438,7 @@ describe('web CLI command', () => {
           {} as never,
           { forgetWorkspace: async () => undefined },
           { getGoalRuntimeSnapshot: async () => null },
+          { goalDurableReferenceStates: () => new Map() },
           { release },
           { invalidate: async () => ({ ok: false as const, error: { message: 'verification is read-only' } }) },
         );

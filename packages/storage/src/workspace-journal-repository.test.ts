@@ -280,6 +280,42 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-goal' }).filter((entry) => entry.phase === 'started')[0]?.closureCode).toBe('no_live_handle');
   });
 
+  it('closes only the calls a probe names, so one host cannot answer for another', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    for (const callId of ['own-call', 'other-host-call']) {
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'project_dev', phase: 'started', status: 'started', callId });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'project_dev', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
+    }
+
+    // The process list a runtime can read only holds its own handles, so the
+    // probe names the one call it can speak for. The sibling keeps pinning.
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['project_dev'], callIds: ['own-call'], closureCode: 'no_live_handle',
+    })).toBe(1);
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    const started = new Map(journal.list({ workspaceId: 'ws-goal' })
+      .filter((entry) => entry.phase === 'started')
+      .map((entry) => [entry.callId, entry.closureCode]));
+    expect(started.get('own-call')).toBe('no_live_handle');
+    expect(started.get('other-host-call')).toBeUndefined();
+
+    // An empty scope closes nothing at all: "no call to speak for" is not "all clear".
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['project_dev'], callIds: [], closureCode: 'no_live_handle',
+    })).toBe(0);
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['project_dev'], callIds: ['other-host-call'], closureCode: 'no_live_handle',
+    })).toBe(1);
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+  });
+
   it('leaves calls a probe could not have observed open, and refuses kinds it may not close', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({

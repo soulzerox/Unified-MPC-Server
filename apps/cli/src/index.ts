@@ -49,10 +49,9 @@ import {
   type RevisionPruneReport,
   type StoredArtifact,
   type Workspace,
-  type WorkspaceLifecycleCleanupEvaluation,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
-import { goalWorkspaceCleanupInputs } from './commands/workspace-cleanup-inputs.js';
+import { createGoalWorkspaceCleanupPort, goalWorkspaceCleanupInputs } from './commands/workspace-cleanup-inputs.js';
 import { ThaiRagIndexJobStore, type ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
@@ -1633,9 +1632,10 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         workspaces,
       });
       const ports: CloseGatePorts = {
-        cleanup: async (): Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>> => state.service.evaluateGoalWorkspaceCleanup({
+        cleanup: createGoalWorkspaceCleanupPort({
+          cleanupInputs,
           goalRuntimeProjections,
-          ...cleanupInputs,
+          evaluate: (evaluationOptions) => state.service.evaluateGoalWorkspaceCleanup(evaluationOptions),
         }),
         removal: async (request) => {
           const previewed = await preview.preview({ workspaceId: request.workspaceId, worktreePath: request.worktreePath, actor });

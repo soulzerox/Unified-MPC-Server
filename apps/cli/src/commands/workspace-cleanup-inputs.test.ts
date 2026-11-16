@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { goalWorkspaceCleanupInputs } from './workspace-cleanup-inputs.js';
+import { ok } from '@unified-mpc/domain';
+import type { GoalRuntimeProjection } from '@unified-mpc/domain';
+import type { WorkspaceCleanupEvaluationOptions } from '@unified-mpc/workspace';
+import { createGoalWorkspaceCleanupPort, goalWorkspaceCleanupInputs } from './workspace-cleanup-inputs.js';
 
 /**
  * The assembly is what the gate and the lifecycle path were getting wrong, so it
@@ -48,5 +51,37 @@ describe('goalWorkspaceCleanupInputs', () => {
 
     expect(inputs.protectedWorkspaceIds).toEqual([]);
     expect(inputs.goalDurableReferenceStates).toEqual(new Map());
+  });
+});
+
+/**
+ * The gate's own test injects a fake `gateCheck`, so the port composition was
+ * the one place a narrowed spread (`...cleanupInputs` losing a field) would keep
+ * every suite green while the close gate reported `allowed` for a protected or
+ * durable-reference-pinned workspace. Assert the evaluator receives all three.
+ */
+describe('createGoalWorkspaceCleanupPort', () => {
+  it('hands the evaluator the projections and both assembled inputs', async () => {
+    const seen: WorkspaceCleanupEvaluationOptions[] = [];
+    const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
+    const goalDurableReferenceStates = new Map([['goal-1', 'present' as const]]);
+    const port = createGoalWorkspaceCleanupPort({
+      cleanupInputs: { protectedWorkspaceIds: ['project-1'], goalDurableReferenceStates },
+      goalRuntimeProjections,
+      evaluate: async (input) => {
+        seen.push(input);
+        return ok([]);
+      },
+    });
+
+    const result = await port({ workspaceId: 'goal-workspace', goalId: 'goal-1' });
+
+    expect(result).toEqual(ok([]));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({
+      goalRuntimeProjections,
+      protectedWorkspaceIds: ['project-1'],
+      goalDurableReferenceStates,
+    });
   });
 });

@@ -1,10 +1,23 @@
 import type { SqliteGoalRepository, SqliteSettingsRepository, SqliteWorkspaceJournalRepository } from '@unified-mpc/storage';
 import { workspaceSelectionReferences } from '@unified-mpc/application';
 import { USER_SETTING_KEYS } from '@unified-mpc/shared';
+import type { Result } from '@unified-mpc/domain';
+import type { WorkspaceCleanupEvaluationOptions, WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace';
+import type { CloseGatePorts } from './gate-command.js';
 
 interface CleanupWorkspace {
   readonly id: string;
   readonly goalId?: string | undefined;
+}
+
+/**
+ * Everything a goal-workspace cleanup decision needs beyond the runtime
+ * projections. Both fields come from one place so a call site cannot pass one
+ * without the other.
+ */
+export interface GoalWorkspaceCleanupInputs {
+  readonly protectedWorkspaceIds: readonly string[];
+  readonly goalDurableReferenceStates: ReturnType<SqliteWorkspaceJournalRepository['goalDurableReferenceStates']>;
 }
 
 /**
@@ -22,10 +35,7 @@ export async function goalWorkspaceCleanupInputs(options: {
   readonly goals: Pick<SqliteGoalRepository, 'countWorkspaceGoalsForHost'>;
   readonly journal: Pick<SqliteWorkspaceJournalRepository, 'goalDurableReferenceStates'>;
   readonly workspaces: readonly CleanupWorkspace[];
-}): Promise<{
-  readonly protectedWorkspaceIds: readonly string[];
-  readonly goalDurableReferenceStates: ReturnType<SqliteWorkspaceJournalRepository['goalDurableReferenceStates']>;
-}> {
+}): Promise<GoalWorkspaceCleanupInputs> {
   const protectedWorkspaceIds: string[] = [
     ...workspaceSelectionReferences(options.settings.get(USER_SETTING_KEYS.httpWorkspaceSelection)),
   ];
@@ -38,4 +48,23 @@ export async function goalWorkspaceCleanupInputs(options: {
     protectedWorkspaceIds,
     goalDurableReferenceStates: options.journal.goalDurableReferenceStates(goalIds),
   };
+}
+
+/**
+ * The close gate's cleanup port, composed from the assembled inputs.
+ *
+ * It exists so the composition can be asserted: dropping either field used to be
+ * invisible because the gate's own test injects a fake `gateCheck`, and a gate
+ * that forgets `goalDurableReferenceStates` reports `allowed` for a workspace the
+ * lifecycle path would keep.
+ */
+export function createGoalWorkspaceCleanupPort(options: {
+  readonly cleanupInputs: GoalWorkspaceCleanupInputs;
+  readonly goalRuntimeProjections: NonNullable<WorkspaceCleanupEvaluationOptions['goalRuntimeProjections']>;
+  readonly evaluate: (input: WorkspaceCleanupEvaluationOptions) => Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>>;
+}): CloseGatePorts['cleanup'] {
+  return async () => options.evaluate({
+    goalRuntimeProjections: options.goalRuntimeProjections,
+    ...options.cleanupInputs,
+  });
 }

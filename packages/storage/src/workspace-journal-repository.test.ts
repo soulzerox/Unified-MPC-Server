@@ -265,7 +265,7 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
 
     expect(journal.closeDeferredCalls({
-      workspaceId: 'ws-goal', operationKinds: ['process_start'], closureCode: 'no_live_handle',
+      workspaceId: 'ws-goal', operationKinds: ['process_start'], callIds: ['spawn-1'], closureCode: 'no_live_handle',
     })).toBe(1);
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
 
@@ -275,7 +275,7 @@ describe('SqliteWorkspaceJournalRepository', () => {
 
     // A retried probe is a no-op, and it cannot rewrite the first verdict.
     expect(journal.closeDeferredCalls({
-      workspaceId: 'ws-goal', operationKinds: ['process_start'], closureCode: 'other_reason',
+      workspaceId: 'ws-goal', operationKinds: ['process_start'], callIds: ['spawn-1'], closureCode: 'other_reason',
     })).toBe(0);
     expect(journal.list({ workspaceId: 'ws-goal' }).filter((entry) => entry.phase === 'started')[0]?.closureCode).toBe('no_live_handle');
   });
@@ -331,6 +331,7 @@ describe('SqliteWorkspaceJournalRepository', () => {
     // cannot claim the handle behind it is gone.
     expect(journal.closeDeferredCalls({
       workspaceId: 'ws-goal', operationKinds: ['process_start', 'git_publish'],
+      callIds: ['older', 'live-call', 'newer'],
       recordedAtOrAfter: '2026-11-16T10:30:00.000Z', closureCode: 'no_live_handle',
     })).toBe(1);
     const byCall = new Map(journal.list({ workspaceId: 'ws-goal' }).map((entry) => [`${entry.callId}/${entry.phase}`, entry]));
@@ -355,7 +356,7 @@ describe('SqliteWorkspaceJournalRepository', () => {
 
     journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'open-1' });
     journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'open-1', resultCode: 'ok' });
-    journal.closeDeferredCalls({ workspaceId: 'ws-goal', operationKinds: ['process_start'], closureCode: 'no_live_handle' });
+    journal.closeDeferredCalls({ workspaceId: 'ws-goal', operationKinds: ['process_start'], callIds: ['open-1'], closureCode: 'no_live_handle' });
     for (const callId of ['spawn-2', 'spawn-3']) {
       journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'started', status: 'started', callId });
       journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });

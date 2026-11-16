@@ -1445,6 +1445,47 @@ export function createStdioMcpRuntime(
   // `IN (...)` list, never a correctness decision.
   const ownProcessHandleCalls = new Map<string, string>();
   const MAX_REMEMBERED_PROCESS_CALLS = 256;
+  /**
+   * #170 freshness: a handle-returning call ends, but its `completed` row is not
+   * evidence the work did. Ask the store that owns the handles; only it may close
+   * the pin. A launcher returns while its process is still live, so every later
+   * completion in the workspace retries the calls this runtime opened — the pin
+   * is released by the first request that finds them gone, never by another
+   * host's view. Best-effort by contract: an unclosed pin errs closed.
+   */
+  const sweepDeferredClosure = async (event: ActivitySinkEvent): Promise<void> => {
+    if (event.workspaceId === undefined) return;
+    if (event.phase === 'started' && PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) {
+      ownProcessHandleCalls.set(event.callId, event.workspaceId);
+      while (ownProcessHandleCalls.size > MAX_REMEMBERED_PROCESS_CALLS) {
+        const oldest = ownProcessHandleCalls.keys().next().value;
+        if (oldest === undefined) break;
+        ownProcessHandleCalls.delete(oldest);
+      }
+      return;
+    }
+    if (event.phase !== 'completed') return;
+    const own = [...ownProcessHandleCalls]
+      .filter(([, workspaceId]) => workspaceId === event.workspaceId)
+      .map(([callId]) => callId);
+    if (own.length === 0 && !PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) return;
+    try {
+      await closeObservedDeferredCalls({
+        journal: workspaceJournal,
+        ...(deferredClosureServices.current?.process === undefined
+          ? {}
+          : { processes: deferredClosureServices.current.process }),
+        actor,
+        workspaceId: event.workspaceId,
+        callIds: [...new Set([event.callId, ...own])],
+        closedAt: event.timestamp,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
   const activityTracker = new ActivityTracker({
     async record(event: ActivitySinkEvent): Promise<void> {
       // Publish starts before slower durable evidence so updater quiet-time
@@ -1497,44 +1538,10 @@ export function createStdioMcpRuntime(
             `Unified-MPC workspace journal append failed: ${error instanceof Error ? error.message : String(error)}\n`,
           );
         }
-        // #170 freshness: a handle-returning call ends here, but its `completed`
-        // row is not evidence the work did. Ask the store that owns the handles;
-        // only it may close the pin. A launcher returns while its process is
-        // still live, so this sweep also retries the calls this runtime opened
-        // earlier: the pin is released by whichever later request finds them
-        // gone, never by another host's view.
-        if (event.phase === 'started' && event.workspaceId !== undefined
-          && PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) {
-          ownProcessHandleCalls.set(event.callId, event.workspaceId);
-          while (ownProcessHandleCalls.size > MAX_REMEMBERED_PROCESS_CALLS) {
-            const oldest = ownProcessHandleCalls.keys().next().value;
-            if (oldest === undefined) break;
-            ownProcessHandleCalls.delete(oldest);
-          }
-        }
-        if (event.phase === 'completed' && event.workspaceId !== undefined) {
-          const callIds = [event.callId, ...[...ownProcessHandleCalls]
-            .filter(([, workspaceId]) => workspaceId === event.workspaceId)
-            .map(([callId]) => callId)];
-          try {
-            await closeObservedDeferredCalls({
-              journal: workspaceJournal,
-              ...(deferredClosureServices.current?.process === undefined
-                ? {}
-                : { processes: deferredClosureServices.current.process }),
-              actor,
-              workspaceId: event.workspaceId,
-              callIds,
-              closedAt: event.timestamp,
-            });
-          } catch (error) {
-            // Best-effort, like the append above: an unclosed pin errs closed.
-            process.stderr.write(
-              `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,
-            );
-          }
-        }
       }
+      // Runs for every completion in the workspace, journaled or not: the
+      // release point must not depend on which tool the next request happens to be.
+      await sweepDeferredClosure(event);
     },
   });
   // #80 slice 3: read-only worktree lifecycle inspection. The ownership ledger

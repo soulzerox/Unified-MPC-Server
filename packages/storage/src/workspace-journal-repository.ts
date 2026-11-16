@@ -105,8 +105,12 @@ export interface WorkspaceJournalClosureRequest {
   readonly recordedAtOrAfter?: string;
   readonly closureCode: string;
   readonly closedAt?: string;
-  /** Restrict to these calls. Omitted closes every matching call in the workspace. */
-  readonly callIds?: readonly string[];
+  /**
+   * The calls this probe speaks for. Required: the journal is shared between
+   * hosts while a probe only sees the handles it created, so an unscoped close
+   * would answer for another host's work. An empty list closes nothing.
+   */
+  readonly callIds: readonly string[];
 }
 
 export interface ListWorkspaceJournalRequest {
@@ -292,10 +296,8 @@ export class SqliteWorkspaceJournalRepository {
     const kinds = [...new Set(request.operationKinds.filter((kind) => required(kind, MAX_OPERATION_CHARS)
       && this.deferredClosureKinds.has(kind)))];
     if (kinds.length === 0) return 0;
-    const calls = request.callIds === undefined
-      ? undefined
-      : [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
-    if (calls !== undefined && calls.length === 0) return 0;
+    const calls = [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
+    if (calls.length === 0) return 0;
     const floor = request.recordedAtOrAfter;
     const result = this.database.connection.prepare(`
       UPDATE workspace_journal_events
@@ -303,14 +305,14 @@ export class SqliteWorkspaceJournalRepository {
       WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
         AND operation_kind IN (${kinds.map(() => '?').join(', ')})
         ${floor === undefined ? '' : 'AND recorded_at >= ?'}
-        ${calls === undefined ? '' : `AND call_id IN (${calls.map(() => '?').join(', ')})`}
+        AND call_id IN (${calls.map(() => '?').join(', ')})
     `).run(
       request.closureCode,
       request.closedAt ?? new Date().toISOString(),
       request.workspaceId,
       ...kinds,
       ...(floor === undefined ? [] : [floor]),
-      ...(calls ?? []),
+      ...calls,
     );
     return Number(result.changes);
   }

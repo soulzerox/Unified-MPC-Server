@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type GoalRuntimeProjection, type Result } from '@unified-mpc/domain';
 import { AuditService } from '@unified-mpc/audit';
 import { formatCodexDiscoveryError, type CodexDiscoveryResult } from '@unified-mpc/codex';
-import { DoctorService, WorkspaceSelectionService, type DoctorProbes, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
+import { DoctorService, WorkspaceSelectionService, createGoalWorktreeRemovalPreviewPort, goalCompletionWorktreeBlockers, type DoctorProbes, type DoctorReport, type WorkspaceSelectionSnapshot } from '@unified-mpc/application';
 import {
   advanceRevisionFromGit,
   ArtifactQuarantineStore,
@@ -32,6 +32,7 @@ import {
   sharedProcessResourceAdmissionController,
   unpinCanonicalRevision,
   verifyCanonicalStore,
+  workspaceLifecycleKind,
   WorkspaceService,
   type CanonicalStatusReport,
   type CanonicalRevisionListReport,
@@ -48,12 +49,13 @@ import {
   type RevisionPruneReport,
   type StoredArtifact,
   type Workspace,
+  type WorkspaceLifecycleCleanupEvaluation,
 } from '@unified-mpc/workspace';
 import { createStdioMcpRuntime, type StdioMcpRuntime, type StdioMcpRuntimeOptions } from './runtime/stdio-mcp-runtime.js';
 import { ThaiRagIndexJobStore, type ThaiRagIndexJobListing } from '@unified-mpc/thai-rag';
 import { recordPublishCredentialSweep } from './runtime/publish-credential-sweep.js';
 import { USER_SETTING_KEYS, resolveDataPath as resolveDataPathFromShared } from '@unified-mpc/shared';
-import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
+import { assertStorageIdentitySafe, recoverHistoricalStorageIdentity, SecretToolSecretStore, SqliteAuditRepository, SqliteDatabase, SqliteGoalRuntimeSnapshotRepository, SqlitePublishCredentialRepository, SqliteSettingsRepository, SqliteWorkspaceJournalRepository, SqliteWorkspaceRepository, type SqlitePhysicalMetrics, type StorageRecoveryResult } from '@unified-mpc/storage';
 import { HarnessActivationLedger, ToolRegistry } from '@unified-mpc/mcp-server';
 import {
   createLocalExtensionsService,
@@ -174,6 +176,8 @@ import {
   type SkillAuditCommand,
 } from './commands/skill-audit.js';
 import { createCanonicalGitSource } from './runtime/canonical-git-source.js';
+import { parseGateArgs, type GateCheckCommand } from './commands/gate.js';
+import { runCloseGate, type CloseGatePorts } from './commands/gate-command.js';
 import {
   parsePublishCredentialArgs,
   readPublishCredentialSecret,
@@ -192,6 +196,8 @@ export * from './commands/prune.js';
 export * from './commands/sync.js';
 export * from './commands/web.js';
 export * from './commands/tools.js';
+export * from './commands/gate.js';
+export * from './commands/gate-command.js';
 export * from './commands/storage.js';
 export * from './commands/index-revision.js';
 export * from './commands/index-revision-list.js';
@@ -237,7 +243,8 @@ export type CliCommand =
   | SkillAuditCommand
   | PublishCredentialCommand
   | WebCommand
-  | ToolsCommand;
+  | ToolsCommand
+  | GateCheckCommand;
 
 export interface CliServerHandle {
   close(): Promise<void>;
@@ -311,6 +318,7 @@ export interface CliDependencies {
   web?(options?: WebRunOptions): Promise<Result<WebRunResult>>;
   toolsList?(): Promise<readonly ToolSummary[]> | readonly ToolSummary[];
   toolsCall?(name: string, args: Record<string, unknown>): Promise<Result<unknown>>;
+  gateCheck?(command: GateCheckCommand): Promise<Result<{ readonly lines: readonly string[]; readonly exitCode: number }>>;
   readonly write?: (text: string) => void;
   readonly writeError?: (text: string) => void;
 }
@@ -358,6 +366,7 @@ export function parseCliArgs(args: readonly string[]): Result<CliCommand> {
   if (args[0] === 'publish-credential') return parsePublishCredentialArgs(args.slice(1));
   if (args[0] === 'skill') return parseSkillAuditArgs(args.slice(1));
   if (args[0] === 'web') return parseWebArgs(args.slice(1));
+  if (args[0] === 'gate') return parseGateArgs(args.slice(1));
   if (args[0] === 'tools') return parseToolsArgs(args.slice(1));
   return err(appError('INVALID_INPUT', 'Unknown unified-mpc command'));
 }
@@ -406,6 +415,8 @@ Commands:
   web [--port <p>]                       Start the Local Web Control Plane
   tools list                             List available downstream MCP tools
   tools call <tool> <args-json>          Call a downstream MCP tool headlessly
+  gate check --phase close --workspace <id> [--goal <id>] [--worktree <path>]...
+                                         Decide the Workflow Gate close phase and record its receipt
   workspace add <path>                   Register a workspace root
   workspace list                         List registered workspaces
   workspace active                       Show the HTTP/ChatGPT Active Project set
@@ -807,6 +818,20 @@ Commands:
       }
       write(typeof result.value === 'string' ? result.value : JSON.stringify(result.value, null, 2));
       return 0;
+    }
+    case 'gate-check': {
+      const gateFn = dependencies.gateCheck;
+      if (gateFn === undefined) {
+        writeError('Workflow gate not available');
+        return 1;
+      }
+      const result = await gateFn(parsed.value);
+      if (!result.ok) {
+        writeError(result.error.message);
+        return 1;
+      }
+      for (const line of result.value.lines) write(line);
+      return result.value.exitCode;
     }
   }
 }
@@ -1569,6 +1594,69 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         return err(appError('INTERNAL_ERROR', errorText || `Tool ${name} failed`));
       }
       return ok(response);
+    },
+    gateCheck: async (command: GateCheckCommand): Promise<Result<{ readonly lines: readonly string[]; readonly exitCode: number }>> => {
+      const state = getWorkspaceState();
+      const workspaces = await state.service.list();
+      const target = workspaces.find((workspace) => workspace.id === command.workspaceId);
+      if (target === undefined) {
+        return err(appError('WORKSPACE_NOT_FOUND', `Workspace ${command.workspaceId} is not registered`, true));
+      }
+      // The reconciliation port lives on the runtime, so the gate borrows the
+      // same ledger view the tools use instead of opening a second one.
+      await getToolRegistry();
+      const reconciliation = mcpRuntime?.services.goalWorktrees;
+      if (reconciliation === undefined) {
+        return err(appError('INTERNAL_ERROR', 'Goal worktree reconciliation is unavailable'));
+      }
+      const actor = { clientId: 'cli', sessionId: 'cli' };
+      const journal = new SqliteWorkspaceJournalRepository(state.database);
+      const goalRuntimeSnapshots = new SqliteGoalRuntimeSnapshotRepository(state.database);
+      const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
+      for (const workspace of workspaces) {
+        if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;
+        const snapshot = await goalRuntimeSnapshots.getGoalRuntimeSnapshot(workspace.goalId);
+        if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
+      }
+      const preview = createGoalWorktreeRemovalPreviewPort({ reconciliation });
+      const ports: CloseGatePorts = {
+        cleanup: async (): Promise<Result<readonly WorkspaceLifecycleCleanupEvaluation[]>> => state.service.evaluateGoalWorkspaceCleanup({
+          goalRuntimeProjections,
+          goalDurableReferenceStates: journal.goalDurableReferenceStates(
+            workspaces.flatMap((workspace) => workspace.goalId === undefined ? [] : [workspace.goalId]),
+          ),
+        }),
+        removal: async (request) => {
+          const previewed = await preview.preview({ workspaceId: request.workspaceId, worktreePath: request.worktreePath, actor });
+          if (!previewed.ok) return previewed;
+          return ok({
+            worktreePath: previewed.value.worktreePath,
+            status: previewed.value.status,
+            blockers: previewed.value.blockers,
+            blockerDetails: previewed.value.blockerDetails,
+          });
+        },
+        completion: async (request) => {
+          const classified = await reconciliation.classify({
+            workspaceId: request.workspaceId,
+            actor,
+            ownershipScope: 'client',
+          });
+          if (!classified.ok) return classified;
+          return ok(goalCompletionWorktreeBlockers(classified.value.entries));
+        },
+      };
+      return runCloseGate({
+        ports,
+        workspaceId: command.workspaceId,
+        ...(command.goalId === undefined ? {} : { goalId: command.goalId }),
+        worktrees: command.worktrees,
+        // Evidence lives beside the other stores in the checkout the gate is
+        // asked about, so a receipt stays discoverable after a session handoff.
+        receiptDirectory: path.join(target.realRootPath || target.rootPath, '.unified-mpc', 'gates'),
+        dryRun: command.dryRun,
+        json: command.json,
+      });
     },
   };
 }

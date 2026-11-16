@@ -2727,6 +2727,61 @@ describe('CLI execution dispatcher', () => {
     expect(JSON.parse(output[0]!)).toEqual({ executed: 'echo', args: { hello: 'world' } });
   });
 
+  it('routes gate check into the gate dependency and returns its exit code', async () => {
+    const output: string[] = [];
+    const seen: unknown[] = [];
+    const deps: CliDependencies = {
+      ...baseDependencies,
+      gateCheck: async (command) => {
+        seen.push(command);
+        return ok({ lines: ['close gate for goal goal-1: allowed', 'fingerprint sha256:aa'], exitCode: 0 });
+      },
+      write: (text) => output.push(text),
+    };
+
+    const code = await runCli(
+      ['gate', 'check', '--phase', 'close', '--workspace', 'workspace-1', '--goal', 'goal-1', '--worktree', '/tmp/wt'],
+      deps,
+    );
+
+    expect(code).toBe(0);
+    expect(seen).toEqual([{
+      kind: 'gate-check',
+      phase: 'close',
+      workspaceId: 'workspace-1',
+      goalId: 'goal-1',
+      worktrees: ['/tmp/wt'],
+      json: false,
+      dryRun: false,
+    }]);
+    expect(output).toEqual(['close gate for goal goal-1: allowed', 'fingerprint sha256:aa']);
+  });
+
+  it('returns the gate refusal exit code and reports a gate failure on stderr', async () => {
+    const refusals: string[] = [];
+    const refused = await runCli(['gate', 'check', '--phase', 'close', '--workspace', 'workspace-1'], {
+      ...baseDependencies,
+      gateCheck: async () => ok({ lines: ['close gate for workspace workspace-1: refused (1 blocker)'], exitCode: 1 }),
+      write: () => undefined,
+    });
+    expect(refused).toBe(1);
+
+    const failed = await runCli(['gate', 'check', '--phase', 'close', '--workspace', 'workspace-1'], {
+      ...baseDependencies,
+      gateCheck: async () => err({ code: 'CONFLICT', message: 'worktree is not in the ownership ledger', recoverable: false }),
+      writeError: (text) => refusals.push(text),
+    });
+    expect(failed).toBe(1);
+    expect(refusals).toEqual(['worktree is not in the ownership ledger']);
+
+    const unavailable = await runCli(['gate', 'check', '--phase', 'close', '--workspace', 'workspace-1'], {
+      ...baseDependencies,
+      writeError: (text) => refusals.push(text),
+    });
+    expect(unavailable).toBe(1);
+    expect(refusals).toContain('Workflow gate not available');
+  });
+
   it('runs the injected doctor probes instead of the retired hardcoded pass', async () => {
     const output: string[] = [];
     const dependencies = createDefaultCliDependencies({

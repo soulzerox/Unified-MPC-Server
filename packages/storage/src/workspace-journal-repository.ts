@@ -21,16 +21,34 @@ const MAX_LIST_LIMIT = 200;
 
 /**
  * Operations whose call ends the request, not the work: the handler returns a
- * handle — a process id, a task id, a parked shell — as soon as the work starts,
- * so the `completed` row that call writes proves nothing about the work itself.
- * Until the resume/freshness step can close them from the durable task/process
- * record, a goal whose workspace journaled one of these kinds stays `present`:
- * the alternative is a cleanup classification that cannot see a running process.
+ * handle — a process id, a task id, a parked shell, a spawned worktree — as soon
+ * as the work starts, so the `completed` row that call writes proves nothing
+ * about the work itself. Every `project_*` launcher, `benchmark_run`,
+ * `run_affected_tests` and `verify_incremental` belong here for the same reason:
+ * they all spawn and return, and the verifier hands back a live process when its
+ * deadline passes.
+ *
+ * `run_goal` is deliberately absent: the goal runtime already tracks a goal's
+ * liveness, so a journal pin would outlive the goal it describes.
+ *
+ * `agent_swarm_run` is present even though it carries read-only sub-actions
+ * (`status`/`result`/`list`): its `start` hands back a swarm id while the swarm
+ * keeps running, and a per-tool-name rule cannot split the sub-actions. Pinning
+ * a goal after a status read is a false block; not pinning one after a start is
+ * the fail-open this set exists to close, so the set errs closed until the
+ * freshness step can ask the swarm store.
+ *
+ * Until the resume/freshness step can close these from the durable
+ * task/process record, a goal whose workspace journaled one of these kinds stays
+ * `present`: the alternative is a cleanup classification that cannot see a
+ * running process.
  */
 export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
-  'process_start', 'task_create', 'shell', 'run_goal',
-  'codex_run', 'delegate', 'parallel_delegate', 'agent_swarm_run',
-  'merge_verification_run', 'project_dev', 'git_worktree_spawn',
+  'process_start', 'task_create', 'shell', 'wsl_exec',
+  'codex_run', 'delegate', 'parallel_delegate', 'merge_verification_run',
+  'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
+  'benchmark_run', 'run_affected_tests', 'verify_incremental',
+  'git_worktree_spawn', 'agent_swarm_run',
 ]);
 
 export type WorkspaceJournalPhase = 'started' | 'completed';
@@ -279,6 +297,12 @@ export class SqliteWorkspaceJournalRepository {
         WHERE w.goal_id IN (${placeholders})
           AND w.archived_at IS NULL
           AND j.operation_kind IN (${kinds.map(() => '?').join(', ')})
+          AND EXISTS (
+            SELECT 1 FROM workspace_journal_events s
+            WHERE s.workspace_id = j.workspace_id
+              AND s.call_id = j.call_id
+              AND s.phase = 'started'
+          )
       `).all(...ids, ...kinds) as unknown as { readonly goal_id: string | null }[];
       for (const row of deferred) {
         if (row.goal_id !== null) states.set(row.goal_id, 'present');
@@ -293,11 +317,47 @@ export class SqliteWorkspaceJournalRepository {
     `).get(workspaceId) as unknown as { readonly count: number };
     const excess = Number(overflow.count) - this.maxEventsPerWorkspace;
     if (excess <= 0) return;
+    const kinds = [...this.deferredClosureKinds];
+    const kindPlaceholders = kinds.map(() => '?').join(', ');
+    // The projection asks whether a workspace journaled a deferred kind at all,
+    // not which call it was, so older calls of the same kind are redundant once a
+    // newer one exists. Collapsing them first is what keeps the store bounded: a
+    // deferred `started` row can never be collected as a whole call, so without
+    // this a workspace that keeps launching processes would grow past
+    // `maxEventsPerWorkspace` forever. The newest call per kind stays, with its
+    // own completion, because that pair is the evidence the resume/freshness step
+    // needs to tell "returned a handle" from "never started".
+    if (kinds.length > 0) {
+      db.prepare(`
+        DELETE FROM workspace_journal_events
+        WHERE workspace_id = ? AND phase = 'started'
+          AND operation_kind IN (${kindPlaceholders})
+          AND EXISTS (
+            SELECT 1 FROM workspace_journal_events n
+            WHERE n.workspace_id = workspace_journal_events.workspace_id
+              AND n.operation_kind = workspace_journal_events.operation_kind
+              AND n.phase = 'started'
+              AND n.sequence > workspace_journal_events.sequence
+          )
+      `).run(workspaceId, ...kinds);
+    }
+    const deferredCalls = kinds.length === 0
+      ? '0'
+      : `EXISTS (
+          SELECT 1 FROM workspace_journal_events k
+          WHERE k.workspace_id = c.workspace_id
+            AND k.call_id = c.call_id
+            AND k.operation_kind IN (${kindPlaceholders})
+        )`;
     // An open row is what pins a worktree, so retention must never be the reason
     // it disappears — and a completion may not go without its own `started` row
     // either, or the leftover row would look open forever and block cleanup
     // permanently. Retention therefore deletes whole closed calls, oldest first,
     // and picks enough calls to cover the overflow.
+    //
+    // The surviving deferred call is excluded: its own completion is not evidence
+    // the work ended, so collecting the pair would turn the projection back into
+    // the fail-open this store exists to prevent.
     db.prepare(`
       DELETE FROM workspace_journal_events
       WHERE workspace_id = ? AND call_id IN (
@@ -309,11 +369,12 @@ export class SqliteWorkspaceJournalRepository {
               AND s.call_id = c.call_id
               AND s.phase = 'started'
           )
+          AND NOT ${deferredCalls}
         GROUP BY c.call_id
         ORDER BY MIN(c.sequence) ASC
         LIMIT ?
       )
-    `).run(workspaceId, workspaceId, Math.ceil(excess / 2));
+    `).run(workspaceId, workspaceId, ...kinds, Math.ceil(excess / 2));
     // A terminal row whose call never started pins nothing, so it is collectable
     // on its own. The shipped caller cannot write one; this keeps the store from
     // leaking rows if another caller does.

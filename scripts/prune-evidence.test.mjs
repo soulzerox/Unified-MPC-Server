@@ -11,10 +11,13 @@ import { promisify } from 'node:util';
 import {
   applyEvidencePlan,
   evidencePlanBlocker,
+  planCloseGateEvidence,
+  planCloseGateEvidencePrune,
   planEvidencePrune,
   planLocalVerifyEvidence,
   planReviewEvidence,
   planReviewEvidencePrune,
+  pruneCloseGateEvidence,
   pruneLocalVerifyEvidence,
   pruneReviewEvidence,
   resolveProtectedHeads,
@@ -1273,3 +1276,108 @@ async function writeReviewReceipt(reviewRoot, headSha, prNumber, createdAt, revi
   );
   return fileName;
 }
+
+function gateReceipt(fileName, gateId, createdAt, workspaceId = 'workspace-1', goalId) {
+  return { kind: 'gate', fileName, gateId, createdAt, workspaceId, goalId };
+}
+
+async function writeGateReceipt(root, gateId, createdAt, workspaceId = 'workspace-1') {
+  const directory = path.join(root, '.unified-mpc', 'gates');
+  await mkdir(directory, { recursive: true });
+  const fileName = `${workspaceId}-${gateId}.json`;
+  await writeFile(
+    path.join(directory, fileName),
+    `${JSON.stringify({
+      kind: 'workflow-gate',
+      phase: 'close',
+      version: 1,
+      gateId,
+      createdAt,
+      verdict: { phase: 'close', workspaceId, allowed: true, blockers: [], fingerprint: `sha256:${'a'.repeat(64)}` },
+    })}\n`,
+    'utf8',
+  );
+  return fileName;
+}
+
+test('gate plan keeps the newest receipts and drops the superseded ones', () => {
+  const plan = planCloseGateEvidencePrune({
+    receipts: [
+      gateReceipt(`workspace-1-${UUID_1}.json`, UUID_1, '2026-01-01T00:00:00.000Z'),
+      gateReceipt(`workspace-1-${UUID_2}.json`, UUID_2, '2026-03-01T00:00:00.000Z'),
+      gateReceipt(`workspace-1-${UUID_3}.json`, UUID_3, '2026-02-01T00:00:00.000Z'),
+    ],
+    keepRecent: 1,
+  });
+
+  assert.deepEqual(plan.keep.map((entry) => entry.gateId), [UUID_2]);
+  assert.deepEqual(plan.keep.map((entry) => entry.reason), ['recent']);
+  assert.deepEqual(plan.remove.map((entry) => entry.gateId), [UUID_1, UUID_3]);
+  assert.deepEqual(plan.remove.map((entry) => entry.reason), ['superseded', 'superseded']);
+});
+
+test('gate plan keeps every receipt when keepRecent covers them and drops all at zero', () => {
+  const receipts = [
+    gateReceipt(`workspace-1-${UUID_1}.json`, UUID_1, '2026-01-01T00:00:00.000Z'),
+    gateReceipt(`workspace-1-${UUID_2}.json`, UUID_2, '2026-02-01T00:00:00.000Z'),
+  ];
+  assert.deepEqual(planCloseGateEvidencePrune({ receipts, keepRecent: 5 }).remove, []);
+  assert.deepEqual(
+    planCloseGateEvidencePrune({ receipts, keepRecent: 0 }).remove.map((entry) => entry.gateId),
+    [UUID_1, UUID_2],
+  );
+});
+
+test('a missing gate store is nothing to prune', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gate-prune-missing-'));
+  try {
+    assert.equal((await planCloseGateEvidence({ root })).status, 'missing');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('gate prune keeps the newest receipt and deletes the superseded ones', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gate-prune-apply-'));
+  try {
+    await writeGateReceipt(root, UUID_1, '2026-01-01T00:00:00.000Z');
+    const kept = await writeGateReceipt(root, UUID_2, '2026-03-01T00:00:00.000Z');
+    await writeGateReceipt(root, UUID_3, '2026-02-01T00:00:00.000Z');
+
+    const result = await pruneCloseGateEvidence({ root, keepRecent: 1, dryRun: false });
+    assert.equal(result.status, 'pruned');
+    assert.deepEqual(result.remove.map((entry) => entry.gateId), [UUID_1, UUID_3]);
+    assert.deepEqual(await readdir(path.join(root, '.unified-mpc', 'gates')), [kept]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable gate receipt refuses the whole plan', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gate-prune-refuse-'));
+  try {
+    await writeGateReceipt(root, UUID_1, '2026-01-01T00:00:00.000Z');
+    await writeFile(path.join(root, '.unified-mpc', 'gates', 'not-a-gate.json'), '{"kind":"other"}\n', 'utf8');
+
+    const plan = await planCloseGateEvidence({ root });
+    assert.equal(plan.status, 'refused');
+    assert.match(plan.reason, /unreadable close gate receipt/);
+    assert.deepEqual(plan.remove, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a gate root that is not a real directory is refused, not pruned', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gate-prune-root-'));
+  try {
+    await mkdir(path.join(root, '.unified-mpc'), { recursive: true });
+    await writeFile(path.join(root, '.unified-mpc', 'gates'), 'not a directory\n', 'utf8');
+
+    const plan = await planCloseGateEvidence({ root });
+    assert.equal(plan.status, 'refused');
+    assert.match(plan.reason, /not a real directory/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

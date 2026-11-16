@@ -503,6 +503,10 @@ export async function applyEvidencePlan(plan) {
     }
     return;
   }
+  if (plan.store === 'gate') {
+    for (const entry of plan.remove) await rm(path.join(plan.targets.gateRoot, entry.fileName), { force: true });
+    return;
+  }
   for (const entry of plan.remove) {
     if (entry.kind === 'capsule') await removeDirectoryEntry(plan.targets.capsuleRoot, entry.name);
     else await rm(path.join(plan.targets.receiptRoot, entry.name), { force: true });
@@ -619,6 +623,82 @@ export async function pruneReviewEvidence({ dryRun = false, ...options }) {
   return { ...plan, dryRun };
 }
 
+/**
+ * Close gate receipts are the newest evidence kind and nothing reads them back
+ * yet, so no head or merge record can protect one. That is why the policy is the
+ * narrowest safe one: keep the newest `keepRecent` receipts and drop the rest.
+ * A receipt this script cannot parse is a refusal, because a gate verdict records
+ * a decision and deleting one it did not understand would destroy evidence rather
+ * than collect superseded runs.
+ */
+export function planCloseGateEvidencePrune({ receipts, keepRecent = 5 }) {
+  const byNewest = (left, right) => right.createdAt.localeCompare(left.createdAt) || left.fileName.localeCompare(right.fileName);
+  const recent = new Set(
+    [...receipts].sort(byNewest).slice(0, Math.max(0, keepRecent)).map((receipt) => receipt.fileName),
+  );
+  const keep = [];
+  const remove = [];
+  for (const receipt of receipts) {
+    const reason = recent.has(receipt.fileName) ? 'recent' : undefined;
+    const entry = {
+      kind: 'gate',
+      fileName: receipt.fileName,
+      gateId: receipt.gateId,
+      workspaceId: receipt.workspaceId,
+      goalId: receipt.goalId,
+      reason: reason ?? 'superseded',
+    };
+    (reason === undefined ? remove : keep).push(entry);
+  }
+  const byName = (left, right) => left.fileName.localeCompare(right.fileName);
+  return { keep: keep.sort(byName), remove: remove.sort(byName) };
+}
+
+/** Plans the close gate receipts under `<root>/.unified-mpc/gates`. */
+export async function planCloseGateEvidence({ root, keepRecent = 5 }) {
+  const resolved = await resolveStoreRoot(root, ['.unified-mpc', 'gates'], 'close gate');
+  if (resolved.status !== 'ok') {
+    return { status: resolved.status, ...(resolved.reason === undefined ? {} : { reason: resolved.reason }), keep: [], remove: [] };
+  }
+  const gateRoot = resolved.path;
+  const receipts = [];
+  for (const entry of await listDirectory(gateRoot) ?? []) {
+    if (!entry.name.endsWith('.json')) continue;
+    const parsed = await readJson(path.join(gateRoot, entry.name));
+    const value = parsed.ok ? parsed.value : undefined;
+    const verdict = value?.verdict;
+    if (!parsed.ok
+      || value?.kind !== 'workflow-gate'
+      || value?.phase !== 'close'
+      || value?.version !== 1
+      || typeof value?.gateId !== 'string'
+      || typeof value?.createdAt !== 'string') {
+      return { status: 'refused', reason: `unreadable close gate receipt: ${entry.name}`, keep: [], remove: [] };
+    }
+    receipts.push({
+      fileName: entry.name,
+      gateId: value.gateId,
+      createdAt: value.createdAt,
+      workspaceId: typeof verdict?.workspaceId === 'string' ? verdict.workspaceId : undefined,
+      goalId: typeof verdict?.goalId === 'string' ? verdict.goalId : undefined,
+    });
+  }
+  return {
+    status: 'pruned',
+    store: 'gate',
+    targets: { gateRoot },
+    guards: [await identityGuard(gateRoot)],
+    ...planCloseGateEvidencePrune({ receipts, keepRecent }),
+  };
+}
+
+/** Plans, and unless `dryRun` applies, the close gate receipt cleanup. */
+export async function pruneCloseGateEvidence({ dryRun = false, ...options }) {
+  const plan = await planCloseGateEvidence(options);
+  if (!dryRun) await applyEvidencePlan(plan);
+  return { ...plan, dryRun };
+}
+
 function parseArguments(argv) {
   const options = { root: process.cwd(), keepRecent: 5, dryRun: true, protect: [] };
   for (let index = 0; index < argv.length; index += 1) {
@@ -648,10 +728,11 @@ function parseArguments(argv) {
 }
 
 function countByKind(entries) {
-  const counts = { capsule: 0, receipt: 0, log: 0 };
+  const counts = { capsule: 0, receipt: 0, log: 0, gate: 0 };
   for (const entry of entries) {
     if (entry.kind === 'capsule') counts.capsule += 1;
     else if (entry.kind === 'log') counts.log += 1;
+    else if (entry.kind === 'gate') counts.gate += 1;
     else counts.receipt += 1;
   }
   return counts;
@@ -662,6 +743,7 @@ function describeCounts(entries) {
   const parts = [];
   if (counts.capsule > 0) parts.push(`${counts.capsule} capsule(s)`);
   if (counts.receipt > 0) parts.push(`${counts.receipt} receipt(s)`);
+  if (counts.gate > 0) parts.push(`${counts.gate} gate receipt(s)`);
   if (counts.log > 0) parts.push(`${counts.log} log director${counts.log === 1 ? 'y' : 'ies'}`);
   return parts.length === 0 ? `${counts.receipt} receipt(s)` : parts.join(' and ');
 }
@@ -694,18 +776,19 @@ async function main() {
   // what was planned, so no second pass can find a new reason to refuse after the
   // other store is already pruned.
   const stores = { root: options.root, headSha, protectedHeadShas, keepRecent: options.keepRecent };
-  const [verification, review] = await Promise.all([
+  const [verification, review, gate] = await Promise.all([
     planLocalVerifyEvidence(stores),
     planReviewEvidence(stores),
+    planCloseGateEvidence(stores),
   ]);
-  const refused = [verification, review].find((result) => result.status === 'refused');
+  const refused = [verification, review, gate].find((result) => result.status === 'refused');
   if (refused !== undefined) {
     console.error(`evidence prune refused: ${refused.reason}`);
     return 1;
   }
   // Both plans are checked before either is applied, so a deletion root that moved
   // after planning stops the run with both stores intact.
-  for (const plan of [verification, review]) {
+  for (const plan of [verification, review, gate]) {
     const blocker = await evidencePlanBlocker(plan);
     if (blocker !== undefined) {
       console.error(`evidence prune refused: ${blocker}`);
@@ -715,9 +798,11 @@ async function main() {
   if (!options.dryRun) {
     await applyEvidencePlan(verification);
     await applyEvidencePlan(review);
+    await applyEvidencePlan(gate);
   }
   report('local verification', verification, options.dryRun);
   report('exact-head review', review, options.dryRun);
+  report('close gate', gate, options.dryRun);
   if (options.dryRun) console.log('dry run, pass --apply to delete');
   return 0;
 }

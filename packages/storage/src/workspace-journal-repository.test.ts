@@ -68,14 +68,15 @@ describe('SqliteWorkspaceJournalRepository', () => {
 
     expect(journal.goalDurableReferenceStates(['goal-1', 'goal-2']).get('goal-1')).toBe('clear');
 
-    // `project_test` blocks until the run ends, so its own outcome is the closure.
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'started', status: 'started', callId: 'call-1' });
+    // `git_publish` returns only after the push ended, so its own outcome is the
+    // closure; every `project_*` launcher and the benchmark are deferred instead.
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'started', status: 'started', callId: 'call-1' });
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
 
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'completed', status: 'failed', callId: 'call-1', resultCode: 'task_failed' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'completed', status: 'failed', callId: 'call-1', resultCode: 'publish_failed' });
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
 
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'benchmark_run', phase: 'started', status: 'started', callId: 'call-2' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'project_dev', phase: 'started', status: 'started', callId: 'call-2' });
     expect(journal.goalDurableReferenceStates(['goal-1', 'goal-2'])).toEqual(new Map([['goal-1', 'present'], ['goal-2', 'clear']]));
     expect(journal.goalDurableReferenceStates([]).size).toBe(0);
   });
@@ -114,6 +115,51 @@ describe('SqliteWorkspaceJournalRepository', () => {
     // call: the deferred set is a policy input, not a second code path.
     const closing = new SqliteWorkspaceJournalRepository(database, { deferredClosureKinds: new Set() });
     expect(closing.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+  });
+
+  it('never lets retention delete the deferred evidence that pins a goal, and keeps the store bounded', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(database);
+    const kinds = new Set(['process_start']);
+    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 3, deferredClosureKinds: kinds });
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    // Five calls against a cap of three: one pin plus the retained rows.
+    for (const callId of ['spawn-1', 'spawn-2', 'spawn-3', 'spawn-4', 'spawn-5']) {
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
+    }
+
+    // The pin survives retention, because a goal with a live handle must never
+    // read `clear` just because its evidence aged out...
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+    // ...and it costs one row per deferred kind, not one per call: retention
+    // collapses older calls of the same kind instead of keeping them forever.
+    expect(journal.list({ workspaceId: 'ws-goal' }).length).toBeLessThanOrEqual(3 + kinds.size);
+  });
+
+  it("does not let one goal's deferred operation pin another goal", async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    await workspaces.insert({
+      id: 'ws-b', displayName: 'B', rootPath: path.join(root, 'b'), realRootPath: path.join(root, 'b'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-2',
+    });
+
+    journal.append({ workspaceId: 'ws-a', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-a' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'spawn-a', resultCode: 'ok' });
+
+    expect(journal.goalDurableReferenceStates(['goal-1', 'goal-2'])).toEqual(
+      new Map([['goal-1', 'present'], ['goal-2', 'clear']]),
+    );
   });
 
   it('still ignores a deferred operation that belongs to an archived registration', async () => {
@@ -180,14 +226,16 @@ describe('SqliteWorkspaceJournalRepository', () => {
       createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
     });
 
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'open' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'started', status: 'started', callId: 'open' });
     for (const callId of ['done-1', 'done-2', 'done-3']) {
-      journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId });
-      journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'started', status: 'started', callId });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
     }
+    // `git_publish` returns only after the push ended, so its completion is real
+    // closure and the pair is collectable; a deferred kind is covered separately.
     // A completion with no `started` sibling can pin nothing, so it is the one
     // row retention may collect on its own.
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'completed', status: 'completed', callId: 'orphan' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'completed', status: 'completed', callId: 'orphan' });
 
     const entries = journal.list({ workspaceId: 'ws-goal' });
     const started = entries.filter((entry) => entry.phase === 'started').map((entry) => entry.callId);

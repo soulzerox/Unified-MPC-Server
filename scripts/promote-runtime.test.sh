@@ -24,7 +24,10 @@ export UNIFIED_MPC_TEST_SYSTEMCTL_LOG="$TMP_ROOT/systemctl.log"
 export UNIFIED_MPC_TEST_SYSTEMD_RUN_LOG="$TMP_ROOT/systemd-run.log"
 export UNIFIED_MPC_SELF_CGROUP_FILE="$TMP_ROOT/self.cgroup"
 export UNIFIED_MPC_TEST_TRANSIENT_CGROUP_FILE="$TMP_ROOT/transient.cgroup"
-export UNIFIED_MPC_READINESS_TIMEOUT_SECONDS="1"
+# The readiness-timeout tests assert probe counts, not wall time, so the deadline
+# only has to outlast the retries; 1s made the slow-readiness fixtures flaky when
+# the machine was busy (each probe forks the fake curl).
+export UNIFIED_MPC_READINESS_TIMEOUT_SECONDS="5"
 export UNIFIED_MPC_READINESS_RETRY_INTERVAL_SECONDS="0.05"
 
 mkdir -p "$HOME" "$UNIFIED_MPC_RUNTIME_DIR/releases" "$TMP_ROOT/bin"

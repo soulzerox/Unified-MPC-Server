@@ -68,15 +68,69 @@ describe('SqliteWorkspaceJournalRepository', () => {
 
     expect(journal.goalDurableReferenceStates(['goal-1', 'goal-2']).get('goal-1')).toBe('clear');
 
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'call-1' });
+    // `project_test` blocks until the run ends, so its own outcome is the closure.
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'started', status: 'started', callId: 'call-1' });
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
 
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'completed', status: 'failed', callId: 'call-1', resultCode: 'task_failed' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'completed', status: 'failed', callId: 'call-1', resultCode: 'task_failed' });
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
 
-    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'call-2' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'benchmark_run', phase: 'started', status: 'started', callId: 'call-2' });
     expect(journal.goalDurableReferenceStates(['goal-1', 'goal-2'])).toEqual(new Map([['goal-1', 'present'], ['goal-2', 'clear']]));
     expect(journal.goalDurableReferenceStates([]).size).toBe(0);
+  });
+
+  it('keeps a handle-returning operation present after its own call returns', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    // `process_start` returns processId as soon as the child is spawned, so the
+    // call's own `completed` phase is not evidence that the process stopped.
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'spawn-1', resultCode: 'ok' });
+
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+  });
+
+  it('lets a caller opt out of deferred closure for a kind it can prove ended', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(database);
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    const journal = new SqliteWorkspaceJournalRepository(database, { deferredClosureKinds: new Set(['process_start']) });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'spawn-1', resultCode: 'ok' });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    // The same rows read `clear` once the caller says this kind closes on its own
+    // call: the deferred set is a policy input, not a second code path.
+    const closing = new SqliteWorkspaceJournalRepository(database, { deferredClosureKinds: new Set() });
+    expect(closing.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+  });
+
+  it('still ignores a deferred operation that belongs to an archived registration', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(database);
+    const journal = new SqliteWorkspaceJournalRepository(database);
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-old' });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+    await workspaces.archive('ws-goal', new Date(1).toISOString());
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
   });
 
   it('does not let a completion written against another workspace close an open row', async () => {

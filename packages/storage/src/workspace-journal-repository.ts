@@ -19,6 +19,20 @@ const MAX_EVENT_ID_CHARS = 512;
 const DEFAULT_MAX_EVENTS_PER_WORKSPACE = 5_000;
 const MAX_LIST_LIMIT = 200;
 
+/**
+ * Operations whose call ends the request, not the work: the handler returns a
+ * handle — a process id, a task id, a parked shell — as soon as the work starts,
+ * so the `completed` row that call writes proves nothing about the work itself.
+ * Until the resume/freshness step can close them from the durable task/process
+ * record, a goal whose workspace journaled one of these kinds stays `present`:
+ * the alternative is a cleanup classification that cannot see a running process.
+ */
+export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
+  'process_start', 'task_create', 'shell', 'run_goal',
+  'codex_run', 'delegate', 'parallel_delegate', 'agent_swarm_run',
+  'merge_verification_run', 'project_dev', 'git_worktree_spawn',
+]);
+
 export type WorkspaceJournalPhase = 'started' | 'completed';
 export type WorkspaceJournalStatus = 'started' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 /** The same vocabulary `WorkspaceDurableReferenceState` uses, minus the fail-closed `unknown`. */
@@ -146,12 +160,17 @@ function toEntry(row: JournalRow): WorkspaceJournalEntry {
  */
 export class SqliteWorkspaceJournalRepository {
   private readonly maxEventsPerWorkspace: number;
+  private readonly deferredClosureKinds: ReadonlySet<string>;
 
   public constructor(
     private readonly database: SqliteDatabase,
-    options: { readonly maxEventsPerWorkspace?: number } = {},
+    options: {
+      readonly maxEventsPerWorkspace?: number;
+      readonly deferredClosureKinds?: ReadonlySet<string>;
+    } = {},
   ) {
     this.maxEventsPerWorkspace = options.maxEventsPerWorkspace ?? DEFAULT_MAX_EVENTS_PER_WORKSPACE;
+    this.deferredClosureKinds = options.deferredClosureKinds ?? DEFERRED_CLOSURE_OPERATION_KINDS;
   }
 
   /**
@@ -215,6 +234,13 @@ export class SqliteWorkspaceJournalRepository {
    * pins. Archived registrations are excluded — their worktree is already gone,
    * so a row left behind by them must not pin the goal's current workspace.
    *
+   * A handle-returning operation is `present` even after its own call returns:
+   * `DEFERRED_CLOSURE_OPERATION_KINDS` hands back a process or task id, so its
+   * `completed` phase ends the request and says nothing about the work. Reading
+   * that phase as closure would report `clear` for a workspace with a running
+   * process in it, which is exactly the fail-closed answer this projection is
+   * supposed to protect.
+   *
    * Callers still decide fail-closed on their own; absence here is evidence, not
    * a blanket permission. A row whose owner died mid-call stays `started` until a
    * later reconciliation closes it; telling "still running" from "died" is the
@@ -243,6 +269,20 @@ export class SqliteWorkspaceJournalRepository {
     `).all(...ids) as unknown as { readonly goal_id: string | null }[];
     for (const row of rows) {
       if (row.goal_id !== null) states.set(row.goal_id, 'present');
+    }
+    const kinds = [...this.deferredClosureKinds];
+    if (kinds.length > 0) {
+      const deferred = this.database.connection.prepare(`
+        SELECT DISTINCT w.goal_id AS goal_id
+        FROM workspace_journal_events j
+        JOIN workspaces w ON w.id = j.workspace_id
+        WHERE w.goal_id IN (${placeholders})
+          AND w.archived_at IS NULL
+          AND j.operation_kind IN (${kinds.map(() => '?').join(', ')})
+      `).all(...ids, ...kinds) as unknown as { readonly goal_id: string | null }[];
+      for (const row of deferred) {
+        if (row.goal_id !== null) states.set(row.goal_id, 'present');
+      }
     }
     return states;
   }

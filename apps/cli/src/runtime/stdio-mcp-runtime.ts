@@ -203,6 +203,7 @@ const HEAVY_JOB_QUEUE_RECOVERY_INTERVAL_MS = 60_000;
  */
 const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
   'task_create', 'task_cancel', 'process_start', 'process_stop',
+  'shell', 'merge_verification_run',
   'git_publish', 'guarded_pr_merge', 'run_goal', 'rebase_goal_workspace',
   'git_worktree_spawn', 'git_worktree_remove', 'agent_swarm_run',
   'run_affected_tests', 'benchmark_run', 'verify_incremental',

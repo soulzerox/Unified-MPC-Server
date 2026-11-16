@@ -386,8 +386,13 @@ workspace journal:
    `workspace_journal_events`. A goal is `present` while one of its live
    (non-archived) workspaces owns a `started` row with no matching `completed`
    row, and `clear` otherwise,
-   so an operation that never reported an outcome keeps its worktree. `apps/cli`
-   passes that map into `reconcileLifecycle` and
+   so an operation that never reported an outcome keeps its worktree. A
+   handle-returning operation (`process_start`, `task_create`, `shell`,
+   `run_goal`, delegate/codex/worktree spawn) is `present` even after its own
+   call returns: that call ends the request, not the work, and closing it from a
+   durable task/process record is a later #170 step — reporting it `clear` would
+   classify a workspace with a running process as a retention candidate.
+   `apps/cli` passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, so a live journal no longer reports
    `durable_references_unknown`. Wiring `gate check --phase close` to those ports
    is what remains: the truth exists, the command does not read it yet.

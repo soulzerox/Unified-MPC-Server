@@ -15,7 +15,7 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
 4. **[Web Control Plane SPA](WEB_CONTROL_PLANE.md)**:
    Guide to the local native `node:http` reactive web dashboard (`http://127.0.0.1:3000/`) and separate MCP bridge (`127.0.0.1:18765`).
 5. **[Multi-Client Ecosystem & Policy Sync](MULTI_CLIENT_SYNC.md)**:
-   Discovery and rule compilation matrix across Google Antigravity, Cursor, Claude Code, OpenCode, Cline, Oh My Pi (OMP), and Codex.
+   Discovery and rule compilation matrix across Google Antigravity, Cursor, Claude Code, OpenCode, Cline, Freebuff, Oh My Pi (OMP), and Codex.
 6. **[Linux Ubuntu Deployment & Systemd](DEPLOYMENT_LINUX.md)**:
    Production deployment on Ubuntu 24.04 LTS, XDG filesystem standards, and systemd user-unit service setup.
 7. **[คู่มือการใช้งานภาษาไทย (Thai User Manual)](USAGE_TH.md)**:
@@ -28,4 +28,12 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
    The S2 slice of #297: a host-owned credential helper, a receipt-bound grant, the guard allowlist and the revocation lifecycle. S2a (lease port, SecretStore ledger, operator CLI, expiry sweep), S2b (the `publish-credential-helper` artifact inside a promoted release), S2c (fingerprint-bound receipt, the live lease's material opened for the diagnostic default-branch read, and a helper-scoped push plus verification with revocation) and S2d (non-secret grant/use/revoke/sweep audit rows and the [token-rotation runbook](PUBLISH_CREDENTIAL_RUNBOOK.md)) are implemented.
 11. **[Extensions Settings Migration](EXTENSIONS_SETTINGS_MIGRATION.md)**:
    The versioned startup reconciliation after the mandatory child `memory` / `thai-rag-mcp` topology was retired: the schema and settings markers, provenance rule, ambiguous-document handling, notice codes, the inert child-pin surface, and interruption/concurrency recovery (issue #4).
+12. **[Workflow Gate Engine](WORKFLOW_GATE.md)**:
+   The phase model (`intake` → `close`), the one gate rule both the CLI and the runtime are held to, and the step-by-step migration status of the four existing gates.
+13. **[Mutation Safety Matrix](architecture/MUTATION_SAFETY_MATRIX.md)**:
+   Release-time safety inventory for every tool the `ToolRegistry` advertises; a newly advertised tool cannot silently escape it.
+14. **[Tool Contract](architecture/TOOL_CONTRACT.md)**:
+   Generated inventory of the live `ToolRegistry` (permissions, advertised tier, delivery state, runtime evidence) plus the MCP protocol and result rules.
+15. **[Audit Remediation Record](AUDIT_REMEDIATION.md)**:
+   The accepted-base audit, each finding's guardrail fix and its evidence, and the remediation status.
 

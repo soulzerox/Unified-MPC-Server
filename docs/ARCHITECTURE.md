@@ -9,16 +9,17 @@ graph TD
     subgraph Clients["Connected AI Clients & IDEs"]
         AG["Google Antigravity<br/>(IDE, Extension, CLI agy)"]
         CR["Cursor IDE"]
-        CL["Claude Code CLI"]
+        CL["Claude Code CLI / Desktop"]
         OC["OpenCode"]
         CN["Cline"]
+        FB["Freebuff"]
         OM["Oh My Pi (OMP)"]
         CX["Codex CLI"]
     end
 
     subgraph Entrypoints["Unified-MPC Entrypoints"]
         CLI["apps/cli<br/>(binary: unified-mpc)"]
-        WEB["apps/web<br/>(Control Plane SPA :18765)"]
+        WEB["apps/web<br/>(Control Plane SPA :3000)"]
         STDIO["Stdio MCP Server<br/>(Host-connected)"]
         HTTP["Loopback HTTP MCP<br/>(Streamable HTTP :18765)"]
     end
@@ -29,7 +30,7 @@ graph TD
         APP["packages/application<br/>(Durable Goals, Checkpoints)"]
         STORE["packages/storage<br/>(node:sqlite WAL Database)"]
         CAP["packages/capabilities<br/>(Linux Shell, Process, System)"]
-        FS["packages/filesystem<br/>(Path Guard, Scoped I/O)"]
+        FS["packages/filesystem<br/>(Scoped I/O)"]
         PERM["packages/permissions<br/>(Safe / Balanced / Full Bypass)"]
         AUDIT["packages/audit<br/>(Redacted Structured Logs)"]
     end
@@ -41,7 +42,7 @@ graph TD
 
     Clients -->|Direct Invocation / Rules| Entrypoints
     Entrypoints --> CoreEngine
-    CW -.->|OAuth PKCE / Tunnel| CFG
+    CW -.->|Outbound Cloudflare tunnel| CFG
     CFG -->|Loopback HTTP| HTTP
 ```
 
@@ -51,7 +52,7 @@ graph TD
 
 Unified-MPC-Server is built from the ground up as a pure POSIX / Linux XDG-compliant service:
 - **No Electron**: Desktop GUI dependencies have been eliminated in favor of a zero-overhead local Web Control Plane SPA (`apps/web`) and the native CLI binary (`apps/cli`).
-- **No Windows / macOS Code**: Complete absence of PowerShell, Windows Sandbox, COM/Registry APIs, or macOS Swift bridges.
+- **Linux-Only Deployment Target**: Linux Ubuntu is the only supported deployment target. Windows and macOS branches that remain in the code are defensive and unsupported, for example the `schtasks.exe` scheduler backend guarded by `platform !== 'win32'` and the CDP platform allowlist.
 - **Node.js Native SQLite**: Leverages Node.js `>=22.0.0` built-in `node:sqlite` (`DatabaseSync`) in WAL mode, avoiding C++ native add-on compilation headaches.
 - **XDG Base Directory Specification**:
   - Configuration & Data: `~/.local/share/unified-mpc/` (overridable via `UNIFIED_MPC_DATA_PATH`)
@@ -62,7 +63,7 @@ Unified-MPC-Server is built from the ground up as a pure POSIX / Linux XDG-compl
 
 ## 3. Package Structure & Responsibilities
 
-The monorepo contains 21 focused packages and applications:
+The monorepo contains 21 workspaces — 3 applications and 18 packages under `@unified-mpc/*` — plus the native Linux host crate:
 
 | Category | Path | Package | Responsibility |
 |---|---|---|---|
@@ -71,6 +72,7 @@ The monorepo contains 21 focused packages and applications:
 | | `apps/cf-gateway` | `@unified-mpc/cf-gateway` | Decoupled Cloudflare Tunnel & ChatGPT Web companion |
 | **Extensions & Ingestion** | `packages/extensions` | `@unified-mpc/extensions` | Parent-owned canonical skill/MCP registry, multi-client discovery, explicit compatibility exports, zero-artifact pruner, IDE policy sync |
 | **MCP & Runtime** | `packages/mcp-server` | `@unified-mpc/mcp-server` | Core MCP server, two-tier catalog, security policies, Ponytail runtime |
+| | `packages/thai-rag` | `@unified-mpc/thai-rag` | Workspace-scoped native code/memory RAG: provider contract and handshake, embedding index jobs, canonical revision manifests, legacy migration |
 | | `packages/capabilities` | `@unified-mpc/capabilities` | Linux process execution, shell task store, system probes, CDP |
 | **Application & State** | `packages/application` | `@unified-mpc/application` | Durable goals, session continuation, checkpointing |
 | | `packages/storage` | `@unified-mpc/storage` | SQLite database wrapper (WAL mode), repositories |

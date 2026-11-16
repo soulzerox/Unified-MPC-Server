@@ -93,4 +93,7 @@ To verify that your multi-client configuration files are in sync and correctly f
 pnpm cli doctor
 ```
 
-The doctor command checks target paths, validates JSON schemas, verifies write permissions across Linux XDG directories, and confirms policy block integrity.
+The doctor command runs seven runtime probes: OS, database, git, ripgrep, registered
+workspaces, the MCP port and Codex discovery. It does not inspect IDE config files;
+`unified-mpc sync` compiles the policy blocks and `unified-mpc skill audit` reports
+skill-copy divergence.

@@ -18,10 +18,10 @@ Unified-MPC-Server คือระบบบริหารจัดการ Mod
 
 ## 1. ภาพรวมและความสามารถหลัก
 
-- **100% Linux Ubuntu Native**: ปราศจากโค้ด Windows (`.bat`, `.ps1`, Win32 API) และ Electron GUI โดยทำงานผ่าน Node.js LTS และมาตรฐาน POSIX XDG Directory.
+- **Linux Ubuntu Native เท่านั้น**: Linux Ubuntu เป็นเป้าหมายการติดตั้งเดียวที่รองรับ; branch ของ Windows/macOS ที่ยังเหลือในโค้ดเป็น defensive และไม่รองรับ (เช่น backend `schtasks.exe` ที่ถูกกันด้วย `platform !== 'win32'`) ระบบไม่ใช้ Electron GUI และทำงานผ่าน Node.js LTS กับมาตรฐาน POSIX XDG Directory.
 - **Bifurcated Ingestion Engine**: แยกกระบวนการติดตั้งอย่างชัดเจนระหว่าง Agent Skill Markdown (`SKILL.md`) และ External MCP Server (`stdio`/`sse`/`http`).
 - **Zero-Artifact Pruning**: ลบการตั้งค่าและไฟล์ที่ไม่ได้ใช้งานอย่างสมบูรณ์แบบ ไม่ทิ้งขยะตกค้างในระบบ.
-- **Single Source of Truth Multi-IDE Sync**: ซิงค์ Rules และ MCP Config ไปยัง 7 IDE ชั้นนำ (Antigravity, Cursor, Claude Code, OpenCode, Cline, OMP, Codex).
+- **Single Source of Truth Multi-IDE Sync**: ซิงค์ Rules และ MCP Config ไปยัง 8 สภาพแวดล้อม AI ชั้นนำ (Antigravity, Cursor, Claude Code/Desktop, OpenCode, Freebuff, Cline, OMP, Codex) พร้อม target `agents` สำหรับ workspace `AGENTS.md`.
 - **User-Editable P1–Pn Runtime Policy**: ผู้ใช้แก้ไข เพิ่ม/ลบ และจัดลำดับการทำงานได้เอง โดย Policy ID คงที่ ส่วน P1–Pn คืออันดับการทำงานปัจจุบัน.
 - **Gated Remote Gateway**: ระบบเชื่อมต่อ Remote Bridge ปลอดภัยด้วย 5-State Machine และเงื่อนไข Hard Gating.
 
@@ -63,7 +63,7 @@ pnpm cli status
 ```
 
 ### 3.2 วินิจฉัยสภาพแวดล้อม (`doctor`)
-ตรวจสอบสิทธิ์การอ่านเขียนไฟล์ในไดเรกทอรี XDG, ตรวจสอบ path ของ IDE ต่างๆ และความถูกต้องของ JSON configs:
+รัน probe 7 ตัวของ runtime: OS, database, git, ripgrep, workspace ที่ลงทะเบียนไว้, MCP port และ Codex (ไม่ได้ตรวจไฟล์ config ของ IDE):
 ```bash
 pnpm cli doctor
 ```
@@ -194,23 +194,19 @@ MCP `instructions` ของ Unified-MPC จะบอก flow นี้กับ
 หากต้องการให้ Unified-MPC-Server ทำงานอยู่เบื้องหลังตลอดเวลา และเริ่มทำงานใหม่อัตโนมัติเมื่อเครื่องรีบูต:
 
 ```bash
-# 1. สร้างโฟลเดอร์สำหรับ user systemd
-mkdir -p ~/.config/systemd/user
+# 1. ติดตั้ง unit ทั้งสามตัว (mcp-http, web, aggregate) พร้อม script และ service.env
+bash scripts/install-user-services.sh
 
-# 2. คัดลอกไฟล์ service จาก scripts/
-cp scripts/unified-mpc.service ~/.config/systemd/user/
+# 2. รอบแรกจะจบด้วย CONFIG_REQUIRED และสร้าง ~/.config/unified-mpc/service.env
+#    ให้ตั้งค่า UNIFIED_MPC_ROOT, UNIFIED_MPC_WORKSPACE และ PATH แบบ absolute แล้วรันซ้ำ
+bash scripts/install-user-services.sh
 
-# 3. เปิดให้โปรเซสทำงานต่อเนื่องแม้ไม่ได้ล็อกอินผ่าน SSH/GUI
-loginctl enable-linger $USER
-
-# 4. รีโหลดและเปิดใช้งาน Service
-systemctl --user daemon-reload
-systemctl --user enable --now unified-mpc.service
-
-# 5. ดูสถานะและ Log
+# 3. รอผล BOOT_PERSISTENCE_READY แล้วตรวจสอบสถานะและ Log
 systemctl --user status unified-mpc.service
 journalctl --user -u unified-mpc.service -f
 ```
+
+ตัวช่วยนี้เปิด user linger ให้เอง, enable/start aggregate unit และตรวจ child service ทั้งสองตัวก่อนรายงาน `BOOT_PERSISTENCE_READY` — ไม่ต้องคัดลอก unit ด้วยมือ.
 
 ---
 

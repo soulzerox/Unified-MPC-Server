@@ -71,6 +71,22 @@ export async function closeObservedDeferredCalls(options: {
   return { closed, settled: true };
 }
 
+/**
+ * Forget a settled call, and only one the probe covered.
+ *
+ * `settled` is a verdict about a snapshot taken before the awaited process read,
+ * so it says nothing about a launcher whose `started` row landed during that
+ * await. Taking the probed ids — never the workspace — is the whole safety
+ * property: an unprobed call that got dropped here is never retried, and its pin
+ * pins the goal `present` for good.
+ */
+export function forgetSettledCalls(
+  remembered: Map<string, string>,
+  probedCallIds: readonly string[],
+): void {
+  for (const callId of probedCallIds) remembered.delete(callId);
+}
+
 function isLiveProcess(process: ManagedProcess): boolean {
   return LIVE_PROCESS_STATES.has(process.state);
 }

@@ -7,6 +7,7 @@ import {
   NO_LIVE_PROCESS_CLOSURE_CODE,
   PROCESS_HANDLE_DEFERRED_KINDS,
   closeObservedDeferredCalls,
+  forgetSettledCalls,
 } from './deferred-journal-closure.js';
 
 const actor: FileActor = { clientId: 'client', sessionId: 'session' };
@@ -85,5 +86,16 @@ describe('closeObservedDeferredCalls', () => {
     for (const kind of PROCESS_HANDLE_DEFERRED_KINDS) {
       expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(kind)).toBe(true);
     }
+  });
+});
+
+describe('forgetSettledCalls', () => {
+  it('forgets only the calls the probe covered, never the rest of the workspace', () => {
+    // The regression this forbids: deleting every entry for the workspace drops a
+    // launcher whose `started` row landed during the awaited process read. It was
+    // never in the verdict, so nothing retries it and the goal stays `present`.
+    const remembered = new Map([['probed', 'ws-1'], ['landed-during-probe', 'ws-1'], ['other-ws', 'ws-2']]);
+    forgetSettledCalls(remembered, ['probed']);
+    expect([...remembered]).toEqual([['landed-during-probe', 'ws-1'], ['other-ws', 'ws-2']]);
   });
 });

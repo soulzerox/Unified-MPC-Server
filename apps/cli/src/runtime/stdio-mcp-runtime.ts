@@ -108,7 +108,7 @@ import {
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
-import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls } from './deferred-journal-closure.js';
+import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls, forgetSettledCalls } from './deferred-journal-closure.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1485,9 +1485,7 @@ export function createStdioMcpRuntime(
       // process list and a journal UPDATE on every later completion. Only the
       // probed ids: a launcher whose `started` row landed while the probe awaited
       // was not in the verdict, so dropping it would pin the goal forever.
-      if (settled) {
-        for (const callId of own) ownProcessHandleCalls.delete(callId);
-      }
+      if (settled) forgetSettledCalls(ownProcessHandleCalls, own);
     } catch (error) {
       process.stderr.write(
         `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,

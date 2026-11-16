@@ -32,7 +32,7 @@ describe('closeObservedDeferredCalls', () => {
     await expect(closeObservedDeferredCalls({
       journal: store, processes: processes(async () => ok([process('exited')])), actor,
       workspaceId: 'ws-1', callIds, closedAt,
-    })).resolves.toBe(1);
+    })).resolves.toEqual({ closed: 1, settled: true });
 
     const call = store.closeDeferredCalls.mock.calls[0]?.[0] as unknown as {
       operationKinds: readonly string[]; recordedAtOrAfter: string; closureCode: string;
@@ -57,12 +57,12 @@ describe('closeObservedDeferredCalls', () => {
       await expect(closeObservedDeferredCalls({
         journal: store, processes: processes(async () => ok([process('exited'), process(state)])), actor,
         workspaceId: 'ws-1', callIds, closedAt,
-      })).resolves.toBe(0);
+      })).resolves.toEqual({ closed: 0, settled: false });
     }
     await expect(closeObservedDeferredCalls({
       journal: store, processes: processes(async () => err(appError('INTERNAL_ERROR', 'unavailable'))), actor,
       workspaceId: 'ws-1', callIds, closedAt,
-    })).resolves.toBe(0);
+    })).resolves.toEqual({ closed: 0, settled: false });
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
   });
 
@@ -70,11 +70,11 @@ describe('closeObservedDeferredCalls', () => {
     const store = journal();
     await expect(closeObservedDeferredCalls({
       journal: store, actor, workspaceId: 'ws-1', callIds, closedAt,
-    })).resolves.toBe(0);
+    })).resolves.toEqual({ closed: 0, settled: false });
     await expect(closeObservedDeferredCalls({
       journal: store, processes: processes(async () => ok([])), actor,
       workspaceId: 'ws-1', callIds: [], closedAt,
-    })).resolves.toBe(0);
+    })).resolves.toEqual({ closed: 0, settled: false });
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
   });
 

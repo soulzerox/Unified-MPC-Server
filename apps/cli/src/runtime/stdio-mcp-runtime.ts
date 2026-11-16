@@ -1470,7 +1470,7 @@ export function createStdioMcpRuntime(
       .map(([callId]) => callId);
     if (own.length === 0 && !PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) return;
     try {
-      await closeObservedDeferredCalls({
+      const { settled } = await closeObservedDeferredCalls({
         journal: workspaceJournal,
         ...(deferredClosureServices.current?.process === undefined
           ? {}
@@ -1480,6 +1480,14 @@ export function createStdioMcpRuntime(
         callIds: [...new Set([event.callId, ...own])],
         closedAt: event.timestamp,
       });
+      // The probe proved the workspace had no live process when it looked, so the
+      // calls it covered are closed for good: forget them instead of paying a
+      // process list and a journal UPDATE on every later completion. Only the
+      // probed ids: a launcher whose `started` row landed while the probe awaited
+      // was not in the verdict, so dropping it would pin the goal forever.
+      if (settled) {
+        for (const callId of own) ownProcessHandleCalls.delete(callId);
+      }
     } catch (error) {
       process.stderr.write(
         `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,

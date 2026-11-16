@@ -108,6 +108,7 @@ import {
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
+import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls } from './deferred-journal-closure.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1433,6 +1434,17 @@ export function createStdioMcpRuntime(
     },
   };
   const durableActivitySink = createFileActivitySink(mcpActivityLogPath(dataPath), { maxBytes: activityLogMaxBytes() });
+  // Filled in once `services` exists: the sink is created first, but only a tool
+  // call can reach it, and no tool call can run before the services are built.
+  const deferredClosureServices: { current?: Pick<McpApplicationServices, 'process'> } = {};
+  // Deferred process-handle calls THIS runtime journaled, oldest first. A
+  // `project_dev`/`process_start` call returns while its process is still live,
+  // so the closure verdict can only be reached by a later sweep; remembering the
+  // callIds is what keeps that sweep to calls this runtime can answer for. The
+  // cap bounds the map: an entry that never resolves costs one integer in an
+  // `IN (...)` list, never a correctness decision.
+  const ownProcessHandleCalls = new Map<string, string>();
+  const MAX_REMEMBERED_PROCESS_CALLS = 256;
   const activityTracker = new ActivityTracker({
     async record(event: ActivitySinkEvent): Promise<void> {
       // Publish starts before slower durable evidence so updater quiet-time
@@ -1484,6 +1496,43 @@ export function createStdioMcpRuntime(
           process.stderr.write(
             `Unified-MPC workspace journal append failed: ${error instanceof Error ? error.message : String(error)}\n`,
           );
+        }
+        // #170 freshness: a handle-returning call ends here, but its `completed`
+        // row is not evidence the work did. Ask the store that owns the handles;
+        // only it may close the pin. A launcher returns while its process is
+        // still live, so this sweep also retries the calls this runtime opened
+        // earlier: the pin is released by whichever later request finds them
+        // gone, never by another host's view.
+        if (event.phase === 'started' && event.workspaceId !== undefined
+          && PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) {
+          ownProcessHandleCalls.set(event.callId, event.workspaceId);
+          while (ownProcessHandleCalls.size > MAX_REMEMBERED_PROCESS_CALLS) {
+            const oldest = ownProcessHandleCalls.keys().next().value;
+            if (oldest === undefined) break;
+            ownProcessHandleCalls.delete(oldest);
+          }
+        }
+        if (event.phase === 'completed' && event.workspaceId !== undefined) {
+          const callIds = [event.callId, ...[...ownProcessHandleCalls]
+            .filter(([, workspaceId]) => workspaceId === event.workspaceId)
+            .map(([callId]) => callId)];
+          try {
+            await closeObservedDeferredCalls({
+              journal: workspaceJournal,
+              ...(deferredClosureServices.current?.process === undefined
+                ? {}
+                : { processes: deferredClosureServices.current.process }),
+              actor,
+              workspaceId: event.workspaceId,
+              callIds,
+              closedAt: event.timestamp,
+            });
+          } catch (error) {
+            // Best-effort, like the append above: an unclosed pin errs closed.
+            process.stderr.write(
+              `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }
         }
       }
     },
@@ -1618,6 +1667,7 @@ export function createStdioMcpRuntime(
     codex: codexService,
     agentSwarm: agentSwarmService,
   };
+  deferredClosureServices.current = { process: processService };
 
   return {
     ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),

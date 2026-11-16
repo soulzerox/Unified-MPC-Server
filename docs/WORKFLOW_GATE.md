@@ -320,6 +320,7 @@ Each step ships alone and leaves the repository working.
 | 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, eight shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
 | 3b ✅ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | shipped with #170's deferred-closure follow-up (#848): `apps/cli/src/index.ts` routes `gate check` through `parseGateArgs`/`runCloseGate` with the three real ports — `evaluateGoalWorkspaceCleanup` over the #170 journal projection, `createGoalWorktreeRemovalPreviewPort` (client-scoped) and `goalCompletionWorktreeBlockers` — and writes the receipt to `<workspace>/.unified-mpc/gates` unless `--dry-run`; `scripts/prune-evidence.mjs` plans that store as a third one (newest `--keep` receipts survive, an unreadable receipt refuses the whole run) with six tests; a refusal exits `1` and still records its receipt. Bundled with #848 on purpose: wiring the gate before the closure fix would point it at a projection that called live work `clear` |
+| 3c ✅ | Close a deferred call from the authority that owns its handle, so the projection can stop pinning once the work really ended | shipped as the #170 freshness step: `workspace_journal_events` gains `closure_code`/`closed_at` (migration `047`), `closeDeferredCalls` writes them for deferred kinds only, and a runtime closes only the calls it opened itself, at the first request of that workspace that finds no live handle behind them — a `project_*` launcher returns while its process still runs, so the release lands on a later request of the same runtime, never on another host's view (`apps/cli/src/runtime/deferred-journal-closure.ts`, kinds `process_start` and the `project_*` launchers). A kind whose handle lives in another authority — a task id, a swarm id, a worktree — still pins until that authority answers, which is the safe direction |
 | 4a ✅ | Repoint `GuardedMergeService` at the shared rule: the subject it evaluates is now read from the provider, so a receipt can only authorize the pull request GitHub holds, and the gate acts on that decision | shipped in #834: `subject_mismatch`/`subject_unavailable` refuse before the receipt is read; the corpus gains an enforcement suite that fails if a blocked decision ever dispatches; the runtime keeps its `MergeEvidenceBlocker` vocabulary and the CLI receipt format is unchanged |
 | 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
@@ -396,9 +397,14 @@ workspace journal:
    journal allowlist so the two cannot drift — is `present` even after its own
    call returns: that call ends the request, not the work, and closing it from a
    durable task/process record is a later #170 step — reporting it `clear` would
-   classify a workspace with a running process as a retention candidate. Retention
-   collapses older calls of the same kind, so the pin costs one row per kind
-   instead of growing with every launch. `run_goal` stays out of that set: the
+   classify a workspace with a running process as a retention candidate. That
+   later step now exists for the kinds whose handle is a managed process:
+   `closeDeferredCalls` records a `closure_code` once the runtime that created the
+   handle can prove none is live, and a closed call stops pinning while keeping
+   its row. A kind owned by another authority (task, swarm, worktree) still pins.
+   Retention collapses older *open* calls of the same kind, so the pin costs one
+   row per kind instead of growing with every launch, and collects a closed call
+   like any other evidence. `run_goal` stays out of that set: the
    goal runtime already tracks goal liveness.
    `apps/cli` passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, and `gate check --phase close` reads it through

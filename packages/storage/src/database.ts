@@ -53,6 +53,7 @@ import { HEAVY_JOB_QUEUE_MIGRATION_SQL } from './migrations/heavy-job-queue-migr
 import { PUBLISH_APPROVAL_MIGRATION_SQL } from './migrations/publish-approval-migration.js';
 import { PUBLISH_CREDENTIAL_MIGRATION_SQL } from './migrations/publish-credential-migration.js';
 import { PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL } from './migrations/publish-approval-fingerprint-migration.js';
+import { WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL } from './migrations/workspace-journal-closure-migration.js';
 import { WORKSPACE_JOURNAL_MIGRATION_SQL } from './migrations/workspace-journal-migration.js';
 
 export type SqliteCompactionResult =
@@ -116,7 +117,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '046_workspace_journal' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '047_workspace_journal_closure' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -199,7 +200,8 @@ export class SqliteDatabase {
       sql: RETIRE_TURN_PERSISTENCE_MIGRATION_SQL,
       reclaimFreePages: true,
     });
-    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_JOURNAL_MIGRATION_SQL });
+    this.applyMigration({ id: '046_workspace_journal', sql: WORKSPACE_JOURNAL_MIGRATION_SQL });
+    this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

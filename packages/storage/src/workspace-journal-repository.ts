@@ -38,10 +38,11 @@ const MAX_LIST_LIMIT = 200;
  * the fail-open this set exists to close, so the set errs closed until the
  * freshness step can ask the swarm store.
  *
- * Until the resume/freshness step can close these from the durable
- * task/process record, a goal whose workspace journaled one of these kinds stays
- * `present`: the alternative is a cleanup classification that cannot see a
- * running process.
+ * A deferred call stays `present` until a freshness probe writes `closure_code`
+ * on it (`closeDeferredCalls`): the probe is the only thing that may claim the
+ * handle is gone, because this store cannot see a running process. A goal whose
+ * workspace journaled one of these kinds and whose probe cannot answer therefore
+ * stays `present`, which is the safe direction.
  */
 export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
   'process_start', 'task_create', 'shell', 'wsl_exec',
@@ -87,6 +88,25 @@ export interface WorkspaceJournalEntry {
   readonly summary?: string;
   readonly traceId?: string;
   readonly recordedAt: string;
+  /** Set once a freshness probe proved no durable handle of this call is live. */
+  readonly closureCode?: string;
+  readonly closedAt?: string;
+}
+
+export interface WorkspaceJournalClosureRequest {
+  readonly workspaceId: string;
+  /** Only the kinds the caller can actually probe. A kind left out keeps pinning. */
+  readonly operationKinds: readonly string[];
+  /**
+   * Rows recorded before this instant are out of scope: a runtime can only prove
+   * that no handle is live for work it could have observed, so an older call
+   * from a previous host stays open instead of reading as closed.
+   */
+  readonly recordedAtOrAfter?: string;
+  readonly closureCode: string;
+  readonly closedAt?: string;
+  /** Restrict to these calls. Omitted closes every matching call in the workspace. */
+  readonly callIds?: readonly string[];
 }
 
 export interface ListWorkspaceJournalRequest {
@@ -109,6 +129,8 @@ interface JournalRow {
   readonly summary: string | null;
   readonly trace_id: string | null;
   readonly recorded_at: string;
+  readonly closure_code: string | null;
+  readonly closed_at: string | null;
 }
 
 export class WorkspaceJournalStoreError extends Error {
@@ -165,6 +187,8 @@ function toEntry(row: JournalRow): WorkspaceJournalEntry {
     ...(row.summary === null ? {} : { summary: row.summary }),
     ...(row.trace_id === null ? {} : { traceId: row.trace_id }),
     recordedAt: row.recorded_at,
+    ...(row.closure_code === null ? {} : { closureCode: row.closure_code }),
+    ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),
   };
 }
 
@@ -233,13 +257,62 @@ export class SqliteWorkspaceJournalRepository {
     const limit = Math.min(Math.max(request.limit ?? MAX_LIST_LIMIT, 1), MAX_LIST_LIMIT);
     const after = Number.isSafeInteger(request.afterSequence) && (request.afterSequence ?? 0) > 0 ? request.afterSequence as number : 0;
     const rows = this.database.connection.prepare(`
-      SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at
+      SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at
       FROM workspace_journal_events
       WHERE workspace_id = ? AND sequence > ?
       ORDER BY sequence ASC
       LIMIT ?
     `).all(request.workspaceId, after, limit) as unknown as JournalRow[];
     return rows.map(toEntry);
+  }
+
+  /**
+   * Close the deferred calls a freshness probe proved finished.
+   *
+   * The probe owns the verdict: this store only records it. A deferred call keeps
+   * its `completed` row (the request ended there) and gains `closure_code`, which
+   * is what the projection reads as "the work ended too". Rows already closed are
+   * left alone, so a repeated probe is a no-op and the first verdict survives.
+   *
+   * `recordedAtOrAfter` is the honesty boundary: a runtime's process/task stores
+   * only know the handles they created, so closing a call it never could have
+   * observed would turn "unknown" into "clear".
+   *
+   * Only `DEFERRED_CLOSURE_OPERATION_KINDS` can be closed here. An ordinary open
+   * call is a different question — the owner died mid-call — and letting a probe
+   * answer it would be the fail-open this store exists to prevent.
+   */
+  public closeDeferredCalls(request: WorkspaceJournalClosureRequest): number {
+    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)
+      || !required(request.closureCode, MAX_RESULT_CODE_CHARS)
+      || (request.recordedAtOrAfter !== undefined && !required(request.recordedAtOrAfter, MAX_RECORDED_AT_CHARS))
+      || (request.closedAt !== undefined && !required(request.closedAt, MAX_RECORDED_AT_CHARS))) {
+      throw new WorkspaceJournalStoreError('invalid_entry', 'Journal closure requires bounded identifiers');
+    }
+    const kinds = [...new Set(request.operationKinds.filter((kind) => required(kind, MAX_OPERATION_CHARS)
+      && this.deferredClosureKinds.has(kind)))];
+    if (kinds.length === 0) return 0;
+    const calls = request.callIds === undefined
+      ? undefined
+      : [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
+    if (calls !== undefined && calls.length === 0) return 0;
+    const floor = request.recordedAtOrAfter;
+    const result = this.database.connection.prepare(`
+      UPDATE workspace_journal_events
+      SET closure_code = ?, closed_at = ?
+      WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
+        AND operation_kind IN (${kinds.map(() => '?').join(', ')})
+        ${floor === undefined ? '' : 'AND recorded_at >= ?'}
+        ${calls === undefined ? '' : `AND call_id IN (${calls.map(() => '?').join(', ')})`}
+    `).run(
+      request.closureCode,
+      request.closedAt ?? new Date().toISOString(),
+      request.workspaceId,
+      ...kinds,
+      ...(floor === undefined ? [] : [floor]),
+      ...(calls ?? []),
+    );
+    return Number(result.changes);
   }
 
   /**
@@ -259,10 +332,14 @@ export class SqliteWorkspaceJournalRepository {
    * process in it, which is exactly the fail-closed answer this projection is
    * supposed to protect.
    *
+   * `closure_code` is what ends that deferral: only a freshness probe that asked
+   * the durable task/process stores writes it, and a row carrying one stops
+   * pinning. A call nobody closed — including one whose owner died mid-flight —
+   * keeps reading `present`, because this store still cannot tell "running" from
+   * "died" on its own.
+   *
    * Callers still decide fail-closed on their own; absence here is evidence, not
-   * a blanket permission. A row whose owner died mid-call stays `started` until a
-   * later reconciliation closes it; telling "still running" from "died" is the
-   * resume/freshness step of #170, not this store's guess.
+   * a blanket permission.
    */
   public goalDurableReferenceStates(goalIds: readonly string[]): ReadonlyMap<string, WorkspaceJournalReferenceState> {
     const states = new Map<string, WorkspaceJournalReferenceState>();
@@ -278,6 +355,7 @@ export class SqliteWorkspaceJournalRepository {
         AND w.archived_at IS NULL
         AND j.phase = 'started'
         AND j.status = 'started'
+        AND j.closure_code IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM workspace_journal_events c
           WHERE c.workspace_id = j.workspace_id
@@ -296,13 +374,9 @@ export class SqliteWorkspaceJournalRepository {
         JOIN workspaces w ON w.id = j.workspace_id
         WHERE w.goal_id IN (${placeholders})
           AND w.archived_at IS NULL
+          AND j.phase = 'started'
           AND j.operation_kind IN (${kinds.map(() => '?').join(', ')})
-          AND EXISTS (
-            SELECT 1 FROM workspace_journal_events s
-            WHERE s.workspace_id = j.workspace_id
-              AND s.call_id = j.call_id
-              AND s.phase = 'started'
-          )
+          AND j.closure_code IS NULL
       `).all(...ids, ...kinds) as unknown as { readonly goal_id: string | null }[];
       for (const row of deferred) {
         if (row.goal_id !== null) states.set(row.goal_id, 'present');
@@ -319,24 +393,24 @@ export class SqliteWorkspaceJournalRepository {
     if (excess <= 0) return;
     const kinds = [...this.deferredClosureKinds];
     const kindPlaceholders = kinds.map(() => '?').join(', ');
-    // The projection asks whether a workspace journaled a deferred kind at all,
-    // not which call it was, so older calls of the same kind are redundant once a
-    // newer one exists. Collapsing them first is what keeps the store bounded: a
-    // deferred `started` row can never be collected as a whole call, so without
-    // this a workspace that keeps launching processes would grow past
-    // `maxEventsPerWorkspace` forever. The newest call per kind stays, with its
-    // own completion, because that pair is the evidence the resume/freshness step
-    // needs to tell "returned a handle" from "never started".
+    // The projection asks whether a workspace still holds an *open* deferred call
+    // of a kind, not which call it was, so older open calls of the same kind are
+    // redundant once a newer one exists. Collapsing only those keeps the store
+    // bounded: an open deferred `started` row can never be collected as a whole
+    // call, so without this a workspace that keeps launching processes would grow
+    // past `maxEventsPerWorkspace` forever. Closed ones are ordinary evidence and
+    // the whole-call deletion below collects them.
     if (kinds.length > 0) {
       db.prepare(`
         DELETE FROM workspace_journal_events
-        WHERE workspace_id = ? AND phase = 'started'
+        WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
           AND operation_kind IN (${kindPlaceholders})
           AND EXISTS (
             SELECT 1 FROM workspace_journal_events n
             WHERE n.workspace_id = workspace_journal_events.workspace_id
               AND n.operation_kind = workspace_journal_events.operation_kind
               AND n.phase = 'started'
+              AND n.closure_code IS NULL
               AND n.sequence > workspace_journal_events.sequence
           )
       `).run(workspaceId, ...kinds);
@@ -348,6 +422,8 @@ export class SqliteWorkspaceJournalRepository {
           WHERE k.workspace_id = c.workspace_id
             AND k.call_id = c.call_id
             AND k.operation_kind IN (${kindPlaceholders})
+            AND k.phase = 'started'
+            AND k.closure_code IS NULL
         )`;
     // An open row is what pins a worktree, so retention must never be the reason
     // it disappears — and a completion may not go without its own `started` row
@@ -355,9 +431,10 @@ export class SqliteWorkspaceJournalRepository {
     // permanently. Retention therefore deletes whole closed calls, oldest first,
     // and picks enough calls to cover the overflow.
     //
-    // The surviving deferred call is excluded: its own completion is not evidence
+    // An unclosed deferred call is excluded: its own completion is not evidence
     // the work ended, so collecting the pair would turn the projection back into
-    // the fail-open this store exists to prevent.
+    // the fail-open this store exists to prevent. Once a freshness probe wrote
+    // `closure_code` that objection is gone, and the pair is collectable.
     db.prepare(`
       DELETE FROM workspace_journal_events
       WHERE workspace_id = ? AND call_id IN (

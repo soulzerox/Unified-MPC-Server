@@ -79,7 +79,7 @@ fi
 
 validate_pair() {
   local root="$1"
-  bash "$validator" mcp-http "$root" >/dev/null 2>&1     && bash "$validator" web "$root" >/dev/null 2>&1
+  UNIFIED_MPC_NODE="$node_bin" bash "$validator" mcp-http "$root" >/dev/null 2>&1     && UNIFIED_MPC_NODE="$node_bin" bash "$validator" web "$root" >/dev/null 2>&1
 }
 
 resolve_valid_pair() {
@@ -126,8 +126,8 @@ fi
 
 if [[ -z "$chosen_root" ]]; then
   printf 'RUNTIME_ROOT_RECONCILIATION_FAILED: service=%s configured=%s\n' "$service" "$configured_root" >&2
-  bash "$validator" mcp-http "$configured_root" >&2 || true
-  bash "$validator" web "$configured_root" >&2 || true
+  UNIFIED_MPC_NODE="$node_bin" bash "$validator" mcp-http "$configured_root" >&2 || true
+  UNIFIED_MPC_NODE="$node_bin" bash "$validator" web "$configured_root" >&2 || true
   fail "$unrecoverable_status" "RUNTIME_RECOVERY_UNAVAILABLE: no valid deployment-owned runtime/current or runtime/last-known-good is available"
 fi
 

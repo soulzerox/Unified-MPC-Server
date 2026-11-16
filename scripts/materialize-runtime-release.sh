@@ -171,8 +171,8 @@ if [[ "$remaining_shared" -ne 0 ]]; then
 fi
 write_state delinked_files "$delinked_files"
 
-bash "$validator" mcp-http "$stage_root" >/dev/null
-bash "$validator" web "$stage_root" >/dev/null
+UNIFIED_MPC_NODE="$node_bin" bash "$validator" mcp-http "$stage_root" >/dev/null
+UNIFIED_MPC_NODE="$node_bin" bash "$validator" web "$stage_root" >/dev/null
 
 # pnpm's legacy deploy can leave one metadata-only self-reference for the
 # deployed package itself. It is not a runtime dependency, but if retained it

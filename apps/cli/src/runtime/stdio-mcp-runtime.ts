@@ -108,6 +108,7 @@ import {
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
+import { closeObservedDeferredCalls } from './deferred-journal-closure.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1433,6 +1434,9 @@ export function createStdioMcpRuntime(
     },
   };
   const durableActivitySink = createFileActivitySink(mcpActivityLogPath(dataPath), { maxBytes: activityLogMaxBytes() });
+  // Filled in once `services` exists: the sink is created first, but only a tool
+  // call can reach it, and no tool call can run before the services are built.
+  const deferredClosureServices: { current?: Pick<McpApplicationServices, 'process'> } = {};
   const activityTracker = new ActivityTracker({
     async record(event: ActivitySinkEvent): Promise<void> {
       // Publish starts before slower durable evidence so updater quiet-time
@@ -1484,6 +1488,27 @@ export function createStdioMcpRuntime(
           process.stderr.write(
             `Unified-MPC workspace journal append failed: ${error instanceof Error ? error.message : String(error)}\n`,
           );
+        }
+        // #170 freshness: a handle-returning call ends here, but its `completed`
+        // row is not evidence the work did. Ask the store that owns the handles;
+        // only it may close the pin.
+        if (event.phase === 'completed') {
+          try {
+            await closeObservedDeferredCalls({
+              journal: workspaceJournal,
+              ...(deferredClosureServices.current?.process === undefined
+                ? {}
+                : { processes: deferredClosureServices.current.process }),
+              actor,
+              workspaceId: event.workspaceId,
+              closedAt: event.timestamp,
+            });
+          } catch (error) {
+            // Best-effort, like the append above: an unclosed pin errs closed.
+            process.stderr.write(
+              `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          }
         }
       }
     },
@@ -1618,6 +1643,7 @@ export function createStdioMcpRuntime(
     codex: codexService,
     agentSwarm: agentSwarmService,
   };
+  deferredClosureServices.current = { process: processService };
 
   return {
     ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),

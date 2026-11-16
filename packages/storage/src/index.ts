@@ -20,6 +20,7 @@ export * from './migrations/goal-live-continuation-lease-quarantine-migration.js
 export * from './migrations/goal-cancellation-migration.js';
 export * from './migrations/retire-auto-machine-roots-migration.js';
 export * from './workspace-journal-repository.js';
+export * from './migrations/workspace-journal-closure-migration.js';
 export * from './migrations/workspace-journal-migration.js';
 export * from './settings-repository.js';
 export * from './workspace-repository.js';

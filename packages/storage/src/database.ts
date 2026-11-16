@@ -53,6 +53,7 @@ import { HEAVY_JOB_QUEUE_MIGRATION_SQL } from './migrations/heavy-job-queue-migr
 import { PUBLISH_APPROVAL_MIGRATION_SQL } from './migrations/publish-approval-migration.js';
 import { PUBLISH_CREDENTIAL_MIGRATION_SQL } from './migrations/publish-credential-migration.js';
 import { PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL } from './migrations/publish-approval-fingerprint-migration.js';
+import { WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL } from './migrations/workspace-journal-closure-migration.js';
 import { WORKSPACE_JOURNAL_MIGRATION_SQL } from './migrations/workspace-journal-migration.js';
 
 export type SqliteCompactionResult =
@@ -200,6 +201,7 @@ export class SqliteDatabase {
       reclaimFreePages: true,
     });
     this.applyMigration({ id: CURRENT_SCHEMA_MIGRATION_ID, sql: WORKSPACE_JOURNAL_MIGRATION_SQL });
+    this.applyMigration({ id: '047_workspace_journal_closure', sql: WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

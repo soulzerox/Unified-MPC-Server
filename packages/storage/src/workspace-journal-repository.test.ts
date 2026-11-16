@@ -253,6 +253,85 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
   });
 
+  it('closes the deferred calls a freshness probe proved finished, and keeps the row', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'spawn-1', resultCode: 'ok' });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['process_start'], closureCode: 'no_live_handle',
+    })).toBe(1);
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+
+    const closed = journal.list({ workspaceId: 'ws-goal' }).filter((entry) => entry.phase === 'started');
+    expect(closed).toHaveLength(1);
+    expect(closed[0]).toMatchObject({ closureCode: 'no_live_handle', status: 'started' });
+
+    // A retried probe is a no-op, and it cannot rewrite the first verdict.
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['process_start'], closureCode: 'other_reason',
+    })).toBe(0);
+    expect(journal.list({ workspaceId: 'ws-goal' }).filter((entry) => entry.phase === 'started')[0]?.closureCode).toBe('no_live_handle');
+  });
+
+  it('leaves calls a probe could not have observed open, and refuses kinds it may not close', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    const recordedAt = '2026-11-16T10:00:00.000Z';
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'older', recordedAt });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'started', status: 'started', callId: 'live-call', recordedAt });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'newer', recordedAt: '2026-11-16T11:00:00.000Z' });
+
+    // The floor is the runtime's own start: `older` predates it, so this runtime
+    // cannot claim the handle behind it is gone.
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['process_start', 'git_publish'],
+      recordedAtOrAfter: '2026-11-16T10:30:00.000Z', closureCode: 'no_live_handle',
+    })).toBe(1);
+    const byCall = new Map(journal.list({ workspaceId: 'ws-goal' }).map((entry) => [`${entry.callId}/${entry.phase}`, entry]));
+    expect(byCall.get('older/started')?.closureCode).toBeUndefined();
+    expect(byCall.get('newer/started')?.closureCode).toBe('no_live_handle');
+    // `git_publish` is not a deferred kind: its own outcome closes it, and a probe
+    // must not be able to answer the different "owner died mid-call" question.
+    expect(byCall.get('live-call/started')?.closureCode).toBeUndefined();
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+  });
+
+  it('collects a closed deferred call but never the open one, under the same cap', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(database);
+    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 3 });
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'open-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'open-1', resultCode: 'ok' });
+    journal.closeDeferredCalls({ workspaceId: 'ws-goal', operationKinds: ['process_start'], closureCode: 'no_live_handle' });
+    for (const callId of ['spawn-2', 'spawn-3']) {
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'started', status: 'started', callId });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'project_test', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
+    }
+
+    // The closed pair is ordinary evidence now, so retention may collect it...
+    expect(journal.list({ workspaceId: 'ws-goal' }).map((entry) => entry.callId)).not.toContain('open-1');
+    // ...while the unclosed `project_test` call keeps pinning the goal.
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+    expect(journal.list({ workspaceId: 'ws-goal' }).length).toBeLessThanOrEqual(3);
+  });
+
   it('ignores an open row that belongs to an archived registration', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
     temporaryRoots.push(root);

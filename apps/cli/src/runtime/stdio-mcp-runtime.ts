@@ -90,6 +90,7 @@ import {
   SqliteMergeVerificationReceiptRepository,
   SqlitePublishApprovalRepository,
   SqlitePublishCredentialRepository,
+  SqliteDeferredHandleRepository,
   SqliteSettingsRepository,
   SqliteWorkspaceJournalRepository,
   SqliteWorkspaceRepository,
@@ -142,7 +143,7 @@ import {
 import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import { startPublishCredentialSweep } from './publish-credential-sweep.js';
 import { resolvePublishCredentialDeployment } from '../commands/publish-credential.js';
-import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest } from '@unified-mpc/mcp-server';
+import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest, DeferredHandleRecorder } from '@unified-mpc/mcp-server';
 import { createTrustedGoalRelocationHostFence, type TrustedGoalRelocationHostActor } from './goal-relocation-host-fence.js';
 
 export interface StdioMcpRuntime {
@@ -154,6 +155,8 @@ export interface StdioMcpRuntime {
   readonly goalWorkspaceRelocation?: GoalWorkspaceRelocationOrchestrator;
   readonly goalRetentionEvidenceSealing?: GoalWorkspaceRetentionEvidenceSealingService;
   readonly actor: FileActor;
+  /** Records the handle a deferred call returned, next to the journal row that names the call. */
+  readonly deferredHandleRecorder: DeferredHandleRecorder;
   readonly extensions: ExtensionsService;
   /**
    * #4 §4: one-shot repair of generated workspace policy artifacts that still
@@ -391,6 +394,20 @@ export function createStdioMcpRuntime(
   // behind, so a later session (or the close phase) can see that an operation
   // touched a Goal Workspace without replaying chat context.
   const workspaceJournal = new SqliteWorkspaceJournalRepository(database);
+  // #170 freshness: the journal says the call happened, this ledger says which
+  // handle it handed back, so the next sweep can ask that provider instead of
+  // reading "not in the process store" as finished. Best-effort by contract: a
+  // missing row just leaves the call pinned.
+  const deferredHandles = new SqliteDeferredHandleRepository(database);
+  const deferredHandleRecorder: DeferredHandleRecorder = (record): void => {
+    try {
+      deferredHandles.record(record);
+    } catch (error) {
+      process.stderr.write(
+        `Unified-MPC deferred handle record failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
   const publishApprovals = new SqlitePublishApprovalRepository(database);
   // #297 S2c: the same lease ledger backs the publish path and the expiry sweep.
   const publishCredentials = new SqlitePublishCredentialRepository({
@@ -1699,6 +1716,7 @@ export function createStdioMcpRuntime(
     ...(goalCustodyAttestation === undefined ? {} : { goalCustodyAttestation }),
     ...(goalRetentionEvidenceSealing === undefined ? {} : { goalRetentionEvidenceSealing }),
     actor,
+    deferredHandleRecorder,
     extensions,
     managedPolicyRepairReady,
     activityTracker,

@@ -62,6 +62,7 @@ async function main(): Promise<void> {
       runtimeAdmissionIdentity,
       services: runtime.services,
       actor: runtime.actor,
+      deferredHandleRecorder: runtime.deferredHandleRecorder,
       activityTracker: runtime.activityTracker,
       codexToolsEnabled: runtime.codexToolsEnabled,
       ponytailModeProvider: () => runtime.ponytailMode,

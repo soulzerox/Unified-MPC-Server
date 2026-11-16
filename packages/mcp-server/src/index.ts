@@ -1,5 +1,6 @@
 export * from './activity-log-file.js';
 export * from './activity-tracker.js';
+export * from './deferred-handle-descriptor.js';
 export * from './goal-managed-task-state-reader.js';
 export * from './goal-worktree-ledger.js';
 export * from './http.js';

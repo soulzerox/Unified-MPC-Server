@@ -109,6 +109,10 @@ import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
 import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls, settleRememberedCalls } from './deferred-journal-closure.js';
+import {
+  createDeferredClosureAuthority,
+  type DeferredClosureAuthority,
+} from './deferred-closure-authority.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1434,9 +1438,13 @@ export function createStdioMcpRuntime(
     },
   };
   const durableActivitySink = createFileActivitySink(mcpActivityLogPath(dataPath), { maxBytes: activityLogMaxBytes() });
-  // Filled in once `services` exists: the sink is created first, but only a tool
-  // call can reach it, and no tool call can run before the services are built.
-  const deferredClosureServices: { current?: Pick<McpApplicationServices, 'process'> } = {};
+  // The authority is what answers "did the handle end"; the runtime never asks a
+  // store directly, so a provider gains a verdict by gaining an adapter. It is
+  // created before the services with no adapter, and `unknown` closes nothing, so
+  // the sink cannot release a pin on a store it has not been given yet.
+  const deferredClosureAuthority: { current: DeferredClosureAuthority } = {
+    current: createDeferredClosureAuthority({}),
+  };
   // Deferred process-handle calls THIS runtime journaled, oldest first. A
   // `project_dev`/`process_start` call returns while its process is still live,
   // so the closure verdict can only be reached by a later sweep; remembering the
@@ -1480,9 +1488,7 @@ export function createStdioMcpRuntime(
         callId: event.callId,
         probe: async (callIds) => closeObservedDeferredCalls({
           journal: workspaceJournal,
-          ...(deferredClosureServices.current?.process === undefined
-            ? {}
-            : { processes: deferredClosureServices.current.process }),
+          authority: deferredClosureAuthority.current,
           actor,
           workspaceId: completedWorkspaceId,
           callIds,
@@ -1683,7 +1689,7 @@ export function createStdioMcpRuntime(
     codex: codexService,
     agentSwarm: agentSwarmService,
   };
-  deferredClosureServices.current = { process: processService };
+  deferredClosureAuthority.current = createDeferredClosureAuthority({ processes: processService });
 
   return {
     ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),

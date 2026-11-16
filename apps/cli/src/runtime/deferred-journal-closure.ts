@@ -1,8 +1,6 @@
-import type { FileActor, ProcessService } from '@unified-mpc/application';
-import type { ManagedProcess, ManagedProcessState } from '@unified-mpc/process';
+import type { FileActor } from '@unified-mpc/application';
 import type { SqliteWorkspaceJournalRepository } from '@unified-mpc/storage';
-
-const LIVE_PROCESS_STATES: ReadonlySet<ManagedProcessState> = new Set(['starting', 'running', 'termination_unverified']);
+import type { DeferredClosureAuthority } from './deferred-closure-authority.js';
 
 /**
  * Deferred kinds whose handle is a managed process, and therefore answerable by
@@ -31,17 +29,17 @@ export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
 const RUNTIME_OBSERVED_FROM = new Date().toISOString();
 
 /**
- * Close the deferred call this request opened, once the workspace has no live
- * managed process left.
+ * Close the deferred call this request opened, once the authority that owns its
+ * handle proves the workspace has no live managed process left.
  *
- * `callIds` is not an optimisation, it is the honesty boundary. `ProcessService`
+ * `callIds` is not an optimisation, it is the honesty boundary. The process store
  * only lists the handles THIS runtime registered, while the journal is shared by
  * every stdio host on the same database, so "no live process" is evidence about
  * one call, never about a neighbouring host's call. Closing by workspace alone
  * would read another host's running `project_dev` as finished.
  *
- * A store that cannot answer, or no process service at all, closes nothing. One
- * live process keeps the call pinned, which also errs closed.
+ * `unknown` — no process service, or a store that cannot answer — closes nothing.
+ * One live process keeps the call pinned, which also errs closed.
  *
  * `settled` says the probe proved the workspace has no live process, so every
  * call in `callIds` is now either closed or was already closed: the caller can
@@ -49,17 +47,20 @@ const RUNTIME_OBSERVED_FROM = new Date().toISOString();
  */
 export async function closeObservedDeferredCalls(options: {
   readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls'>;
-  readonly processes?: Pick<ProcessService, 'list'>;
+  /** Asks the store that owns the handles; `unknown` never closes a call. */
+  readonly authority: Pick<DeferredClosureAuthority, 'workspaceProcessState'>;
   readonly actor: FileActor;
   readonly workspaceId: string;
   /** The call whose request just completed: the only one this runtime may answer. */
   readonly callIds: readonly string[];
   readonly closedAt: string;
 }): Promise<{ readonly closed: number; readonly settled: boolean }> {
-  if (options.processes === undefined || options.callIds.length === 0) return { closed: 0, settled: false };
-  const listed = await options.processes.list(options.actor, options.workspaceId);
-  if (!listed.ok) return { closed: 0, settled: false };
-  if (listed.value.some(isLiveProcess)) return { closed: 0, settled: false };
+  if (options.callIds.length === 0) return { closed: 0, settled: false };
+  const state = await options.authority.workspaceProcessState({
+    actor: options.actor,
+    workspaceId: options.workspaceId,
+  });
+  if (state !== 'gone') return { closed: 0, settled: false };
   const closed = options.journal.closeDeferredCalls({
     workspaceId: options.workspaceId,
     operationKinds: [...PROCESS_HANDLE_DEFERRED_KINDS],
@@ -94,8 +95,4 @@ export async function settleRememberedCalls(options: {
   const { settled } = await options.probe([...new Set([options.callId, ...own])]);
   if (!settled) return;
   for (const callId of own) options.remembered.delete(callId);
-}
-
-function isLiveProcess(process: ManagedProcess): boolean {
-  return LIVE_PROCESS_STATES.has(process.state);
 }

@@ -316,6 +316,41 @@ describe('web CLI command', () => {
   });
 
   describe('workspace control', () => {
+    it('passes the journal projection into goal workspace cleanup evaluation', async () => {
+      const goalWorkspace = {
+        id: '22222222-2222-4222-8222-222222222222',
+        displayName: 'Goal',
+        rootPath: '/tmp/journal-goal',
+        realRootPath: '/tmp/journal-goal',
+        createdAt: '2026-11-09T00:00:00.000Z',
+        workspaceKind: 'goal',
+        goalId: 'goal-1',
+      };
+      const evaluate = vi.fn(async () => ({ ok: true as const, value: [] }));
+      const references = vi.fn(() => new Map([['goal-1', 'clear' as const]]));
+      const control = createWorkspaceControl(
+        {} as never,
+        {
+          list: async () => [goalWorkspace],
+          evaluateGoalWorkspaceCleanup: evaluate,
+        } as never,
+        {} as never,
+        { forgetWorkspace: async () => undefined },
+        { getGoalRuntimeSnapshot: async () => null },
+        { goalDurableReferenceStates: references },
+        { release: async () => true },
+        { invalidate: async () => ({ ok: true as const, value: undefined }) },
+      );
+
+      await expect(control.cleanupEvaluations?.()).resolves.toEqual([]);
+      // Dropping the projection from this call site turns every goal back into
+      // `durable_references_unknown`, so the argument itself is the assertion.
+      expect(references).toHaveBeenCalledWith(['goal-1']);
+      expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({
+        goalDurableReferenceStates: new Map([['goal-1', 'clear']]),
+      }));
+    });
+
     it('releases the provider generation ledger row when a workspace registration is removed', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'web-workspace-remove-'));
       try {

@@ -204,8 +204,9 @@ const HEAVY_JOB_QUEUE_RECOVERY_INTERVAL_MS = 60_000;
 const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
   'task_create', 'task_cancel', 'process_start', 'process_stop',
   'git_publish', 'guarded_pr_merge', 'run_goal', 'rebase_goal_workspace',
+  'git_worktree_spawn', 'git_worktree_remove', 'agent_swarm_run',
   'run_affected_tests', 'benchmark_run', 'verify_incremental',
-  'project_test', 'project_build', 'project_lint', 'project_typecheck',
+  'project_dev', 'project_test', 'project_build', 'project_lint', 'project_typecheck',
   'codex_run', 'codex_stop', 'delegate', 'parallel_delegate', 'delegate_cancel',
 ]);
 
@@ -1472,9 +1473,14 @@ export function createStdioMcpRuntime(
             ...(event.traceId === undefined ? {} : { traceId: event.traceId }),
             recordedAt: event.timestamp,
           });
-        } catch {
+        } catch (error) {
           // Best-effort by contract: a journal write must never fail the tool
-          // call it describes. The audit entry above already succeeded.
+          // call it describes. The audit entry above already succeeded. It must
+          // still be visible: a silently missing `started` row reads as "no
+          // durable references" in a fail-closed cleanup decision.
+          process.stderr.write(
+            `Unified-MPC workspace journal append failed: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
         }
       }
     },

@@ -98,8 +98,13 @@ function required(value: string | undefined, max: number): boolean {
 }
 
 function validRequest(request: WorkspaceJournalAppendRequest): boolean {
-  const phaseMatchesStatus = (request.phase === 'started' && request.status === 'started')
-    || (request.phase === 'completed' && request.status !== 'started');
+  // Closed list, not "anything but started": the DDL accepts five statuses and a
+  // stray string must not reach it as a raw SQLITE_CONSTRAINT.
+  const phaseMatchesStatus = request.status === 'started'
+    ? request.phase === 'started'
+    : (request.phase === 'completed'
+      && (request.status === 'completed' || request.status === 'failed'
+        || request.status === 'cancelled' || request.status === 'interrupted'));
   return required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)
     && required(request.operationKind, MAX_OPERATION_CHARS)
     && required(request.callId, MAX_CALL_ID_CHARS)

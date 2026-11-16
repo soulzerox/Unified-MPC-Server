@@ -315,7 +315,7 @@ Each step ships alone and leaves the repository working.
 | 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
 | 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, eight shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
-| 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); **blocked** only on `goalDurableReferenceStates` (#170); then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
+| 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); `goalDurableReferenceStates` ✅ (#170 workspace journal, see “Status after step 3a” below); **blocked** only on the `close` command reading those ports; then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
 | 4a ✅ | Repoint `GuardedMergeService` at the shared rule: the subject it evaluates is now read from the provider, so a receipt can only authorize the pull request GitHub holds, and the gate acts on that decision | shipped in #834: `subject_mismatch`/`subject_unavailable` refuse before the receipt is read; the corpus gains an enforcement suite that fails if a blocked decision ever dispatches; the runtime keeps its `MergeEvidenceBlocker` vocabulary and the CLI receipt format is unchanged |
 | 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
@@ -383,8 +383,9 @@ Step 3b's last prerequisite — the durable-reference source — ships as the #1
 workspace journal:
 
 1. `goalDurableReferenceStates` answers `clear`/`present` from
-   `workspace_journal_events`. A goal is `present` while one of its workspaces
-   owns a `started` row with no matching `completed` row, and `clear` otherwise,
+   `workspace_journal_events`. A goal is `present` while one of its live
+   (non-archived) workspaces owns a `started` row with no matching `completed`
+   row, and `clear` otherwise,
    so an operation that never reported an outcome keeps its worktree. `apps/cli`
    passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, so a live journal no longer reports

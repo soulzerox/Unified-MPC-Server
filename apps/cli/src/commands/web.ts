@@ -204,9 +204,7 @@ export async function runWeb(
         ...protectedByOpenGoal,
       ],
       goalRuntimeProjections,
-      goalDurableReferenceStates: workspaceJournal.goalDurableReferenceStates(
-        lifecycleCandidates.flatMap((workspace) => workspace.goalId === undefined ? [] : [workspace.goalId]),
-      ),
+      goalDurableReferenceStates: durableReferenceStatesFor(workspaceJournal, lifecycleCandidates),
     });
     if (!lifecycle.ok) throw new Error(lifecycle.error.message);
     // A registration can be archived outside the removal adapter (lifecycle
@@ -293,6 +291,20 @@ export function createWebGoalRuntimeProjection(
   });
 }
 
+/**
+ * The durable-reference truth both cleanup entry points hand to the service.
+ * One expression means a call site cannot forget the projection and silently
+ * revert every goal to `durable_references_unknown`.
+ */
+function durableReferenceStatesFor(
+  journal: Pick<SqliteWorkspaceJournalRepository, 'goalDurableReferenceStates'>,
+  workspaces: readonly { readonly goalId?: string | undefined }[],
+): ReturnType<SqliteWorkspaceJournalRepository['goalDurableReferenceStates']> {
+  return journal.goalDurableReferenceStates(
+    workspaces.flatMap((workspace) => (workspace.goalId === undefined ? [] : [workspace.goalId as string])),
+  );
+}
+
 export function createWorkspaceControl(
   workspaceRepository: SqliteWorkspaceRepository,
   workspaceService: WorkspaceService,
@@ -330,18 +342,16 @@ export function createWorkspaceControl(
   return {
     list: projectList,
     cleanupEvaluations: async (): Promise<readonly WebWorkspaceCleanupEvaluation[]> => {
+      const workspaces = await workspaceService.list();
       const goalRuntimeProjections = new Map<string, GoalRuntimeProjection>();
-      for (const workspace of await workspaceService.list()) {
+      for (const workspace of workspaces) {
         if (workspaceLifecycleKind(workspace) !== 'goal' || workspace.goalId === undefined) continue;
         const snapshot = await goalRuntimeSnapshots.getGoalRuntimeSnapshot(workspace.goalId);
         if (snapshot !== null) goalRuntimeProjections.set(workspace.goalId, snapshot.projection);
       }
-      const workspaces = await workspaceService.list();
       return unwrap(workspaceService.evaluateGoalWorkspaceCleanup({
         goalRuntimeProjections,
-        goalDurableReferenceStates: workspaceJournal.goalDurableReferenceStates(
-          workspaces.flatMap((workspace) => workspace.goalId === undefined ? [] : [workspace.goalId]),
-        ),
+        goalDurableReferenceStates: durableReferenceStatesFor(workspaceJournal, workspaces),
       }));
     },
     selection: async (): Promise<WebWorkspaceSelectionSnapshot | null> => {

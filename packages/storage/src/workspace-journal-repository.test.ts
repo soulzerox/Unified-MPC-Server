@@ -109,6 +109,9 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(() => journal.append({
       workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'call-3', resultCode: 'x'.repeat(129),
     })).toThrow(WorkspaceJournalStoreError);
+    expect(() => journal.append({
+      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'completed', status: 'not-a-status' as never, callId: 'call-4',
+    })).toThrow(WorkspaceJournalStoreError);
     expect(journal.list({ workspaceId: 'ws-a' })).toHaveLength(0);
   });
 
@@ -117,7 +120,7 @@ describe('SqliteWorkspaceJournalRepository', () => {
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
     const workspaces = new SqliteWorkspaceRepository(database);
-    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 4 });
+    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 3 });
     await workspaces.insert({
       id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
       createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
@@ -128,6 +131,9 @@ describe('SqliteWorkspaceJournalRepository', () => {
       journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId });
       journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
     }
+    // A completion with no `started` sibling can pin nothing, so it is the one
+    // row retention may collect on its own.
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'completed', status: 'completed', callId: 'orphan' });
 
     const entries = journal.list({ workspaceId: 'ws-goal' });
     const started = entries.filter((entry) => entry.phase === 'started').map((entry) => entry.callId);
@@ -140,6 +146,8 @@ describe('SqliteWorkspaceJournalRepository', () => {
     }
     expect(started).toContain('open');
     expect(entries.map((entry) => entry.callId)).not.toContain('done-1');
+    expect(entries.map((entry) => entry.callId)).not.toContain('orphan');
+    expect(entries.length).toBeLessThanOrEqual(3);
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
   });
 

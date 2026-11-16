@@ -1470,7 +1470,7 @@ export function createStdioMcpRuntime(
       .map(([callId]) => callId);
     if (own.length === 0 && !PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) return;
     try {
-      await closeObservedDeferredCalls({
+      const { settled } = await closeObservedDeferredCalls({
         journal: workspaceJournal,
         ...(deferredClosureServices.current?.process === undefined
           ? {}
@@ -1480,6 +1480,14 @@ export function createStdioMcpRuntime(
         callIds: [...new Set([event.callId, ...own])],
         closedAt: event.timestamp,
       });
+      // The probe proved the workspace has no live process, so every remembered
+      // call in it is closed for good: forget them instead of paying a process
+      // list and a journal UPDATE on every later completion.
+      if (settled) {
+        for (const [callId, workspaceId] of ownProcessHandleCalls) {
+          if (workspaceId === event.workspaceId) ownProcessHandleCalls.delete(callId);
+        }
+      }
     } catch (error) {
       process.stderr.write(
         `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,

@@ -41,8 +41,11 @@ const RUNTIME_OBSERVED_FROM = new Date().toISOString();
  * would read another host's running `project_dev` as finished.
  *
  * A store that cannot answer, or no process service at all, closes nothing. One
- * live process keeps the call pinned, which also errs closed. Returns how many
- * calls it closed.
+ * live process keeps the call pinned, which also errs closed.
+ *
+ * `settled` says the probe proved the workspace has no live process, so every
+ * call in `callIds` is now either closed or was already closed: the caller can
+ * forget them instead of re-asking on every later request.
  */
 export async function closeObservedDeferredCalls(options: {
   readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls'>;
@@ -52,12 +55,12 @@ export async function closeObservedDeferredCalls(options: {
   /** The call whose request just completed: the only one this runtime may answer. */
   readonly callIds: readonly string[];
   readonly closedAt: string;
-}): Promise<number> {
-  if (options.processes === undefined || options.callIds.length === 0) return 0;
+}): Promise<{ readonly closed: number; readonly settled: boolean }> {
+  if (options.processes === undefined || options.callIds.length === 0) return { closed: 0, settled: false };
   const listed = await options.processes.list(options.actor, options.workspaceId);
-  if (!listed.ok) return 0;
-  if (listed.value.some(isLiveProcess)) return 0;
-  return options.journal.closeDeferredCalls({
+  if (!listed.ok) return { closed: 0, settled: false };
+  if (listed.value.some(isLiveProcess)) return { closed: 0, settled: false };
+  const closed = options.journal.closeDeferredCalls({
     workspaceId: options.workspaceId,
     operationKinds: [...PROCESS_HANDLE_DEFERRED_KINDS],
     recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
@@ -65,6 +68,7 @@ export async function closeObservedDeferredCalls(options: {
     closureCode: NO_LIVE_PROCESS_CLOSURE_CODE,
     closedAt: options.closedAt,
   });
+  return { closed, settled: true };
 }
 
 function isLiveProcess(process: ManagedProcess): boolean {

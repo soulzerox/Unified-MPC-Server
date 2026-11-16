@@ -94,7 +94,15 @@ describe('settleRememberedCalls', () => {
     // The regression this forbids: forgetting every entry for the workspace drops
     // a launcher whose `started` row landed during the awaited process read. No
     // verdict covers it, so nothing retries it and the goal stays `present`.
-    const remembered = new Map([['probed-1', 'ws-1'], ['probed-2', 'ws-1']]);
+    // `foreign` predates the snapshot, so it pins the workspace filter: a snapshot
+    // that took every remembered call would probe and forget another workspace's
+    // pin. `completed-now` predates it too, so it pins the dedupe.
+    const remembered = new Map([
+      ['probed-1', 'ws-1'],
+      ['probed-2', 'ws-1'],
+      ['foreign', 'ws-2'],
+      ['completed-now', 'ws-1'],
+    ]);
     const probed: string[][] = [];
     await settleRememberedCalls({
       remembered,
@@ -103,12 +111,14 @@ describe('settleRememberedCalls', () => {
       probe: async (callIds) => {
         probed.push([...callIds]);
         remembered.set('landed-during-probe', 'ws-1');
-        remembered.set('elsewhere', 'ws-2');
         return { closed: 3, settled: true };
       },
     });
     expect(probed).toEqual([['completed-now', 'probed-1', 'probed-2']]);
-    expect([...remembered]).toEqual([['landed-during-probe', 'ws-1'], ['elsewhere', 'ws-2']]);
+    expect([...remembered]).toEqual([
+      ['foreign', 'ws-2'],
+      ['landed-during-probe', 'ws-1'],
+    ]);
   });
 
   it('forgets nothing when the probe could not settle the workspace', async () => {

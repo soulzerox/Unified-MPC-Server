@@ -7,7 +7,7 @@ import {
   NO_LIVE_PROCESS_CLOSURE_CODE,
   PROCESS_HANDLE_DEFERRED_KINDS,
   closeObservedDeferredCalls,
-  forgetSettledCalls,
+  settleRememberedCalls,
 } from './deferred-journal-closure.js';
 
 const actor: FileActor = { clientId: 'client', sessionId: 'session' };
@@ -89,13 +89,36 @@ describe('closeObservedDeferredCalls', () => {
   });
 });
 
-describe('forgetSettledCalls', () => {
-  it('forgets only the calls the probe covered, never the rest of the workspace', () => {
-    // The regression this forbids: deleting every entry for the workspace drops a
-    // launcher whose `started` row landed during the awaited process read. It was
-    // never in the verdict, so nothing retries it and the goal stays `present`.
-    const remembered = new Map([['probed', 'ws-1'], ['landed-during-probe', 'ws-1'], ['other-ws', 'ws-2']]);
-    forgetSettledCalls(remembered, ['probed']);
-    expect([...remembered]).toEqual([['landed-during-probe', 'ws-1'], ['other-ws', 'ws-2']]);
+describe('settleRememberedCalls', () => {
+  it('forgets the calls the probe covered, and keeps one that started during the probe', async () => {
+    // The regression this forbids: forgetting every entry for the workspace drops
+    // a launcher whose `started` row landed during the awaited process read. No
+    // verdict covers it, so nothing retries it and the goal stays `present`.
+    const remembered = new Map([['probed-1', 'ws-1'], ['probed-2', 'ws-1']]);
+    const probed: string[][] = [];
+    await settleRememberedCalls({
+      remembered,
+      workspaceId: 'ws-1',
+      callId: 'completed-now',
+      probe: async (callIds) => {
+        probed.push([...callIds]);
+        remembered.set('landed-during-probe', 'ws-1');
+        remembered.set('elsewhere', 'ws-2');
+        return { closed: 3, settled: true };
+      },
+    });
+    expect(probed).toEqual([['completed-now', 'probed-1', 'probed-2']]);
+    expect([...remembered]).toEqual([['landed-during-probe', 'ws-1'], ['elsewhere', 'ws-2']]);
+  });
+
+  it('forgets nothing when the probe could not settle the workspace', async () => {
+    const remembered = new Map([['probed-1', 'ws-1']]);
+    await settleRememberedCalls({
+      remembered,
+      workspaceId: 'ws-1',
+      callId: 'completed-now',
+      probe: async () => ({ closed: 0, settled: false }),
+    });
+    expect([...remembered]).toEqual([['probed-1', 'ws-1']]);
   });
 });

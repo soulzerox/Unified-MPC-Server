@@ -135,6 +135,9 @@ function resolvePackageTarget(packageDir, subpath) {
     return undefined;
   }
   if (subpath.length > 0) {
+    // Node refuses a specifier that walks out of its package, so a release must
+    // not be judged by a file the loader would never resolve.
+    if (subpath.split("/").includes("..")) return undefined;
     // A workspace package can export a subpath whose target is not the literal
     // path (`@unified-mpc/shared/date-time-display`), so follow its exports map
     // before falling back to the file, which would refuse a carried file. A
@@ -190,7 +193,25 @@ const seen = new Set();
 const missing = new Set();
 const queue = [...entries];
 while (queue.length > 0) {
-  const file = queue.pop();
+  const queued = queue.pop();
+  let file;
+  try {
+    // Walk the realpath so a pnpm link site and its store copy are one file, not
+    // two passes over the same bytes that report the same missing member twice.
+    file = fs.realpathSync(queued);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      missing.add(path.relative(root, queued));
+      continue;
+    }
+    process.stderr.write(`${path.relative(root, queued)}: ${error.code ?? error.message}\n`);
+    process.exit(2);
+  }
+  if (!insideRoot(file)) {
+    // A member of the release that resolves elsewhere is not in the release.
+    missing.add(`${path.relative(root, queued)} (resolves outside the release to ${file})`);
+    continue;
+  }
   if (seen.has(file)) continue;
   seen.add(file);
   let source;

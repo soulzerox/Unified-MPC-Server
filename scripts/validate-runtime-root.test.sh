@@ -224,6 +224,43 @@ printf "export * from '@unified-mpc/mcp-server/undeclared';\n" \
   >>"$closure_workspace_undeclared/apps/cli/node_modules/@unified-mpc/mcp-server/dist/tool-registry.js"
 expect_fail 67 RUNTIME_ARTIFACT_INCOMPLETE mcp-http "$closure_workspace_undeclared"
 
+# A member of the release whose file is a symlink out of the release is not in
+# the release: the bytes the service would load live somewhere the release does
+# not carry, and deleting them breaks a restart.
+closure_file_escape="$TMP_ROOT/closure-file-escape"
+make_runtime "$closure_file_escape"
+printf "export * from './linked.js';\n" >"$closure_file_escape/apps/cli/dist/index.js"
+printf 'export const linked = 1;\n' >"$TMP_ROOT/outside-linked.js"
+ln -s "$TMP_ROOT/outside-linked.js" "$closure_file_escape/apps/cli/dist/linked.js"
+expect_fail 67 RUNTIME_ARTIFACT_INCOMPLETE web "$closure_file_escape"
+
+# Node refuses a subpath that walks out of its package, so a release must not be
+# judged by a file outside it that the loader would never resolve. The leak file
+# exists on purpose: a raw fallback would accept it.
+closure_subpath_escape="$TMP_ROOT/closure-subpath-escape"
+make_runtime "$closure_subpath_escape"
+plain_package="$closure_subpath_escape/apps/cli/node_modules/@unified-mpc/plain"
+mkdir -p "$plain_package"
+printf '{"name":"@unified-mpc/plain","type":"module"}\n' >"$plain_package/package.json"
+printf 'export const leak = 1;\n' >"$closure_subpath_escape/apps/cli/leak.js"
+printf "export * from '@unified-mpc/plain/../../../leak.js';\n" \
+  >"$closure_subpath_escape/apps/cli/dist/index.js"
+expect_fail 67 RUNTIME_ARTIFACT_INCOMPLETE web "$closure_subpath_escape"
+
+# The link site and its store copy are one file, so a missing member reached
+# through both paths is reported once, not twice.
+set +e
+duplicate_output="$(bash "$VALIDATOR" mcp-http "$closure_workspace_store" 2>&1)"
+duplicate_status=$?
+set -e
+duplicate_count="$(grep -c 'mutation-subject.js' <<<"$duplicate_output" || true)"
+if [[ "$duplicate_status" -ne 67 || "$duplicate_count" -ne 1 ]]; then
+  printf 'expected one mutation-subject.js report at status 67, got %s at %s\n' \
+    "$duplicate_count" "$duplicate_status" >&2
+  exit 1
+fi
+pass_count=$((pass_count + 1))
+
 # A node that cannot run the scan is a preflight failure, not an artifact verdict.
 set +e
 UNIFIED_MPC_NODE=/bin/false bash "$VALIDATOR" web "$closure_ok" >/dev/null 2>&1

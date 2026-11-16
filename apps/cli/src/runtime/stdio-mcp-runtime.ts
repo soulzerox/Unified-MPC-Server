@@ -1480,13 +1480,13 @@ export function createStdioMcpRuntime(
         callIds: [...new Set([event.callId, ...own])],
         closedAt: event.timestamp,
       });
-      // The probe proved the workspace has no live process, so every remembered
-      // call in it is closed for good: forget them instead of paying a process
-      // list and a journal UPDATE on every later completion.
+      // The probe proved the workspace had no live process when it looked, so the
+      // calls it covered are closed for good: forget them instead of paying a
+      // process list and a journal UPDATE on every later completion. Only the
+      // probed ids: a launcher whose `started` row landed while the probe awaited
+      // was not in the verdict, so dropping it would pin the goal forever.
       if (settled) {
-        for (const [callId, workspaceId] of ownProcessHandleCalls) {
-          if (workspaceId === event.workspaceId) ownProcessHandleCalls.delete(callId);
-        }
+        for (const callId of own) ownProcessHandleCalls.delete(callId);
       }
     } catch (error) {
       process.stderr.write(

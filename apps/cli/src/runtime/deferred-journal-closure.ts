@@ -72,19 +72,28 @@ export async function closeObservedDeferredCalls(options: {
 }
 
 /**
- * Forget a settled call, and only one the probe covered.
+ * Probe the workspace, then forget exactly the calls the probe covered.
  *
- * `settled` is a verdict about a snapshot taken before the awaited process read,
- * so it says nothing about a launcher whose `started` row landed during that
- * await. Taking the probed ids — never the workspace — is the whole safety
- * property: an unprobed call that got dropped here is never retried, and its pin
- * pins the goal `present` for good.
+ * `settled` is a verdict about a snapshot: the calls this runtime remembered when
+ * the probe started. A launcher whose `started` row lands while the probe awaits
+ * was never in that snapshot, so forgetting by workspace would drop a call no
+ * verdict covers — it is never retried, and its pin holds the goal `present` for
+ * good. Both the snapshot and the delete live here, so the rule has one home and
+ * a caller cannot reach the map with the wrong set.
  */
-export function forgetSettledCalls(
-  remembered: Map<string, string>,
-  probedCallIds: readonly string[],
-): void {
-  for (const callId of probedCallIds) remembered.delete(callId);
+export async function settleRememberedCalls(options: {
+  readonly remembered: Map<string, string>;
+  readonly workspaceId: string;
+  /** The call whose request just completed: the runtime may answer for it too. */
+  readonly callId: string;
+  readonly probe: (callIds: readonly string[]) => Promise<{ readonly closed: number; readonly settled: boolean }>;
+}): Promise<void> {
+  const own = [...options.remembered]
+    .filter(([, workspaceId]) => workspaceId === options.workspaceId)
+    .map(([callId]) => callId);
+  const { settled } = await options.probe([...new Set([options.callId, ...own])]);
+  if (!settled) return;
+  for (const callId of own) options.remembered.delete(callId);
 }
 
 function isLiveProcess(process: ManagedProcess): boolean {

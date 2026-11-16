@@ -108,7 +108,7 @@ import {
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
-import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls, forgetSettledCalls } from './deferred-journal-closure.js';
+import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls, settleRememberedCalls } from './deferred-journal-closure.js';
 import { resolveGoalBaseBranch, resolveGoalRepositoryIds } from './canonical-git-source.js';
 import { CrossProcessWorkspaceAuthorityWatcher, LocalWorkspaceAuthorityEpoch } from './workspace-authority-epoch.js';
 import { StrictWorkspaceRepository } from './strict-workspace-repository.js';
@@ -1465,27 +1465,30 @@ export function createStdioMcpRuntime(
       return;
     }
     if (event.phase !== 'completed') return;
-    const own = [...ownProcessHandleCalls]
-      .filter(([, workspaceId]) => workspaceId === event.workspaceId)
-      .map(([callId]) => callId);
-    if (own.length === 0 && !PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) return;
+    const completedWorkspaceId = event.workspaceId;
+    if (
+      !PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)
+      && ![...ownProcessHandleCalls.values()].includes(completedWorkspaceId)
+    ) return;
     try {
-      const { settled } = await closeObservedDeferredCalls({
-        journal: workspaceJournal,
-        ...(deferredClosureServices.current?.process === undefined
-          ? {}
-          : { processes: deferredClosureServices.current.process }),
-        actor,
-        workspaceId: event.workspaceId,
-        callIds: [...new Set([event.callId, ...own])],
-        closedAt: event.timestamp,
-      });
       // The probe proved the workspace had no live process when it looked, so the
-      // calls it covered are closed for good: forget them instead of paying a
-      // process list and a journal UPDATE on every later completion. Only the
-      // probed ids: a launcher whose `started` row landed while the probe awaited
-      // was not in the verdict, so dropping it would pin the goal forever.
-      if (settled) forgetSettledCalls(ownProcessHandleCalls, own);
+      // calls it covered are closed for good and forgotten instead of costing a
+      // process list plus a journal UPDATE on every later completion.
+      await settleRememberedCalls({
+        remembered: ownProcessHandleCalls,
+        workspaceId: completedWorkspaceId,
+        callId: event.callId,
+        probe: async (callIds) => closeObservedDeferredCalls({
+          journal: workspaceJournal,
+          ...(deferredClosureServices.current?.process === undefined
+            ? {}
+            : { processes: deferredClosureServices.current.process }),
+          actor,
+          workspaceId: completedWorkspaceId,
+          callIds,
+          closedAt: event.timestamp,
+        }),
+      });
     } catch (error) {
       process.stderr.write(
         `Unified-MPC workspace journal closure failed: ${error instanceof Error ? error.message : String(error)}\n`,

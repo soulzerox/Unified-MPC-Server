@@ -94,6 +94,7 @@ import {
   SqliteWorkspaceJournalRepository,
   SqliteWorkspaceRepository,
   assertStorageIdentitySafe,
+  DEFERRED_CLOSURE_OPERATION_KINDS,
 } from '@unified-mpc/storage';
 import { ArtifactQuarantineStore, CanonicalManifestStore, CanonicalRefStore, GcLeaseStore, GoalOverlayStore, IndexJobLedger, ProviderGenerationLedger, RevisionPinRegistry, SecretPolicy, WorkspacePathGuard, WorkspaceService, boundCanonicalStatusReport, canonicalRevisionList, canonicalStatus, gcStatus, pinGoalBaseAtCommit, sharedProcessResourceAdmissionController, type Workspace } from '@unified-mpc/workspace';
 import { appError, err, ok, type GoalRecord, type RepositoryMergePolicy, type Result, type WorkspaceAdmissionReceipt, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
@@ -196,18 +197,20 @@ const DEFAULT_THAI_RAG_START_RETRY_MS = 5_000;
 const HEAVY_JOB_QUEUE_RECOVERY_INTERVAL_MS = 60_000;
 
 /**
- * Tools whose call can leave work behind in a workspace, so the durable
- * journal keeps a row for them (#170, first slice). Read-only and preview-only
- * tools are deliberately absent: they cannot own a result worth recovering, and
- * journaling them would turn a recovery index into a request log.
+ * Tools whose call can leave work behind in a workspace, so the durable journal
+ * keeps a row for them (#170, first slice). Read-only and preview-only tools are
+ * deliberately absent: they cannot own a result worth recovering, and journaling
+ * them would turn a recovery index into a request log.
+ *
+ * The deferred-closure kinds are unioned in rather than repeated: a kind the
+ * projection treats as unproven must be journaled, or the policy is silently
+ * dead — which is exactly how `shell` and `merge_verification_run` were missed.
  */
-const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
-  'task_create', 'task_cancel', 'process_start', 'process_stop',
+export const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
+  ...DEFERRED_CLOSURE_OPERATION_KINDS,
+  'task_cancel', 'process_stop', 'codex_stop', 'delegate_cancel',
   'git_publish', 'guarded_pr_merge', 'run_goal', 'rebase_goal_workspace',
-  'git_worktree_spawn', 'git_worktree_remove', 'agent_swarm_run',
-  'run_affected_tests', 'benchmark_run', 'verify_incremental',
-  'project_dev', 'project_test', 'project_build', 'project_lint', 'project_typecheck',
-  'codex_run', 'codex_stop', 'delegate', 'parallel_delegate', 'delegate_cancel',
+  'git_worktree_remove', 'agent_swarm_run',
 ]);
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */

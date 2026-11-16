@@ -234,12 +234,12 @@ Rules the implementation enforces, per gate rather than uniformly:
   can be audited after the fact;
 - a blocked evaluation is recorded too, so "why was this refused" is answerable;
 - a new receipt kind needs its own store, and the same step must extend
-  `scripts/prune-evidence.mjs` and its tests. Prune plans only
-  `.unified-mpc/local-verify` and `.unified-mpc/reviews`; the verification store
-  skips filenames that do not match its receipt pattern, while the review store
-  reads every `.json` file and refuses the whole plan when one is unreadable. A
-  new kind dropped into either directory would be silently unpruned or would
-  break pruning.
+  `scripts/prune-evidence.mjs` and its tests. Prune plans
+  `.unified-mpc/local-verify`, `.unified-mpc/reviews` and `.unified-mpc/gates`;
+  the verification store skips filenames that do not match its receipt pattern,
+  while the review and close-gate stores read every `.json` file and refuse the
+  whole plan when one is unreadable. A new kind dropped into any of those
+  directories would be silently unpruned or would break pruning.
 
 ---
 
@@ -319,7 +319,7 @@ Each step ships alone and leaves the repository working.
 | 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
 | 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, eight shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
-| 3b ⏸ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | removal preview ✅ (`createGoalWorktreeRemovalPreviewPort`, client-scoped); `goalDurableReferenceStates` ✅ (#170 workspace journal, see “Status after step 3a” below); **blocked** only on the `close` command reading those ports; then: a goal worktree with `unmerged_changes` is refused, a merged head is allowed, `retention_pending` is refused, the new receipt kind is pruned by policy |
+| 3b ✅ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | shipped with #170's deferred-closure follow-up (#848): `apps/cli/src/index.ts` routes `gate check` through `parseGateArgs`/`runCloseGate` with the three real ports — `evaluateGoalWorkspaceCleanup` over the #170 journal projection, `createGoalWorktreeRemovalPreviewPort` (client-scoped) and `goalCompletionWorktreeBlockers` — and writes the receipt to `<workspace>/.unified-mpc/gates` unless `--dry-run`; `scripts/prune-evidence.mjs` plans that store as a third one (newest `--keep` receipts survive, an unreadable receipt refuses the whole run) with six tests; a refusal exits `1` and still records its receipt. Bundled with #848 on purpose: wiring the gate before the closure fix would point it at a projection that called live work `clear` |
 | 4a ✅ | Repoint `GuardedMergeService` at the shared rule: the subject it evaluates is now read from the provider, so a receipt can only authorize the pull request GitHub holds, and the gate acts on that decision | shipped in #834: `subject_mismatch`/`subject_unavailable` refuse before the receipt is read; the corpus gains an enforcement suite that fails if a blocked decision ever dispatches; the runtime keeps its `MergeEvidenceBlocker` vocabulary and the CLI receipt format is unchanged |
 | 4b ⏸ | Wire `verify`/`review` through the engine's `receipts()` rather than each path reading its own store | blocked on the engine's receipt store existing in code; the runtime keeps its SQLite receipts until then (open question 3), and this step does not convert them |
 | 4c ✅ | Evaluate the receipt against the subject the provider confirmed, so an omitted caller `baseSha` can no longer skip the receipt's base check | shipped in #836: a receipt written for another base is refused with `receipt_base_stale` whether or not the caller named a base; the runtime's receipt reuse already matches on `baseSha`, so a retargeted pull request gets a fresh receipt instead of a permanent refusal |
@@ -390,11 +390,20 @@ workspace journal:
    `workspace_journal_events`. A goal is `present` while one of its live
    (non-archived) workspaces owns a `started` row with no matching `completed`
    row, and `clear` otherwise,
-   so an operation that never reported an outcome keeps its worktree. `apps/cli`
-   passes that map into `reconcileLifecycle` and
-   `evaluateGoalWorkspaceCleanup`, so a live journal no longer reports
-   `durable_references_unknown`. Wiring `gate check --phase close` to those ports
-   is what remains: the truth exists, the command does not read it yet.
+   so an operation that never reported an outcome keeps its worktree. A
+   handle-returning operation — every kind in
+   `DEFERRED_CLOSURE_OPERATION_KINDS`, which is also unioned into the runtime
+   journal allowlist so the two cannot drift — is `present` even after its own
+   call returns: that call ends the request, not the work, and closing it from a
+   durable task/process record is a later #170 step — reporting it `clear` would
+   classify a workspace with a running process as a retention candidate. Retention
+   collapses older calls of the same kind, so the pin costs one row per kind
+   instead of growing with every launch. `run_goal` stays out of that set: the
+   goal runtime already tracks goal liveness.
+   `apps/cli` passes that map into `reconcileLifecycle` and
+   `evaluateGoalWorkspaceCleanup`, and `gate check --phase close` reads it through
+   the ports below, so a live journal no longer reports
+   `durable_references_unknown` and the close gate no longer decides blind.
 
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as

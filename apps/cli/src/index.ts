@@ -1159,6 +1159,11 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
         harnessActivationLedger,
         sessionId: 'cli',
         ...(mcpRuntime === undefined ? {} : {
+          // `unified-mpc tools call run_goal|task_create|process_start` creates
+          // real durable work, so the CLI registry has to report through the same
+          // activity sink as the stdio host; a tracker of its own would leave no
+          // `workspace_journal_events` row and the goal would read as `clear`.
+          activityTracker: mcpRuntime.activityTracker,
           activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
           activeWorkspaceScopeUnavailableProvider: mcpRuntime.activeWorkspaceScopeUnavailableProvider,
           activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,

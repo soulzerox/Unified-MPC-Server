@@ -1,9 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import type { SqliteDatabase } from './database.js';
 
-const MAX_ID_CHARS = 512;
+/**
+ * Per-field bounds, each mirroring the DDL. A value the schema would reject must
+ * be refused here as a typed store error first, so a caller sees
+ * `WorkspaceJournalStoreError` instead of a raw `SQLITE_CONSTRAINT`.
+ */
+const MAX_WORKSPACE_ID_CHARS = 512;
 const MAX_OPERATION_CHARS = 64;
+const MAX_TOOL_CHARS = 128;
+const MAX_CALL_ID_CHARS = 256;
+const MAX_RESULT_CODE_CHARS = 128;
 const MAX_SUMMARY_CHARS = 500;
+const MAX_SESSION_CHARS = 512;
+const MAX_TRACE_CHARS = 512;
+const MAX_RECORDED_AT_CHARS = 64;
+const MAX_EVENT_ID_CHARS = 512;
 const DEFAULT_MAX_EVENTS_PER_WORKSPACE = 5_000;
 const MAX_LIST_LIMIT = 200;
 
@@ -15,11 +27,13 @@ export type WorkspaceJournalReferenceState = 'clear' | 'present';
 export interface WorkspaceJournalAppendRequest {
   readonly workspaceId: string;
   readonly operationKind: string;
+  /** Required: the `(workspace, callId, phase)` triple is what pairs an open row
+   * with its completion, and SQL would neither dedupe nor match a NULL. */
+  readonly callId: string;
   readonly phase: WorkspaceJournalPhase;
   readonly status: WorkspaceJournalStatus;
   readonly sessionId?: string;
   readonly toolName?: string;
-  readonly callId?: string;
   readonly resultCode?: string;
   readonly summary?: string;
   readonly traceId?: string;
@@ -34,7 +48,7 @@ export interface WorkspaceJournalEntry {
   readonly sessionId?: string;
   readonly operationKind: string;
   readonly toolName?: string;
-  readonly callId?: string;
+  readonly callId: string;
   readonly phase: WorkspaceJournalPhase;
   readonly status: WorkspaceJournalStatus;
   readonly resultCode?: string;
@@ -56,7 +70,7 @@ interface JournalRow {
   readonly session_id: string | null;
   readonly operation_kind: string;
   readonly tool_name: string | null;
-  readonly call_id: string | null;
+  readonly call_id: string;
   readonly phase: string;
   readonly status: string;
   readonly result_code: string | null;
@@ -86,17 +100,17 @@ function required(value: string | undefined, max: number): boolean {
 function validRequest(request: WorkspaceJournalAppendRequest): boolean {
   const phaseMatchesStatus = (request.phase === 'started' && request.status === 'started')
     || (request.phase === 'completed' && request.status !== 'started');
-  return required(request.workspaceId, MAX_ID_CHARS)
+  return required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)
     && required(request.operationKind, MAX_OPERATION_CHARS)
+    && required(request.callId, MAX_CALL_ID_CHARS)
     && phaseMatchesStatus
-    && bounded(request.sessionId, MAX_ID_CHARS)
-    && bounded(request.toolName, MAX_ID_CHARS)
-    && bounded(request.callId, MAX_ID_CHARS)
-    && bounded(request.resultCode, MAX_ID_CHARS)
+    && bounded(request.sessionId, MAX_SESSION_CHARS)
+    && bounded(request.toolName, MAX_TOOL_CHARS)
+    && bounded(request.resultCode, MAX_RESULT_CODE_CHARS)
     && bounded(request.summary, MAX_SUMMARY_CHARS)
-    && bounded(request.traceId, MAX_ID_CHARS)
-    && bounded(request.recordedAt, 64)
-    && bounded(request.eventId, MAX_ID_CHARS);
+    && bounded(request.traceId, MAX_TRACE_CHARS)
+    && bounded(request.recordedAt, MAX_RECORDED_AT_CHARS)
+    && bounded(request.eventId, MAX_EVENT_ID_CHARS);
 }
 
 function toEntry(row: JournalRow): WorkspaceJournalEntry {
@@ -107,7 +121,7 @@ function toEntry(row: JournalRow): WorkspaceJournalEntry {
     ...(row.session_id === null ? {} : { sessionId: row.session_id }),
     operationKind: row.operation_kind,
     ...(row.tool_name === null ? {} : { toolName: row.tool_name }),
-    ...(row.call_id === null ? {} : { callId: row.call_id }),
+    callId: row.call_id,
     phase: row.phase === 'started' ? 'started' : 'completed',
     status: row.status as WorkspaceJournalStatus,
     ...(row.result_code === null ? {} : { resultCode: row.result_code }),
@@ -157,7 +171,7 @@ export class SqliteWorkspaceJournalRepository {
       request.sessionId ?? null,
       request.operationKind,
       request.toolName ?? null,
-      request.callId ?? null,
+      request.callId,
       request.phase,
       request.status,
       request.resultCode ?? null,
@@ -171,7 +185,7 @@ export class SqliteWorkspaceJournalRepository {
   }
 
   public list(request: ListWorkspaceJournalRequest): readonly WorkspaceJournalEntry[] {
-    if (!required(request.workspaceId, MAX_ID_CHARS)) {
+    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
       throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
     }
     const limit = Math.min(Math.max(request.limit ?? MAX_LIST_LIMIT, 1), MAX_LIST_LIMIT);
@@ -189,16 +203,21 @@ export class SqliteWorkspaceJournalRepository {
   /**
    * Durable references per goal, in the vocabulary `WorkspaceService` uses.
    *
-   * A goal is `present` while it owns an operation that started and never
-   * reported a terminal outcome: discarding the worktree would discard the only
-   * remaining handle to that work. A goal with no such row is `clear`, because
-   * a goal that never journaled anything has nothing this store pins. Callers
-   * still decide fail-closed on their own; absence here is evidence, not a
-   * blanket permission.
+   * A goal is `present` while one of its live workspaces owns an operation that
+   * started and never reported a terminal outcome: discarding the worktree would
+   * discard the only remaining handle to that work. A goal with no such row is
+   * `clear`, because a goal that never journaled anything has nothing this store
+   * pins. Archived registrations are excluded — their worktree is already gone,
+   * so a row left behind by them must not pin the goal's current workspace.
+   *
+   * Callers still decide fail-closed on their own; absence here is evidence, not
+   * a blanket permission. A row whose owner died mid-call stays `started` until a
+   * later reconciliation closes it; telling "still running" from "died" is the
+   * resume/freshness step of #170, not this store's guess.
    */
   public goalDurableReferenceStates(goalIds: readonly string[]): ReadonlyMap<string, WorkspaceJournalReferenceState> {
     const states = new Map<string, WorkspaceJournalReferenceState>();
-    const ids = [...new Set(goalIds.filter((goalId) => required(goalId, MAX_ID_CHARS)))];
+    const ids = [...new Set(goalIds.filter((goalId) => required(goalId, MAX_WORKSPACE_ID_CHARS)))];
     for (const goalId of ids) states.set(goalId, 'clear');
     if (ids.length === 0) return states;
     const placeholders = ids.map(() => '?').join(', ');
@@ -207,6 +226,8 @@ export class SqliteWorkspaceJournalRepository {
       FROM workspace_journal_events j
       JOIN workspaces w ON w.id = j.workspace_id
       WHERE w.goal_id IN (${placeholders})
+        AND w.archived_at IS NULL
+        AND j.phase = 'started'
         AND j.status = 'started'
         AND NOT EXISTS (
           SELECT 1 FROM workspace_journal_events c
@@ -227,14 +248,42 @@ export class SqliteWorkspaceJournalRepository {
     `).get(workspaceId) as unknown as { readonly count: number };
     const excess = Number(overflow.count) - this.maxEventsPerWorkspace;
     if (excess <= 0) return;
-    // Only terminal rows are collectable: an open row is what pins a worktree,
-    // so retention must never be the reason it disappears.
+    // An open row is what pins a worktree, so retention must never be the reason
+    // it disappears — and a completion may not go without its own `started` row
+    // either, or the leftover row would look open forever and block cleanup
+    // permanently. Retention therefore deletes whole closed calls, oldest first,
+    // and picks enough calls to cover the overflow.
+    db.prepare(`
+      DELETE FROM workspace_journal_events
+      WHERE workspace_id = ? AND call_id IN (
+        SELECT c.call_id FROM workspace_journal_events c
+        WHERE c.workspace_id = ? AND c.phase = 'completed'
+          AND EXISTS (
+            SELECT 1 FROM workspace_journal_events s
+            WHERE s.workspace_id = c.workspace_id
+              AND s.call_id = c.call_id
+              AND s.phase = 'started'
+          )
+        GROUP BY c.call_id
+        ORDER BY MIN(c.sequence) ASC
+        LIMIT ?
+      )
+    `).run(workspaceId, workspaceId, Math.ceil(excess / 2));
+    // A terminal row whose call never started pins nothing, so it is collectable
+    // on its own. The shipped caller cannot write one; this keeps the store from
+    // leaking rows if another caller does.
     db.prepare(`
       DELETE FROM workspace_journal_events
       WHERE sequence IN (
-        SELECT sequence FROM workspace_journal_events
-        WHERE workspace_id = ? AND status <> 'started'
-        ORDER BY sequence ASC
+        SELECT j.sequence FROM workspace_journal_events j
+        WHERE j.workspace_id = ? AND j.status <> 'started'
+          AND NOT EXISTS (
+            SELECT 1 FROM workspace_journal_events s
+            WHERE s.workspace_id = j.workspace_id
+              AND s.call_id = j.call_id
+              AND s.phase = 'started'
+          )
+        ORDER BY j.sequence ASC
         LIMIT ?
       )
     `).run(workspaceId, excess);

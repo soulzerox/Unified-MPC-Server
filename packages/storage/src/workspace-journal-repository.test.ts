@@ -98,30 +98,70 @@ describe('SqliteWorkspaceJournalRepository', () => {
     await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
 
     expect(() => journal.append({
-      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'completed',
+      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'completed', callId: 'call-1',
     })).toThrow(WorkspaceJournalStoreError);
     expect(() => journal.append({
-      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'started', summary: 'x'.repeat(501),
+      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'started', callId: '',
+    })).toThrow(WorkspaceJournalStoreError);
+    expect(() => journal.append({
+      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'call-2', summary: 'x'.repeat(501),
+    })).toThrow(WorkspaceJournalStoreError);
+    expect(() => journal.append({
+      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'call-3', resultCode: 'x'.repeat(129),
     })).toThrow(WorkspaceJournalStoreError);
     expect(journal.list({ workspaceId: 'ws-a' })).toHaveLength(0);
   });
 
-  it('trims terminal history but never an open row', async () => {
+  it('retires whole closed calls and never an open row, so no started row is left unclosable', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
     temporaryRoots.push(root);
     const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
     const workspaces = new SqliteWorkspaceRepository(database);
-    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 3 });
-    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 4 });
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
 
-    journal.append({ workspaceId: 'ws-a', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'open' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'open' });
     for (const callId of ['done-1', 'done-2', 'done-3']) {
-      journal.append({ workspaceId: 'ws-a', operationKind: 'task_create', phase: 'completed', status: 'completed', callId });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId });
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'completed', status: 'completed', callId, resultCode: 'ok' });
     }
 
-    const callIds = journal.list({ workspaceId: 'ws-a' }).map((entry) => entry.callId);
-    expect(callIds).toContain('open');
-    expect(callIds.length).toBeLessThanOrEqual(3);
-    expect(callIds).not.toContain('done-1');
+    const entries = journal.list({ workspaceId: 'ws-goal' });
+    const started = entries.filter((entry) => entry.phase === 'started').map((entry) => entry.callId);
+    const completed = new Set(entries.filter((entry) => entry.phase === 'completed').map((entry) => entry.callId));
+    // Every surviving started row still has its completion: retention never
+    // leaves an unclosable row behind, which would pin the goal forever.
+    for (const callId of started) {
+      if (callId === 'open') continue;
+      expect(completed.has(callId)).toBe(true);
+    }
+    expect(started).toContain('open');
+    expect(entries.map((entry) => entry.callId)).not.toContain('done-1');
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+  });
+
+  it('ignores an open row that belongs to an archived registration', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(database);
+    const journal = new SqliteWorkspaceJournalRepository(database);
+    const createdAt = new Date(0).toISOString();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt, workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'old-open' });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    await workspaces.archive('ws-goal', new Date(1).toISOString());
+
+    // The worktree is gone, so its open row cannot be what keeps the goal alive;
+    // the archived filter is what keeps it from blocking cleanup forever.
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
   });
 });

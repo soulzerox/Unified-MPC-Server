@@ -11,6 +11,8 @@
  * worktree. Terminal rows are references, not custody, so they do not block
  * cleanup. `call_id`/`phase` are unique so a retried write cannot duplicate a
  * row, and `(call_id, phase)` is what pairs an open row with its completion.
+ * `call_id` is NOT NULL because SQL neither dedupes nor joins NULLs: a nullable
+ * key would make a retried write insert a second row and leave an unclosable one.
  */
 export const WORKSPACE_JOURNAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspace_journal_events (
@@ -20,7 +22,7 @@ CREATE TABLE IF NOT EXISTS workspace_journal_events (
   session_id TEXT,
   operation_kind TEXT NOT NULL CHECK (length(operation_kind) BETWEEN 1 AND 64),
   tool_name TEXT CHECK (tool_name IS NULL OR length(tool_name) BETWEEN 1 AND 128),
-  call_id TEXT CHECK (call_id IS NULL OR length(call_id) BETWEEN 1 AND 256),
+  call_id TEXT NOT NULL CHECK (length(call_id) BETWEEN 1 AND 256),
   phase TEXT NOT NULL CHECK (phase IN ('started', 'completed')),
   status TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed', 'cancelled', 'interrupted')),
   result_code TEXT CHECK (result_code IS NULL OR length(result_code) BETWEEN 1 AND 128),

@@ -67,21 +67,6 @@ export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
  */
 export const WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE = 'worktree_preview_settled';
 
-/**
- * Tools whose own response can close the journal row they opened.
- *
- * Every name here hands back work that outlives the call, and every such tool also has a
- * settlement rule below, so its newest open row can end itself: retention therefore may
- * not collapse it (`DURABLE_REFERENCE_OPERATION_KINDS` in `@unified-mpc/storage`), or a
- * newer self-settling row would evict the older row that still stands for live work.
- * The storage set cannot be derived from these rules — the journal sits one layer down —
- * so the two lists are pinned to each other by
- * `apps/cli/src/runtime/deferred-journal-closure.test.ts`.
- */
-export const SETTLEMENT_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'agent_swarm_run', 'merge_verification_run', 'git_worktree_spawn',
-]);
-
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;
@@ -189,6 +174,27 @@ export const MERGE_VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
 export function isMergeVerificationTool(toolName: string): boolean {
   return MERGE_VERIFICATION_TOOLS.has(toolName);
 }
+
+/**
+ * Tools whose own response can close the journal row they opened.
+ *
+ * Every name here hands back work that outlives the call, and every such tool also has a
+ * settlement rule above (`recordableDeferredSettlement`), so a later row of the same kind
+ * can end itself: retention therefore may not collapse the kind
+ * (`DURABLE_REFERENCE_OPERATION_KINDS` in `@unified-mpc/storage`), or that newer
+ * self-settling row would evict the older row that still stands for live work.
+ *
+ * The set is built from the rules rather than beside them, so adding a tool to
+ * `MERGE_VERIFICATION_TOOLS` (or a new literal rule) makes the kind exempt by
+ * construction. The storage half still cannot be derived — the journal sits one layer
+ * down — so `apps/cli/src/runtime/deferred-journal-closure.test.ts` pins the two sets
+ * to each other and fails until the storage set says the same thing.
+ */
+export const SETTLEMENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'agent_swarm_run',
+  'git_worktree_spawn',
+  ...MERGE_VERIFICATION_TOOLS,
+]);
 
 /**
  * Tools whose response carries the id of a local Codex task at the top level.

@@ -53,28 +53,35 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Kinds whose open row is a reference to work that outlives the call, and whose newest
- * open row can settle itself.
+ * Kinds whose newest open row can end itself, so retention may never collapse them.
  *
- * Two open rows of such a kind are two different references, not two reports of the
- * same in-flight work: a `git_worktree_spawn` row stands for a worktree that may still
- * hold work, an `agent_swarm_run start` row for a swarm that still runs, and a
- * `merge_verification_run` row for an attempt that is still queued. Retention's
- * per-kind collapse treats open rows as interchangeable and keeps the newest, which is
- * how each of them can lose its pin: the evicted row is the only evidence of that work,
- * and the survivor then closes itself from its own call under
- * `worktree_preview_settled`, `swarm_read_settled` or `verification_settled`, leaving
- * the kind with nothing open while the work still runs. These kinds are therefore never
- * collapsed.
+ * The hazard is not that a row settles — it is that the *newer* of two open rows can,
+ * while the older one is the only surviving evidence of work that still runs. Retention's
+ * per-kind collapse treats open rows as interchangeable and keeps the newest, so it would
+ * delete the older reference and then let the survivor close itself, leaving the kind with
+ * nothing open. Two open rows of these kinds are two different references, not two
+ * reports of one in-flight call: a `git_worktree_spawn` row stands for a worktree that may
+ * still hold work, an `agent_swarm_run start` row for a swarm that still runs, and a
+ * `merge_verification_run` row for an attempt that is still queued.
  *
- * That costs the bound: nothing else may delete an open row, so each real reference
- * keeps its `started` row (and an uncollected completion) for the life of the
- * workspace, and past `maxEventsPerWorkspace` the excess cannot be reduced. The trade
- * is deliberate — a released pin over live work is worse than rows a rare event
- * appends — and it is the only thing this exemption buys.
+ * The exemption is name-level and therefore broader than the hazard. `agent_swarm_run`'s
+ * `start` row cannot settle itself (only its read sub-actions can, under
+ * `swarm_read_settled`), and a real `dryRun: false` spawn cannot either (only a preview
+ * can, under `worktree_preview_settled`); they are listed because their *kind* can produce
+ * a self-settling row newer than another open reference.
  *
- * Adding a settlement rule for another kind means adding it here too;
- * `deferred-journal-closure.test.ts` in the CLI fails until both sides agree.
+ * What that costs: an exempt kind's open row is out of reach of every other pass here, so
+ * a reference with no closure route — the real spawn above, and an `agent_swarm_run` row a
+ * restarted host can no longer answer — keeps its `started` row and its completion for the
+ * life of the workspace, contributing to a `maxEventsPerWorkspace` excess that only other
+ * kinds' closed calls can bring down. The trade is deliberate: a released pin over live
+ * work is worse than rows a rare event appends.
+ *
+ * Adding a settlement rule for another tool means adding its kind here too. The MCP server
+ * builds `SETTLEMENT_TOOL_NAMES` from its rules, and
+ * `apps/cli/src/runtime/deferred-journal-closure.test.ts` asserts the two sets are equal,
+ * so that half fails loudly. The journal cannot derive the list itself: the rules live one
+ * layer up.
  */
 export const DURABLE_REFERENCE_OPERATION_KINDS: ReadonlySet<string> = new Set([
   'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run',

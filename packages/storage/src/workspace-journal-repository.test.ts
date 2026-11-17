@@ -189,8 +189,10 @@ describe('SqliteWorkspaceJournalRepository', () => {
         callIds: ['self-settling'],
         closureCode: selfSettledCode,
       })).toBe(1);
-      // The older reference is still the row that pins: on the parent it had been
-      // collapsed away, so this read was `clear`.
+      // With the launchers closed first, these two reads are decided by the reference
+      // rows alone: the survivor is still physically open and still pins the goal.
+      // Under the old ordering the leftover `run-3` row answered both reads, so a
+      // regression in the exemption would not have moved them.
       expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
       expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['work', 'self-settling'] }))
         .toEqual(['work']);

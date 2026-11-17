@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
+import { DIRECT_PROCESS_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
 import { DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
 import type { DeferredClosureAuthority, DeferredHandleState } from './deferred-closure-authority.js';
 import {
@@ -11,25 +12,40 @@ import {
 const actor: FileActor = { clientId: 'client', sessionId: 'session' };
 const closedAt = '2026-11-16T10:00:00.000Z';
 
-function journal(): { readonly closeDeferredCalls: ReturnType<typeof vi.fn> } {
-  return { closeDeferredCalls: vi.fn(() => 1) };
+function journal(closedPerCall = 1): { readonly closeDeferredCalls: ReturnType<typeof vi.fn> } {
+  return { closeDeferredCalls: vi.fn(() => closedPerCall) };
 }
 
-/** The recorded correlation: which handle each call returned, and who owns it. */
-function ledger(handles: readonly Partial<DeferredHandle>[]): {
+/**
+ * The recorded correlation: which handle each call returned, and who owns it.
+ *
+ * `take` honours the `callIds` list unless `shared` is set, which models the
+ * ledger being shared by every host on the database: it may answer with rows this
+ * runtime never journaled.
+ */
+function ledger(handles: readonly Partial<DeferredHandle>[], options: { shared?: boolean } = {}): {
   readonly take: ReturnType<typeof vi.fn>;
   readonly forget: ReturnType<typeof vi.fn>;
 } {
   return {
     take: vi.fn((_workspaceId: string, callIds: readonly string[]) => handles
-      .filter((handle) => callIds.includes(handle.callId ?? 'call-1'))
+      .filter((handle) => options.shared === true || callIds.includes(handle.callId ?? 'call-1'))
       .map((handle) => ({ provider: 'process', handleId: 'process-1', ...handle }))),
     forget: vi.fn(() => handles.length),
   };
 }
 
-function authority(state: DeferredHandleState): Pick<DeferredClosureAuthority, 'handleState'> {
-  return { handleState: vi.fn(async () => state) };
+function authority(
+  handle: DeferredHandleState,
+  workspace: DeferredHandleState = handle,
+): {
+  readonly handleState: ReturnType<typeof vi.fn>;
+  readonly workspaceProcessState: ReturnType<typeof vi.fn>;
+} {
+  return {
+    handleState: vi.fn(async () => handle),
+    workspaceProcessState: vi.fn(async () => workspace),
+  };
 }
 
 const operationKinds = [...DEFERRED_CLOSURE_OPERATION_KINDS];
@@ -37,8 +53,7 @@ const operationKinds = [...DEFERRED_CLOSURE_OPERATION_KINDS];
 function probe(options: {
   readonly store?: ReturnType<typeof journal>;
   readonly handles?: ReturnType<typeof ledger>;
-  readonly authority?: Pick<DeferredClosureAuthority, 'handleState'>;
-  readonly callIds?: readonly string[];
+  readonly authority?: Pick<DeferredClosureAuthority, 'handleState' | 'workspaceProcessState'>;
   readonly ownedCallIds?: readonly string[];
 }): Promise<{ readonly closed: number; readonly settled: boolean }> {
   return closeJudgedDeferredCalls({
@@ -48,7 +63,6 @@ function probe(options: {
     operationKinds,
     actor,
     workspaceId: 'ws-1',
-    callIds: options.callIds ?? ['call-1'],
     ownedCallIds: options.ownedCallIds ?? ['call-1'],
     closedAt,
   });
@@ -96,10 +110,11 @@ describe('closeJudgedDeferredCalls', () => {
       handleState: vi.fn(async ({ handleId }: { readonly handleId: string }) => (
         handleId === 'process-1' ? 'gone' : 'live'
       )),
-    } as unknown as Pick<DeferredClosureAuthority, 'handleState'>;
+      workspaceProcessState: vi.fn(async () => 'live' as const),
+    } as unknown as Pick<DeferredClosureAuthority, 'handleState' | 'workspaceProcessState'>;
 
     await expect(probe({
-      store, handles, authority: asker, callIds: ['call-1', 'call-2'], ownedCallIds: ['call-1', 'call-2'],
+      store, handles, authority: asker, ownedCallIds: ['call-1', 'call-2'],
     })).resolves.toEqual({ closed: 1, settled: false });
 
     expect(store.closeDeferredCalls.mock.calls[0]?.[0]?.callIds).toEqual(['call-1']);
@@ -107,16 +122,46 @@ describe('closeJudgedDeferredCalls', () => {
     expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
   });
 
-  it('leaves a call with no recorded handle pinned instead of guessing', async () => {
+  it('closes a call that recorded no handle once the workspace has nothing live', async () => {
     const store = journal();
-    const asker = authority('gone');
+    const handles = ledger([]);
+    // The handle question has no subject, so the workspace question is the only
+    // evidence left: nothing live here means the launch never produced work.
+    const asker = authority('live', 'gone');
 
-    // Settled, because nothing is left to ask: the pin stays (fail-closed) and the
-    // call stops costing a lookup on every later completion.
-    await expect(probe({ store, handles: ledger([]), authority: asker }))
-      .resolves.toEqual({ closed: 0, settled: true });
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, settled: true });
+
+    expect(asker.workspaceProcessState).toHaveBeenCalledWith({ actor, workspaceId: 'ws-1' });
     expect(asker.handleState).not.toHaveBeenCalled();
+    const call = store.closeDeferredCalls.mock.calls[0]?.[0] as unknown as { callIds: readonly string[]; closureCode: string };
+    expect(call.callIds).toEqual(['call-1']);
+    expect(call.closureCode).toBe(NO_LIVE_PROCESS_CLOSURE_CODE);
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('keeps a handle-less call pinned while the workspace still has a live process', async () => {
+    const store = journal();
+    const handles = ledger([]);
+
+    for (const state of ['live', 'unknown'] as const) {
+      await expect(probe({ store, handles, authority: authority('live', state) }))
+        .resolves.toEqual({ closed: 0, settled: false });
+    }
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
+  });
+
+  it('never judges a recorded handle this runtime did not journal', async () => {
+    const store = journal();
+    // A shared ledger can answer with another host's row: it is not evidence here.
+    const handles = ledger([{ callId: 'another-hosts-call', handleId: 'process-9' }], { shared: true });
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, settled: true });
+
+    expect(asker.handleState).not.toHaveBeenCalled();
+    expect(store.closeDeferredCalls.mock.calls[0]?.[0]?.callIds).toEqual(['call-1']);
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
   });
 
   it('does not ask a provider no adapter can answer for', async () => {
@@ -124,12 +169,25 @@ describe('closeJudgedDeferredCalls', () => {
     const handles = ledger([{ callId: 'call-1', provider: 'swarm', handleId: 'swarm-1' }]);
     const asker = authority('gone');
 
-    // The authority saying `gone` is not enough: a provider with no closure code
-    // has no vocabulary to write the verdict in, so the pin stays — and there is
-    // nothing to retry, so the call is not remembered again.
+    // The authority saying `gone` is not enough: a provider with no route has no
+    // vocabulary to write the verdict in, so the pin stays — and there is nothing
+    // to retry, so the call is not remembered again.
     await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 0, settled: true });
     expect(asker.handleState).not.toHaveBeenCalled();
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
+  it('keeps the correlation when the store closes nothing', async () => {
+    const store = journal(0);
+    const handles = ledger([{ callId: 'call-1' }]);
+
+    await expect(probe({ store, handles, authority: authority('gone') }))
+      .resolves.toEqual({ closed: 0, settled: true });
+    // A row the store refused (already closed, or older than this runtime) must
+    // keep its ledger entry: forgetting it would drop the correlation a later
+    // sweep needs to ask again.
+    expect(handles.forget).not.toHaveBeenCalled();
   });
 
   it('does nothing when there is no call to judge', async () => {
@@ -137,21 +195,21 @@ describe('closeJudgedDeferredCalls', () => {
     const handles = ledger([{ callId: 'call-1' }]);
     const asker = authority('gone');
 
-    await expect(probe({ store, handles, authority: asker, callIds: [], ownedCallIds: [] }))
+    await expect(probe({ store, handles, authority: asker, ownedCallIds: [] }))
       .resolves.toEqual({ closed: 0, settled: false });
     // No call means no question: asking anyway would cost a store read per
     // completion event in every workspace.
-    expect(handles.take).toHaveBeenCalledWith('ws-1', []);
+    expect(handles.take).not.toHaveBeenCalled();
     expect(asker.handleState).not.toHaveBeenCalled();
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
   });
 
-  // The store silently drops kinds outside its deferred set, so a kind removed
-  // from `DEFERRED_CLOSURE_OPERATION_KINDS` would turn the sweep into a no-op
-  // without failing anything else.
-  it('only probes kinds the store will accept', () => {
-    for (const kind of operationKinds) {
-      expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(kind)).toBe(true);
+  // The store silently drops kinds outside its deferred set, so a process tool the
+  // recorder writes a handle for but the closure kinds omit turns the sweep into a
+  // no-op for that tool without failing anything else.
+  it('accepts a closure for every tool that records a process handle', () => {
+    for (const toolName of [...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]) {
+      expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(toolName)).toBe(true);
     }
   });
 });
@@ -163,30 +221,23 @@ describe('settleRememberedCalls', () => {
     // verdict covers it, so nothing retries it and the goal stays `present`.
     // `foreign` predates the snapshot, so it pins the workspace filter: a snapshot
     // that took every remembered call would probe and forget another workspace's
-    // pin. `completed-now` predates it too, so it pins the dedupe.
+    // pin.
     const remembered = new Map([
       ['probed-1', 'ws-1'],
       ['probed-2', 'ws-1'],
       ['foreign', 'ws-2'],
-      ['completed-now', 'ws-1'],
     ]);
-    const probed: { callIds: readonly string[]; ownedCallIds: readonly string[] }[] = [];
+    const probed: (readonly string[])[] = [];
     await settleRememberedCalls({
       remembered,
       workspaceId: 'ws-1',
-      callId: 'completed-now',
-      probe: async (callIds, ownedCallIds) => {
-        probed.push({ callIds: [...callIds], ownedCallIds: [...ownedCallIds] });
+      probe: async (ownedCallIds) => {
+        probed.push([...ownedCallIds]);
         remembered.set('landed-during-probe', 'ws-1');
-        return { closed: 3, settled: true };
+        return { closed: 2, settled: true };
       },
     });
-    expect(probed).toEqual([{
-      callIds: ['completed-now', 'probed-1', 'probed-2'],
-      // Only the snapshot may be called settled: the completing call is judged
-      // too, but it is not what the caller asked this probe to account for.
-      ownedCallIds: ['probed-1', 'probed-2', 'completed-now'],
-    }]);
+    expect(probed).toEqual([['probed-1', 'probed-2']]);
     expect([...remembered]).toEqual([
       ['foreign', 'ws-2'],
       ['landed-during-probe', 'ws-1'],
@@ -198,9 +249,15 @@ describe('settleRememberedCalls', () => {
     await settleRememberedCalls({
       remembered,
       workspaceId: 'ws-1',
-      callId: 'completed-now',
       probe: async () => ({ closed: 0, settled: false }),
     });
     expect([...remembered]).toEqual([['probed-1', 'ws-1']]);
+  });
+
+  it('asks nothing when this workspace remembers no call', async () => {
+    const remembered = new Map([['other-workspace-call', 'ws-2']]);
+    const probe = vi.fn(async () => ({ closed: 0, settled: false }));
+    await settleRememberedCalls({ remembered, workspaceId: 'ws-1', probe });
+    expect(probe).not.toHaveBeenCalled();
   });
 });

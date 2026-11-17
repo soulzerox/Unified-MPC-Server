@@ -35,18 +35,27 @@ export interface DeferredHandleRecord {
 export type DeferredHandleRecorder = (record: DeferredHandleRecord) => void;
 
 /** Tools whose response carries a managed process id at the top level. */
-export function isDirectProcessTool(toolName: string): boolean {
-  return toolName === 'process_start'
-    || toolName === 'project_dev'
-    || toolName === 'project_test'
-    || toolName === 'project_lint'
-    || toolName === 'project_typecheck'
-    || toolName === 'project_build';
-}
+export const DIRECT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
+  'process_start',
+  'project_dev',
+  'project_test',
+  'project_lint',
+  'project_typecheck',
+  'project_build',
+]);
 
 /** Tools whose response wraps the managed process under `process`. */
+export const WRAPPED_PROCESS_TOOLS: ReadonlySet<string> = new Set([
+  'benchmark_run',
+  'run_affected_tests',
+]);
+
+export function isDirectProcessTool(toolName: string): boolean {
+  return DIRECT_PROCESS_TOOLS.has(toolName);
+}
+
 export function isWrappedProcessTool(toolName: string): boolean {
-  return toolName === 'benchmark_run' || toolName === 'run_affected_tests';
+  return WRAPPED_PROCESS_TOOLS.has(toolName);
 }
 
 /**

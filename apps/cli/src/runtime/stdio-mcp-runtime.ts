@@ -1514,15 +1514,13 @@ export function createStdioMcpRuntime(
       await settleRememberedCalls({
         remembered: ownProcessHandleCalls,
         workspaceId: completedWorkspaceId,
-        callId: event.callId,
-        probe: async (callIds, ownedCallIds) => closeJudgedDeferredCalls({
+        probe: async (ownedCallIds) => closeJudgedDeferredCalls({
           journal: workspaceJournal,
           handles: deferredHandles,
           authority: deferredClosureAuthority.current,
           operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS],
           actor,
           workspaceId: completedWorkspaceId,
-          callIds,
           ownedCallIds,
           closedAt: event.timestamp,
         }),

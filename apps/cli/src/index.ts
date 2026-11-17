@@ -1159,6 +1159,21 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
       return parseExtensionsSettings(undefined);
     }
   };
+  // Writing the managed block is the one place where "fall back to defaults" is
+  // destructive: it replaces a curated document with DEFAULT_POLICIES (#872). So
+  // a sync whose persisted settings cannot be read refuses instead of guessing,
+  // while read-only callers above stay permissive.
+  const readSyncSettings = (): Result<ReturnType<typeof parseExtensionsSettings>> => {
+    try {
+      return ok(parseExtensionsSettings(getWorkspaceState().settings.get(EXTENSIONS_SETTINGS_KEY)));
+    } catch (error) {
+      return err(appError(
+        'INTERNAL_ERROR',
+        `Refusing to sync policies: the persisted extensions settings cannot be read (${error instanceof Error ? error.message : String(error)})`,
+        true,
+      ));
+    }
+  };
   let toolRegistry: ToolRegistry | undefined;
   let mcpRuntime: StdioMcpRuntime | undefined;
   const harnessActivationLedger = new HarnessActivationLedger();
@@ -1268,14 +1283,17 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     installServer: async (input: InstallServerInput): Promise<Result<InstallServerResult>> => new InstallerService().installServer(input),
     pruneSkill: async (input: PruneSkillInput): Promise<Result<PruneSkillResult>> => new PrunerService().pruneSkill(input),
     pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult>> => new PrunerService().pruneServer(input),
-    sync: async (targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>> =>
+    sync: async (targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>> => {
       // The managed policy block must come from the persisted document, not from
       // DEFAULT_POLICIES: a host that curated its policies would otherwise lose
       // that curation on the next sync, silently (#872).
-      new IdeSyncService({
+      const settings = readSyncSettings();
+      if (!settings.ok) return settings;
+      return new IdeSyncService({
         ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
-        settings: getAuditSettings(),
-      }).sync(targets),
+        settings: settings.value,
+      }).sync(targets);
+    },
     storageRecover: async (): Promise<StorageRecoveryResult> =>
       recoverHistoricalStorageIdentity(resolveDataPathFromShared()),
     storageMetrics: async (): Promise<SqlitePhysicalMetrics> => getWorkspaceState().database.physicalMetrics(),

@@ -343,6 +343,41 @@ describe('CLI default dependency lifecycle', () => {
     }
   });
 
+  it('refuses to sync the policy block when the persisted extensions settings cannot be read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-sync-settings-unreadable-'));
+    const canonical = path.join(root, 'canonical');
+    const home = path.join(root, 'home');
+    await mkdir(canonical, { recursive: true });
+    await writeFile(path.join(canonical, 'unified-mpc.sqlite'), 'not sqlite', 'utf8');
+
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = canonical;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+
+    try {
+      const dependencies = createDefaultCliDependencies();
+      const result = await dependencies.sync?.(['opencode']);
+      expect(result?.ok).toBe(false);
+      if (result !== undefined && !result.ok) {
+        expect(result.error.message).toMatch(/persisted extensions settings cannot be read/u);
+      }
+      // The destructive half of #872: never write DEFAULT_POLICIES over a block
+      // whose persisted document could not be read.
+      expect(existsSync(path.join(home, '.config', 'opencode', 'AGENTS.md'))).toBe(false);
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('recovers historical storage through the default CLI dependency without opening the guarded workspace DB first', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-storage-recover-'));
     const canonical = path.join(root, 'canonical');

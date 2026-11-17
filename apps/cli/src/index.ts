@@ -1269,7 +1269,13 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
     pruneSkill: async (input: PruneSkillInput): Promise<Result<PruneSkillResult>> => new PrunerService().pruneSkill(input),
     pruneServer: async (input: PruneServerInput): Promise<Result<PruneServerResult>> => new PrunerService().pruneServer(input),
     sync: async (targets?: readonly SyncTarget[], workspaceRoot?: string): Promise<Result<{ readonly updatedFiles: readonly string[] }>> =>
-      new IdeSyncService(workspaceRoot !== undefined ? { workspaceRoot } : {}).sync(targets),
+      // The managed policy block must come from the persisted document, not from
+      // DEFAULT_POLICIES: a host that curated its policies would otherwise lose
+      // that curation on the next sync, silently (#872).
+      new IdeSyncService({
+        ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+        settings: getAuditSettings(),
+      }).sync(targets),
     storageRecover: async (): Promise<StorageRecoveryResult> =>
       recoverHistoricalStorageIdentity(resolveDataPathFromShared()),
     storageMetrics: async (): Promise<SqlitePhysicalMetrics> => getWorkspaceState().database.physicalMetrics(),

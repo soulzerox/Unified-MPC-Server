@@ -411,6 +411,48 @@ export class SqliteWorkspaceJournalRepository {
   }
 
   /**
+   * Which of these calls the journal still holds open, by the same rule the goal
+   * projection pins with.
+   *
+   * `openDeferredCallIds` answers for calls a runtime already knows are
+   * handle-returning, so a `closure_code` is the only question. A reader that only
+   * has a journal window does not know that: a normal call's `started` row keeps
+   * `closure_code` NULL forever, and its `completed` row may sit outside the window
+   * being read. Judging "open" from the window alone would call every completed call
+   * still running. So the whole predicate is applied here — a handle-returning kind
+   * is open until it is closed, and every other kind ends at its own `completed` row.
+   */
+  public openCallIds(request: OpenDeferredCallsRequest): readonly string[] {
+    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
+      throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
+    }
+    const calls = [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
+    if (calls.length === 0) return [];
+    const kinds = [...this.deferredClosureKinds];
+    const callPlaceholders = calls.map(() => '?').join(', ');
+    const deferredClause = kinds.length === 0
+      ? ''
+      : `OR j.operation_kind IN (${kinds.map(() => '?').join(', ')})`;
+    const rows = this.database.connection.prepare(`
+      SELECT DISTINCT j.call_id
+      FROM workspace_journal_events j
+      WHERE j.workspace_id = ? AND j.phase = 'started' AND j.status = 'started'
+        AND j.closure_code IS NULL
+        AND j.call_id IN (${callPlaceholders})
+        AND (
+          NOT EXISTS (
+            SELECT 1 FROM workspace_journal_events c
+            WHERE c.workspace_id = j.workspace_id
+              AND c.call_id = j.call_id
+              AND c.phase = 'completed'
+          )
+          ${deferredClause}
+        )
+    `).all(request.workspaceId, ...calls, ...kinds) as unknown as { readonly call_id: string }[];
+    return rows.map((row) => row.call_id);
+  }
+
+  /**
    * Durable references per goal, in the vocabulary `WorkspaceService` uses.
    *
    * A goal is `present` while one of its live workspaces owns an operation that

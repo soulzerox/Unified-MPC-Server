@@ -28,7 +28,7 @@ export interface WorkspaceResumeEvent {
   readonly resultCode?: string;
   readonly summary?: string;
   readonly recordedAt: string;
-  /** The call started and no verdict closed it: its work may still be running. */
+  /** The call started and nothing has ended it: its work may still be running. */
   readonly open: boolean;
 }
 
@@ -48,10 +48,16 @@ export interface WorkspaceResumeSnapshot {
   };
 }
 
-/** The journal read this module needs: the store's own list, nothing wider. */
+/** The journal reads this module needs: the store's own list and its open-call rule. */
 export interface WorkspaceResumeJournalReader {
   /** Rows for one workspace, ordered by `sequence` ascending, at most `limit` of them. */
   list(request: ListWorkspaceJournalRequest): readonly WorkspaceJournalEntry[];
+  /**
+   * Which of these call ids the journal still holds open. Asked for the window's
+   * `started` rows, because whether a call ended depends on rows that may sit past
+   * the cursor — reading that from the window alone would call finished work running.
+   */
+  openCallIds(request: { readonly workspaceId: string; readonly callIds: readonly string[] }): readonly string[];
 }
 
 export interface WorkspaceResumeSnapshotReader {
@@ -93,7 +99,15 @@ export function createWorkspaceResumeSnapshotReader(options: {
       });
       const truncated = rows.length > limit;
       const included = truncated ? rows.slice(0, limit) : rows;
-      const events = included.map(toEvent);
+      const startedCallIds = [...new Set(
+        included.filter((row) => row.phase === 'started').map((row) => row.callId),
+      )];
+      // One extra store read, and only when the window holds a start: the answer
+      // depends on rows the window may not contain.
+      const openCallIds = startedCallIds.length === 0
+        ? new Set<string>()
+        : new Set(options.journal.openCallIds({ workspaceId, callIds: startedCallIds }));
+      const events = included.map((entry) => toEvent(entry, openCallIds));
       const open = events.filter((event) => event.open);
       const last = included.at(-1);
 
@@ -112,7 +126,7 @@ export function createWorkspaceResumeSnapshotReader(options: {
   };
 }
 
-function toEvent(entry: WorkspaceJournalEntry): WorkspaceResumeEvent {
+function toEvent(entry: WorkspaceJournalEntry, openCallIds: ReadonlySet<string>): WorkspaceResumeEvent {
   return {
     sequence: entry.sequence,
     operationKind: entry.operationKind,
@@ -122,6 +136,6 @@ function toEvent(entry: WorkspaceJournalEntry): WorkspaceResumeEvent {
     ...(entry.resultCode === undefined ? {} : { resultCode: entry.resultCode }),
     ...(entry.summary === undefined ? {} : { summary: entry.summary }),
     recordedAt: entry.recordedAt,
-    open: entry.phase === 'started' && entry.closureCode === undefined,
+    open: entry.phase === 'started' && openCallIds.has(entry.callId),
   };
 }

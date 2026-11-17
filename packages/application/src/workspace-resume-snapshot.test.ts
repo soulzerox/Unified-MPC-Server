@@ -19,11 +19,21 @@ function entry(overrides: Partial<WorkspaceJournalEntry> & { sequence: number })
   } as WorkspaceJournalEntry;
 }
 
-function journalOf(entries: readonly WorkspaceJournalEntry[]): {
+/**
+ * A journal that answers both reads the way the store does, over the whole entry
+ * set — including rows the caller's window cannot see.
+ *
+ * `handleReturning` is the kinds whose `completed` phase ends the request, not the
+ * work; the real store knows them as `DEFERRED_CLOSURE_OPERATION_KINDS`.
+ */
+function journalOf(entries: readonly WorkspaceJournalEntry[], handleReturning: readonly string[] = []): {
   readonly journal: WorkspaceResumeJournalReader;
   readonly requests: ListWorkspaceJournalRequest[];
+  readonly openRequests: { readonly workspaceId: string; readonly callIds: readonly string[] }[];
 } {
   const requests: ListWorkspaceJournalRequest[] = [];
+  const openRequests: { readonly workspaceId: string; readonly callIds: readonly string[] }[] = [];
+  const deferred = new Set(handleReturning);
   const journal: WorkspaceResumeJournalReader = {
     list(request): readonly WorkspaceJournalEntry[] {
       requests.push(request);
@@ -35,8 +45,22 @@ function journalOf(entries: readonly WorkspaceJournalEntry[]): {
         .sort((left, right) => left.sequence - right.sequence)
         .slice(0, request.limit ?? entries.length);
     },
+    openCallIds(request): readonly string[] {
+      openRequests.push(request);
+      return [...new Set(request.callIds)].filter((callId) => {
+        const started = entries.find((candidate) => candidate.workspaceId === request.workspaceId
+          && candidate.callId === callId
+          && candidate.phase === 'started'
+          && candidate.closureCode === undefined);
+        if (started === undefined) return false;
+        if (deferred.has(started.operationKind)) return true;
+        return !entries.some((candidate) => candidate.workspaceId === request.workspaceId
+          && candidate.callId === callId
+          && candidate.phase === 'completed');
+      });
+    },
   };
-  return { journal, requests };
+  return { journal, requests, openRequests };
 }
 
 const now = (): Date => new Date('2026-11-18T03:00:00.000Z');
@@ -85,7 +109,7 @@ describe('workspace resume snapshot', () => {
   });
 
   it('reports an empty window at the caller cursor rather than at zero', () => {
-    const { journal } = journalOf([]);
+    const { journal, openRequests } = journalOf([]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
     const snapshot = read.read({ workspaceId: 'ws-1', afterSequence: 7 });
@@ -96,6 +120,8 @@ describe('workspace resume snapshot', () => {
     expect(snapshot.value.cursor).toBe(7);
     expect(snapshot.value.truncated).toBe(false);
     expect(snapshot.value.openReferences).toEqual({ count: 0, latestSequence: null });
+    // With no start in the window there is nothing to ask about.
+    expect(openRequests).toEqual([]);
   });
 
   it('counts only the calls whose work may still be running', () => {
@@ -117,6 +143,43 @@ describe('workspace resume snapshot', () => {
     expect(snapshot.value.events.map((event) => event.open)).toEqual([true, false, false, true]);
   });
 
+  it('does not call a call open just because its completion sits past the cursor', () => {
+    // The window ends before `call-a` completes. Judging "open" from the window alone
+    // would report a finished call as running; the store answers for the whole journal.
+    const { journal, openRequests } = journalOf([
+      entry({ sequence: 1, operationKind: 'git_publish', callId: 'call-a', phase: 'started', status: 'started' }),
+      entry({ sequence: 2, operationKind: 'git_publish', callId: 'call-b', phase: 'started', status: 'started' }),
+      entry({ sequence: 3, operationKind: 'git_publish', callId: 'call-a', phase: 'completed', status: 'completed' }),
+    ]);
+    const read = createWorkspaceResumeSnapshotReader({ journal, now });
+
+    const snapshot = read.read({ workspaceId: 'ws-1', limit: 2 });
+
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    expect(snapshot.value.events.map((event) => event.open)).toEqual([false, true]);
+    expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 2 });
+    expect(openRequests).toEqual([{ workspaceId: 'ws-1', callIds: ['call-a', 'call-b'] }]);
+  });
+
+  it('keeps a handle-returning call open after its own request completed', () => {
+    // `process_start` returns as soon as the child spawns, so its `completed` row ends
+    // the request, not the work; only a `closure_code` ends the pin.
+    const { journal } = journalOf([
+      entry({ sequence: 1, operationKind: 'process_start', callId: 'spawn-1', phase: 'started', status: 'started' }),
+      entry({ sequence: 2, operationKind: 'process_start', callId: 'spawn-1', phase: 'completed', status: 'completed' }),
+      entry({ sequence: 3, operationKind: 'process_start', callId: 'spawn-2', phase: 'started', status: 'started', closureCode: 'process_exited' }),
+    ], ['process_start']);
+    const read = createWorkspaceResumeSnapshotReader({ journal, now });
+
+    const snapshot = read.read({ workspaceId: 'ws-1' });
+
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    expect(snapshot.value.events.map((event) => event.open)).toEqual([true, false, false]);
+    expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 1 });
+  });
+
   it('asks the store for one workspace only', () => {
     const { journal, requests } = journalOf([entry({ sequence: 1 }), entry({ sequence: 2, workspaceId: 'ws-2' })]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
@@ -130,7 +193,7 @@ describe('workspace resume snapshot', () => {
   });
 
   it('refuses a request it cannot answer without guessing', () => {
-    const { journal, requests } = journalOf([entry({ sequence: 1 })]);
+    const { journal, requests, openRequests } = journalOf([entry({ sequence: 1 })]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
     for (const request of [
@@ -147,5 +210,6 @@ describe('workspace resume snapshot', () => {
     }
     // Nothing was read: a refused request must not spend a store query.
     expect(requests).toEqual([]);
+    expect(openRequests).toEqual([]);
   });
 });

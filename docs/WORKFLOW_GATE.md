@@ -484,11 +484,16 @@ not present — a new session, a reconnect, a handoff. It is bounded
 below the store's own `MAX_LIST_LIMIT` 200 so the reader can ask for one row more
 than the bound and prove `truncated` rather than infer it from a clamped reply),
 cursor-based (`afterSequence` in, `cursor` out, oldest first so the caller can
-replay in order), and read-only. `openReferences` counts only the calls in that
-window whose `started` row carries no `closure_code`, so a resumed session learns
-which work may still be running without reading the whole journal again. The
-tool is absent, not empty, when the runtime has no journal: an empty event list
-would read as "nothing happened here", which is the wrong answer.
+replay in order), and read-only. `openReferences` answers which calls in that
+window may still be running, using the store's own pin rule rather than the
+window's rows: a plain call ends at its `completed` row, which may sit past the
+cursor, while a handle-returning call stays open past its own `completed` row
+until a freshness probe writes `closure_code`. That rule is
+`SqliteWorkspaceJournalRepository.openCallIds` — the same predicate
+`goalDurableReferenceStates` pins with, asked for the window's call ids — so a
+resumed session cannot read finished work as running. The tool is absent, not
+empty, when the runtime has no journal: an empty event list would read as
+"nothing happened here", which is the wrong answer.
 
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as

@@ -96,6 +96,31 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
   });
 
+  it('answers which named calls are open by the pin rule, not by the closure code alone', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+
+    // A plain call ends at its own `completed` row; its `started` row keeps
+    // `closure_code` NULL forever, so a reader that only looked at the code would
+    // report finished work as running.
+    journal.append({ workspaceId: 'ws-a', operationKind: 'git_publish', phase: 'started', status: 'started', callId: 'publish-1' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'git_publish', phase: 'completed', status: 'completed', callId: 'publish-1', resultCode: 'ok' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'git_publish', phase: 'started', status: 'started', callId: 'publish-2' });
+
+    // A handle-returning call stays open past its own `completed` row until a
+    // freshness probe writes the closure code.
+    journal.append({ workspaceId: 'ws-a', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-1' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'spawn-1', resultCode: 'ok' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'spawn-2' });
+    journal.closeDeferredCalls({ workspaceId: 'ws-a', operationKinds: ['process_start'], callIds: ['spawn-2'], closureCode: 'no_live_process' });
+
+    const callIds = ['publish-1', 'publish-2', 'spawn-1', 'spawn-2', 'never-started'];
+    expect(journal.openCallIds({ workspaceId: 'ws-a', callIds }).sort()).toEqual(['publish-2', 'spawn-1']);
+    // A read of another workspace never sees these rows, and an empty ask costs nothing.
+    expect(journal.openCallIds({ workspaceId: 'ws-b', callIds })).toEqual([]);
+    expect(journal.openCallIds({ workspaceId: 'ws-a', callIds: [] })).toEqual([]);
+  });
+
   it('lets a caller opt out of deferred closure for a kind it can prove ended', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
     temporaryRoots.push(root);

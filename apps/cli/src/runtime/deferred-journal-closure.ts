@@ -134,6 +134,8 @@ export async function closeJudgedDeferredCalls(options: {
   }
 
   const withoutHandle = [...owned].filter((callId) => !recordedIds.has(callId));
+  /** Calls a settlement already finished: their rows are closed before this sweep. */
+  const settledElsewhere = new Set<string>();
   if (withoutHandle.length > 0) {
     // No handle to ask about: a launch that failed, an `isError` response, or a
     // ledger write that threw. The workspace question is the only evidence left,
@@ -157,6 +159,22 @@ export async function closeJudgedDeferredCalls(options: {
       });
       if (state === 'gone') {
         for (const callId of answerable) gone.set(callId, NO_LIVE_PROCESS_CLOSURE_CODE);
+      }
+    }
+    // A handle-less call of a kind the listing cannot speak for is only finished if
+    // its own response closed the row (a `merge_verification_run` that reached its
+    // verdict, an `agent_swarm_run` read). Those are done: remembering them would
+    // grow the bounded retry map with calls nothing can ever account for, and evict
+    // live ones whose rows then stay pinned. A row still open keeps its pin and its
+    // retry, exactly as before.
+    const unanswerable = withoutHandle.filter((callId) => !answerable.includes(callId));
+    if (unanswerable.length > 0) {
+      const stillOpen = new Set(options.journal.openDeferredCallIds({
+        workspaceId: options.workspaceId,
+        callIds: unanswerable,
+      }));
+      for (const callId of unanswerable) {
+        if (!stillOpen.has(callId)) settledElsewhere.add(callId);
       }
     }
   }
@@ -205,6 +223,8 @@ export async function closeJudgedDeferredCalls(options: {
   // Nothing can answer for these, now or later: asking again could only repeat
   // the same "no route". The ledger row stays, the pin stays, the retry does not.
   for (const callId of unaskable) accounted.add(callId);
+  // A row a settlement closed needs no later sweep and no retry.
+  for (const callId of settledElsewhere) accounted.add(callId);
 
   return { closed, accountedCallIds: [...accounted] };
 }

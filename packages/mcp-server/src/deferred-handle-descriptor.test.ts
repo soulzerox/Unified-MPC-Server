@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recordableDeferredHandle, recordableDeferredSettlement, VERIFICATION_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
+import { recordableDeferredHandle, recordableDeferredSettlement, SWARM_READ_SETTLED_CLOSURE_CODE, VERIFICATION_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
 
 const input = { workspaceId: 'workspace-1' };
 const done = { isError: false };
@@ -129,6 +129,32 @@ describe('recordableDeferredSettlement', () => {
   it('leaves a failed call pinned, since a cancelled run can still be live', (): void => {
     expect(recordableDeferredSettlement('merge_verification_run', input, {
       isError: true, structuredContent: { status: 'completed', receiptRef: 'receipt-1' },
+    })).toBeUndefined();
+  });
+
+  it('settles an agent_swarm_run read, which started no work at all', (): void => {
+    // The journal treats the tool as deferred by name because a `start` returns
+    // while the swarm runs. A read hands back the snapshot of a swarm this call did
+    // not start, so no handle may be recorded and the row must close with the call.
+    for (const operation of ['status', 'result', 'cancel', 'list']) {
+      expect(recordableDeferredSettlement('agent_swarm_run', { workspaceId: 'workspace-1', operation }, {
+        ...done, structuredContent: { swarm: { swarmId: 'swarm-9', state: 'running' } },
+      })).toEqual({ workspaceId: 'workspace-1', closureCode: SWARM_READ_SETTLED_CLOSURE_CODE });
+    }
+  });
+
+  it('leaves an agent_swarm_run start to the swarm service', (): void => {
+    expect(recordableDeferredSettlement('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'start' }, {
+      ...done, structuredContent: { swarmId: 'swarm-1', state: 'queued' },
+    })).toBeUndefined();
+  });
+
+  it('settles nothing for a failed or workspace-less swarm read, which may still be live', (): void => {
+    expect(recordableDeferredSettlement('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'cancel' }, {
+      isError: true, structuredContent: { swarm: { swarmId: 'swarm-9' } },
+    })).toBeUndefined();
+    expect(recordableDeferredSettlement('agent_swarm_run', { operation: 'status' }, {
+      ...done, structuredContent: { swarm: { swarmId: 'swarm-9' } },
     })).toBeUndefined();
   });
 

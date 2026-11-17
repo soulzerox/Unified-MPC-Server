@@ -43,6 +43,17 @@ export type DeferredHandleRecorder = (record: DeferredHandleRecord) => void;
  */
 export const VERIFICATION_SETTLED_CLOSURE_CODE = 'verification_settled';
 
+/**
+ * Why a read of an `agent_swarm_run` sub-action ends its own deferral.
+ *
+ * The journal treats the whole tool as deferred, by name, because a `start` returns
+ * while the swarm runs. A `status`/`result`/`cancel`/`list` call starts nothing, so
+ * its work really did end inside the call: no handle may be recorded for it (it names
+ * a swarm this call did not start, and no listing can speak for a swarm), and leaving
+ * its row open would pin the goal `present` forever with nothing able to ask.
+ */
+export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
+
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;
@@ -64,18 +75,28 @@ export type DeferredSettlementRecorder = (record: DeferredSettlementRecord) => v
  * Only a verdict settles itself: a `queued` attempt hands back an id and waits for
  * the status port, and a failed call may have been cancelled mid-run, so its work
  * can still be live — the pin stays rather than reading "errored" as "finished".
+ *
+ * An `agent_swarm_run` read sub-action settles too, for a different reason: it starts
+ * nothing, so its work ended inside the call. Its `start` sibling does not: it hands
+ * back a swarm id whose authority answers later.
  */
 export function recordableDeferredSettlement(
   toolName: string,
   input: unknown,
   response: { readonly structuredContent?: unknown; readonly isError?: boolean },
 ): RecordedDeferredSettlement | undefined {
-  if (!isMergeVerificationTool(toolName)) return undefined;
   if (response.isError === true) return undefined;
-  const structured = asRecord(response.structuredContent);
-  if (structured?.status !== 'completed') return undefined;
   const workspaceId = boundedString(asRecord(input)?.workspaceId, 128);
-  return workspaceId === undefined ? undefined : { workspaceId, closureCode: VERIFICATION_SETTLED_CLOSURE_CODE };
+  if (workspaceId === undefined) return undefined;
+  if (isMergeVerificationTool(toolName)) {
+    const structured = asRecord(response.structuredContent);
+    if (structured?.status !== 'completed') return undefined;
+    return { workspaceId, closureCode: VERIFICATION_SETTLED_CLOSURE_CODE };
+  }
+  if (toolName === 'agent_swarm_run' && asRecord(input)?.operation !== AGENT_SWARM_START_OPERATION) {
+    return { workspaceId, closureCode: SWARM_READ_SETTLED_CLOSURE_CODE };
+  }
+  return undefined;
 }
 
 /** Tools whose response carries a managed process id at the top level. */

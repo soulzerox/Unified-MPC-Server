@@ -153,9 +153,10 @@ describe('closeJudgedDeferredCalls', () => {
     // Reachable when the ledger write threw: the row is best-effort, so the call
     // is journaled but has no handle. A live durable task is not in the process
     // listing, so that answer would release the pin on running work.
-    const store = journal(1, [], { 'call-1': 'task_create' });
+    const store = journal(1, ['call-1'], { 'call-1': 'task_create' });
     const asker = authority('gone', 'gone');
 
+    // The row is still open, so the pin and the retry both stay.
     await expect(probe({ store, handles: ledger([]), authority: asker }))
       .resolves.toEqual({ closed: 0, accountedCallIds: [] });
     expect(asker.workspaceProcessState).not.toHaveBeenCalled();
@@ -242,7 +243,7 @@ describe('closeJudgedDeferredCalls', () => {
   it('never answers a codex_run that recorded no handle with the process listing', async () => {
     // A codex_run whose ledger write failed records nothing, and its process is
     // invisible to the CLI listing, so that answer would release a live pin.
-    const store = journal(1, [], { 'call-1': 'codex_run' });
+    const store = journal(1, ['call-1'], { 'call-1': 'codex_run' });
     const asker = authority('gone', 'gone');
 
     await expect(probe({ store, handles: ledger([]), authority: asker }))
@@ -279,13 +280,30 @@ describe('closeJudgedDeferredCalls', () => {
   });
 
   it('never answers a swarm call that recorded no handle with the process listing', async () => {
-    const store = journal(1, [], { 'call-1': 'agent_swarm_run' });
+    const store = journal(1, ['call-1'], { 'call-1': 'agent_swarm_run' });
     const asker = authority('gone', 'gone');
 
     await expect(probe({ store, handles: ledger([]), authority: asker }))
       .resolves.toEqual({ closed: 0, accountedCallIds: [] });
     expect(asker.workspaceProcessState).not.toHaveBeenCalled();
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
+  it('accounts a handle-less call its own response already closed instead of retrying it forever', async () => {
+    // An `agent_swarm_run` read settles its own row under `swarm_read_settled`.
+    // The kind is not one the listing can answer, so before this the call would be
+    // remembered forever, filling the bounded retry map with calls nothing can
+    // account for and evicting live ones whose rows then stay pinned.
+    const store = journal(1, [], { 'call-1': 'agent_swarm_run' });
+    const handles = ledger([]);
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles, authority: asker }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: ['call-1'] });
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    // Nothing was closed here: the row was already closed by the call itself.
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
   });
 
   it('never lets a live call in the same probe settle the ones that are gone', async () => {

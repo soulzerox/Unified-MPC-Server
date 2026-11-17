@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import { WORKSPACE_RESUME_MAX_LIMIT } from '@unified-mpc/application';
 import { IncrementalVerifier } from '../incremental-verifier.js';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 
@@ -17,6 +18,12 @@ const sessionHandoffSchema = z.object({
 const verifyIncrementalSchema = z.object({
   workspaceId: z.string().trim().min(1).max(128),
   userConfirmed: z.boolean().optional(),
+}).strict();
+
+const workspaceResumeSchema = z.object({
+  workspaceId: z.string().trim().min(1).max(128),
+  afterSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  limit: z.number().int().min(1).max(WORKSPACE_RESUME_MAX_LIMIT).optional(),
 }).strict();
 
 export function sessionTools(context: McpToolContext, verifier: IncrementalVerifier): McpToolDefinition[] {
@@ -37,7 +44,40 @@ export function sessionTools(context: McpToolContext, verifier: IncrementalVerif
       inputSchema: verifyIncrementalSchema,
       handler: async (input, signal, authorization) => verifier.verify(context, input.workspaceId, signal, input.userConfirmed === true, authorization),
     }),
+    defineTool({
+      name: 'workspace_resume',
+      description: 'Read a bounded, resumable view of this workspace\'s durable journal: what calls ran here, in order, since the cursor you pass back. Use it when you were not present for earlier work (a new session, a reconnect, a handoff) and need to know what finished or may still be running before acting. Read-only; pass the returned cursor as afterSequence to continue, and ask again while truncated is true.',
+      permission: 'READ',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: workspaceResumeSchema,
+      handler: async (input) => readWorkspaceResume(context, input),
+    }),
   ];
+}
+
+async function readWorkspaceResume(
+  context: McpToolContext,
+  input: z.infer<typeof workspaceResumeSchema>,
+): Promise<Result<Record<string, unknown>>> {
+  const resume = context.services.workspaceResume;
+  if (resume === undefined) return missingService();
+  const snapshot = resume.read({
+    workspaceId: input.workspaceId,
+    ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+  });
+  if (!snapshot.ok) return err(snapshot.error);
+  return ok({
+    workspaceId: snapshot.value.workspaceId,
+    generatedAt: snapshot.value.generatedAt,
+    cursor: snapshot.value.cursor,
+    truncated: snapshot.value.truncated,
+    events: [...snapshot.value.events],
+    openReferences: {
+      count: snapshot.value.openReferences.count,
+      latestSequence: snapshot.value.openReferences.latestSequence,
+    },
+  });
 }
 
 async function createSessionHandoff(

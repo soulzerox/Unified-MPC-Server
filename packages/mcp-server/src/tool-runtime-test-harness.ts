@@ -160,6 +160,19 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
       },
     },
     workspaceQuery: serviceProxy('workspaceQuery', calls, () => ({ entries: [] })),
+    workspaceResume: {
+      read(request: { readonly workspaceId: string; readonly afterSequence?: number }) {
+        calls.push('workspaceResume.read');
+        return ok({
+          workspaceId: request.workspaceId,
+          generatedAt: new Date(0).toISOString(),
+          cursor: request.afterSequence ?? 0,
+          truncated: false,
+          events: [],
+          openReferences: { count: 0, latestSequence: null },
+        });
+      },
+    },
     projectSnapshot: serviceProxy('projectSnapshot', calls, () => ({ workspaceId: 'workspace-1', files: 1 })),
     project: serviceProxy('project', calls, () => ({ kind: 'node', packageManager: 'pnpm' })),
     file: serviceProxy('file', calls, (method, args) => {

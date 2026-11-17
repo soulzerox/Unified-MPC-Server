@@ -37,6 +37,7 @@ import type {
   ScheduledContinuationService,
   WorkspaceIndexService,
   WorkspaceQueryService,
+  WorkspaceResumeSnapshotReader,
   WriteFileRequest,
 } from '@unified-mpc/application';
 import { z } from 'zod';
@@ -325,6 +326,12 @@ export interface McpApplicationServices {
   readonly workspaceSelection?: WorkspaceSelectionPort;
   readonly preferredGoal?: PreferredGoalPort;
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
+  /**
+   * Read-only, bounded journal projection for a session that was not there (#170).
+   * Omitted when the runtime has no workspace journal, which keeps the tool absent
+   * rather than answering `clear` from nothing.
+   */
+  readonly workspaceResume?: WorkspaceResumeSnapshotReader;
   readonly projectSnapshot?: ProjectSnapshotPort;
   readonly project?: Pick<ProjectService, 'detect'>;
   readonly file?: Pick<FileService, 'readFile' | 'readFiles' | 'writeFile' | 'applyPatch' | 'editFile' | 'moveFile' | 'copyFile' | 'deleteFile' | 'listRecoveryItems' | 'restoreDeletedFile' | 'prepareExternalFileMutation'>;

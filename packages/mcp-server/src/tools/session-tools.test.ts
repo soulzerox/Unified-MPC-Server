@@ -70,6 +70,64 @@ describe('session tools', () => {
     expect(value.prompt).not.toEqual(expect.stringContaining('Before ending'));
   });
 
+  it('projects the journal through the resume port and reports a runtime without one', async () => {
+    const requests: unknown[] = [];
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        workspaceResume: {
+          read(request: unknown) {
+            requests.push(request);
+            return ok({
+              workspaceId: 'workspace-1',
+              generatedAt: '2026-11-18T03:00:00.000Z',
+              cursor: 9,
+              truncated: true,
+              events: [{
+                sequence: 8,
+                operationKind: 'process_start',
+                phase: 'started',
+                status: 'started',
+                recordedAt: '2026-11-18T02:00:00.000Z',
+                open: true,
+              }],
+              openReferences: { count: 1, latestSequence: 8 },
+            });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+
+    const answered = await findTool(context, new IncrementalVerifier(), 'workspace_resume').execute(
+      { workspaceId: 'workspace-1', afterSequence: 7, limit: 2 },
+      new AbortController().signal,
+    );
+
+    expect(requests).toEqual([{ workspaceId: 'workspace-1', afterSequence: 7, limit: 2 }]);
+    expect(answered.ok).toBe(true);
+    if (!answered.ok) return;
+    expect(answered.value).toEqual({
+      workspaceId: 'workspace-1',
+      generatedAt: '2026-11-18T03:00:00.000Z',
+      cursor: 9,
+      truncated: true,
+      events: [expect.objectContaining({ sequence: 8, open: true })],
+      openReferences: { count: 1, latestSequence: 8 },
+    });
+
+    // A runtime with no journal must say so: an empty event list would read as
+    // "nothing happened in this workspace", which is the wrong answer.
+    const absent = { actor, contextEconomy: new ContextEconomyRuntime(), services: {} } as unknown as McpToolContext;
+    const refused = await findTool(absent, new IncrementalVerifier(), 'workspace_resume').execute(
+      { workspaceId: 'workspace-1' },
+      new AbortController().signal,
+    );
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.code).toBe('INTERNAL_ERROR');
+  });
+
   it('returns verify_incremental cache hit only while the exact source HEAD and diff stay unchanged', async () => {
     let patch = '+first-diff';
     let head = 'a'.repeat(40);

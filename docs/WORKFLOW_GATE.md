@@ -475,6 +475,21 @@ workspace journal:
    the ports below, so a live journal no longer reports
    `durable_references_unknown` and the close gate no longer decides blind.
 
+The journal's read side is `workspace_resume`
+(`packages/application/src/workspace-resume-snapshot.ts`, wired in the stdio
+runtime over the same `SqliteWorkspaceJournalRepository` the host appends to):
+one call answers "what ran here since the cursor I hold" for a session that was
+not present — a new session, a reconnect, a handoff. It is bounded
+(`WORKSPACE_RESUME_DEFAULT_LIMIT` 20, `WORKSPACE_RESUME_MAX_LIMIT` 100, both
+below the store's own `MAX_LIST_LIMIT` 200 so the reader can ask for one row more
+than the bound and prove `truncated` rather than infer it from a clamped reply),
+cursor-based (`afterSequence` in, `cursor` out, oldest first so the caller can
+replay in order), and read-only. `openReferences` counts only the calls in that
+window whose `started` row carries no `closure_code`, so a resumed session learns
+which work may still be running without reading the whole journal again. The
+tool is absent, not empty, when the runtime has no journal: an empty event list
+would read as "nothing happened here", which is the wrong answer.
+
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as
 `createGoalWorktreeRemovalPreviewPort` in

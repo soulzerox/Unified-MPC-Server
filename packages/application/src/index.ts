@@ -39,6 +39,7 @@ export * from './search-service.js';
 export * from './workspace-info-service.js';
 export * from './workspace-selection-service.js';
 export * from './workspace-query-service.js';
+export * from './workspace-resume-snapshot.js';
 export * from './workspace-index-queue.js';
 export * from './workspace-index.js';
 export * from './lifecycle-hooks.js';

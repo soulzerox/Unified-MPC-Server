@@ -143,8 +143,59 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-goal' }).length).toBeLessThanOrEqual(3 + kinds.size);
   });
 
-  it("does not let one goal's deferred operation pin another goal", async () => {
-    const { journal, workspaces, root } = await setup();
+  it('keeps every open durable reference, so a settling preview cannot evict a real spawn', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const workspaces = new SqliteWorkspaceRepository(database);
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 3 });
+
+    // A spawn that really created a worktree, then a preview that created nothing.
+    // The preview is newer, so the per-kind collapse used to delete the real
+    // spawn's open row and keep the preview — which then closed itself, leaving
+    // the worktree unpinned.
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_worktree_spawn', phase: 'started', status: 'started', callId: 'spawn-real' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_worktree_spawn', phase: 'started', status: 'started', callId: 'spawn-preview' });
+    // Overflow the cap with an ordinary deferred kind, which still collapses.
+    for (const callId of ['run-1', 'run-2', 'run-3']) {
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId });
+    }
+
+    expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['spawn-real', 'spawn-preview'] }).sort())
+      .toEqual(['spawn-preview', 'spawn-real']);
+
+    // The preview settles under its own code; the real spawn's reference survives
+    // and keeps pinning the goal.
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal',
+      operationKinds: ['git_worktree_spawn'],
+      callIds: ['spawn-preview'],
+      closureCode: 'worktree_preview_settled',
+    })).toBe(1);
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal',
+      operationKinds: ['git_worktree_spawn'],
+      callIds: ['spawn-real'],
+      closureCode: 'worktree_removed',
+    })).toBe(1);
+    // The launch rows the overflow left behind still pin; close them so the last
+    // assertion is about the worktree reference and not about them.
+    journal.closeDeferredCalls({
+      workspaceId: 'ws-goal',
+      operationKinds: ['process_start'],
+      callIds: ['run-1', 'run-2', 'run-3'],
+      closureCode: 'no_live_process',
+    });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+  });
+
+  it("does not let one goal's deferred operation pin another goal", async () => {    const { journal, workspaces, root } = await setup();
     await workspaces.insert({
       id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'),
       createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',

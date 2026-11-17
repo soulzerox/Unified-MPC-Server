@@ -109,11 +109,13 @@ export function recordableDeferredSettlement(
   }
   // A preview creates nothing, so its work ended inside the call whether it answered
   // or errored. Decided from the input alone for the same reason a read is: the
-  // response cannot say whether a directory was created on the way to failing. Both
-  // spellings of the flag count, exactly as the spawn runtime reads them
-  // (`gitWorktreeSpawn` takes `dryRun !== false && dry_run !== false`): reading only
-  // one would treat a real spawn as a preview and release its pin, the fail-open
-  // direction this rule exists to avoid.
+  // response cannot say whether a directory was created on the way to failing. A
+  // present `dry_run` counts as a preview because the tool's schema is `.strict()` and
+  // lists only `dryRun`, so such a call is refused before its handler and created
+  // nothing. That is not the runtime's own reading — `gitWorktreeSpawn` takes
+  // `dryRun !== false && dry_run !== false` — so the two agree only while the schema
+  // keeps refusing the alias, which
+  // `deferred-handle-descriptor.test.ts` pins against the real catalog entry.
   if (toolName === 'git_worktree_spawn' && isWorktreeSpawnPreview(input)) {
     return { workspaceId, closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE };
   }

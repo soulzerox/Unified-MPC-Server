@@ -8,6 +8,7 @@ import {
   DeferredHandleStoreError,
   SqliteDeferredHandleRepository,
 } from './deferred-handle-repository.js';
+import { DEFERRED_HANDLE_MIGRATION_SQL } from './migrations/deferred-handle-migration.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
 
 const temporaryRoots: string[] = [];
@@ -99,6 +100,11 @@ describe('SqliteDeferredHandleRepository', () => {
     // A provider the type allows but the DDL refuses would be a handle its own
     // writer cannot store; one the DDL allows but the type does not would be a row
     // no reader can name. Both directions are the same bug: two lists, one set.
+    // The set comparison covers the DDL side (a `CHECK` that grew alone is
+    // invisible to an insert test), the inserts cover the behaviour.
+    const ddlProviders = /provider\s+IN\s*\(([^)]*)\)/.exec(DEFERRED_HANDLE_MIGRATION_SQL)?.[1] ?? '';
+    expect([...ddlProviders.matchAll(/'([^']+)'/g)].map((match) => match[1]).sort())
+      .toEqual([...DEFERRED_HANDLE_PROVIDERS].sort());
     for (const provider of DEFERRED_HANDLE_PROVIDERS) {
       expect(() => insert.run(`call-${provider}`, provider)).not.toThrow();
     }

@@ -10,7 +10,7 @@
  */
 
 /** Providers a handle can be recorded for today. The ledger's closed set is wider. */
-export type RecordedDeferredHandleProvider = 'process' | 'task' | 'verification';
+export type RecordedDeferredHandleProvider = 'process' | 'task' | 'verification' | 'codex';
 
 export interface RecordedDeferredHandle {
   readonly workspaceId: string;
@@ -126,6 +126,22 @@ export function isMergeVerificationTool(toolName: string): boolean {
 }
 
 /**
+ * Tools whose response carries the id of a local Codex task at the top level.
+ *
+ * `codex_run` returns `{ codexTaskId, processId }`, and only the `CodexService` that
+ * launched it knows the task: a codex process lives in that service's own process
+ * manager, so the CLI's process listing can never see it. The id is what its
+ * liveness probe answers for, so it is the handle.
+ */
+export const CODEX_TASK_TOOLS: ReadonlySet<string> = new Set([
+  'codex_run',
+]);
+
+export function isCodexTaskTool(toolName: string): boolean {
+  return CODEX_TASK_TOOLS.has(toolName);
+}
+
+/**
  * Derive the recorded handle for a tool response, or `undefined` when this call
  * hands back nothing an authority in this runtime can answer for.
  *
@@ -138,6 +154,9 @@ export function isMergeVerificationTool(toolName: string): boolean {
  * `verification`, and only while the attempt is `queued`: a run that already holds
  * a receipt records no handle, and its own response closes its journal row instead
  * (`recordableDeferredSettlement`), so that call is never pinned in the first place.
+ * `codex_run` records its `codexTaskId` under provider `codex`, whose closure route
+ * asks the codex service that launched it: the id is invisible to the CLI process
+ * listing, so no other provider could answer for it.
  * A tool with no route is never recorded: recording a handle nothing can ask about
  * would keep its call pinned forever, which is the exact failure recording a handle
  * is meant to prevent.
@@ -157,6 +176,11 @@ export function recordableDeferredHandle(
     if (structured.status !== 'queued') return undefined;
     const attemptId = boundedString(structured.attemptId, 256);
     return attemptId === undefined ? undefined : { workspaceId, provider: 'verification', handleId: attemptId };
+  }
+
+  if (isCodexTaskTool(toolName)) {
+    const codexTaskId = boundedString(structured.codexTaskId, 256);
+    return codexTaskId === undefined ? undefined : { workspaceId, provider: 'codex', handleId: codexTaskId };
   }
 
   if (isDurableTaskTool(toolName)) {

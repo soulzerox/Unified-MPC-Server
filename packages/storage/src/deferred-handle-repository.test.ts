@@ -8,7 +8,6 @@ import {
   DeferredHandleStoreError,
   SqliteDeferredHandleRepository,
 } from './deferred-handle-repository.js';
-import { DEFERRED_HANDLE_MIGRATION_SQL } from './migrations/deferred-handle-migration.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
 
 const temporaryRoots: string[] = [];
@@ -101,8 +100,14 @@ describe('SqliteDeferredHandleRepository', () => {
     // writer cannot store; one the DDL allows but the type does not would be a row
     // no reader can name. Both directions are the same bug: two lists, one set.
     // The set comparison covers the DDL side (a `CHECK` that grew alone is
-    // invisible to an insert test), the inserts cover the behaviour.
-    const ddlProviders = /provider\s+IN\s*\(([^)]*)\)/.exec(DEFERRED_HANDLE_MIGRATION_SQL)?.[1] ?? '';
+    // invisible to an insert test), the inserts cover the behaviour. The DDL is
+    // read from the migrated table, not from the first migration's text, so a
+    // rebuild that widens the `CHECK` is the schema this test sees.
+    const ddlProviders = /provider\s+IN\s*\(([^)]*)\)/.exec(String(
+      (database.connection.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'deferred_handles'",
+      ).get() as { sql?: string } | undefined)?.sql,
+    ))?.[1] ?? '';
     expect([...ddlProviders.matchAll(/'([^']+)'/g)].map((match) => match[1]).sort())
       .toEqual([...DEFERRED_HANDLE_PROVIDERS].sort());
     for (const provider of DEFERRED_HANDLE_PROVIDERS) {

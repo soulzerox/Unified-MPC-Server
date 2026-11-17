@@ -10,7 +10,7 @@ const MAX_RECORDED_AT_CHARS = 64;
  * answer for it and the call keeps pinning. Adding one here is the whole change
  * needed to make that authority answerable.
  */
-export const DEFERRED_HANDLE_PROVIDERS = ['process', 'task', 'swarm', 'worktree', 'verification'] as const;
+export const DEFERRED_HANDLE_PROVIDERS = ['process', 'task', 'swarm', 'worktree', 'verification', 'codex'] as const;
 export type DeferredHandleProvider = typeof DEFERRED_HANDLE_PROVIDERS[number];
 
 export interface DeferredHandleAppendRequest {

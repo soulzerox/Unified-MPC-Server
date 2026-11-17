@@ -16,9 +16,11 @@ const closedAt = '2026-11-16T10:00:00.000Z';
 function journal(
   closed: number | ((callId: string) => number) = 1,
   stillOpen: readonly string[] = [],
+  kinds: Readonly<Record<string, string>> = {},
 ): {
   readonly closeDeferredCalls: ReturnType<typeof vi.fn>;
   readonly openDeferredCallIds: ReturnType<typeof vi.fn>;
+  readonly openDeferredCallKinds: ReturnType<typeof vi.fn>;
 } {
   return {
     closeDeferredCalls: vi.fn((request: { readonly callIds: readonly string[] }) => (
@@ -27,6 +29,12 @@ function journal(
     // A zero from `closeDeferredCalls` can mean "already closed" or "out of reach".
     // The list is what tells them apart, so it is asserted, not defaulted away.
     openDeferredCallIds: vi.fn(() => stillOpen),
+    // The journal is the only place that still knows a call's kind, and it decides
+    // whether the coarser process answer may speak for it. Default to a process
+    // kind so the fixtures that predate kinds keep their meaning.
+    openDeferredCallKinds: vi.fn((request: { readonly callIds: readonly string[] }) => new Map(
+      request.callIds.map((callId) => [callId, kinds[callId] ?? 'process_start']),
+    )),
   };
 }
 
@@ -63,6 +71,8 @@ function authority(
 }
 
 const operationKinds = [...DEFERRED_CLOSURE_OPERATION_KINDS];
+/** The kinds a managed-process listing can speak for, as the runtime passes them. */
+const PROCESS_HANDLE_TOOLS: ReadonlySet<string> = new Set([...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]);
 
 function probe(options: {
   readonly store?: ReturnType<typeof journal>;
@@ -75,6 +85,7 @@ function probe(options: {
     handles: options.handles ?? ledger([]),
     authority: options.authority ?? authority('gone'),
     operationKinds,
+    workspaceFallbackKinds: PROCESS_HANDLE_TOOLS,
     actor,
     workspaceId: 'ws-1',
     ownedCallIds: options.ownedCallIds ?? ['call-1'],
@@ -133,6 +144,30 @@ describe('closeJudgedDeferredCalls', () => {
     // is live in the workspace would answer a different question.
     expect(asker.workspaceProcessState).not.toHaveBeenCalled();
     expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('never answers a durable task that recorded no handle with the process listing', async () => {
+    // Reachable when the ledger write threw: the row is best-effort, so the call
+    // is journaled but has no handle. A live durable task is not in the process
+    // listing, so that answer would release the pin on running work.
+    const store = journal(1, [], { 'call-1': 'task_create' });
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles: ledger([]), authority: asker }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
+  it('still closes a process call that recorded no handle once nothing is live', async () => {
+    // The same shape for a kind the listing can speak for: the fix must not
+    // suspend the release path for foreground-free launches that never started.
+    const store = journal();
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles: ledger([]), authority: asker }))
+      .resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
+    expect(asker.workspaceProcessState).toHaveBeenCalledWith({ actor, workspaceId: 'ws-1' });
   });
 
   it('keeps a still-running durable task pinned and re-asks it next sweep', async () => {

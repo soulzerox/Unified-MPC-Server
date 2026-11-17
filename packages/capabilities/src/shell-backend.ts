@@ -327,14 +327,22 @@ export class ShellCapabilityBackend implements CapabilityBackend {
    * keep the goal pinned, because none of them is evidence the work ended.
    */
   public async taskLivenessForGoal(workspaceId: string, taskId: string): Promise<GoalTaskLiveness> {
-    let observed: Result<unknown>;
+    let state: unknown;
     try {
-      observed = await this.statusForGoalLiveness(workspaceId, taskId);
+      const record = this.tasks.get(taskId);
+      if (record !== undefined) {
+        // A task this host still holds in memory: the owner check is what keeps
+        // another workspace's id from being read at all.
+        if (record.owner.workspaceId !== workspaceId) return 'unknown';
+        state = record.state;
+      } else if (this.durableStore !== undefined) {
+        const observed = await this.durableStore.livenessForGoal(taskId, workspaceId);
+        state = observed.ok ? observed.value.state : undefined;
+      }
     } catch {
       // A store that throws has said nothing about the task; the pin stays.
       return 'unknown';
     }
-    const state = observed.ok && isRecord(observed.value) ? observed.value.state : undefined;
     if (typeof state !== 'string') return 'unknown';
     if (GOAL_TASK_LIVE_STATES.has(state)) return 'live';
     if (GOAL_TASK_GONE_STATES.has(state)) return 'gone';

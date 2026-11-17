@@ -61,7 +61,7 @@ import {
   type ExtensionsService,
   type ManagedPolicyRepairReport,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, isDirectProcessTool, isDurableTaskTool, isWrappedProcessTool, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, DIRECT_PROCESS_TOOLS, isDirectProcessTool, isDurableTaskTool, isWrappedProcessTool, WRAPPED_PROCESS_TOOLS, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   ThaiRagIndexJobStore,
@@ -232,6 +232,16 @@ export const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
  */
 const ownsDeferredHandle = (toolName: string): boolean =>
   isDirectProcessTool(toolName) || isWrappedProcessTool(toolName) || isDurableTaskTool(toolName);
+
+/**
+ * Kinds a managed-process listing can speak for.
+ *
+ * The closure sweep judges a call with no recorded handle by asking whether the
+ * workspace holds a live process, which is only evidence for tools whose work is
+ * such a process. A `task_create` handle lives in the durable task directory, so
+ * that listing can never see it and must not be asked about it.
+ */
+const PROCESS_HANDLE_TOOLS: ReadonlySet<string> = new Set([...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]);
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
@@ -1523,6 +1533,7 @@ export function createStdioMcpRuntime(
           handles: deferredHandles,
           authority: deferredClosureAuthority.current,
           operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS],
+          workspaceFallbackKinds: PROCESS_HANDLE_TOOLS,
           actor,
           workspaceId: completedWorkspaceId,
           ownedCallIds,

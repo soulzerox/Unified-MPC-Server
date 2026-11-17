@@ -346,6 +346,24 @@ export class DurableShellTaskStore {
     return ok(await this.snapshotFromMetadata(reconciled));
   }
 
+  /**
+   * The state of one task, for a goal that only needs to know whether it can still
+   * be working.
+   *
+   * The snapshot is not built here on purpose: it reads stdout and stderr, and a
+   * liveness probe runs on every completion in the workspace, so paying output
+   * size per remembered task would make the pin cost grow with the work it pins.
+   */
+  public async livenessForGoal(taskId: string, workspaceId: string): Promise<Result<{ readonly state: DurableShellTaskState }>> {
+    const metadata = await this.readMetadata(taskId);
+    if (!metadata.ok) return metadata;
+    if (metadataOwner(metadata.value).workspaceId !== workspaceId) {
+      return err(appError('PERMISSION_DENIED', 'Task belongs to another or unknown workspace'));
+    }
+    const reconciled = await this.reconcile(metadata.value);
+    return ok({ state: reconciled.state });
+  }
+
   /** Trusted cancellation path used by durable goals; it deliberately ignores the transient MCP session. */
   public async cancelForGoal(
     taskId: string,

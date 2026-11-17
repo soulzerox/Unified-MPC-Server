@@ -64,18 +64,28 @@ const RUNTIME_OBSERVED_FROM = new Date().toISOString();
  * `accountedCallIds` is the answer the caller acts on: a call is accounted for
  * only when nothing is left to ask about it — its row closed (now or by an
  * earlier sweep), it recorded a provider no adapter can ask about, or it recorded
- * no handle at all and the workspace held nothing live. Callers forget exactly
- * these and keep the rest for a later sweep: `live` and `unknown` keep the pin and
- * are asked again on the next completion, and so does a row the store refused.
+ * no handle at all and the workspace held nothing live for its kind. Callers
+ * forget exactly these and keep the rest for a later sweep: `live` and `unknown`
+ * keep the pin and are asked again on the next completion, and so does a row the
+ * store refused.
  */
 export async function closeJudgedDeferredCalls(options: {
-  readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls' | 'openDeferredCallIds'>;
+  readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls' | 'openDeferredCallIds' | 'openDeferredCallKinds'>;
   /** The handle ledger: which handle each call returned, and the authority that owns it. */
   readonly handles: Pick<SqliteDeferredHandleRepository, 'take' | 'forget'>;
   /** Asks the stores that own a handle; `unknown` never closes a call. */
   readonly authority: Pick<DeferredClosureAuthority, 'handleState' | 'workspaceProcessState'>;
   /** Kinds the journal will accept a closure for; the exact `ownedCallIds` do the narrowing. */
   readonly operationKinds: readonly string[];
+  /**
+   * Kinds a managed-process listing can speak for.
+   *
+   * A call with no recorded handle is judged by the workspace's process listing,
+   * which is only evidence for work that listing could hold. A durable task is
+   * never in it, so "no process is live" says nothing about one, and answering it
+   * that way would release the pin while the task runs.
+   */
+  readonly workspaceFallbackKinds: ReadonlySet<string>;
   readonly actor: FileActor;
   readonly workspaceId: string;
   /** The calls this runtime journaled: the only calls it may judge. */
@@ -114,15 +124,27 @@ export async function closeJudgedDeferredCalls(options: {
   if (withoutHandle.length > 0) {
     // No handle to ask about: a launch that failed, an `isError` response, or a
     // ledger write that threw. The workspace question is the only evidence left,
-    // and it is asked only for calls this runtime journaled. With nothing live
-    // here the work never started, so the row can close; leaving it open would
-    // pin the goal `present` for good.
-    const state = await options.authority.workspaceProcessState({
-      actor: options.actor,
+    // and it is asked only for calls this runtime journaled and only for the
+    // kinds that question can answer — a durable task never appears in the
+    // process listing, so answering for one would release a pin on live work.
+    // Leaving those judged by nothing keeps their pin and re-asks them later.
+    const kinds = options.journal.openDeferredCallKinds({
       workspaceId: options.workspaceId,
+      callIds: withoutHandle,
     });
-    if (state === 'gone') {
-      for (const callId of withoutHandle) gone.set(callId, NO_LIVE_PROCESS_CLOSURE_CODE);
+    const answerable = withoutHandle.filter((callId) => (
+      options.workspaceFallbackKinds.has(kinds.get(callId) ?? '')
+    ));
+    if (answerable.length > 0) {
+      // With nothing live here the work never started, so the row can close;
+      // leaving it open would pin the goal `present` for good.
+      const state = await options.authority.workspaceProcessState({
+        actor: options.actor,
+        workspaceId: options.workspaceId,
+      });
+      if (state === 'gone') {
+        for (const callId of answerable) gone.set(callId, NO_LIVE_PROCESS_CLOSURE_CODE);
+      }
     }
   }
 

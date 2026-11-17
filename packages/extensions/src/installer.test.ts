@@ -136,6 +136,52 @@ describe('InstallerService - Skill Ingestion Pipeline', () => {
       .resolves.toContain('# Beta');
   });
 
+  it('stages a linked Skill source as owned content instead of storing the link (#871)', async () => {
+    const { symlink, lstat: lstatEntry, realpath, rm } = await import('node:fs/promises');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'installer-canonical-skill-linked-source-'));
+    temporaryRoots.push(root);
+    const home = path.join(root, 'home');
+    const dataDir = path.join(root, 'data');
+    const realSource = path.join(root, 'real-source');
+    const linkedSource = path.join(root, 'linked-source');
+    await mkdir(realSource, { recursive: true });
+    await writeFile(
+      path.join(realSource, 'SKILL.md'),
+      '---\nname: linked-skill\ndescription: Linked source skill\n---\n# Linked Skill\n',
+      'utf8',
+    );
+    await symlink(realSource, linkedSource);
+
+    const installed = await new InstallerService({ homeDir: home, dataDir }).installSkill({
+      name: 'linked-skill',
+      source: linkedSource,
+      targets: ['unified-mpc', 'cline'],
+    });
+    expect(installed.ok).toBe(true);
+
+    const canonicalDir = path.join(dataDir, 'extensions', 'skills', 'linked-skill');
+    expect((await lstatEntry(canonicalDir)).isSymbolicLink()).toBe(false);
+    expect((await lstatEntry(canonicalDir)).isDirectory()).toBe(true);
+    expect(await readFile(path.join(canonicalDir, 'SKILL.md'), 'utf8')).toContain('# Linked Skill');
+    // The real source is untouched: materializing must not move or rewrite it.
+    expect(await realpath(realSource)).toBe(realSource);
+    expect(await readFile(path.join(realSource, 'SKILL.md'), 'utf8')).toContain('# Linked Skill');
+
+    // Repair path: a host that already installed from the linked source holds
+    // that link in the canonical store. Its content fingerprint matches the
+    // staged copy, so re-install used to short-circuit and keep the link.
+    await rm(canonicalDir, { recursive: true, force: true });
+    await symlink(realSource, canonicalDir);
+    const repaired = await new InstallerService({ homeDir: home, dataDir }).installSkill({
+      name: 'linked-skill',
+      source: linkedSource,
+      targets: ['unified-mpc', 'cline'],
+    });
+    expect(repaired.ok).toBe(true);
+    expect((await lstatEntry(canonicalDir)).isSymbolicLink()).toBe(false);
+    expect((await lstatEntry(canonicalDir)).isDirectory()).toBe(true);
+  });
+
   it('persists canonical Skill installed-state, preserves MCP entries, and keeps identical installs idempotent', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'installer-canonical-skill-registry-'));
     temporaryRoots.push(root);

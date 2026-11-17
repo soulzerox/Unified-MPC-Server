@@ -248,6 +248,13 @@ export class InstallerService {
       }
       const fileStat = await stat(sourceSkillFile);
       if (!fileStat.isFile()) return err(appError('FILE_NOT_FOUND', `SKILL.md not found at ${sourceSkillFile}`));
+      // A linked source root (`~/.agents/skills/x -> ~/.gemini/config/skills/...`)
+      // must be staged from its real content. `fs.cp` copies a linked directory
+      // as a link, so the canonical entry would name content it does not own and
+      // `rm -rf <entry>` would leave the link behind (#871). Resolving the root
+      // only keeps the existing refusal for symlinks *inside* the tree.
+      sourceSkillDir = await realpath(sourceSkillDir);
+      sourceSkillFile = path.join(sourceSkillDir, 'SKILL.md');
     } catch {
       return err(appError('FILE_NOT_FOUND', `Skill source or SKILL.md not found at ${resolvedSource}`));
     }
@@ -405,7 +412,19 @@ export class InstallerService {
         [],
         async () => {
           const currentFingerprint = await fingerprintCanonicalSkillDirectory(activeSkillDir);
-          if (currentFingerprint.ok && currentFingerprint.value === stagedFingerprint.value) {
+          // A fingerprint hashes content, not the entry type, and it follows a
+          // link. A canonical entry that is itself a symlink therefore looks
+          // up to date while the store still names content it does not own, so
+          // re-install must replace it instead of short-circuiting (#871).
+          const currentIsLinked = await lstat(activeSkillDir).then(
+            (entry) => entry.isSymbolicLink(),
+            () => false,
+          );
+          if (
+            !currentIsLinked
+            && currentFingerprint.ok
+            && currentFingerprint.value === stagedFingerprint.value
+          ) {
             return;
           }
           if (!currentFingerprint.ok && currentFingerprint.error.code !== 'FILE_NOT_FOUND') {

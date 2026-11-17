@@ -3,7 +3,7 @@ import type { DiagnosticLogger, FileActor } from '@unified-mpc/application';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { APP_NAME, APP_VERSION, DEFAULT_PONYTAIL_MODE, parsePonytailMode, type DestructiveAutoApprovalPolicy, type PonytailMode, type ToolAvailabilitySnapshot } from '@unified-mpc/shared';
 import { readTraceContext, type ActivitySink, type ActivityTracker } from './activity-tracker.js';
-import type { DeferredHandleRecorder } from './deferred-handle-descriptor.js';
+import type { DeferredHandleRecorder, DeferredSettlementRecorder } from './deferred-handle-descriptor.js';
 import { withProgressHeartbeat, type ProgressNotifyContext } from './progress-heartbeat.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { RunBudgetGuard, type RunBudgetContext } from './run-budget.js';
@@ -45,6 +45,8 @@ export interface McpServerOptions {
   readonly activityTracker?: ActivityTracker;
   /** Records the handle a deferred call returned, for the next freshness probe. */
   readonly deferredHandleRecorder?: DeferredHandleRecorder;
+  /** Closes the journal row of a call its own response proved finished. */
+  readonly deferredSettlementRecorder?: DeferredSettlementRecorder;
   readonly profileProvider?: () => PermissionProfile;
   readonly authorizationModeProvider?: () => AuthorizationMode;
   readonly allowAiDeleteProvider?: () => boolean;
@@ -107,6 +109,7 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     ...(options.activity === undefined ? {} : { activity: options.activity }),
     ...(options.activityTracker === undefined ? {} : { activityTracker: options.activityTracker }),
     ...(options.deferredHandleRecorder === undefined ? {} : { deferredHandleRecorder: options.deferredHandleRecorder }),
+    ...(options.deferredSettlementRecorder === undefined ? {} : { deferredSettlementRecorder: options.deferredSettlementRecorder }),
     ...(options.requestScope === undefined ? {} : { sessionId: options.requestScope.sessionId }),
     ...(options.profileProvider === undefined ? {} : { profileProvider: options.profileProvider }),
     ...(options.authorizationModeProvider === undefined ? {} : { authorizationModeProvider: options.authorizationModeProvider }),

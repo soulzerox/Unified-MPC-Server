@@ -228,6 +228,7 @@ async function main(): Promise<void> {
     services: runtime.services,
     actor: runtime.actor,
     deferredHandleRecorder: runtime.deferredHandleRecorder,
+    deferredSettlementRecorder: runtime.deferredSettlementRecorder,
     activityTracker: runtime.activityTracker,
     codexToolsEnabled: runtime.codexToolsEnabled,
     ponytailModeProvider: () => runtime.ponytailMode,

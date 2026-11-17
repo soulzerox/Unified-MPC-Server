@@ -143,7 +143,7 @@ import {
 import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import { startPublishCredentialSweep } from './publish-credential-sweep.js';
 import { resolvePublishCredentialDeployment } from '../commands/publish-credential.js';
-import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest, DeferredHandleRecorder } from '@unified-mpc/mcp-server';
+import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest, DeferredHandleRecorder, DeferredSettlementRecorder } from '@unified-mpc/mcp-server';
 import { createTrustedGoalRelocationHostFence, type TrustedGoalRelocationHostActor } from './goal-relocation-host-fence.js';
 
 export interface StdioMcpRuntime {
@@ -157,6 +157,8 @@ export interface StdioMcpRuntime {
   readonly actor: FileActor;
   /** Records the handle a deferred call returned, next to the journal row that names the call. */
   readonly deferredHandleRecorder: DeferredHandleRecorder;
+  /** Closes the journal row of a call whose own response proved the work ended. */
+  readonly deferredSettlementRecorder: DeferredSettlementRecorder;
   readonly extensions: ExtensionsService;
   /**
    * #4 §4: one-shot repair of generated workspace policy artifacts that still
@@ -416,17 +418,56 @@ export function createStdioMcpRuntime(
   // behind, so a later session (or the close phase) can see that an operation
   // touched a Goal Workspace without replaying chat context.
   const workspaceJournal = new SqliteWorkspaceJournalRepository(database);
+  // Deferred handle calls THIS runtime journaled, oldest first. A
+  // `project_dev`/`process_start`/`task_create` call returns while its work is
+  // still live, and a `merge_verification_run` denied admission returns with a
+  // queued attempt, so the closure verdict can only be reached by a later sweep;
+  // remembering the callIds is what keeps that sweep to calls this runtime can
+  // answer for. The cap bounds the map: an entry that never resolves costs one
+  // integer in an `IN (...)` list, never a correctness decision.
+  const ownDeferredHandleCalls = new Map<string, string>();
+  const MAX_REMEMBERED_DEFERRED_CALLS = 256;
+  const rememberDeferredCall = (callId: string, workspaceId: string): void => {
+    ownDeferredHandleCalls.set(callId, workspaceId);
+    while (ownDeferredHandleCalls.size > MAX_REMEMBERED_DEFERRED_CALLS) {
+      const oldest = ownDeferredHandleCalls.keys().next().value;
+      if (oldest === undefined) break;
+      ownDeferredHandleCalls.delete(oldest);
+    }
+  };
   // #170 freshness: the journal says the call happened, this ledger says which
   // handle it handed back, so the next sweep can ask that provider instead of
   // reading "not in the process store" as finished. Best-effort by contract: a
   // missing row just leaves the call pinned.
   const deferredHandles = new SqliteDeferredHandleRepository(database);
   const deferredHandleRecorder: DeferredHandleRecorder = (record): void => {
+    // A verification call is remembered here, not by tool name: only a queued
+    // attempt records a handle, and only a recorded handle has an authority that
+    // can prove it ended. A completed run records nothing and is never retried.
+    if (record.provider === 'verification') rememberDeferredCall(record.callId, record.workspaceId);
     try {
       deferredHandles.record(record);
     } catch (error) {
       process.stderr.write(
         `Unified-MPC deferred handle record failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
+  const deferredSettlementRecorder: DeferredSettlementRecorder = (record): void => {
+    // A call whose own response ended its deferral never reaches the sweep: it
+    // recorded no handle, so nothing would ever ask about it and its `started` row
+    // would pin the goal `present` for good. The verdict is the call's own, so it
+    // is written here rather than by a later probe.
+    try {
+      workspaceJournal.closeDeferredCalls({
+        workspaceId: record.workspaceId,
+        operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS],
+        callIds: [record.callId],
+        closureCode: record.closureCode,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `Unified-MPC workspace journal settlement failed: ${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
   };
@@ -1484,14 +1525,6 @@ export function createStdioMcpRuntime(
   const deferredClosureAuthority: { current: DeferredClosureAuthority } = {
     current: createDeferredClosureAuthority({}),
   };
-  // Deferred handle calls THIS runtime journaled, oldest first. A
-  // `project_dev`/`process_start`/`task_create` call returns while its work is
-  // still live, so the closure verdict can only be reached by a later sweep;
-  // remembering the callIds is what keeps that sweep to calls this runtime can
-  // answer for. The cap bounds the map: an entry that never resolves costs one
-  // integer in an `IN (...)` list, never a correctness decision.
-  const ownDeferredHandleCalls = new Map<string, string>();
-  const MAX_REMEMBERED_DEFERRED_CALLS = 256;
   /**
    * #170 freshness: a handle-returning call ends, but its `completed` row is not
    * evidence the work did. Ask the authority that owns each recorded handle; only
@@ -1503,12 +1536,7 @@ export function createStdioMcpRuntime(
   const sweepDeferredClosure = async (event: ActivitySinkEvent): Promise<void> => {
     if (event.workspaceId === undefined) return;
     if (event.phase === 'started' && ownsDeferredHandle(event.toolName)) {
-      ownDeferredHandleCalls.set(event.callId, event.workspaceId);
-      while (ownDeferredHandleCalls.size > MAX_REMEMBERED_DEFERRED_CALLS) {
-        const oldest = ownDeferredHandleCalls.keys().next().value;
-        if (oldest === undefined) break;
-        ownDeferredHandleCalls.delete(oldest);
-      }
+      rememberDeferredCall(event.callId, event.workspaceId);
       return;
     }
     if (event.phase !== 'completed') return;
@@ -1739,6 +1767,9 @@ export function createStdioMcpRuntime(
     // A `task_create` handle is a durable shell task id, so the verdict comes from
     // the backend that wrote the task directory rather than a second store.
     durableTasks: capabilityRuntime.shell,
+    // A queued verification attempt is answered by the status port, which already
+    // reads a `running` row with an expired heartbeat as a dead runner.
+    verification: mergeVerificationStatus,
   });
 
   return {
@@ -1750,6 +1781,7 @@ export function createStdioMcpRuntime(
     ...(goalRetentionEvidenceSealing === undefined ? {} : { goalRetentionEvidenceSealing }),
     actor,
     deferredHandleRecorder,
+    deferredSettlementRecorder,
     extensions,
     managedPolicyRepairReady,
     activityTracker,

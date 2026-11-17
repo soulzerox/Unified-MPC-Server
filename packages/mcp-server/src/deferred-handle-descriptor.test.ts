@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recordableDeferredHandle } from './deferred-handle-descriptor.js';
+import { recordableDeferredHandle, recordableDeferredSettlement, VERIFICATION_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
 
 const input = { workspaceId: 'workspace-1' };
 const done = { isError: false };
@@ -34,5 +34,60 @@ describe('recordableDeferredHandle', () => {
     expect(recordableDeferredHandle('process_start', input, { isError: true, structuredContent: { processId: 'proc-4' } })).toBeUndefined();
     expect(recordableDeferredHandle('process_start', input, { ...done, structuredContent: {} })).toBeUndefined();
     expect(recordableDeferredHandle('process_start', {}, { ...done, structuredContent: { processId: 'proc-5' } })).toBeUndefined();
+  });
+
+  it('records the attempt id a queued merge_verification_run returned', (): void => {
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'queued', attemptId: 'attempt-1' },
+    })).toEqual({ workspaceId: 'workspace-1', provider: 'verification', handleId: 'attempt-1' });
+  });
+
+  it('records nothing for a verification run that already holds its receipt', (): void => {
+    // A run that reached a verdict hands back no attempt id: the gate already ran, so
+    // there is no live work to ask about. Its own response closes the journal row
+    // instead, which is what keeps that call from pinning the goal forever.
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'completed', receiptRef: 'receipt-1' },
+    })).toBeUndefined();
+  });
+
+  it('records nothing for a queued verification with no attempt id, or a failed call', (): void => {
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'queued' },
+    })).toBeUndefined();
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      isError: true, structuredContent: { status: 'queued', attemptId: 'attempt-1' },
+    })).toBeUndefined();
+  });
+});
+
+describe('recordableDeferredSettlement', () => {
+  it('settles the call a completed verification ran to a verdict inside', (): void => {
+    expect(recordableDeferredSettlement('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'completed', receiptRef: 'receipt-1' },
+    })).toEqual({ workspaceId: 'workspace-1', closureCode: VERIFICATION_SETTLED_CLOSURE_CODE });
+  });
+
+  it('leaves a queued attempt to the status port', (): void => {
+    // Queued work is still live, so closing here would release the pin while the
+    // attempt it named is waiting to run.
+    expect(recordableDeferredSettlement('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'queued', attemptId: 'attempt-1' },
+    })).toBeUndefined();
+  });
+
+  it('leaves a failed call pinned, since a cancelled run can still be live', (): void => {
+    expect(recordableDeferredSettlement('merge_verification_run', input, {
+      isError: true, structuredContent: { status: 'completed', receiptRef: 'receipt-1' },
+    })).toBeUndefined();
+  });
+
+  it('settles nothing for another tool or a call with no workspace', (): void => {
+    expect(recordableDeferredSettlement('process_start', input, {
+      ...done, structuredContent: { status: 'completed' },
+    })).toBeUndefined();
+    expect(recordableDeferredSettlement('merge_verification_run', {}, {
+      ...done, structuredContent: { status: 'completed' },
+    })).toBeUndefined();
   });
 });

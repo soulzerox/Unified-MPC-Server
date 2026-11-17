@@ -105,3 +105,35 @@ describe('deferred closure authority — durable task adapter', () => {
       .resolves.toBe('unknown');
   });
 });
+
+describe('deferred closure authority — verification adapter', () => {
+  const verification = (
+    attemptState: (request: { readonly attemptId: string; readonly workspaceId: string })
+      => Promise<'live' | 'gone' | 'unknown'>,
+  ): ReturnType<typeof createDeferredClosureAuthority> => createDeferredClosureAuthority({
+    verification: { attemptState },
+  });
+
+  it('takes the status port reading of the queued attempt instead of decoding the row', async () => {
+    for (const verdict of ['live', 'gone'] as const) {
+      const attemptState = vi.fn(async () => verdict);
+      await expect(verification(attemptState)
+        .handleState({ actor, workspaceId, provider: 'verification', handleId: 'attempt-1' }))
+        .resolves.toBe(verdict);
+      // The workspace is part of the question: an attempt row of another workspace
+      // is not evidence about this one, so the port must be asked about both.
+      expect(attemptState).toHaveBeenCalledWith({ attemptId: 'attempt-1', workspaceId });
+    }
+  });
+
+  it('keeps a verification pinned when the port throws, cannot tell, or was never given', async () => {
+    for (const asker of [
+      verification(async () => { throw new Error('row unreadable'); }),
+      verification(async () => 'unknown'),
+      createDeferredClosureAuthority({}),
+    ]) {
+      await expect(asker.handleState({ actor, workspaceId, provider: 'verification', handleId: 'attempt-1' }))
+        .resolves.toBe('unknown');
+    }
+  });
+});

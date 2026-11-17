@@ -10,7 +10,7 @@
  */
 
 /** Providers a handle can be recorded for today. The ledger's closed set is wider. */
-export type RecordedDeferredHandleProvider = 'process' | 'task';
+export type RecordedDeferredHandleProvider = 'process' | 'task' | 'verification';
 
 export interface RecordedDeferredHandle {
   readonly workspaceId: string;
@@ -33,6 +33,50 @@ export interface DeferredHandleRecord {
  * the same fail-closed direction the journal already takes.
  */
 export type DeferredHandleRecorder = (record: DeferredHandleRecord) => void;
+
+/**
+ * Why this call's own response ended its deferral.
+ *
+ * A `merge_verification_run` that reached a verdict ran its gate inside the call,
+ * so nothing is left to ask and the journal row must close with that call. The
+ * code is the journal's vocabulary for "the work ended", not a provider verdict.
+ */
+export const VERIFICATION_SETTLED_CLOSURE_CODE = 'verification_settled';
+
+export interface RecordedDeferredSettlement {
+  readonly workspaceId: string;
+  readonly closureCode: string;
+}
+
+export interface DeferredSettlementRecord {
+  readonly workspaceId: string;
+  readonly callId: string;
+  readonly closureCode: string;
+}
+
+/** Closes the journal row of a call its own response proved finished. */
+export type DeferredSettlementRecorder = (record: DeferredSettlementRecord) => void;
+
+/**
+ * Derive the closure a response proves about its own call, or `undefined` when the
+ * call stayed deferred.
+ *
+ * Only a verdict settles itself: a `queued` attempt hands back an id and waits for
+ * the status port, and a failed call may have been cancelled mid-run, so its work
+ * can still be live — the pin stays rather than reading "errored" as "finished".
+ */
+export function recordableDeferredSettlement(
+  toolName: string,
+  input: unknown,
+  response: { readonly structuredContent?: unknown; readonly isError?: boolean },
+): RecordedDeferredSettlement | undefined {
+  if (!isMergeVerificationTool(toolName)) return undefined;
+  if (response.isError === true) return undefined;
+  const structured = asRecord(response.structuredContent);
+  if (structured?.status !== 'completed') return undefined;
+  const workspaceId = boundedString(asRecord(input)?.workspaceId, 128);
+  return workspaceId === undefined ? undefined : { workspaceId, closureCode: VERIFICATION_SETTLED_CLOSURE_CODE };
+}
 
 /** Tools whose response carries a managed process id at the top level. */
 export const DIRECT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
@@ -68,6 +112,20 @@ export function isDurableTaskTool(toolName: string): boolean {
 }
 
 /**
+ * Tools whose response can carry the id of a durably queued verification attempt.
+ *
+ * A completed run returns a receipt and no attempt id, so it records no handle: the
+ * gate already ran, and `recordableDeferredSettlement` closes its own journal row.
+ */
+export const MERGE_VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
+  'merge_verification_run',
+]);
+
+export function isMergeVerificationTool(toolName: string): boolean {
+  return MERGE_VERIFICATION_TOOLS.has(toolName);
+}
+
+/**
  * Derive the recorded handle for a tool response, or `undefined` when this call
  * hands back nothing an authority in this runtime can answer for.
  *
@@ -76,9 +134,13 @@ export function isDurableTaskTool(toolName: string): boolean {
  *
  * `task_create` records its `task_id` under provider `task`, whose closure route
  * asks the shell backend that wrote the durable task, so the id it hands back can
- * be answered for. A tool with no route is never recorded: recording a handle
- * nothing can ask about would keep its call pinned forever, which is the exact
- * failure recording a handle is meant to prevent.
+ * be answered for. `merge_verification_run` records its `attemptId` under provider
+ * `verification`, and only while the attempt is `queued`: a run that already holds
+ * a receipt records no handle, and its own response closes its journal row instead
+ * (`recordableDeferredSettlement`), so that call is never pinned in the first place.
+ * A tool with no route is never recorded: recording a handle nothing can ask about
+ * would keep its call pinned forever, which is the exact failure recording a handle
+ * is meant to prevent.
  */
 export function recordableDeferredHandle(
   toolName: string,
@@ -90,6 +152,12 @@ export function recordableDeferredHandle(
   if (structured === undefined) return undefined;
   const workspaceId = boundedString(asRecord(input)?.workspaceId, 128);
   if (workspaceId === undefined) return undefined;
+
+  if (isMergeVerificationTool(toolName)) {
+    if (structured.status !== 'queued') return undefined;
+    const attemptId = boundedString(structured.attemptId, 256);
+    return attemptId === undefined ? undefined : { workspaceId, provider: 'verification', handleId: attemptId };
+  }
 
   if (isDurableTaskTool(toolName)) {
     const taskId = boundedString(structured.task_id, 256);

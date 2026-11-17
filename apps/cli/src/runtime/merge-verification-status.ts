@@ -75,6 +75,15 @@ export interface MergeVerificationStatusDependencies {
       readonly headSha?: string;
       readonly limit?: number;
     }): Promise<readonly AttemptSourceRecord[]>;
+    /**
+     * One row by id, for the closure probe's single-attempt question.
+     *
+     * ponytail: optional so the projection's existing callers and fixtures stay
+     * unchanged; a caller that omits it gets `unknown`, which keeps the pin
+     * instead of releasing it. Add it to every caller when a second one needs a
+     * verdict.
+     */
+    getById?(attemptId: string): Promise<AttemptSourceRecord | undefined>;
   };
   readonly receipts: {
     listForExactHead(request: {
@@ -98,7 +107,29 @@ export interface MergeVerificationStatusDependencies {
 
 export interface MergeVerificationStatusPort {
   get(request: MergeVerificationStatusRequest): Promise<MergeVerificationStatusResult>;
+
+  /**
+   * Whether the attempt behind this id can still be running.
+   *
+   * This is the same reading `get` applies, asked about one row: a `running`
+   * attempt whose heartbeat expired is `interrupted`, which is `gone` because the
+   * runner that owned it never reported. An id this host never wrote, an attempt
+   * of another workspace and an unreadable row are `unknown` — none of them is
+   * evidence the verification ended.
+   */
+  attemptState(request: {
+    readonly attemptId: string;
+    readonly workspaceId: string;
+  }): Promise<MergeVerificationAttemptLiveness>;
 }
+
+/** The verdict a closure probe may act on: only `gone` releases a pin. */
+export type MergeVerificationAttemptLiveness = 'live' | 'gone' | 'unknown';
+
+const LIVE_ATTEMPT_STATES: ReadonlySet<MergeVerificationStatusAttemptState> = new Set(['queued', 'running']);
+const GONE_ATTEMPT_STATES: ReadonlySet<MergeVerificationStatusAttemptState> = new Set([
+  'completed', 'failed', 'interrupted',
+]);
 
 const DEFAULT_STALE_AFTER_MS = 90_000;
 const EXPIRED_DETAIL = 'Heartbeat expired without a verdict; the runner never reported completion';
@@ -187,6 +218,28 @@ export function createMergeVerificationStatusPort(
         ...(latest === undefined ? {} : { latestReceiptRef: latest.receiptRef }),
         ...(decision === undefined ? {} : { decision }),
       };
+    },
+
+    async attemptState({ attemptId, workspaceId }): Promise<MergeVerificationAttemptLiveness> {
+      const read = deps.attempts.getById;
+      if (read === undefined) return 'unknown';
+      let record: AttemptSourceRecord | undefined;
+      try {
+        record = await read.call(deps.attempts, attemptId);
+      } catch {
+        return 'unknown';
+      }
+      if (record === undefined) return 'unknown';
+      // An attempt recorded for another workspace says nothing about this one.
+      if (record.workspaceId !== workspaceId) return 'unknown';
+      const staleCutoff = Date.parse(now().toISOString()) - staleAfterMs;
+      const state = record.status === 'running' && Date.parse(record.heartbeatAt) <= staleCutoff
+        ? 'interrupted'
+        : record.status;
+      if (LIVE_ATTEMPT_STATES.has(state)) return 'live';
+      if (GONE_ATTEMPT_STATES.has(state)) return 'gone';
+      // A state added later is not evidence the verification ended.
+      return 'unknown';
     },
   };
 }

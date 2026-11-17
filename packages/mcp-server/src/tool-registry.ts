@@ -50,7 +50,7 @@ import {
   type ToolAvailabilitySnapshot,
 } from '@unified-mpc/shared';
 import { ActivityTracker, describeStructuredResultDetail, summarizeStructuredResultTarget, summarizeToolTarget, type ActivitySink, type TraceContext } from './activity-tracker.js';
-import { recordableDeferredHandle, type DeferredHandleRecorder } from './deferred-handle-descriptor.js';
+import { recordableDeferredHandle, recordableDeferredSettlement, type DeferredHandleRecorder, type DeferredSettlementRecorder } from './deferred-handle-descriptor.js';
 import { ContextEngine } from './context-engine.js';
 import { ContextEconomyRuntime } from './context-economy.js';
 import { hasExplicitUserConfirmation } from './destructive-policy.js';
@@ -139,6 +139,11 @@ export interface ToolRegistryOptions {
    * and a call with no recorded handle stays pinned.
    */
   readonly deferredHandleRecorder?: DeferredHandleRecorder;
+  /**
+   * Closes the journal row of a call its own response proved finished. Best-effort
+   * too: a recorder that throws leaves the pin where the journal already put it.
+   */
+  readonly deferredSettlementRecorder?: DeferredSettlementRecorder;
   readonly sessionId?: string;
   readonly profileProvider?: () => PermissionProfile;
   /** Explicit transport-scoped authorization override. Effective only while the active profile is Full. */
@@ -282,6 +287,7 @@ export class ToolRegistry {
   private readonly diagnostic: DiagnosticLogger | undefined;
   private readonly activity: ActivityTracker;
   private readonly deferredHandleRecorder: DeferredHandleRecorder | undefined;
+  private readonly deferredSettlementRecorder: DeferredSettlementRecorder | undefined;
   private readonly schemaRegistry: ToolSchemaRegistry;
   private readonly sessionId: string | undefined;
   private readonly permissionEngine = new DefaultPermissionEngine();
@@ -321,6 +327,7 @@ export class ToolRegistry {
     this.diagnostic = options.diagnostic;
     this.activity = options.activityTracker ?? new ActivityTracker(options.activity);
     this.deferredHandleRecorder = options.deferredHandleRecorder;
+    this.deferredSettlementRecorder = options.deferredSettlementRecorder;
     this.sessionId = options.sessionId;
     this.profileProvider = options.profileProvider ?? ((): PermissionProfile => permissionProfiles.full);
     this.authorizationModeProvider = options.authorizationModeProvider ?? ((): AuthorizationMode => 'standard');
@@ -1071,6 +1078,17 @@ export class ToolRegistry {
           } catch {
             // Best-effort by contract: a ledger write never fails the call it
             // describes, and the call stays pinned without it.
+          }
+        }
+      }
+      if (this.deferredSettlementRecorder !== undefined) {
+        const settlement = recordableDeferredSettlement(name, activeRoutedInput, response);
+        if (settlement !== undefined) {
+          try {
+            this.deferredSettlementRecorder({ ...settlement, callId });
+          } catch {
+            // Best-effort by contract: the journal row keeps its pin, which is the
+            // same fail-closed direction a missing handle takes.
           }
         }
       }

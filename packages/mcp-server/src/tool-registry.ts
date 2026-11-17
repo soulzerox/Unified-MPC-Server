@@ -532,6 +532,7 @@ export class ToolRegistry {
     );
     const started = Date.now();
     let fencedMutationEnd: ((mutationSucceeded?: boolean) => Promise<void>) | undefined;
+    let deferredSettled = false;
     let durableGoalExecutionAdmitted = false;
     let resourceAdmissionLease: ResourceAdmissionLease | undefined;
     let backgroundRagAdmissionWorkspaceId: string | undefined;
@@ -1084,6 +1085,7 @@ export class ToolRegistry {
       if (this.deferredSettlementRecorder !== undefined) {
         const settlement = recordableDeferredSettlement(name, activeRoutedInput, response);
         if (settlement !== undefined) {
+          deferredSettled = true;
           try {
             this.deferredSettlementRecorder({ ...settlement, callId });
           } catch {
@@ -1115,6 +1117,26 @@ export class ToolRegistry {
       const response = mapError(sanitizeException(error, this.diagnostic));
       await this.activity.end(callId, 'INTERNAL_ERROR', Date.now() - started, 'Operation failed');
       return response;
+    } finally {
+      // Every exit path settles what a refusal already finished. A call stopped at
+      // validation, a hard block or approval never reached its handler, and a read
+      // it never ran started nothing — but its journal row is still open, so the
+      // goal stays `present` forever and no probe can ever answer for it. The error
+      // envelope is what keeps the other rule honest: a verification settles only
+      // when its own response reported a completed attempt, and that happened on
+      // the response path, so `deferredSettled` already covers it and this leaves it
+      // alone.
+      if (!deferredSettled && this.deferredSettlementRecorder !== undefined) {
+        const settlement = recordableDeferredSettlement(name, activityInput, { isError: true });
+        if (settlement !== undefined) {
+          try {
+            this.deferredSettlementRecorder({ ...settlement, callId });
+          } catch {
+            // Best-effort by contract, the same as the handle write: a ledger write
+            // never fails the call it describes, and the row keeps its pin.
+          }
+        }
+      }
     }
   }
 

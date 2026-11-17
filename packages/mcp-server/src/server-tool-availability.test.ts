@@ -45,18 +45,34 @@ describe('MCP server live tool availability', () => {
     const properties = Object.keys(schema?.properties as object);
     expect(properties).toContain('dryRun');
     expect(properties).not.toContain('dry_run');
+    // An unknown tool is refused with the same `INVALID_INPUT`, so name the exposure
+    // explicitly: without this the alias refusals below could pass on a stale tool name.
+    expect(registry.describeExposedDefinition('git_worktree_spawn')).toBeDefined();
 
-    const refused = await registry.invoke('git_worktree_spawn', {
-      workspaceId: 'workspace-1',
-      worktreePath: '.worktrees/agent-1',
-      ref: 'main',
-      dryRun: false,
-      dry_run: true,
-    });
-    expect(refused).toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
+    const spawn = { workspaceId: 'workspace-1', worktreePath: '.worktrees/agent-1', ref: 'main' };
+    // Positive control: the alias-free input clears the registry's own parse, so the
+    // refusals below are about the alias and not about a fixture field that stopped
+    // validating. The handler is not reached either way — it has no git service here.
+    const control = await registry.invoke('git_worktree_spawn', { ...spawn, dryRun: false });
+    expect(control).not.toMatchObject({ structuredContent: { error: { code: 'INVALID_INPUT' } } });
+
+    // Every aliased shape, including the one where the readings diverge most:
+    // `{ dry_run: false }` alone, which the spawn runtime takes as a real spawn while the
+    // settlement takes a present `dry_run` as "refused, created nothing".
+    for (const aliased of [
+      { ...spawn, dry_run: false },
+      { ...spawn, dry_run: true },
+      { ...spawn, dryRun: false, dry_run: true },
+    ]) {
+      await expect(registry.invoke('git_worktree_spawn', aliased)).resolves.toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: 'INVALID_INPUT' } },
+      });
+    }
   });
 
-  it('keeps canonical harness schemas strict at registry invocation boundary', async () => {    const registry = new ToolRegistry({}, actor);
+  it('keeps canonical harness schemas strict at registry invocation boundary', async () => {
+    const registry = new ToolRegistry({}, actor);
     expect(registry.describeInputJsonSchema('prepare_code_change')).toMatchObject({
       type: 'object',
       additionalProperties: false,

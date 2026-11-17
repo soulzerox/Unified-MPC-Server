@@ -1083,7 +1083,10 @@ export class ToolRegistry {
         }
       }
       if (this.deferredSettlementRecorder !== undefined) {
-        const settlement = recordableDeferredSettlement(name, activeRoutedInput, response);
+        // The same input the activity row was opened with, not the routed one: the
+        // close must name the workspace that owns the row, or it writes nothing and
+        // the call stays pinned while the recorder reports a settlement.
+        const settlement = recordableDeferredSettlement(name, activityInput, response);
         if (settlement !== undefined) {
           deferredSettled = true;
           try {

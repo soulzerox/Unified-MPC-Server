@@ -38,7 +38,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 // set of steps it vouches for. The number alone is not evidence: every version
 // must also record the digest of the step set it ran, and a mismatch refuses
 // the merge profile instead of reusing a stale number (#579 review).
-export const PROFILE_VERSION = 4;
+export const PROFILE_VERSION = 5;
 export const PROFILES = ['merge', 'targeted'];
 
 /**
@@ -49,6 +49,7 @@ export const PROFILES = ['merge', 'targeted'];
  */
 const RECORDED_STEP_SET_DIGESTS = new Map([
   [4, 'sha256:215be23752cd3f3b58ee52280d87a98aa212bf8565f954fb63dee052812f8f5f'],
+  [5, 'sha256:b5cff5d69a19e1e5a8fde656d0eaec81fa35bd919df69735406d3bbd09babb91'],
 ]);
 
 const testStep = (packageName) => ({
@@ -75,6 +76,18 @@ export const STEP_DEFINITIONS = [
   // must fail fast, and these suites need no workspace output.
   { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/workflow-gate-core.test.mjs', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs', 'scripts/user-services.test.mjs', 'scripts/prune-unused-husky-hooks.test.mjs', 'scripts/prune-evidence.test.mjs', 'scripts/smoke-runtime-child-env.test.mjs', 'scripts/smoke-materialized-runtime.test.mjs', 'scripts/release-verify.test.mjs', 'scripts/check-native-rag-generation.test.mjs', 'scripts/check-dist-provenance-freshness.test.mjs'] },
   { name: 'build', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, 'build'] },
+  // The runtime scripts are not package tests, so nothing ran them and two of the
+  // six had rotted. They need a built dist (the materializer reads the CLI's
+  // provenance), so this step runs after build and before the package tests.
+  {
+    name: 'test:runtime-scripts',
+    profiles: ['merge'],
+    command: [
+      'bash',
+      '-c',
+      'set -euo pipefail; for f in scripts/*.test.sh; do printf "== %s\\n" "$f"; bash "$f"; done',
+    ],
+  },
   testStep('@unified-mpc/audit'),
   testStep('@unified-mpc/domain'),
   testStep('@unified-mpc/ipc-contracts'),

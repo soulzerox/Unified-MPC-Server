@@ -48,6 +48,7 @@ test('merge profile runs every gate in a deterministic order', () => {
     'lint',
     'test:merge-gate',
     'build',
+    'test:runtime-scripts',
     'test:audit',
     'test:domain',
     'test:ipc-contracts',

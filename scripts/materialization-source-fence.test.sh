@@ -45,6 +45,9 @@ done
 mkdir -p "$out/dist/bin" "$out/node_modules"
 printf 'export {};\n' >"$out/dist/bin/mcp-http.js"
 printf 'export {};\n' >"$out/dist/index.js"
+# The materializer refuses a deployment whose promoted artifact cannot carry the
+# #297 publish credential helper, so the fixture build has to emit it too.
+printf 'export {};\n' >"$out/dist/bin/publish-credential-helper.js"
 cp apps/cli/dist/build-provenance.json "$out/dist/build-provenance.json"
 SH
 chmod +x "$fake_corepack"

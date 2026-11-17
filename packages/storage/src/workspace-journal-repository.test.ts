@@ -301,6 +301,26 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: [] })).toEqual([]);
   });
 
+  it('names the kind that owns each still-open call, so a coarser answer is asked of the right ones', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    for (const [callId, operationKind] of [['spawn-1', 'process_start'], ['task-1', 'task_create']] as const) {
+      journal.append({ workspaceId: 'ws-goal', operationKind, phase: 'started', status: 'started', callId });
+    }
+    journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['process_start'], callIds: ['spawn-1'], closureCode: 'no_live_handle',
+    });
+
+    // A closed call is not open, so it has no kind to report: a probe that asked
+    // about it has already had its answer.
+    const kinds = journal.openDeferredCallKinds({ workspaceId: 'ws-goal', callIds: ['spawn-1', 'task-1'] });
+    expect([...kinds]).toEqual([['task-1', 'task_create']]);
+    expect(journal.openDeferredCallKinds({ workspaceId: 'ws-goal', callIds: [] }).size).toBe(0);
+  });
+
   it('closes only the calls a probe names, so one host cannot answer for another', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({

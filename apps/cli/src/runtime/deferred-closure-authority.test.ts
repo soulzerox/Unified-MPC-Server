@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProcessService } from '@unified-mpc/application';
+import type { GoalTaskLiveness } from '@unified-mpc/capabilities';
 import { appError, err, ok } from '@unified-mpc/domain';
 import { createDeferredClosureAuthority } from './deferred-closure-authority.js';
 
@@ -71,5 +72,36 @@ describe('deferred closure authority — task adapter', () => {
       await expect(authority.handleState({ actor, workspaceId, provider: 'task', handleId: 't-1' }))
         .resolves.toBe('unknown');
     }
+  });
+});
+
+describe('deferred closure authority — durable task adapter', () => {
+  const durable = (
+    taskLivenessForGoal: (workspaceId: string, taskId: string) => Promise<GoalTaskLiveness>,
+  ): NonNullable<Parameters<typeof createDeferredClosureAuthority>[0]['durableTasks']> => ({ taskLivenessForGoal });
+
+  it('takes the durable verdict for a task_create id instead of asking the protocol', async () => {
+    for (const verdict of ['live', 'gone'] as const) {
+      const getTask = vi.fn(async () => ({ status: 'completed' }));
+      const asker = createDeferredClosureAuthority({ tasks: { getTask }, durableTasks: durable(async () => verdict) });
+      await expect(asker.handleState({ actor, workspaceId, provider: 'task', handleId: 'task-1' })).resolves.toBe(verdict);
+      // A durable task id is not an MCP task id: asking the protocol for it could
+      // only ever answer `unknown`, and a `gone` there would release the pin on a
+      // task that is still running.
+      expect(getTask).not.toHaveBeenCalled();
+    }
+  });
+
+  it('falls back to the protocol when the durable store never wrote that id', async () => {
+    const getTask = vi.fn(async () => ({ status: 'completed' }));
+    const asker = createDeferredClosureAuthority({ tasks: { getTask }, durableTasks: durable(async () => 'unknown') });
+    await expect(asker.handleState({ actor, workspaceId, provider: 'task', handleId: 't-1' })).resolves.toBe('gone');
+    expect(getTask).toHaveBeenCalledWith({ taskId: 't-1' });
+  });
+
+  it('keeps the pin when only the durable adapter answers, and it cannot tell', async () => {
+    const asker = createDeferredClosureAuthority({ durableTasks: durable(async () => 'unknown') });
+    await expect(asker.handleState({ actor, workspaceId, provider: 'task', handleId: 'task-1' }))
+      .resolves.toBe('unknown');
   });
 });

@@ -324,6 +324,32 @@ export class SqliteWorkspaceJournalRepository {
   }
 
   /**
+   * The operation kind that owns each of these still-open calls.
+   *
+   * A call with no recorded handle can only be judged by something coarser, and
+   * which coarser question is honest depends on the kind: a managed process is
+   * listed by the process store, while a durable task never appears there at all.
+   * The journal already knows the kind, so the caller asks it instead of guessing
+   * from the tool name it no longer has.
+   */
+  public openDeferredCallKinds(request: OpenDeferredCallsRequest): ReadonlyMap<string, string> {
+    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
+      throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
+    }
+    const kinds = new Map<string, string>();
+    const calls = [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
+    if (calls.length === 0) return kinds;
+    const rows = this.database.connection.prepare(`
+      SELECT DISTINCT call_id, operation_kind
+      FROM workspace_journal_events
+      WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
+        AND call_id IN (${calls.map(() => '?').join(', ')})
+    `).all(request.workspaceId, ...calls) as unknown as { readonly call_id: string; readonly operation_kind: string }[];
+    for (const row of rows) kinds.set(row.call_id, row.operation_kind);
+    return kinds;
+  }
+
+  /**
    * Which of these calls the journal still holds open.
    *
    * `closeDeferredCalls` reports the rows it changed, and a zero is ambiguous: the

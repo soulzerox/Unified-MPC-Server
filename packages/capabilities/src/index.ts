@@ -34,6 +34,7 @@ export {
   ShellCapabilityBackend,
   SHELL_HEAVY_ADMISSION_CLASSES,
   type DurableShellTaskReconciliationProvider,
+  type GoalTaskLiveness,
   type ShellCapabilityOptions,
   type ShellHeavyAdmissionClass,
   type ShellHeavyAdmissionEnqueueResult,

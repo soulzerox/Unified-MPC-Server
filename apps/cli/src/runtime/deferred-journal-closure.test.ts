@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
-import { DIRECT_PROCESS_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
+import { DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
 import { DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
 import type { DeferredClosureAuthority, DeferredHandleState } from './deferred-closure-authority.js';
 import {
   NO_LIVE_PROCESS_CLOSURE_CODE,
+  NO_LIVE_TASK_CLOSURE_CODE,
   closeJudgedDeferredCalls,
   settleRememberedCalls,
 } from './deferred-journal-closure.js';
@@ -15,9 +16,11 @@ const closedAt = '2026-11-16T10:00:00.000Z';
 function journal(
   closed: number | ((callId: string) => number) = 1,
   stillOpen: readonly string[] = [],
+  kinds: Readonly<Record<string, string>> = {},
 ): {
   readonly closeDeferredCalls: ReturnType<typeof vi.fn>;
   readonly openDeferredCallIds: ReturnType<typeof vi.fn>;
+  readonly openDeferredCallKinds: ReturnType<typeof vi.fn>;
 } {
   return {
     closeDeferredCalls: vi.fn((request: { readonly callIds: readonly string[] }) => (
@@ -26,6 +29,12 @@ function journal(
     // A zero from `closeDeferredCalls` can mean "already closed" or "out of reach".
     // The list is what tells them apart, so it is asserted, not defaulted away.
     openDeferredCallIds: vi.fn(() => stillOpen),
+    // The journal is the only place that still knows a call's kind, and it decides
+    // whether the coarser process answer may speak for it. Default to a process
+    // kind so the fixtures that predate kinds keep their meaning.
+    openDeferredCallKinds: vi.fn((request: { readonly callIds: readonly string[] }) => new Map(
+      request.callIds.map((callId) => [callId, kinds[callId] ?? 'process_start']),
+    )),
   };
 }
 
@@ -62,6 +71,8 @@ function authority(
 }
 
 const operationKinds = [...DEFERRED_CLOSURE_OPERATION_KINDS];
+/** The kinds a managed-process listing can speak for, as the runtime passes them. */
+const PROCESS_HANDLE_TOOLS: ReadonlySet<string> = new Set([...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]);
 
 function probe(options: {
   readonly store?: ReturnType<typeof journal>;
@@ -74,6 +85,7 @@ function probe(options: {
     handles: options.handles ?? ledger([]),
     authority: options.authority ?? authority('gone'),
     operationKinds,
+    workspaceFallbackKinds: PROCESS_HANDLE_TOOLS,
     actor,
     workspaceId: 'ws-1',
     ownedCallIds: options.ownedCallIds ?? ['call-1'],
@@ -114,6 +126,58 @@ describe('closeJudgedDeferredCalls', () => {
       expect(store.closeDeferredCalls).not.toHaveBeenCalled();
       expect(handles.forget).not.toHaveBeenCalled();
     }
+  });
+
+  it('closes a durable task by its id under the task code, not the process code', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'task', handleId: 'task-1' }]);
+    const asker = authority('gone');
+
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
+
+    expect(asker.handleState).toHaveBeenCalledWith({
+      actor, workspaceId: 'ws-1', provider: 'task', handleId: 'task-1',
+    });
+    const call = store.closeDeferredCalls.mock.calls[0]?.[0] as unknown as { closureCode: string };
+    expect(call.closureCode).toBe(NO_LIVE_TASK_CLOSURE_CODE);
+    // A task with a handle is judged by that handle; asking whether some process
+    // is live in the workspace would answer a different question.
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('never answers a durable task that recorded no handle with the process listing', async () => {
+    // Reachable when the ledger write threw: the row is best-effort, so the call
+    // is journaled but has no handle. A live durable task is not in the process
+    // listing, so that answer would release the pin on running work.
+    const store = journal(1, [], { 'call-1': 'task_create' });
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles: ledger([]), authority: asker }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
+  it('still closes a process call that recorded no handle once nothing is live', async () => {
+    // The same shape for a kind the listing can speak for: the fix must not
+    // suspend the release path for foreground-free launches that never started.
+    const store = journal();
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles: ledger([]), authority: asker }))
+      .resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
+    expect(asker.workspaceProcessState).toHaveBeenCalledWith({ actor, workspaceId: 'ws-1' });
+  });
+
+  it('keeps a still-running durable task pinned and re-asks it next sweep', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'task', handleId: 'task-1' }]);
+
+    await expect(probe({ store, handles, authority: authority('live', 'gone') }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
   });
 
   it('never lets a live call in the same probe settle the ones that are gone', async () => {
@@ -243,11 +307,11 @@ describe('closeJudgedDeferredCalls', () => {
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
   });
 
-  // The store silently drops kinds outside its deferred set, so a process tool the
-  // recorder writes a handle for but the closure kinds omit turns the sweep into a
-  // no-op for that tool without failing anything else.
-  it('accepts a closure for every tool that records a process handle', () => {
-    for (const toolName of [...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]) {
+  // The store silently drops kinds outside its deferred set, so a tool the recorder
+  // writes a handle for but the closure kinds omit turns the sweep into a no-op for
+  // that tool without failing anything else.
+  it('accepts a closure for every tool that records a handle', () => {
+    for (const toolName of [...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS, ...DURABLE_TASK_TOOLS]) {
       expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(toolName)).toBe(true);
     }
   });

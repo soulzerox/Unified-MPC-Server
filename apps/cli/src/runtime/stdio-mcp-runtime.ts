@@ -61,7 +61,7 @@ import {
   type ExtensionsService,
   type ManagedPolicyRepairReport,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, isDirectProcessTool, isWrappedProcessTool, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, DIRECT_PROCESS_TOOLS, isDirectProcessTool, isDurableTaskTool, isWrappedProcessTool, WRAPPED_PROCESS_TOOLS, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   ThaiRagIndexJobStore,
@@ -222,8 +222,7 @@ export const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Tools whose response hands back a managed process this runtime can be asked
- * about later.
+ * Tools whose response hands back a handle this runtime can be asked about later.
  *
  * One definition, shared with the recorder that writes the handle ledger and with
  * the MCP Tasks projection: a tool the recorder stores a handle for must be a tool
@@ -231,8 +230,18 @@ export const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
  * `shell`/`wsl_exec` are absent by contract — a backgrounded child outlives the
  * shell that launched it.
  */
-const ownsProcessHandle = (toolName: string): boolean =>
-  isDirectProcessTool(toolName) || isWrappedProcessTool(toolName);
+const ownsDeferredHandle = (toolName: string): boolean =>
+  isDirectProcessTool(toolName) || isWrappedProcessTool(toolName) || isDurableTaskTool(toolName);
+
+/**
+ * Kinds a managed-process listing can speak for.
+ *
+ * The closure sweep judges a call with no recorded handle by asking whether the
+ * workspace holds a live process, which is only evidence for tools whose work is
+ * such a process. A `task_create` handle lives in the durable task directory, so
+ * that listing can never see it and must not be asked about it.
+ */
+const PROCESS_HANDLE_TOOLS: ReadonlySet<string> = new Set([...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]);
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
@@ -1475,14 +1484,14 @@ export function createStdioMcpRuntime(
   const deferredClosureAuthority: { current: DeferredClosureAuthority } = {
     current: createDeferredClosureAuthority({}),
   };
-  // Deferred process-handle calls THIS runtime journaled, oldest first. A
-  // `project_dev`/`process_start` call returns while its process is still live,
-  // so the closure verdict can only be reached by a later sweep; remembering the
-  // callIds is what keeps that sweep to calls this runtime can answer for. The
-  // cap bounds the map: an entry that never resolves costs one integer in an
-  // `IN (...)` list, never a correctness decision.
-  const ownProcessHandleCalls = new Map<string, string>();
-  const MAX_REMEMBERED_PROCESS_CALLS = 256;
+  // Deferred handle calls THIS runtime journaled, oldest first. A
+  // `project_dev`/`process_start`/`task_create` call returns while its work is
+  // still live, so the closure verdict can only be reached by a later sweep;
+  // remembering the callIds is what keeps that sweep to calls this runtime can
+  // answer for. The cap bounds the map: an entry that never resolves costs one
+  // integer in an `IN (...)` list, never a correctness decision.
+  const ownDeferredHandleCalls = new Map<string, string>();
+  const MAX_REMEMBERED_DEFERRED_CALLS = 256;
   /**
    * #170 freshness: a handle-returning call ends, but its `completed` row is not
    * evidence the work did. Ask the authority that owns each recorded handle; only
@@ -1493,20 +1502,20 @@ export function createStdioMcpRuntime(
    */
   const sweepDeferredClosure = async (event: ActivitySinkEvent): Promise<void> => {
     if (event.workspaceId === undefined) return;
-    if (event.phase === 'started' && ownsProcessHandle(event.toolName)) {
-      ownProcessHandleCalls.set(event.callId, event.workspaceId);
-      while (ownProcessHandleCalls.size > MAX_REMEMBERED_PROCESS_CALLS) {
-        const oldest = ownProcessHandleCalls.keys().next().value;
+    if (event.phase === 'started' && ownsDeferredHandle(event.toolName)) {
+      ownDeferredHandleCalls.set(event.callId, event.workspaceId);
+      while (ownDeferredHandleCalls.size > MAX_REMEMBERED_DEFERRED_CALLS) {
+        const oldest = ownDeferredHandleCalls.keys().next().value;
         if (oldest === undefined) break;
-        ownProcessHandleCalls.delete(oldest);
+        ownDeferredHandleCalls.delete(oldest);
       }
       return;
     }
     if (event.phase !== 'completed') return;
     const completedWorkspaceId = event.workspaceId;
     if (
-      !ownsProcessHandle(event.toolName)
-      && ![...ownProcessHandleCalls.values()].includes(completedWorkspaceId)
+      !ownsDeferredHandle(event.toolName)
+      && ![...ownDeferredHandleCalls.values()].includes(completedWorkspaceId)
     ) return;
     try {
       // The handles this probe accounted for are forgotten instead of costing a
@@ -1515,15 +1524,16 @@ export function createStdioMcpRuntime(
       // came from, so it may be judged even when the memory cap has since evicted
       // it from the map.
       await settleRememberedCalls({
-        remembered: ownProcessHandleCalls,
+        remembered: ownDeferredHandleCalls,
         workspaceId: completedWorkspaceId,
-        additionalOwnedCallIds: ownsProcessHandle(event.toolName) ? [event.callId] : [],
-        maxRemembered: MAX_REMEMBERED_PROCESS_CALLS,
+        additionalOwnedCallIds: ownsDeferredHandle(event.toolName) ? [event.callId] : [],
+        maxRemembered: MAX_REMEMBERED_DEFERRED_CALLS,
         probe: async (ownedCallIds) => closeJudgedDeferredCalls({
           journal: workspaceJournal,
           handles: deferredHandles,
           authority: deferredClosureAuthority.current,
           operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS],
+          workspaceFallbackKinds: PROCESS_HANDLE_TOOLS,
           actor,
           workspaceId: completedWorkspaceId,
           ownedCallIds,
@@ -1724,7 +1734,12 @@ export function createStdioMcpRuntime(
     codex: codexService,
     agentSwarm: agentSwarmService,
   };
-  deferredClosureAuthority.current = createDeferredClosureAuthority({ processes: processService });
+  deferredClosureAuthority.current = createDeferredClosureAuthority({
+    processes: processService,
+    // A `task_create` handle is a durable shell task id, so the verdict comes from
+    // the backend that wrote the task directory rather than a second store.
+    durableTasks: capabilityRuntime.shell,
+  });
 
   return {
     ...(options.runtimeAdmissionIdentity === undefined ? {} : { runtimeAdmissionIdentity: options.runtimeAdmissionIdentity }),

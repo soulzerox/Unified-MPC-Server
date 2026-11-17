@@ -51,8 +51,17 @@ function required(value: string | undefined, max: number): boolean {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
-/** SQLITE_CONSTRAINT_FOREIGNKEY, in the numeric and message-only shapes `node:sqlite` exposes. */
-function isUnknownWorkspaceError(error: unknown): boolean {
+/**
+ * SQLITE_CONSTRAINT_FOREIGNKEY, in the numeric and message-only shapes
+ * `node:sqlite` exposes.
+ *
+ * `deferred_handles` has exactly one foreign key — `workspace_id` into
+ * `workspaces(id)` — so a violation can only mean the handle names a workspace this
+ * host does not have, which is a caller bug rather than a driver failure. A second
+ * foreign key would make this classifier wrong, and the answer is then to inspect
+ * which constraint fired or to stop translating at all, not to widen the name.
+ */
+function isForeignKeyViolation(error: unknown): boolean {
   if ((error as { errcode?: unknown } | null)?.errcode === 787) return true;
   return error instanceof Error && error.message.includes('FOREIGN KEY');
 }
@@ -96,7 +105,7 @@ export class SqliteDeferredHandleRepository {
       // The one failure this method can explain: the workspace does not exist, so
       // the row would name an owner nothing can ask. Anything else (disk, schema)
       // is not the caller's fault and must keep its own shape.
-      if (!isUnknownWorkspaceError(error)) throw error;
+      if (!isForeignKeyViolation(error)) throw error;
       throw new DeferredHandleStoreError(
         'invalid_entry',
         `Deferred handle names a workspace this host does not have: ${request.workspaceId}`,

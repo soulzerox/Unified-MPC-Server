@@ -94,6 +94,12 @@ describe('SqliteDeferredHandleRepository', () => {
   });
 
   it('keeps the DDL provider set and DEFERRED_HANDLE_PROVIDERS the same set', async () => {
+    // Adding a provider to both lists is *not* enough for a host that already
+    // migrated: `DEFERRED_HANDLE_MIGRATION_SQL` is `CREATE TABLE IF NOT EXISTS`,
+    // applied once per `schema_migrations` id, so an existing database keeps the old
+    // `CHECK` while this test stays green. A provider addition therefore needs a new
+    // migration id — or a table rebuild, which is what `049` did and the rebuild test
+    // below proves over rows that already exist.
     const { database } = await setup();
     const insert = database.connection.prepare(`
       INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at)
@@ -105,8 +111,10 @@ describe('SqliteDeferredHandleRepository', () => {
     // The set comparison covers the DDL side (a `CHECK` that grew alone is
     // invisible to an insert test), the inserts cover the behaviour. The DDL is
     // read from the migrated table, not from the first migration's text, so a
-    // rebuild that widens the `CHECK` is the schema this test sees.
-    const ddlProviders = /provider\s+IN\s*\(([^)]*)\)/.exec(String(
+    // rebuild that widens the `CHECK` is the schema this test sees. The match is
+    // anchored on the `CHECK` so a second `provider IN (...)` clause in the same
+    // table cannot be compared instead.
+    const ddlProviders = /CHECK\s*\(\s*provider\s+IN\s*\(([^)]*)\)/.exec(String(
       (database.connection.prepare(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'deferred_handles'",
       ).get() as { sql?: string } | undefined)?.sql,
@@ -171,11 +179,41 @@ describe('SqliteDeferredHandleRepository', () => {
     // The row references `workspaces(id)`, so the driver refuses it. The caller's
     // contract is `invalid_entry` for a bad request, and an unknown workspace is a
     // caller bug like the other ones — not a driver error leaking through.
+    let thrown: unknown;
+    try {
+      handles.record({
+        workspaceId: 'ws-missing',
+        callId: 'call-1',
+        provider: 'process',
+        handleId: 'proc-1',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    // Pinning the reason and the message: an unconditional relabel of every driver
+    // failure would pass a bare `toThrow(DeferredHandleStoreError)`.
+    expect(thrown).toBeInstanceOf(DeferredHandleStoreError);
+    expect((thrown as DeferredHandleStoreError).reason).toBe('invalid_entry');
+    expect((thrown as DeferredHandleStoreError).message).toContain('ws-missing');
+  });
+
+  it('lets a driver failure keep its own shape instead of relabelling it', async () => {
+    const { database, handles } = await setup();
+    database.close();
+
+    // A closed database is a driver failure, not a bad request: relabelling it
+    // `invalid_entry` would tell the caller to fix input that was fine.
     expect(() => handles.record({
-      workspaceId: 'ws-missing',
+      workspaceId: 'ws-1',
       callId: 'call-1',
       provider: 'process',
       handleId: 'proc-1',
-    })).toThrow(DeferredHandleStoreError);
+    })).toThrow(/closed/i);
+    expect(() => handles.record({
+      workspaceId: 'ws-1',
+      callId: 'call-2',
+      provider: 'process',
+      handleId: 'proc-2',
+    })).not.toThrow(DeferredHandleStoreError);
   });
 });

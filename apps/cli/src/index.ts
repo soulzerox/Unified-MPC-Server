@@ -1189,6 +1189,10 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           // activity sink as the stdio host; a tracker of its own would leave no
           // `workspace_journal_events` row and the goal would read as `clear`.
           activityTracker: mcpRuntime.activityTracker,
+          // Paying the same sink is only half the record: the journal row says the
+          // call started, and the ledger says which handle it owns. Without this the
+          // CLI launcher's call is journaled and can never be released.
+          deferredHandleRecorder: mcpRuntime.deferredHandleRecorder,
           activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
           activeWorkspaceScopeUnavailableProvider: mcpRuntime.activeWorkspaceScopeUnavailableProvider,
           activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,

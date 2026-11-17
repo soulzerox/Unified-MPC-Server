@@ -13,6 +13,7 @@ import {
 import type { McpApplicationServices } from './tool-registry.js';
 import type { McpToolResponse } from './result-mapper.js';
 import { withCapabilityOwnerMetadata } from './request-scope.js';
+import { isDirectProcessTool, isWrappedProcessTool } from './deferred-handle-descriptor.js';
 
 export const MODERN_TASKS_EXTENSION_ID = 'io.modelcontextprotocol/tasks';
 
@@ -477,19 +478,6 @@ function resultForDescriptor(descriptor: ModernTaskDescriptor, value: Record<str
     structuredContent,
     ...(isError ? { isError: true } : {}),
   };
-}
-
-function isDirectProcessTool(toolName: string): boolean {
-  return toolName === 'process_start'
-    || toolName === 'project_dev'
-    || toolName === 'project_test'
-    || toolName === 'project_lint'
-    || toolName === 'project_typecheck'
-    || toolName === 'project_build';
-}
-
-function isWrappedProcessTool(toolName: string): boolean {
-  return toolName === 'benchmark_run' || toolName === 'run_affected_tests';
 }
 
 function taskTtlMs(createdAt: string, deadlineAt: string | undefined): number | null {

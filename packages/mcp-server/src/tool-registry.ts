@@ -50,6 +50,7 @@ import {
   type ToolAvailabilitySnapshot,
 } from '@unified-mpc/shared';
 import { ActivityTracker, describeStructuredResultDetail, summarizeStructuredResultTarget, summarizeToolTarget, type ActivitySink, type TraceContext } from './activity-tracker.js';
+import { recordableDeferredHandle, type DeferredHandleRecorder } from './deferred-handle-descriptor.js';
 import { ContextEngine } from './context-engine.js';
 import { ContextEconomyRuntime } from './context-economy.js';
 import { hasExplicitUserConfirmation } from './destructive-policy.js';
@@ -132,6 +133,12 @@ export interface ToolRegistryOptions {
   readonly diagnostic?: DiagnosticLogger;
   readonly activity?: ActivitySink;
   readonly activityTracker?: ActivityTracker;
+  /**
+   * Records the handle a deferred call returned, so a later probe can ask the
+   * authority that owns it. Best-effort: a recorder that throws is swallowed,
+   * and a call with no recorded handle stays pinned.
+   */
+  readonly deferredHandleRecorder?: DeferredHandleRecorder;
   readonly sessionId?: string;
   readonly profileProvider?: () => PermissionProfile;
   /** Explicit transport-scoped authorization override. Effective only while the active profile is Full. */
@@ -274,6 +281,7 @@ export class ToolRegistry {
   private readonly actor: FileActor;
   private readonly diagnostic: DiagnosticLogger | undefined;
   private readonly activity: ActivityTracker;
+  private readonly deferredHandleRecorder: DeferredHandleRecorder | undefined;
   private readonly schemaRegistry: ToolSchemaRegistry;
   private readonly sessionId: string | undefined;
   private readonly permissionEngine = new DefaultPermissionEngine();
@@ -312,6 +320,7 @@ export class ToolRegistry {
     this.actor = actor;
     this.diagnostic = options.diagnostic;
     this.activity = options.activityTracker ?? new ActivityTracker(options.activity);
+    this.deferredHandleRecorder = options.deferredHandleRecorder;
     this.sessionId = options.sessionId;
     this.profileProvider = options.profileProvider ?? ((): PermissionProfile => permissionProfiles.full);
     this.authorizationModeProvider = options.authorizationModeProvider ?? ((): AuthorizationMode => 'standard');
@@ -1054,6 +1063,17 @@ export class ToolRegistry {
       }
       await this.recordPonytailOutcome(name, activeRoutedInput, response, activityWorkspaceId, ponytailInvocation);
 
+      if (this.deferredHandleRecorder !== undefined) {
+        const handle = recordableDeferredHandle(name, activeRoutedInput, response);
+        if (handle !== undefined) {
+          try {
+            this.deferredHandleRecorder({ ...handle, callId });
+          } catch {
+            // Best-effort by contract: a ledger write never fails the call it
+            // describes, and the call stays pinned without it.
+          }
+        }
+      }
       const resultCode = response.isError === true ? readErrorCode(response) ?? 'ERROR' : 'SUCCESS';
       const resultMessage = readErrorMessage(response);
       const resultDetail = withGateNote(describeStructuredResultDetail(response.structuredContent ?? response.content), harnessGateNote);

@@ -456,13 +456,20 @@ workspace journal:
    would release a pin over work that exists.
    Retention collapses older *open* calls of a kind whose open row is interchangeable
    in-flight work, so a launcher costs one row per kind instead of growing with every
-   launch, and collects a closed call like any other evidence. A kind whose newest open
-   row can settle itself is never collapsed (`DURABLE_REFERENCE_OPERATION_KINDS`:
+   launch, and collects a closed call like any other evidence. A kind whose *newer* open
+   row can end itself is never collapsed (`DURABLE_REFERENCE_OPERATION_KINDS`:
    `git_worktree_spawn`, `agent_swarm_run`, `merge_verification_run`): collapsing would
    let that newer row evict an older open row that no later call represents, and then
    close itself, leaving the kind with nothing open while the work it stood for still
-   runs. `run_goal` stays out of the pinning set entirely: the
-   goal runtime already tracks goal liveness.
+   runs. The exemption is name-level, so it is broader than the hazard — an
+   `agent_swarm_run start` row and a real `dryRun: false` spawn cannot settle themselves;
+   their kinds are listed because they can also produce a row that does. What that costs:
+   an exempt kind's open row is out of reach of every other retention pass, so a reference
+   with no closure route does keep its rows for the life of the workspace and counts
+   against `maxEventsPerWorkspace` until closed calls bring that excess down — a closed
+   call of any kind is collected, the exempt kind's own settled preview among them — and a
+   released pin over live work is worse than rows a rare event appends. `run_goal` stays
+   out of the pinning set entirely: the goal runtime already tracks goal liveness.
    `apps/cli` passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, and `gate check --phase close` reads it through
    the ports below, so a live journal no longer reports

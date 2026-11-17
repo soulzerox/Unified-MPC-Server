@@ -78,6 +78,21 @@ export interface DeferredSettlementRecord {
   readonly closureCode: string;
 }
 
+/**
+ * One settlement rule: the tool it answers for, the closure code it writes, and the
+ * test that decides whether this call's own response proved its work ended.
+ *
+ * The rule owns the response test, including whether an error settles it, so a rule
+ * that reads only the input cannot be narrowed by a later error shortcut.
+ */
+interface SettlementRule {
+  readonly closureCode: string;
+  readonly settles: (
+    input: unknown,
+    response: { readonly structuredContent?: unknown; readonly isError?: boolean },
+  ) => boolean;
+}
+
 /** Closes the journal row of a call its own response proved finished. */
 export type DeferredSettlementRecorder = (record: DeferredSettlementRecord) => void;
 
@@ -93,39 +108,22 @@ export type DeferredSettlementRecorder = (record: DeferredSettlementRecord) => v
  * nothing, so its work ended inside the call — including when the read failed, since
  * a read that failed still started nothing. Its `start` sibling does not: it hands
  * back a swarm id whose authority answers later.
+ *
+ * Every tool that can settle here has exactly one entry in `SETTLEMENT_RULES`, and
+ * that table is the only thing this function dispatches through, so a rule cannot
+ * exist without also naming its tool in `SETTLEMENT_TOOL_NAMES`.
  */
 export function recordableDeferredSettlement(
   toolName: string,
   input: unknown,
   response: { readonly structuredContent?: unknown; readonly isError?: boolean },
 ): RecordedDeferredSettlement | undefined {
+  const rule = SETTLEMENT_RULES.get(toolName);
+  if (rule === undefined) return undefined;
   const workspaceId = boundedString(asRecord(input)?.workspaceId, 128);
   if (workspaceId === undefined) return undefined;
-  // A read starts nothing, so even a failed read is finished: leaving it open
-  // would pin the goal on a call that could never have produced work, and no
-  // probe could ever answer it.
-  if (toolName === 'agent_swarm_run' && isAgentSwarmRead(input)) {
-    return { workspaceId, closureCode: SWARM_READ_SETTLED_CLOSURE_CODE };
-  }
-  // A preview creates nothing, so its work ended inside the call whether it answered
-  // or errored. Decided from the input alone for the same reason a read is: the
-  // response cannot say whether a directory was created on the way to failing. A
-  // present `dry_run` counts as a preview because the tool's schema is `.strict()` and
-  // lists only `dryRun`, so such a call is refused before its handler and created
-  // nothing. That is not the runtime's own reading — `gitWorktreeSpawn` takes
-  // `dryRun !== false && dry_run !== false` — so the two agree only while the schema
-  // keeps refusing the alias, which
-  // `deferred-handle-descriptor.test.ts` pins against the real catalog entry.
-  if (toolName === 'git_worktree_spawn' && isWorktreeSpawnPreview(input)) {
-    return { workspaceId, closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE };
-  }
-  if (response.isError === true) return undefined;
-  if (isMergeVerificationTool(toolName)) {
-    const structured = asRecord(response.structuredContent);
-    if (structured?.status !== 'completed') return undefined;
-    return { workspaceId, closureCode: VERIFICATION_SETTLED_CLOSURE_CODE };
-  }
-  return undefined;
+  if (!rule.settles(input, response)) return undefined;
+  return { workspaceId, closureCode: rule.closureCode };
 }
 
 /** Tools whose response carries a managed process id at the top level. */
@@ -174,6 +172,62 @@ export const MERGE_VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
 export function isMergeVerificationTool(toolName: string): boolean {
   return MERGE_VERIFICATION_TOOLS.has(toolName);
 }
+
+/**
+ * The settlement rules, keyed by the tool each answers for.
+ *
+ * This table is the only place a tool's settlement is decided: `recordableDeferredSettlement`
+ * dispatches through it and `SETTLEMENT_TOOL_NAMES` is its key set, so a rule and the
+ * exempt kind it implies cannot be written apart.
+ */
+const SETTLEMENT_RULES: ReadonlyMap<string, SettlementRule> = new Map<string, SettlementRule>([
+  // A read starts nothing, so even a failed read is finished: leaving it open would pin
+  // the goal on a call that could never have produced work, and no probe could ever
+  // answer it.
+  ['agent_swarm_run', {
+    closureCode: SWARM_READ_SETTLED_CLOSURE_CODE,
+    settles: (input) => isAgentSwarmRead(input),
+  }],
+  // A preview creates nothing, so its work ended inside the call whether it answered or
+  // errored. Decided from the input alone for the same reason a read is: the response
+  // cannot say whether a directory was created on the way to failing. A present
+  // `dry_run` counts as a preview because the tool's schema is `.strict()` and lists
+  // only `dryRun`, so such a call is refused before its handler and created nothing.
+  // That is not the runtime's own reading — `gitWorktreeSpawn` takes
+  // `dryRun !== false && dry_run !== false` — so the two agree only while the schema
+  // keeps refusing the alias, which `deferred-handle-descriptor.test.ts` pins against
+  // the real catalog entry.
+  ['git_worktree_spawn', {
+    closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE,
+    settles: (input) => isWorktreeSpawnPreview(input),
+  }],
+  // A verified run already holds a receipt, so it ran its gate inside the call and
+  // nothing is left to ask; a `queued` attempt hands back an id and waits for the
+  // status port, and an error may have been cancelled mid-run.
+  ...[...MERGE_VERIFICATION_TOOLS].map((toolName): [string, SettlementRule] => [toolName, {
+    closureCode: VERIFICATION_SETTLED_CLOSURE_CODE,
+    settles: (_input, response) => response.isError !== true
+      && asRecord(response.structuredContent)?.status === 'completed',
+  }]),
+]);
+
+/**
+ * Tools whose own response can close the journal row they opened.
+ *
+ * Every name here hands back work that outlives the call, and every such tool also has a
+ * settlement rule above (`recordableDeferredSettlement`), so a later row of the same kind
+ * can end itself: retention therefore may not collapse the kind
+ * (`DURABLE_REFERENCE_OPERATION_KINDS` in `@unified-mpc/storage`), or that newer
+ * self-settling row would evict the older row that still stands for live work.
+ *
+ * The set is `SETTLEMENT_RULES`' key set, so a new rule — a new literal entry, or a name
+ * added to `MERGE_VERIFICATION_TOOLS` — makes the kind exempt by construction. The
+ * storage half still cannot be derived — the journal sits one layer down — so
+ * `apps/cli/src/runtime/deferred-journal-closure.test.ts` pins the two sets to each other
+ * and fails on any drift: a kind this table gained that storage lacks, a kind storage
+ * added that this table lacks, or a rename that moved a key.
+ */
+export const SETTLEMENT_TOOL_NAMES: ReadonlySet<string> = new Set(SETTLEMENT_RULES.keys());
 
 /**
  * Tools whose response carries the id of a local Codex task at the top level.

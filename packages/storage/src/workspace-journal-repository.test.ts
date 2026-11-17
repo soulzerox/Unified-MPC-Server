@@ -174,15 +174,28 @@ describe('SqliteWorkspaceJournalRepository', () => {
       expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['work', 'self-settling'] }).sort())
         .toEqual(['self-settling', 'work']);
 
+      // Close the launch rows first, so every later pin is decided by a reference
+      // row rather than by a launcher the overflow happened to leave open.
+      journal.closeDeferredCalls({
+        workspaceId: 'ws-goal',
+        operationKinds: ['process_start'],
+        callIds: ['run-1', 'run-2', 'run-3'],
+        closureCode: 'no_live_process',
+      });
+
       expect(journal.closeDeferredCalls({
         workspaceId: 'ws-goal',
         operationKinds: [kind],
         callIds: ['self-settling'],
         closureCode: selfSettledCode,
       })).toBe(1);
-      // The older reference survives and still pins the goal: no later call
-      // represents that work.
+      // With the launchers closed first, these two reads are decided by the reference
+      // rows alone: the survivor is still physically open and still pins the goal.
+      // Under the old ordering the leftover `run-3` row answered both reads, so a
+      // regression in the exemption would not have moved them.
       expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+      expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['work', 'self-settling'] }))
+        .toEqual(['work']);
 
       expect(journal.closeDeferredCalls({
         workspaceId: 'ws-goal',
@@ -190,14 +203,6 @@ describe('SqliteWorkspaceJournalRepository', () => {
         callIds: ['work'],
         closureCode: 'work_ended',
       })).toBe(1);
-      // The launch rows the overflow left behind still pin; close them so the last
-      // assertion is about the reference and not about them.
-      journal.closeDeferredCalls({
-        workspaceId: 'ws-goal',
-        operationKinds: ['process_start'],
-        callIds: ['run-1', 'run-2', 'run-3'],
-        closureCode: 'no_live_process',
-      });
       expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
     }
   });

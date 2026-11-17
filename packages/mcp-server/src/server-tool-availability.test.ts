@@ -34,8 +34,29 @@ describe('MCP server live tool availability', () => {
     expect(registry.describeExposedDefinition('prepare_code_change')).toBe(registry.listExposedDefinitions().find((tool) => tool.name === 'prepare_code_change'));
   });
 
-  it('keeps canonical harness schemas strict at registry invocation boundary', async () => {
+  it('registers git_worktree_spawn with the strict catalog schema that refuses the dry_run alias', async (): Promise<void> => {
+    // `recordableDeferredSettlement` reads a present `dry_run` as "the schema refused this
+    // call before its handler, so it created nothing". That holds only while the tool the
+    // registry actually exposes validates with the catalog schema, so this asserts at the
+    // registered tool rather than on the builder alone.
     const registry = new ToolRegistry({}, actor);
+    const schema = registry.describeInputJsonSchema('git_worktree_spawn');
+    expect(schema).toMatchObject({ type: 'object', additionalProperties: false });
+    const properties = Object.keys(schema?.properties as object);
+    expect(properties).toContain('dryRun');
+    expect(properties).not.toContain('dry_run');
+
+    const refused = await registry.invoke('git_worktree_spawn', {
+      workspaceId: 'workspace-1',
+      worktreePath: '.worktrees/agent-1',
+      ref: 'main',
+      dryRun: false,
+      dry_run: true,
+    });
+    expect(refused).toMatchObject({ isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } } });
+  });
+
+  it('keeps canonical harness schemas strict at registry invocation boundary', async () => {    const registry = new ToolRegistry({}, actor);
     expect(registry.describeInputJsonSchema('prepare_code_change')).toMatchObject({
       type: 'object',
       additionalProperties: false,

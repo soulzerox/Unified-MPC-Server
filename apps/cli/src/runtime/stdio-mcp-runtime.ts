@@ -1509,15 +1509,16 @@ export function createStdioMcpRuntime(
       && ![...ownProcessHandleCalls.values()].includes(completedWorkspaceId)
     ) return;
     try {
-      // The handles this probe covered are closed for good and forgotten instead
-      // of costing a store read plus a journal UPDATE on every later completion.
-      // The completing call is this runtime's own: its `started` event is where
-      // the ownership came from, so it may be judged even when the memory cap has
-      // since evicted it from the map.
+      // The handles this probe accounted for are forgotten instead of costing a
+      // store read plus a journal UPDATE on every later completion. The completing
+      // call is this runtime's own: its `started` event is where the ownership
+      // came from, so it may be judged even when the memory cap has since evicted
+      // it from the map.
       await settleRememberedCalls({
         remembered: ownProcessHandleCalls,
         workspaceId: completedWorkspaceId,
         additionalOwnedCallIds: ownsProcessHandle(event.toolName) ? [event.callId] : [],
+        maxRemembered: MAX_REMEMBERED_PROCESS_CALLS,
         probe: async (ownedCallIds) => closeJudgedDeferredCalls({
           journal: workspaceJournal,
           handles: deferredHandles,

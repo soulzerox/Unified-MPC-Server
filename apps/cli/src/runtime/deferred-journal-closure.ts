@@ -12,9 +12,11 @@ export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
  * How one recorded provider becomes a verdict: the adapter to ask, and the closure
  * code its `gone` answer is written under.
  *
- * A provider missing here has no adapter yet, so it is never asked and never
- * closed: its handle keeps the pin, which is the only safe reading of "nothing
- * asked". Adding an adapter and its code together is what makes a provider
+ * A provider missing here has no closure code yet, so its `gone` answer has no
+ * vocabulary to be written in: it is never asked and never closed, and its handle
+ * keeps the pin, which is the only safe reading of "no verdict". The adapter may
+ * well exist already — `task` has one — so the missing piece is the code, not the
+ * question. Adding an adapter and its code together is what makes a provider
  * releasable, and one entry is all it takes, so the two can never disagree.
  */
 interface ClosureRoute {
@@ -56,14 +58,15 @@ const RUNTIME_OBSERVED_FROM = new Date().toISOString();
  * closes nothing. A provider with no route is never asked, so it also never
  * settles.
  *
- * `settled` says every owned call is accounted for — its handle was proven gone,
- * its workspace was proven to hold no live process while it recorded no handle at
- * all, or it recorded a provider no adapter can ask about — so the caller can
- * forget them instead of re-asking on every later request. `live` and `unknown`
- * keep the pin and are asked again on the next completion.
+ * `accountedCallIds` is the answer the caller acts on: a call is accounted for
+ * only when nothing is left to ask about it — its row closed (now or by an
+ * earlier sweep), it recorded a provider no adapter can ask about, or it recorded
+ * no handle at all and the workspace held nothing live. Callers forget exactly
+ * these and keep the rest for a later sweep: `live` and `unknown` keep the pin and
+ * are asked again on the next completion, and so does a row the store refused.
  */
 export async function closeJudgedDeferredCalls(options: {
-  readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls'>;
+  readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls' | 'openDeferredCallIds'>;
   /** The handle ledger: which handle each call returned, and the authority that owns it. */
   readonly handles: Pick<SqliteDeferredHandleRepository, 'take' | 'forget'>;
   /** Asks the stores that own a handle; `unknown` never closes a call. */
@@ -75,9 +78,9 @@ export async function closeJudgedDeferredCalls(options: {
   /** The calls this runtime journaled: the only calls it may judge. */
   readonly ownedCallIds: readonly string[];
   readonly closedAt: string;
-}): Promise<{ readonly closed: number; readonly settled: boolean }> {
+}): Promise<{ readonly closed: number; readonly accountedCallIds: readonly string[] }> {
   const owned = new Set(options.ownedCallIds);
-  if (owned.size === 0) return { closed: 0, settled: false };
+  if (owned.size === 0) return { closed: 0, accountedCallIds: [] };
   const recorded = options.handles.take(options.workspaceId, [...owned]);
   const recordedIds = new Set(recorded.map((handle) => handle.callId));
   /** Calls an adapter proved gone, with the code their verdict is written under. */
@@ -121,11 +124,13 @@ export async function closeJudgedDeferredCalls(options: {
   }
 
   let closed = 0;
-  /** Calls whose row actually closed: only those may be called accounted for. */
+  /** Calls nothing is left to ask about: only those may be forgotten. */
   const accounted = new Set<string>();
+  /** Calls whose close this attempt did not land, still to be classified. */
+  const refused: string[] = [];
   for (const [callId, closureCode] of gone) {
     // One call per write: the store reports a count, so a shared bucket could not
-    // say which rows landed, and a row that did not land must stay retryable.
+    // say which rows landed.
     const closedHere = options.journal.closeDeferredCalls({
       workspaceId: options.workspaceId,
       operationKinds: [...options.operationKinds],
@@ -134,27 +139,52 @@ export async function closeJudgedDeferredCalls(options: {
       closureCode,
       closedAt: options.closedAt,
     });
-    if (closedHere === 0) continue;
+    if (closedHere === 0) {
+      refused.push(callId);
+      continue;
+    }
     closed += closedHere;
     accounted.add(callId);
-    // The verdict landed, so the correlation has done its job. A call whose row
-    // the store refused keeps both its ledger row and its retry.
+    // The verdict landed, so the correlation has done its job.
     options.handles.forget(options.workspaceId, [callId]);
   }
 
-  const pending = [...owned].filter((callId) => !accounted.has(callId) && !unaskable.has(callId));
-  return { closed, settled: pending.length === 0 };
+  if (refused.length > 0) {
+    // A zero is also what an earlier sweep's landed close looks like on every
+    // later attempt. That row already stops pinning, so asking about it again
+    // would never finish; only a row still open is a call to keep asking about.
+    const stillOpen = new Set(options.journal.openDeferredCallIds({
+      workspaceId: options.workspaceId,
+      callIds: refused,
+    }));
+    for (const callId of refused) {
+      if (stillOpen.has(callId)) continue;
+      accounted.add(callId);
+      options.handles.forget(options.workspaceId, [callId]);
+    }
+  }
+
+  // Nothing can answer for these, now or later: asking again could only repeat
+  // the same "no route". The ledger row stays, the pin stays, the retry does not.
+  for (const callId of unaskable) accounted.add(callId);
+
+  return { closed, accountedCallIds: [...accounted] };
 }
 
 /**
- * Probe the snapshot of remembered calls, then forget exactly that snapshot.
+ * Probe the snapshot of remembered calls, then forget exactly the accounted ones.
  *
- * `settled` is a verdict about a snapshot: the calls this runtime remembered when
- * the probe started. A launcher whose `started` row lands while the probe awaits
- * was never in that snapshot, so forgetting by workspace would drop a call no
- * verdict covers — it is never retried, and its pin holds the goal `present` for
- * good. Both the snapshot and the delete live here, so the rule has one home and
- * a caller cannot reach the map with the wrong set.
+ * `accountedCallIds` is a verdict about a snapshot: the calls this runtime
+ * remembered when the probe started. A launcher whose `started` row lands while
+ * the probe awaits was never in that snapshot, so forgetting by workspace would
+ * drop a call no verdict covers — it is never retried, and its pin holds the goal
+ * `present` for good. Both the snapshot and the delete live here, so the rule has
+ * one home and a caller cannot reach the map with the wrong set.
+ *
+ * Pruning is per call, not per sweep: a landed close next to a live sibling stays
+ * forgotten instead of being re-probed on every later completion. A call that is
+ * not accounted for is remembered again — including one supplied only through
+ * `additionalOwnedCallIds`, whose eviction left it nothing else to be retried from.
  */
 export async function settleRememberedCalls(options: {
   readonly remembered: Map<string, string>;
@@ -165,14 +195,31 @@ export async function settleRememberedCalls(options: {
    * own `started` event, not from the map, so an evicted call still gets judged.
    */
   readonly additionalOwnedCallIds?: readonly string[];
-  readonly probe: (ownedCallIds: readonly string[]) => Promise<{ readonly closed: number; readonly settled: boolean }>;
+  /** Bound on the map, so re-remembering can never grow it past the caller's cap. */
+  readonly maxRemembered?: number;
+  readonly probe: (ownedCallIds: readonly string[]) => Promise<{
+    readonly closed: number;
+    readonly accountedCallIds: readonly string[];
+  }>;
 }): Promise<void> {
   const own = [...options.remembered]
     .filter(([, workspaceId]) => workspaceId === options.workspaceId)
     .map(([callId]) => callId);
   const judged = [...new Set([...own, ...(options.additionalOwnedCallIds ?? [])])];
   if (judged.length === 0) return;
-  const { settled } = await options.probe(judged);
-  if (!settled) return;
-  for (const callId of own) options.remembered.delete(callId);
+  const { accountedCallIds } = await options.probe(judged);
+  const accounted = new Set(accountedCallIds);
+  for (const callId of own) {
+    if (accounted.has(callId)) options.remembered.delete(callId);
+  }
+  for (const callId of judged) {
+    if (accounted.has(callId) || options.remembered.has(callId)) continue;
+    options.remembered.set(callId, options.workspaceId);
+    if (options.maxRemembered === undefined) continue;
+    while (options.remembered.size > options.maxRemembered) {
+      const oldest = options.remembered.keys().next().value;
+      if (oldest === undefined) break;
+      options.remembered.delete(oldest);
+    }
+  }
 }

@@ -12,11 +12,20 @@ import {
 const actor: FileActor = { clientId: 'client', sessionId: 'session' };
 const closedAt = '2026-11-16T10:00:00.000Z';
 
-function journal(closed: number | ((callId: string) => number) = 1): { readonly closeDeferredCalls: ReturnType<typeof vi.fn> } {
+function journal(
+  closed: number | ((callId: string) => number) = 1,
+  stillOpen: readonly string[] = [],
+): {
+  readonly closeDeferredCalls: ReturnType<typeof vi.fn>;
+  readonly openDeferredCallIds: ReturnType<typeof vi.fn>;
+} {
   return {
     closeDeferredCalls: vi.fn((request: { readonly callIds: readonly string[] }) => (
       typeof closed === 'function' ? closed(request.callIds[0] ?? '') : closed
     )),
+    // A zero from `closeDeferredCalls` can mean "already closed" or "out of reach".
+    // The list is what tells them apart, so it is asserted, not defaulted away.
+    openDeferredCallIds: vi.fn(() => stillOpen),
   };
 }
 
@@ -59,7 +68,7 @@ function probe(options: {
   readonly handles?: ReturnType<typeof ledger>;
   readonly authority?: Pick<DeferredClosureAuthority, 'handleState' | 'workspaceProcessState'>;
   readonly ownedCallIds?: readonly string[];
-}): Promise<{ readonly closed: number; readonly settled: boolean }> {
+}): Promise<{ readonly closed: number; readonly accountedCallIds: readonly string[] }> {
   return closeJudgedDeferredCalls({
     journal: options.store ?? journal(),
     handles: options.handles ?? ledger([]),
@@ -78,7 +87,7 @@ describe('closeJudgedDeferredCalls', () => {
     const handles = ledger([{ callId: 'call-1', provider: 'process', handleId: 'process-1' }]);
     const asker = authority('gone');
 
-    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, settled: true });
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
 
     expect(asker.handleState).toHaveBeenCalledWith({
       actor, workspaceId: 'ws-1', provider: 'process', handleId: 'process-1',
@@ -101,7 +110,7 @@ describe('closeJudgedDeferredCalls', () => {
       const store = journal();
       const handles = ledger([{ callId: 'call-1' }]);
       await expect(probe({ store, handles, authority: authority(state) }))
-        .resolves.toEqual({ closed: 0, settled: false });
+        .resolves.toEqual({ closed: 0, accountedCallIds: [] });
       expect(store.closeDeferredCalls).not.toHaveBeenCalled();
       expect(handles.forget).not.toHaveBeenCalled();
     }
@@ -119,7 +128,7 @@ describe('closeJudgedDeferredCalls', () => {
 
     await expect(probe({
       store, handles, authority: asker, ownedCallIds: ['call-1', 'call-2'],
-    })).resolves.toEqual({ closed: 1, settled: false });
+    })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
 
     expect(store.closeDeferredCalls.mock.calls[0]?.[0]?.callIds).toEqual(['call-1']);
     // Only the settled handle is forgotten; the live one is re-asked next time.
@@ -133,7 +142,7 @@ describe('closeJudgedDeferredCalls', () => {
     // evidence left: nothing live here means the launch never produced work.
     const asker = authority('live', 'gone');
 
-    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, settled: true });
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
 
     expect(asker.workspaceProcessState).toHaveBeenCalledWith({ actor, workspaceId: 'ws-1' });
     expect(asker.handleState).not.toHaveBeenCalled();
@@ -149,7 +158,7 @@ describe('closeJudgedDeferredCalls', () => {
 
     for (const state of ['live', 'unknown'] as const) {
       await expect(probe({ store, handles, authority: authority('live', state) }))
-        .resolves.toEqual({ closed: 0, settled: false });
+        .resolves.toEqual({ closed: 0, accountedCallIds: [] });
     }
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
     expect(handles.forget).not.toHaveBeenCalled();
@@ -161,7 +170,7 @@ describe('closeJudgedDeferredCalls', () => {
     const handles = ledger([{ callId: 'another-hosts-call', handleId: 'process-9' }], { shared: true });
     const asker = authority('gone', 'gone');
 
-    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, settled: true });
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
 
     expect(asker.handleState).not.toHaveBeenCalled();
     expect(store.closeDeferredCalls.mock.calls[0]?.[0]?.callIds).toEqual(['call-1']);
@@ -176,7 +185,7 @@ describe('closeJudgedDeferredCalls', () => {
     // The authority saying `gone` is not enough: a provider with no route has no
     // vocabulary to write the verdict in, so the pin stays — and there is nothing
     // to retry, so the call is not remembered again.
-    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 0, settled: true });
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 0, accountedCallIds: ['call-1'] });
     expect(asker.handleState).not.toHaveBeenCalled();
     expect(asker.workspaceProcessState).not.toHaveBeenCalled();
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
@@ -185,26 +194,39 @@ describe('closeJudgedDeferredCalls', () => {
   it('keeps a call whose close the store refused, and forgets only the one that landed', async () => {
     // One close per call is what makes this judgeable: a shared bucket would let a
     // landed row hide a refused one, and only the landed row may be settled.
-    const store = journal((callId) => (callId === 'call-1' ? 1 : 0));
+    const store = journal((callId) => (callId === 'call-1' ? 1 : 0), ['call-2']);
     const handles = ledger([{ callId: 'call-1' }, { callId: 'call-2', handleId: 'process-2' }]);
 
     await expect(probe({
       store, handles, authority: authority('gone'), ownedCallIds: ['call-1', 'call-2'],
-    })).resolves.toEqual({ closed: 1, settled: false });
+    })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
 
     expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
     expect(handles.forget).not.toHaveBeenCalledWith('ws-1', ['call-2']);
   });
 
-  it('keeps the correlation and the retry when the store closes nothing', async () => {
-    const store = journal(0);
+  it('keeps the correlation and the retry while the row is still open', async () => {
+    const store = journal(0, ['call-1']);
     const handles = ledger([{ callId: 'call-1' }]);
 
-    // Not settled: the row did not close, so forgetting the call would drop the
-    // only path that can still ask about it.
+    // The close did not land and the row is still open: dropping the call here
+    // would drop the only path that can still ask about it.
     await expect(probe({ store, handles, authority: authority('gone') }))
-      .resolves.toEqual({ closed: 0, settled: false });
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(store.openDeferredCallIds).toHaveBeenCalledWith({ workspaceId: 'ws-1', callIds: ['call-1'] });
     expect(handles.forget).not.toHaveBeenCalled();
+  });
+
+  it('accounts for a row an earlier sweep already closed', async () => {
+    // Every later attempt gets a zero from `closeDeferredCalls` because the row
+    // already carries a closure code. Reading that zero as "refused" would keep
+    // the call in memory for good and re-probe a row that pins nothing.
+    const store = journal(0, []);
+    const handles = ledger([{ callId: 'call-1' }]);
+
+    await expect(probe({ store, handles, authority: authority('gone') }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: ['call-1'] });
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
   });
 
   it('does nothing when there is no call to judge', async () => {
@@ -213,7 +235,7 @@ describe('closeJudgedDeferredCalls', () => {
     const asker = authority('gone');
 
     await expect(probe({ store, handles, authority: asker, ownedCallIds: [] }))
-      .resolves.toEqual({ closed: 0, settled: false });
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
     // No call means no question: asking anyway would cost a store read per
     // completion event in every workspace.
     expect(handles.take).not.toHaveBeenCalled();
@@ -232,7 +254,7 @@ describe('closeJudgedDeferredCalls', () => {
 });
 
 describe('settleRememberedCalls', () => {
-  it('forgets the calls the probe covered, and keeps one that started during the probe', async () => {
+  it('forgets only the accounted calls, and keeps one that started during the probe', async () => {
     // The regression this forbids: forgetting every entry for the workspace drops
     // a launcher whose `started` row landed during the awaited store read. No
     // verdict covers it, so nothing retries it and the goal stays `present`.
@@ -251,7 +273,7 @@ describe('settleRememberedCalls', () => {
       probe: async (ownedCallIds) => {
         probed.push([...ownedCallIds]);
         remembered.set('landed-during-probe', 'ws-1');
-        return { closed: 2, settled: true };
+        return { closed: 2, accountedCallIds: ['probed-1', 'probed-2'] };
       },
     });
     expect(probed).toEqual([['probed-1', 'probed-2']]);
@@ -261,38 +283,65 @@ describe('settleRememberedCalls', () => {
     ]);
   });
 
-  it('forgets nothing when the probe could not settle the calls it owned', async () => {
+  it('drops a call closed next to a live sibling instead of probing it again', async () => {
+    // A landed close is a fact about one call. Gating the prune on the whole sweep
+    // would re-probe that closed call on every later completion — the exact cost
+    // the map exists to avoid — until the cap evicted a live in-flight call.
+    const remembered = new Map([['closed-1', 'ws-1'], ['live-1', 'ws-1']]);
+    const probed: (readonly string[])[] = [];
+    const probe = async (ownedCallIds: readonly string[]): Promise<{
+      readonly closed: number;
+      readonly accountedCallIds: readonly string[];
+    }> => {
+      probed.push([...ownedCallIds]);
+      return probed.length === 1
+        ? { closed: 1, accountedCallIds: ['closed-1'] }
+        : { closed: 0, accountedCallIds: ['closed-1'] };
+    };
+
+    await settleRememberedCalls({ remembered, workspaceId: 'ws-1', probe });
+    expect([...remembered]).toEqual([['live-1', 'ws-1']]);
+
+    await settleRememberedCalls({ remembered, workspaceId: 'ws-1', probe });
+    // The second sweep asks about the live call only.
+    expect(probed[1]).toEqual(['live-1']);
+  });
+
+  it('keeps a call the probe could not account for', async () => {
     const remembered = new Map([['probed-1', 'ws-1']]);
     await settleRememberedCalls({
       remembered,
       workspaceId: 'ws-1',
-      probe: async () => ({ closed: 0, settled: false }),
+      probe: async () => ({ closed: 0, accountedCallIds: [] }),
     });
     expect([...remembered]).toEqual([['probed-1', 'ws-1']]);
   });
 
   it('asks nothing when this workspace remembers no call', async () => {
     const remembered = new Map([['other-workspace-call', 'ws-2']]);
-    const probe = vi.fn(async () => ({ closed: 0, settled: false }));
+    const probe = vi.fn(async () => ({ closed: 0, accountedCallIds: [] }));
     await settleRememberedCalls({ remembered, workspaceId: 'ws-1', probe });
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it('still judges a call the bounded map no longer holds', async () => {
+  it('still judges a call the bounded map no longer holds, and retries it', async () => {
     // The memory cap may evict an in-flight call; its own `started` event is still
-    // where the ownership came from, so its completion gets one chance to close it.
+    // where the ownership came from, so its completion gets a verdict. If that
+    // verdict does not account for it, nothing else can retry it, so it goes back
+    // in the map — bounded, so re-remembering cannot outgrow the cap.
     const remembered = new Map([['probed-1', 'ws-1']]);
     const probed: (readonly string[])[] = [];
     await settleRememberedCalls({
       remembered,
       workspaceId: 'ws-1',
       additionalOwnedCallIds: ['evicted'],
+      maxRemembered: 2,
       probe: async (ownedCallIds) => {
         probed.push([...ownedCallIds]);
-        return { closed: 0, settled: false };
+        return { closed: 0, accountedCallIds: ['probed-1'] };
       },
     });
     expect(probed).toEqual([['probed-1', 'evicted']]);
-    expect([...remembered]).toEqual([['probed-1', 'ws-1']]);
+    expect([...remembered]).toEqual([['evicted', 'ws-1']]);
   });
 });

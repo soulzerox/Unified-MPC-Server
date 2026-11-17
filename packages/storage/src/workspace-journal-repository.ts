@@ -113,6 +113,12 @@ export interface WorkspaceJournalClosureRequest {
   readonly callIds: readonly string[];
 }
 
+export interface OpenDeferredCallsRequest {
+  readonly workspaceId: string;
+  /** The calls to check. An empty list asks nothing. */
+  readonly callIds: readonly string[];
+}
+
 export interface ListWorkspaceJournalRequest {
   readonly workspaceId: string;
   readonly afterSequence?: number;
@@ -315,6 +321,30 @@ export class SqliteWorkspaceJournalRepository {
       ...calls,
     );
     return Number(result.changes);
+  }
+
+  /**
+   * Which of these calls the journal still holds open.
+   *
+   * `closeDeferredCalls` reports the rows it changed, and a zero is ambiguous: the
+   * row may carry a closure code from an earlier sweep — a no-op, not a refusal —
+   * or it may be out of reach for this runtime. A caller that kept asking about an
+   * already-closed call would never finish; one that stopped asking about an open
+   * call would strand its pin. So the difference is read back, not guessed.
+   */
+  public openDeferredCallIds(request: OpenDeferredCallsRequest): readonly string[] {
+    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
+      throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
+    }
+    const calls = [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
+    if (calls.length === 0) return [];
+    const rows = this.database.connection.prepare(`
+      SELECT DISTINCT call_id
+      FROM workspace_journal_events
+      WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
+        AND call_id IN (${calls.map(() => '?').join(', ')})
+    `).all(request.workspaceId, ...calls) as unknown as { readonly call_id: string }[];
+    return rows.map((row) => row.call_id);
   }
 
   /**

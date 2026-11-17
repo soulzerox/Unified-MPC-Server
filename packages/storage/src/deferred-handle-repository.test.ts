@@ -3,7 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SqliteDatabase } from './database.js';
-import { DeferredHandleStoreError, SqliteDeferredHandleRepository } from './deferred-handle-repository.js';
+import {
+  DEFERRED_HANDLE_PROVIDERS,
+  DeferredHandleStoreError,
+  SqliteDeferredHandleRepository,
+} from './deferred-handle-repository.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
 
 const temporaryRoots: string[] = [];
@@ -84,5 +88,44 @@ describe('SqliteDeferredHandleRepository', () => {
       INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at)
       VALUES ('ws-1', 'call-2', 'telepathy', 'x', '2026-01-01T00:00:00.000Z')
     `).run()).toThrow();
+  });
+
+  it('keeps the DDL provider set and DEFERRED_HANDLE_PROVIDERS the same set', async () => {
+    const { database } = await setup();
+    const insert = database.connection.prepare(`
+      INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at)
+      VALUES ('ws-1', ?, ?, 'handle-1', '2026-01-01T00:00:00.000Z')
+    `);
+    // A provider the type allows but the DDL refuses would be a handle its own
+    // writer cannot store; one the DDL allows but the type does not would be a row
+    // no reader can name. Both directions are the same bug: two lists, one set.
+    for (const provider of DEFERRED_HANDLE_PROVIDERS) {
+      expect(() => insert.run(`call-${provider}`, provider)).not.toThrow();
+    }
+    expect(() => insert.run('call-unlisted', 'unlisted')).toThrow();
+  });
+
+  it('never lets one workspace forget another workspace\'s handle', async () => {
+    const { handles } = await setup();
+    handles.record({ workspaceId: 'ws-1', callId: 'call-1', provider: 'process', handleId: 'proc-1' });
+
+    // `settleRememberedCalls` filters by workspace before it gets here, so this is
+    // the store's own guarantee: a verdict on one workspace's work cannot delete
+    // the correlation another host still needs.
+    expect(handles.forget('ws-2', ['call-1'])).toBe(0);
+    expect(handles.take('ws-1', ['call-1'])).toEqual([expect.objectContaining({ handleId: 'proc-1' })]);
+  });
+
+  it('reports a handle for a workspace this host does not have as an invalid entry', async () => {
+    const { handles } = await setup();
+    // The row references `workspaces(id)`, so the driver refuses it. The caller's
+    // contract is `invalid_entry` for a bad request, and an unknown workspace is a
+    // caller bug like the other ones — not a driver error leaking through.
+    expect(() => handles.record({
+      workspaceId: 'ws-missing',
+      callId: 'call-1',
+      provider: 'process',
+      handleId: 'proc-1',
+    })).toThrow(DeferredHandleStoreError);
   });
 });

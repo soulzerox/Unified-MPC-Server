@@ -51,6 +51,12 @@ function required(value: string | undefined, max: number): boolean {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
+/** SQLITE_CONSTRAINT_FOREIGNKEY, in the numeric and message-only shapes `node:sqlite` exposes. */
+function isUnknownWorkspaceError(error: unknown): boolean {
+  if ((error as { errcode?: unknown } | null)?.errcode === 787) return true;
+  return error instanceof Error && error.message.includes('FOREIGN KEY');
+}
+
 /**
  * Which handle a journaled call returned, and which authority can answer for it.
  *
@@ -74,17 +80,28 @@ export class SqliteDeferredHandleRepository {
       || (request.recordedAt !== undefined && !required(request.recordedAt, MAX_RECORDED_AT_CHARS))) {
       throw new DeferredHandleStoreError('invalid_entry', 'Deferred handle requires bounded identifiers');
     }
-    this.database.connection.prepare(`
-      INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (workspace_id, call_id) DO NOTHING
-    `).run(
-      request.workspaceId,
-      request.callId,
-      request.provider,
-      request.handleId,
-      request.recordedAt ?? new Date().toISOString(),
-    );
+    try {
+      this.database.connection.prepare(`
+        INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (workspace_id, call_id) DO NOTHING
+      `).run(
+        request.workspaceId,
+        request.callId,
+        request.provider,
+        request.handleId,
+        request.recordedAt ?? new Date().toISOString(),
+      );
+    } catch (error) {
+      // The one failure this method can explain: the workspace does not exist, so
+      // the row would name an owner nothing can ask. Anything else (disk, schema)
+      // is not the caller's fault and must keep its own shape.
+      if (!isUnknownWorkspaceError(error)) throw error;
+      throw new DeferredHandleStoreError(
+        'invalid_entry',
+        `Deferred handle names a workspace this host does not have: ${request.workspaceId}`,
+      );
+    }
   }
 
   /** The handles this workspace recorded for the given calls, in no fixed order. */

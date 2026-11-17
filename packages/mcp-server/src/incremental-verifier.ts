@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appError, classifyWorkspaceSourceEvidence, err, ok, type InvocationAuthorization, type Result, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
+import { appError, classifyWorkspaceSourceEvidence, err, ok, type InvocationAuthorization, type Result, type WorkspaceEvidenceFreshness, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
 import type { McpToolContext } from './tools/tool-types.js';
 
 const DEFAULT_VERIFY_WAIT_MS = 5 * 60 * 1000;
@@ -8,6 +8,12 @@ const LOG_TAIL_LINES = 80;
 
 interface VerificationCacheEntry {
   readonly cacheKey: string;
+  /**
+   * The repository and worktree the cached result belongs to. A result from
+   * another checkout can never be reused, which is a different answer from a
+   * result that is merely out of date.
+   */
+  readonly evidenceIdentity: string;
   readonly value: Record<string, unknown>;
   readonly bytes: number;
 }
@@ -57,11 +63,17 @@ export class IncrementalVerifier {
       this.bytesSaved += cached.bytes;
       return ok({
         cache: 'hit',
+        reuse: 'fresh',
         cache_key: cached.cacheKey,
         changed_files: fingerprint.value.changedFiles,
         ...cached.value,
       });
     }
+    // `fresh` is the hit above; everything else is why the previous result was not
+    // reused, in the vocabulary the domain already uses for workspace evidence.
+    const reuse: WorkspaceEvidenceFreshness = cached === undefined
+      ? 'unknown'
+      : cached.evidenceIdentity === fingerprint.value.evidenceIdentity ? 'stale' : 'not_reusable';
     this.misses += 1;
 
     if (signal.aborted) return cancelledVerification();
@@ -100,9 +112,15 @@ export class IncrementalVerifier {
       verified_at: new Date(this.now()).toISOString(),
     } satisfies Record<string, unknown>;
     const bytes = Buffer.byteLength(JSON.stringify(verification), 'utf8');
-    this.cache.set(workspaceId, { cacheKey: fingerprint.value.cacheKey, value: verification, bytes });
+    this.cache.set(workspaceId, {
+      cacheKey: fingerprint.value.cacheKey,
+      evidenceIdentity: fingerprint.value.evidenceIdentity,
+      value: verification,
+      bytes,
+    });
     return ok({
       cache: 'miss',
+      reuse,
       cache_key: fingerprint.value.cacheKey,
       changed_files: fingerprint.value.changedFiles,
       ...verification,
@@ -137,7 +155,7 @@ async function buildDiffFingerprint(
   context: McpToolContext,
   workspaceId: string,
   signal: AbortSignal,
-): Promise<Result<{ readonly cacheKey: string; readonly changedFiles: readonly string[] }>> {
+): Promise<Result<{ readonly cacheKey: string; readonly evidenceIdentity: string; readonly changedFiles: readonly string[] }>> {
   const git = context.services.git;
   if (git === undefined) return err(appError('INTERNAL_ERROR', 'Git service is unavailable', true));
   const before = await git.observeWorkspace(context.actor, workspaceId, {}, signal);
@@ -171,7 +189,11 @@ async function buildDiffFingerprint(
     .update('\0')
     .update(staged.value.patch)
     .digest('hex');
-  return ok({ cacheKey: hash, changedFiles });
+  return ok({
+    cacheKey: hash,
+    evidenceIdentity: `${after.value.repositoryIdentity}\0${after.value.worktreeIdentity}`,
+    changedFiles,
+  });
 }
 
 function workspaceSourceEvidenceIdentity(source: {

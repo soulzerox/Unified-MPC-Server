@@ -131,6 +131,7 @@ describe('session tools', () => {
   it('returns verify_incremental cache hit only while the exact source HEAD and diff stay unchanged', async () => {
     let patch = '+first-diff';
     let head = 'a'.repeat(40);
+    let repositoryIdentity = 'repo-1';
     let starts = 0;
     const context = {
       actor,
@@ -139,7 +140,7 @@ describe('session tools', () => {
         git: {
           async observeWorkspace() {
             return ok({
-              repositoryIdentity: 'repo-1',
+              repositoryIdentity,
               gitCommonDirIdentity: 'common-1',
               worktreeIdentity: 'worktree-1',
               branch: 'feat/task-7',
@@ -193,15 +194,20 @@ describe('session tools', () => {
     const third = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     head = 'b'.repeat(40);
     const fourth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    repositoryIdentity = 'repo-2';
+    const fifth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
 
-    expect(first).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(second).toMatchObject({ ok: true, value: { cache: 'hit', passed: true } });
-    expect(third).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(fourth).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 1, misses: 3, hitRate: 1 / 4 });
+    expect(first).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'unknown', passed: true } });
+    expect(second).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
+    expect(third).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'stale', passed: true } });
+    expect(fourth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'stale', passed: true } });
+    // Another repository under the same workspace id is not out of date, it is
+    // unusable: reusing it would report another checkout's result as this one's.
+    expect(fifth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
+    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 1, misses: 4, hitRate: 1 / 5 });
     expect(verifier.stats().bytesSaved).toBeGreaterThan(0);
     expect(verifier.invalidate('workspace-1')).toBe(1);
-    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 1, misses: 3 });
-    expect(starts).toBe(3);
+    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 1, misses: 4 });
+    expect(starts).toBe(4);
   });
 });

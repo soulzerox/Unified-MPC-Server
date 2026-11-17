@@ -153,6 +153,49 @@ describe('recording a deferred settlement', () => {
     }]);
   });
 
+  it('settles a read that was refused before it ran, so its row cannot pin forever', async (): Promise<void> => {
+    const records: DeferredSettlementRecord[] = [];
+    const events: ActivitySinkEvent[] = [];
+    const registry = new ToolRegistry({} as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'workspace-a', rootPath: '/tmp/project-a' }),
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+      codexToolsEnabled: true,
+      activity: { async record(event): Promise<void> { events.push(event); } },
+      deferredSettlementRecorder: (record): void => { records.push(record); },
+    });
+
+    // No `swarmId`: validation refuses the call before the handler is reached, so
+    // the response path never settles it. The read still started nothing.
+    const response = await registry.invoke('agent_swarm_run', {
+      operation: 'status',
+      workspaceId: 'workspace-a',
+    });
+
+    expect(response.isError).toBe(true);
+    expect(records).toEqual([{
+      workspaceId: 'workspace-a',
+      closureCode: 'swarm_read_settled',
+      callId: events[0]?.callId,
+    }]);
+  });
+
+  it('leaves a refused verification alone, because it settles only on its own verdict', async (): Promise<void> => {
+    const records: DeferredSettlementRecord[] = [];
+    const registry = new ToolRegistry({} as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'workspace-a', rootPath: '/tmp/project-a' }),
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+      activity: { async record(): Promise<void> {} },
+      deferredSettlementRecorder: (record): void => { records.push(record); },
+    });
+
+    // A refused run queued nothing and produced no verdict: settling it here would
+    // claim a gate ran that never did, which is the fail-open direction.
+    const response = await registry.invoke('merge_verification_run', { workspaceId: 'workspace-a' });
+
+    expect(response.isError).toBe(true);
+    expect(records).toEqual([]);
+  });
+
   it('never fails the call it settles when the journal write throws', async (): Promise<void> => {
     const { registry } = verificationRegistry(() => { throw new Error('journal is down'); });
 

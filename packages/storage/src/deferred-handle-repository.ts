@@ -8,7 +8,11 @@ const MAX_RECORDED_AT_CHARS = 64;
  *
  * Closed on purpose: an unlisted provider has no adapter, so a probe cannot
  * answer for it and the call keeps pinning. Adding one here is the whole change
- * needed to make that authority answerable.
+ * needed to make that authority answerable — but not the whole change to store it:
+ * the DDL `CHECK` must accept it too, and because the table migration is
+ * `CREATE TABLE IF NOT EXISTS` applied once per `schema_migrations` id, an
+ * already-migrated host keeps the old `CHECK` unless the addition ships as a new
+ * migration id or a table rebuild (as `049` did).
  */
 export const DEFERRED_HANDLE_PROVIDERS = ['process', 'task', 'swarm', 'worktree', 'verification', 'codex'] as const;
 export type DeferredHandleProvider = typeof DEFERRED_HANDLE_PROVIDERS[number];

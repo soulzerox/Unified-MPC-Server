@@ -174,6 +174,19 @@ describe('SqliteDeferredHandleRepository', () => {
     expect(handles.take('ws-1', ['call-1'])).toEqual([expect.objectContaining({ handleId: 'proc-1' })]);
   });
 
+  it('keeps the single foreign key its driver translation assumes', async () => {
+    const { database } = await setup();
+    // `isForeignKeyViolation` is only allowed to mean "unknown workspace" while
+    // `workspace_id` is the table's one and only reference. A second foreign key
+    // would silently make it the wrong classifier, so pin the premise itself rather
+    // than only the behaviour it produces.
+    const keys = database.connection.prepare('PRAGMA foreign_key_list(deferred_handles)').all() as unknown as {
+      readonly table: string; readonly from: string; readonly to: string;
+    }[];
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatchObject({ table: 'workspaces', from: 'workspace_id', to: 'id' });
+  });
+
   it('reports a handle for a workspace this host does not have as an invalid entry', async () => {
     const { handles } = await setup();
     // The row references `workspaces(id)`, so the driver refuses it. The caller's

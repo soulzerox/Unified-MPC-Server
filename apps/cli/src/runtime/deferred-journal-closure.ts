@@ -1,75 +1,125 @@
 import type { FileActor } from '@unified-mpc/application';
-import type { SqliteWorkspaceJournalRepository } from '@unified-mpc/storage';
-import type { DeferredClosureAuthority } from './deferred-closure-authority.js';
-
-/**
- * Deferred kinds whose handle is a managed process, and therefore answerable by
- * the process store in this runtime.
- *
- * The rest of `DEFERRED_CLOSURE_OPERATION_KINDS` stays open on purpose: a task id,
- * a parked shell, a worktree or a swarm id lives in another authority, and
- * guessing "not in the process store, so finished" is the fail-open the journal
- * exists to prevent. `shell`/`wsl_exec` are excluded for the same reason: their
- * own process can exit while a backgrounded child keeps working.
- */
-export const PROCESS_HANDLE_DEFERRED_KINDS: ReadonlySet<string> = new Set([
-  'process_start', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
-]);
+import type { SqliteDeferredHandleRepository, SqliteWorkspaceJournalRepository } from '@unified-mpc/storage';
+import type { DeferredClosureAuthority, DeferredHandleProvider } from './deferred-closure-authority.js';
 
 export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
+
+/**
+ * The closure code each provider's verdict is written under, or `undefined` when
+ * no adapter can answer for it yet.
+ *
+ * A provider missing here cannot be closed at all: its handle stays pinned, which
+ * is the only safe reading of "nothing asked". Adding an authority adapter and its
+ * code together is what makes a provider releasable.
+ */
+const CLOSURE_CODES: Readonly<Partial<Record<DeferredHandleProvider, string>>> = {
+  process: NO_LIVE_PROCESS_CLOSURE_CODE,
+};
+
+/**
+ * The ledger's closed provider set is wider than the runtime can answer for, so a
+ * stored row can name a provider no adapter exists for. This is the narrowing that
+ * keeps those rows pinned instead of asking a store that was never wired.
+ */
+function supportedProvider(provider: string): provider is DeferredHandleProvider {
+  return provider === 'process' || provider === 'task';
+}
 
 /**
  * Calls recorded before this runtime started belong to a previous host.
  *
  * The process store only knows the handles this runtime created, so "absent from
- * the list" is evidence for a call we could have observed and a guess for one we
- * could not. This instant is what keeps the sweep on the honest side of that line;
- * module load is the earliest point of the runtime that could have journaled.
+ * the ledger answer" is evidence for a call we could have observed and a guess for
+ * one we could not. This instant is what keeps the sweep on the honest side of
+ * that line; module load is the earliest point of the runtime that could have
+ * journaled.
  */
 const RUNTIME_OBSERVED_FROM = new Date().toISOString();
 
 /**
- * Close the deferred call this request opened, once the authority that owns its
- * handle proves the workspace has no live managed process left.
+ * Close the deferred calls a probe can account for, each by its own handle.
  *
- * `callIds` is not an optimisation, it is the honesty boundary. The process store
- * only lists the handles THIS runtime registered, while the journal is shared by
- * every stdio host on the same database, so "no live process" is evidence about
- * one call, never about a neighbouring host's call. Closing by workspace alone
- * would read another host's running `project_dev` as finished.
+ * The ledger says which handle a call returned and which authority owns it; this
+ * asks that authority per call instead of asking the workspace as a whole. That
+ * difference is the point: a workspace answer says "some process is live", which
+ * pins every call in it, while a handle answer says whether *this* call's work
+ * ended.
  *
- * `unknown` — no process service, or a store that cannot answer — closes nothing.
- * One live process keeps the call pinned, which also errs closed.
+ * `ownedCallIds` is not an optimisation, it is the honesty boundary. The ledger
+ * and the journal are shared by every stdio host on the database, while the
+ * process store only lists the handles THIS runtime registered, so "not in the
+ * list" is `gone` only for a call this runtime journaled. Ownership is what makes
+ * one host's answer evidence, never another host's.
  *
- * `settled` says the probe proved the workspace has no live process, so every
- * call in `callIds` is now either closed or was already closed: the caller can
- * forget them instead of re-asking on every later request.
+ * `unknown` — no adapter, an unaskable provider, or a store that cannot answer —
+ * closes nothing. A call with no ledger row is skipped and keeps its pin.
+ *
+ * `settled` says every call this runtime owned is accounted for — its handle was
+ * proven gone, or it recorded no handle any adapter can ask about — so the caller
+ * can forget them instead of re-asking on every later request.
  */
-export async function closeObservedDeferredCalls(options: {
+export async function closeJudgedDeferredCalls(options: {
   readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls'>;
-  /** Asks the store that owns the handles; `unknown` never closes a call. */
-  readonly authority: Pick<DeferredClosureAuthority, 'workspaceProcessState'>;
+  /** The handle ledger: which handle each call returned, and the authority that owns it. */
+  readonly handles: Pick<SqliteDeferredHandleRepository, 'take' | 'forget'>;
+  /** Asks the store that owns a handle; `unknown` never closes a call. */
+  readonly authority: Pick<DeferredClosureAuthority, 'handleState'>;
+  /** Kinds the journal will accept a closure for; the exact `callIds` do the narrowing. */
+  readonly operationKinds: readonly string[];
   readonly actor: FileActor;
   readonly workspaceId: string;
-  /** The call whose request just completed: the only one this runtime may answer. */
+  /** The calls to judge. A call with no recorded handle is skipped, never assumed. */
   readonly callIds: readonly string[];
+  /** The subset this runtime journaled: the only calls a probe may call settled. */
+  readonly ownedCallIds: readonly string[];
   readonly closedAt: string;
 }): Promise<{ readonly closed: number; readonly settled: boolean }> {
-  if (options.callIds.length === 0) return { closed: 0, settled: false };
-  const state = await options.authority.workspaceProcessState({
-    actor: options.actor,
-    workspaceId: options.workspaceId,
-  });
-  if (state !== 'gone') return { closed: 0, settled: false };
-  const closed = options.journal.closeDeferredCalls({
-    workspaceId: options.workspaceId,
-    operationKinds: [...PROCESS_HANDLE_DEFERRED_KINDS],
-    recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
-    callIds: options.callIds,
-    closureCode: NO_LIVE_PROCESS_CLOSURE_CODE,
-    closedAt: options.closedAt,
-  });
-  return { closed, settled: true };
+  const owned = new Set(options.ownedCallIds);
+  const recorded = options.handles.take(options.workspaceId, options.callIds);
+  const gone: string[] = [];
+  /** Calls whose handle an adapter can actually be asked about. */
+  const askable = new Set<string>();
+  const byCode = new Map<string, string[]>();
+  for (const handle of recorded) {
+    if (!supportedProvider(handle.provider)) continue;
+    const code = CLOSURE_CODES[handle.provider];
+    // A provider with no code has no adapter: asking it would only produce
+    // `unknown`, and a verdict no code can express must not close a call.
+    if (code === undefined) continue;
+    askable.add(handle.callId);
+    const state = await options.authority.handleState({
+      actor: options.actor,
+      workspaceId: options.workspaceId,
+      provider: handle.provider,
+      handleId: handle.handleId,
+    });
+    if (state !== 'gone') continue;
+    gone.push(handle.callId);
+    byCode.set(code, [...(byCode.get(code) ?? []), handle.callId]);
+  }
+
+  let closed = 0;
+  for (const [closureCode, closedCallIds] of byCode) {
+    closed += options.journal.closeDeferredCalls({
+      workspaceId: options.workspaceId,
+      operationKinds: [...options.operationKinds],
+      recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
+      callIds: closedCallIds,
+      closureCode,
+      closedAt: options.closedAt,
+    });
+    // The verdict landed, so the correlation has done its job. Forgetting it is
+    // what stops a settled call costing a lookup on every later request.
+    options.handles.forget(options.workspaceId, closedCallIds);
+  }
+
+  // Settled means every call this runtime owned is accounted for: its handle is
+  // gone, or it never recorded one an adapter can ask about (a failed launch, an
+  // unwired provider), so re-asking could only produce the same answer. Anything
+  // still `live` or `unknown` is asked again on the next completion.
+  const pending = [...owned].filter((callId) => askable.has(callId) && !gone.includes(callId));
+  const settled = owned.size > 0 && pending.length === 0;
+  return { closed, settled };
 }
 
 /**
@@ -87,12 +137,12 @@ export async function settleRememberedCalls(options: {
   readonly workspaceId: string;
   /** The call whose request just completed: the runtime may answer for it too. */
   readonly callId: string;
-  readonly probe: (callIds: readonly string[]) => Promise<{ readonly closed: number; readonly settled: boolean }>;
+  readonly probe: (callIds: readonly string[], ownedCallIds: readonly string[]) => Promise<{ readonly closed: number; readonly settled: boolean }>;
 }): Promise<void> {
   const own = [...options.remembered]
     .filter(([, workspaceId]) => workspaceId === options.workspaceId)
     .map(([callId]) => callId);
-  const { settled } = await options.probe([...new Set([options.callId, ...own])]);
+  const { settled } = await options.probe([...new Set([options.callId, ...own])], own);
   if (!settled) return;
   for (const callId of own) options.remembered.delete(callId);
 }

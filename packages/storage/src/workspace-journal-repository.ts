@@ -52,6 +52,28 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
   'git_worktree_spawn', 'agent_swarm_run',
 ]);
 
+/**
+ * Kinds whose open row is a reference to work that outlives the call, and whose newest
+ * open row can be closed by a later call of the same kind.
+ *
+ * Two open rows of such a kind are two different references, not two reports of the
+ * same in-flight work: a `git_worktree_spawn` row stands for a worktree that may still
+ * hold work, an `agent_swarm_run start` row for a swarm that still runs, and a
+ * `merge_verification_run` row for an attempt that is still queued. Retention's
+ * per-kind collapse treats open rows as interchangeable and keeps the newest, which is
+ * how each of them can lose its pin: the evicted row is the only evidence of that work,
+ * and the survivor then settles itself under `worktree_preview_settled`,
+ * `swarm_read_settled` or `verification_settled`, leaving the kind with nothing open
+ * while the work still runs. These kinds are therefore never collapsed — losing a
+ * reference is the fail-open direction, and each of them is rare next to a launcher.
+ *
+ * Adding a settlement rule for another kind means adding it here too. The journal
+ * cannot derive the list: the rules live in the MCP server, one layer up.
+ */
+export const DURABLE_REFERENCE_OPERATION_KINDS: ReadonlySet<string> = new Set([
+  'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run',
+]);
+
 export type WorkspaceJournalPhase = 'started' | 'completed';
 export type WorkspaceJournalStatus = 'started' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 /** The same vocabulary `WorkspaceDurableReferenceState` uses, minus the fail-closed `unknown`. */
@@ -457,12 +479,17 @@ export class SqliteWorkspaceJournalRepository {
     // bounded: an open deferred `started` row can never be collected as a whole
     // call, so without this a workspace that keeps launching processes would grow
     // past `maxEventsPerWorkspace` forever. Closed ones are ordinary evidence and
-    // the whole-call deletion below collects them.
-    if (kinds.length > 0) {
+    // the whole-call deletion below collects them. A durable reference kind is the
+    // exception: its open rows are distinct references, not repeated reports of one
+    // in-flight call, so collapsing them would let a self-settling newer row evict
+    // the older reference that still pins.
+    const collapseKinds = kinds.filter((kind) => !DURABLE_REFERENCE_OPERATION_KINDS.has(kind));
+    if (collapseKinds.length > 0) {
+      const collapsePlaceholders = collapseKinds.map(() => '?').join(', ');
       db.prepare(`
         DELETE FROM workspace_journal_events
         WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
-          AND operation_kind IN (${kindPlaceholders})
+          AND operation_kind IN (${collapsePlaceholders})
           AND EXISTS (
             SELECT 1 FROM workspace_journal_events n
             WHERE n.workspace_id = workspace_journal_events.workspace_id
@@ -471,7 +498,7 @@ export class SqliteWorkspaceJournalRepository {
               AND n.closure_code IS NULL
               AND n.sequence > workspace_journal_events.sequence
           )
-      `).run(workspaceId, ...kinds);
+      `).run(workspaceId, ...collapseKinds);
     }
     const deferredCalls = kinds.length === 0
       ? '0'

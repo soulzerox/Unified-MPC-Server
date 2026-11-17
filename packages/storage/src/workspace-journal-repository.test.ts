@@ -143,6 +143,65 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-goal' }).length).toBeLessThanOrEqual(3 + kinds.size);
   });
 
+  it('keeps every open reference whose newest row can settle itself', async () => {
+    // Each kind has an older open row for work that still runs, then a newer row of
+    // the same kind that ends inside its own call. The per-kind collapse used to
+    // delete the older row and keep the newer one, which then closed itself: the
+    // kind was left with nothing open while the work it stood for still ran.
+    const kinds = [
+      ['git_worktree_spawn', 'worktree_preview_settled'],
+      ['agent_swarm_run', 'swarm_read_settled'],
+      ['merge_verification_run', 'verification_settled'],
+    ] as const;
+    for (const [kind, selfSettledCode] of kinds) {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+      temporaryRoots.push(root);
+      const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+      const workspaces = new SqliteWorkspaceRepository(database);
+      await workspaces.insert({
+        id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+        createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+      });
+      const journal = new SqliteWorkspaceJournalRepository(database, { maxEventsPerWorkspace: 3 });
+
+      journal.append({ workspaceId: 'ws-goal', operationKind: kind, phase: 'started', status: 'started', callId: 'work' });
+      journal.append({ workspaceId: 'ws-goal', operationKind: kind, phase: 'started', status: 'started', callId: 'self-settling' });
+      // Overflow the cap with an ordinary deferred kind, which still collapses.
+      for (const callId of ['run-1', 'run-2', 'run-3']) {
+        journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId });
+      }
+
+      expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['work', 'self-settling'] }).sort())
+        .toEqual(['self-settling', 'work']);
+
+      expect(journal.closeDeferredCalls({
+        workspaceId: 'ws-goal',
+        operationKinds: [kind],
+        callIds: ['self-settling'],
+        closureCode: selfSettledCode,
+      })).toBe(1);
+      // The older reference survives and still pins the goal: no later call
+      // represents that work.
+      expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+      expect(journal.closeDeferredCalls({
+        workspaceId: 'ws-goal',
+        operationKinds: [kind],
+        callIds: ['work'],
+        closureCode: 'work_ended',
+      })).toBe(1);
+      // The launch rows the overflow left behind still pin; close them so the last
+      // assertion is about the reference and not about them.
+      journal.closeDeferredCalls({
+        workspaceId: 'ws-goal',
+        operationKinds: ['process_start'],
+        callIds: ['run-1', 'run-2', 'run-3'],
+        closureCode: 'no_live_process',
+      });
+      expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+    }
+  });
+
   it("does not let one goal's deferred operation pin another goal", async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({

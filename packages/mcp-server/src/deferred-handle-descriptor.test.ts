@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { recordableDeferredHandle, recordableDeferredSettlement, SWARM_READ_SETTLED_CLOSURE_CODE, VERIFICATION_SETTLED_CLOSURE_CODE, WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
+import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
+import { upgradeToolInputSchema } from './upgrade-tool-contracts.js';
 
 const input = { workspaceId: 'workspace-1' };
 const done = { isError: false };
@@ -210,6 +212,20 @@ describe('recordableDeferredSettlement', () => {
         isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } },
       })).toEqual({ workspaceId: 'workspace-1', closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE });
     }
+  });
+
+  it('settles the alias only while the schema keeps refusing it', (): void => {
+    // The rule above reads a present `dry_run` as "refused before the handler", which
+    // is true only while this schema rejects the alias. Adding the field to
+    // INPUT_FIELDS would let `{ dryRun: false, dry_run: true }` through, and the spawn
+    // runtime reads that as a real spawn (`dryRun !== false && dry_run !== false`) while
+    // the settlement reads it as a preview — a released pin over a worktree that exists.
+    const entry = UPGRADE_TOOL_CATALOG.find((candidate) => candidate.name === 'git_worktree_spawn');
+    expect(entry).toBeDefined();
+    const schema = upgradeToolInputSchema(entry!);
+    const base = { workspaceId: 'workspace-1', worktreePath: '.worktrees/agent-1', ref: 'main' };
+    expect(schema.safeParse({ ...base, dryRun: false }).success).toBe(true);
+    expect(schema.safeParse({ ...base, dryRun: false, dry_run: true }).success).toBe(false);
   });
 
   it('settles nothing for a read with no workspace, which nothing could be closed against', (): void => {

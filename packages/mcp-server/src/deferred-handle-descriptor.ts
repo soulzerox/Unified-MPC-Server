@@ -237,15 +237,20 @@ function isAgentSwarmRead(input: unknown): boolean {
 }
 
 /**
- * True when the call is the default preview, which creates nothing.
+ * True when the call created no worktree, so its durable-reference row must close.
  *
- * Mirrors the spawn runtime's own gate exactly (`dryRun !== false && dry_run !== false`):
- * treating either spelling of `false` as "absent" would settle a call that really
- * spawned, which is the fail-open direction.
+ * The tool's input schema is `.strict()` and lists only `dryRun`, so a call that
+ * carries the `dry_run` alias is refused before its handler runs and created nothing,
+ * whatever the alias says. The only reachable real spawn is therefore `dryRun === false`
+ * with no alias present, and it keeps its pin: a failure after `git worktree add` is
+ * indistinguishable from a refusal, so reading an error as "nothing was created" would
+ * release a pin over work that exists.
  */
 function isWorktreeSpawnPreview(input: unknown): boolean {
   const value = asRecord(input);
-  return value?.dryRun !== false && value?.dry_run !== false;
+  if (value === undefined) return false;
+  if (value.dry_run !== undefined) return true;
+  return value.dryRun !== false;
 }
 
 /** True only for the `start` sub-action. */

@@ -189,12 +189,24 @@ describe('recordableDeferredSettlement', () => {
   it('leaves a real git_worktree_spawn pinned, since a failure can follow the worktree', (): void => {
     // A spawn that really ran keeps its pin whether it answered or errored: it may have
     // created the worktree and then failed, so reading the error as "nothing was
-    // created" would release a pin over work that exists.
-    for (const response of [done, { isError: true }]) {
-      expect(recordableDeferredSettlement('git_worktree_spawn', {
-        workspaceId: 'workspace-1', dryRun: false,
-      }, response)).toBeUndefined();
+    // created" would release a pin over work that exists. Either spelling of the flag
+    // means a real spawn, exactly as the spawn runtime reads them.
+    for (const realSpawn of [
+      { workspaceId: 'workspace-1', dryRun: false },
+      { workspaceId: 'workspace-1', dry_run: false },
+      { workspaceId: 'workspace-1', dryRun: true, dry_run: false },
+      { workspaceId: 'workspace-1', dryRun: false, dry_run: true },
+    ]) {
+      for (const response of [done, { isError: true }]) {
+        expect(recordableDeferredSettlement('git_worktree_spawn', realSpawn, response)).toBeUndefined();
+      }
     }
+  });
+
+  it('settles a preview written with the dry_run alias too', (): void => {
+    expect(recordableDeferredSettlement('git_worktree_spawn', { workspaceId: 'workspace-1', dry_run: true }, {
+      ...done, structuredContent: { dryRun: true },
+    })).toEqual({ workspaceId: 'workspace-1', closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE });
   });
 
   it('settles nothing for a read with no workspace, which nothing could be closed against', (): void => {

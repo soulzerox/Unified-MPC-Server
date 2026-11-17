@@ -109,8 +109,12 @@ export function recordableDeferredSettlement(
   }
   // A preview creates nothing, so its work ended inside the call whether it answered
   // or errored. Decided from the input alone for the same reason a read is: the
-  // response cannot say whether a directory was created on the way to failing.
-  if (toolName === 'git_worktree_spawn' && asRecord(input)?.dryRun !== false) {
+  // response cannot say whether a directory was created on the way to failing. Both
+  // spellings of the flag count, exactly as the spawn runtime reads them
+  // (`gitWorktreeSpawn` takes `dryRun !== false && dry_run !== false`): reading only
+  // one would treat a real spawn as a preview and release its pin, the fail-open
+  // direction this rule exists to avoid.
+  if (toolName === 'git_worktree_spawn' && isWorktreeSpawnPreview(input)) {
     return { workspaceId, closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE };
   }
   if (response.isError === true) return undefined;
@@ -230,6 +234,18 @@ function agentSwarmOperation(input: unknown): string | undefined {
 function isAgentSwarmRead(input: unknown): boolean {
   const operation = agentSwarmOperation(input);
   return operation !== undefined && AGENT_SWARM_READ_OPERATIONS.has(operation);
+}
+
+/**
+ * True when the call is the default preview, which creates nothing.
+ *
+ * Mirrors the spawn runtime's own gate exactly (`dryRun !== false && dry_run !== false`):
+ * treating either spelling of `false` as "absent" would settle a call that really
+ * spawned, which is the fail-open direction.
+ */
+function isWorktreeSpawnPreview(input: unknown): boolean {
+  const value = asRecord(input);
+  return value?.dryRun !== false && value?.dry_run !== false;
 }
 
 /** True only for the `start` sub-action. */

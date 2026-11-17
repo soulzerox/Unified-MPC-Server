@@ -1,4 +1,4 @@
-import type { CodexService, FileActor, ProcessService } from '@unified-mpc/application';
+import type { AgentSwarmService, AgentSwarmState, CodexService, FileActor, ProcessService } from '@unified-mpc/application';
 import type { ShellCapabilityBackend } from '@unified-mpc/capabilities';
 import type { ManagedProcessState } from '@unified-mpc/process';
 
@@ -24,8 +24,18 @@ const CODEX_GONE_STATES: ReadonlySet<ManagedProcessState> = new Set([
   'exited', 'failed', 'stopped', 'timed_out',
 ]);
 
+/**
+ * How a Codex-backed agent swarm reads.
+ *
+ * `termination_unverified` is live for the same reason it is on a process: the swarm
+ * may still be finishing, and this probe releases a goal, so the doubt goes to the
+ * pin. `queued` has not started yet, so it is live by definition.
+ */
+const SWARM_LIVE_STATES: ReadonlySet<AgentSwarmState> = new Set(['queued', 'running', 'termination_unverified']);
+const SWARM_GONE_STATES: ReadonlySet<AgentSwarmState> = new Set(['completed', 'failed', 'cancelled']);
+
 /** Authorities this runtime can ask about directly; the ledger's closed set is wider. */
-export type DeferredHandleProvider = 'process' | 'task' | 'verification' | 'codex';
+export type DeferredHandleProvider = 'process' | 'task' | 'verification' | 'codex' | 'swarm';
 
 /**
  * A verdict about one deferred handle, or about the workspace that owns it.
@@ -86,6 +96,17 @@ export type MergeVerificationObservation = {
  */
 export type CodexTaskObservation = Pick<CodexService, 'statusForGoalLiveness'>;
 
+/**
+ * The swarm side of a `swarm` handle.
+ *
+ * `agent_swarm_run start`, `delegate` and `parallel_delegate` hand back a swarm id,
+ * and the `AgentSwarmService` that started the swarm owns its state: swarms run in
+ * their own runtime, never in the CLI process listing, so no listing could answer
+ * for one. `statusForGoalLiveness` is that service's trusted probe, already used for
+ * durable-goal orphan detection, so no second store is opened here.
+ */
+export type AgentSwarmObservation = Pick<AgentSwarmService, 'statusForGoalLiveness'>;
+
 export interface DeferredClosureAuthority {
   /**
    * Whether the workspace still owns a live managed process.
@@ -120,6 +141,8 @@ export function createDeferredClosureAuthority(options: {
   readonly verification?: MergeVerificationObservation;
   /** The codex service that launched a `codex_run` task, and the only reader of it. */
   readonly codex?: CodexTaskObservation;
+  /** The swarm service that started the swarm an `agent_swarm_run`/delegate call named. */
+  readonly swarm?: AgentSwarmObservation;
 }): DeferredClosureAuthority {
   const listProcesses = async (
     actor: FileActor,
@@ -142,6 +165,7 @@ export function createDeferredClosureAuthority(options: {
       if (provider === 'task') return taskState(options.tasks, options.durableTasks, workspaceId, handleId);
       if (provider === 'verification') return verificationState(options.verification, workspaceId, handleId);
       if (provider === 'codex') return codexState(options.codex, workspaceId, handleId);
+      if (provider === 'swarm') return swarmState(options.swarm, workspaceId, handleId);
       const listed = await listProcesses(actor, workspaceId);
       if (listed === undefined) return 'unknown';
       const handle = listed.find((entry) => entry.processId === handleId);
@@ -184,6 +208,28 @@ async function codexState(
     if (CODEX_LIVE_STATES.has(state)) return 'live';
     if (CODEX_GONE_STATES.has(state)) return 'gone';
     // A state added later is not evidence the task ended.
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function swarmState(
+  swarm: AgentSwarmObservation | undefined,
+  workspaceId: string,
+  swarmId: string,
+): Promise<DeferredHandleState> {
+  // Same fail-closed direction as the other adapters: no service and an unreadable
+  // swarm both keep the pin. A swarm this host never started answers
+  // `PROCESS_NOT_FOUND`, which is not evidence the work ended.
+  if (swarm === undefined) return 'unknown';
+  try {
+    const observation = swarm.statusForGoalLiveness(workspaceId, swarmId);
+    if (!observation.ok) return 'unknown';
+    const state = observation.value.state;
+    if (SWARM_LIVE_STATES.has(state)) return 'live';
+    if (SWARM_GONE_STATES.has(state)) return 'gone';
+    // A state added later is not evidence the swarm ended.
     return 'unknown';
   } catch {
     return 'unknown';

@@ -32,11 +32,11 @@ const MAX_LIST_LIMIT = 200;
  * liveness, so a journal pin would outlive the goal it describes.
  *
  * `agent_swarm_run` is present even though it carries read-only sub-actions
- * (`status`/`result`/`list`): its `start` hands back a swarm id while the swarm
- * keeps running, and a per-tool-name rule cannot split the sub-actions. Pinning
- * a goal after a status read is a false block; not pinning one after a start is
- * the fail-open this set exists to close, so the set errs closed until the
- * freshness step can ask the swarm store.
+ * (`status`/`result`/`cancel`/`list`): its `start` hands back a swarm id while the
+ * swarm keeps running, and a per-tool-name rule cannot split the sub-actions. Not
+ * pinning one after a start is the fail-open this set exists to close, so the set
+ * errs closed; the journal row of a read is closed by the call itself under
+ * `swarm_read_settled`, so the name-level pin does not outlive the read.
  *
  * A deferred call stays `present` until a freshness probe writes `closure_code`
  * on it (`closeDeferredCalls`): the probe is the only thing that may claim the

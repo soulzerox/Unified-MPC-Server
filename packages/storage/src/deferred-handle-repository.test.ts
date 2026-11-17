@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +10,8 @@ import {
   SqliteDeferredHandleRepository,
 } from './deferred-handle-repository.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
+import { DEFERRED_HANDLE_MIGRATION_SQL } from './migrations/deferred-handle-migration.js';
+import { DEFERRED_HANDLE_PROVIDER_MIGRATION_SQL } from './migrations/deferred-handle-provider-migration.js';
 
 const temporaryRoots: string[] = [];
 
@@ -114,6 +117,42 @@ describe('SqliteDeferredHandleRepository', () => {
       expect(() => insert.run(`call-${provider}`, provider)).not.toThrow();
     }
     expect(() => insert.run('call-unlisted', 'unlisted')).toThrow();
+  });
+
+  it('rebuilds a populated 048 table into the widened provider set without losing a row', async () => {
+    // 049 is a table rebuild, so the claim that matters is not what the INSERT
+    // says but what the migration does to rows that already exist: a handle the
+    // host is still correlating must survive verbatim, and the widened CHECK must
+    // accept it. Built on a raw connection so the schema really is the 048 one.
+    const database = new DatabaseSync(':memory:');
+    try {
+      database.exec('PRAGMA foreign_keys = ON');
+      database.exec('CREATE TABLE workspaces (id TEXT PRIMARY KEY NOT NULL)');
+      database.exec("INSERT INTO workspaces (id) VALUES ('ws-1')");
+      database.exec(DEFERRED_HANDLE_MIGRATION_SQL);
+      const insert = database.prepare(
+        'INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at) VALUES (?, ?, ?, ?, ?)',
+      );
+      const before = [
+        ['ws-1', 'call-process', 'process', 'proc-1', '2026-11-16T10:00:00.000Z'],
+        ['ws-1', 'call-task', 'task', 'task-1', '2026-11-16T10:01:00.000Z'],
+        ['ws-1', 'call-swarm', 'swarm', 'swarm-1', '2026-11-16T10:02:00.000Z'],
+      ] as const;
+      for (const row of before) insert.run(...row);
+
+      database.exec(DEFERRED_HANDLE_PROVIDER_MIGRATION_SQL);
+
+      expect(database.prepare(
+        'SELECT workspace_id, call_id, provider, handle_id, recorded_at FROM deferred_handles ORDER BY call_id',
+      ).all().map((row) => Object.values(row as Record<string, unknown>)))
+        .toEqual([...before].map((row) => [...row]).sort((left, right) => left[1].localeCompare(right[1])));
+      // The widened set is what the rebuild exists for.
+      expect(() => database.prepare(
+        'INSERT INTO deferred_handles (workspace_id, call_id, provider, handle_id, recorded_at) VALUES (?, ?, ?, ?, ?)',
+      ).run('ws-1', 'call-codex', 'codex', 'codex-1', '2026-11-16T10:03:00.000Z')).not.toThrow();
+    } finally {
+      database.close();
+    }
   });
 
   it('never lets one workspace forget another workspace\'s handle', async () => {

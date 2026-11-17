@@ -111,6 +111,48 @@ describe('recording a deferred settlement', () => {
     }]);
   });
 
+  it('settles an agent_swarm_run read, which starts no work to wait for', async (): Promise<void> => {
+    const records: DeferredSettlementRecord[] = [];
+    const events: ActivitySinkEvent[] = [];
+    const swarmId = '11111111-1111-4111-8111-111111111111';
+    const registry = new ToolRegistry({
+      agentSwarm: {
+        async status() {
+          return ok({
+            swarmId,
+            workspaceId: 'workspace-a',
+            state: 'running',
+            maxConcurrency: 1,
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(0).toISOString(),
+            tasks: [],
+          });
+        },
+      },
+    } as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'workspace-a', rootPath: '/tmp/project-a' }),
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+      // The swarm tool is only registered when Codex tools are explicitly enabled.
+      codexToolsEnabled: true,
+      activity: { async record(event): Promise<void> { events.push(event); } },
+      deferredSettlementRecorder: (record): void => { records.push(record); },
+    });
+
+    expect((await registry.invoke('agent_swarm_run', {
+      operation: 'status',
+      workspaceId: 'workspace-a',
+      swarmId,
+    })).isError).not.toBe(true);
+
+    // No handle is recorded for a read (it names a swarm this call did not start),
+    // so the call's own verdict is the only thing that can stop its row pinning.
+    expect(records).toEqual([{
+      workspaceId: 'workspace-a',
+      closureCode: 'swarm_read_settled',
+      callId: events[0]?.callId,
+    }]);
+  });
+
   it('never fails the call it settles when the journal write throws', async (): Promise<void> => {
     const { registry } = verificationRegistry(() => { throw new Error('journal is down'); });
 

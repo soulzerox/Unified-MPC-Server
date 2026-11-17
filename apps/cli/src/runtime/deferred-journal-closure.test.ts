@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
-import { CODEX_TASK_TOOLS, DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, MERGE_VERIFICATION_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
+import { AGENT_SWARM_TOOLS, CODEX_TASK_TOOLS, DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, MERGE_VERIFICATION_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
 import { DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
 import type { DeferredClosureAuthority, DeferredHandleState } from './deferred-closure-authority.js';
 import {
   NO_LIVE_CODEX_CLOSURE_CODE,
   NO_LIVE_PROCESS_CLOSURE_CODE,
+  NO_LIVE_SWARM_CLOSURE_CODE,
   NO_LIVE_TASK_CLOSURE_CODE,
   NO_LIVE_VERIFICATION_CLOSURE_CODE,
   closeJudgedDeferredCalls,
@@ -152,9 +153,10 @@ describe('closeJudgedDeferredCalls', () => {
     // Reachable when the ledger write threw: the row is best-effort, so the call
     // is journaled but has no handle. A live durable task is not in the process
     // listing, so that answer would release the pin on running work.
-    const store = journal(1, [], { 'call-1': 'task_create' });
+    const store = journal(1, ['call-1'], { 'call-1': 'task_create' });
     const asker = authority('gone', 'gone');
 
+    // The row is still open, so the pin and the retry both stay.
     await expect(probe({ store, handles: ledger([]), authority: asker }))
       .resolves.toEqual({ closed: 0, accountedCallIds: [] });
     expect(asker.workspaceProcessState).not.toHaveBeenCalled();
@@ -241,13 +243,67 @@ describe('closeJudgedDeferredCalls', () => {
   it('never answers a codex_run that recorded no handle with the process listing', async () => {
     // A codex_run whose ledger write failed records nothing, and its process is
     // invisible to the CLI listing, so that answer would release a live pin.
-    const store = journal(1, [], { 'call-1': 'codex_run' });
+    const store = journal(1, ['call-1'], { 'call-1': 'codex_run' });
     const asker = authority('gone', 'gone');
 
     await expect(probe({ store, handles: ledger([]), authority: asker }))
       .resolves.toEqual({ closed: 0, accountedCallIds: [] });
     expect(asker.workspaceProcessState).not.toHaveBeenCalled();
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
+  it('closes a started agent swarm by its swarm id under the codex-swarm code', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'swarm', handleId: 'swarm-1' }]);
+    const asker = authority('gone');
+
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
+
+    expect(asker.handleState).toHaveBeenCalledWith({
+      actor, workspaceId: 'ws-1', provider: 'swarm', handleId: 'swarm-1',
+    });
+    const call = store.closeDeferredCalls.mock.calls[0]?.[0] as unknown as { closureCode: string };
+    expect(call.closureCode).toBe(NO_LIVE_SWARM_CLOSURE_CODE);
+    // A swarm runs in its own runtime, so nothing in the process listing speaks for it.
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('keeps a running swarm pinned and re-asks it next sweep', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'swarm', handleId: 'swarm-1' }]);
+
+    await expect(probe({ store, handles, authority: authority('live', 'gone') }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
+  });
+
+  it('never answers a swarm call that recorded no handle with the process listing', async () => {
+    const store = journal(1, ['call-1'], { 'call-1': 'agent_swarm_run' });
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles: ledger([]), authority: asker }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
+  it('accounts a handle-less call its own response already closed instead of retrying it forever', async () => {
+    // An `agent_swarm_run` read settles its own row under `swarm_read_settled`.
+    // The kind is not one the listing can answer, so before this the call would be
+    // remembered forever, filling the bounded retry map with calls nothing can
+    // account for and evicting live ones whose rows then stay pinned.
+    const store = journal(1, [], { 'call-1': 'agent_swarm_run' });
+    const handles = ledger([]);
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles, authority: asker }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: ['call-1'] });
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    // Nothing was closed here: the row was already closed by the call itself.
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
   });
 
   it('never lets a live call in the same probe settle the ones that are gone', async () => {
@@ -313,7 +369,7 @@ describe('closeJudgedDeferredCalls', () => {
 
   it('does not ask a provider no adapter can answer for', async () => {
     const store = journal();
-    const handles = ledger([{ callId: 'call-1', provider: 'swarm', handleId: 'swarm-1' }]);
+    const handles = ledger([{ callId: 'call-1', provider: 'worktree', handleId: 'worktree-1' }]);
     const asker = authority('gone');
 
     // The authority saying `gone` is not enough: a provider with no route has no
@@ -383,7 +439,7 @@ describe('closeJudgedDeferredCalls', () => {
   it('accepts a closure for every tool that records a handle', () => {
     for (const toolName of [
       ...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS, ...DURABLE_TASK_TOOLS, ...MERGE_VERIFICATION_TOOLS,
-      ...CODEX_TASK_TOOLS,
+      ...CODEX_TASK_TOOLS, ...AGENT_SWARM_TOOLS,
     ]) {
       expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(toolName)).toBe(true);
     }

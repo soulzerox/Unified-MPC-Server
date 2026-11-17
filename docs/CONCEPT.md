@@ -93,8 +93,8 @@ This design separates **availability**, **trust**, and **policy enforcement**: a
 Injecting hundreds of tool schemas into an LLM's context window exhausts token budgets and degrades reasoning accuracy.
 
 Unified-MPC-Server solves this with a two-tier exposure model:
-- **Default tier**: `ToolRegistry.list()` advertises 270 of the 277 registered tool definitions in one `tools/list` — the file (`read_file`, `edit_file`), shell, git, search, workspace, goal, plan and integration surfaces, each with a typed schema.
-- **Opt-in tier**: the seven Codex/Agent-Swarm tools (`codex_status`, `codex_run`, `codex_task_list`, `codex_task_status`, `codex_task_logs`, `codex_stop`, `agent_swarm_run`) are advertised only when Codex delegation and Agent Swarm are enabled; `ToolRegistry.listAll()` then exposes all 277.
+- **Default tier**: `ToolRegistry.list()` advertises 271 of the 278 registered tool definitions in one `tools/list` — the file (`read_file`, `edit_file`), shell, git, search, workspace, goal, plan and integration surfaces, each with a typed schema.
+- **Opt-in tier**: the seven Codex/Agent-Swarm tools (`codex_status`, `codex_run`, `codex_task_list`, `codex_task_status`, `codex_task_logs`, `codex_stop`, `agent_swarm_run`) are advertised only when Codex delegation and Agent Swarm is enabled; `ToolRegistry.listAll()` then exposes all 278.
 - **Child MCP servers stay outside the catalog**: policy-vetted read-only calls execute through the parent, mutations keep the normal approval boundary, and idle children are released, so their schemas never enter the client context by default.
 
 ---

@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
-import { DIRECT_PROCESS_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
+import { DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
 import { DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
 import type { DeferredClosureAuthority, DeferredHandleState } from './deferred-closure-authority.js';
 import {
   NO_LIVE_PROCESS_CLOSURE_CODE,
+  NO_LIVE_TASK_CLOSURE_CODE,
   closeJudgedDeferredCalls,
   settleRememberedCalls,
 } from './deferred-journal-closure.js';
@@ -114,6 +115,34 @@ describe('closeJudgedDeferredCalls', () => {
       expect(store.closeDeferredCalls).not.toHaveBeenCalled();
       expect(handles.forget).not.toHaveBeenCalled();
     }
+  });
+
+  it('closes a durable task by its id under the task code, not the process code', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'task', handleId: 'task-1' }]);
+    const asker = authority('gone');
+
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
+
+    expect(asker.handleState).toHaveBeenCalledWith({
+      actor, workspaceId: 'ws-1', provider: 'task', handleId: 'task-1',
+    });
+    const call = store.closeDeferredCalls.mock.calls[0]?.[0] as unknown as { closureCode: string };
+    expect(call.closureCode).toBe(NO_LIVE_TASK_CLOSURE_CODE);
+    // A task with a handle is judged by that handle; asking whether some process
+    // is live in the workspace would answer a different question.
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('keeps a still-running durable task pinned and re-asks it next sweep', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'task', handleId: 'task-1' }]);
+
+    await expect(probe({ store, handles, authority: authority('live', 'gone') }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
   });
 
   it('never lets a live call in the same probe settle the ones that are gone', async () => {
@@ -243,11 +272,11 @@ describe('closeJudgedDeferredCalls', () => {
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
   });
 
-  // The store silently drops kinds outside its deferred set, so a process tool the
-  // recorder writes a handle for but the closure kinds omit turns the sweep into a
-  // no-op for that tool without failing anything else.
-  it('accepts a closure for every tool that records a process handle', () => {
-    for (const toolName of [...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS]) {
+  // The store silently drops kinds outside its deferred set, so a tool the recorder
+  // writes a handle for but the closure kinds omit turns the sweep into a no-op for
+  // that tool without failing anything else.
+  it('accepts a closure for every tool that records a handle', () => {
+    for (const toolName of [...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS, ...DURABLE_TASK_TOOLS]) {
       expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(toolName)).toBe(true);
     }
   });

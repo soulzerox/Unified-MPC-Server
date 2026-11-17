@@ -739,4 +739,43 @@ describe('ShellCapabilityBackend unrestricted', () => {
     await expect(backendB.cancelForGoal('client-1', 'workspace-1', taskId))
       .resolves.toMatchObject({ ok: true, value: { matched: true } });
   }, 15_000);
+
+  it('answers a goal with a liveness verdict, and never calls an unreadable or foreign task gone', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-liveness-'));
+    temporaryRoots.push(root);
+    const taskStateDirectory = path.join(root, '.tasks');
+    const owner = (workspaceId = 'workspace-1'): { metadata: Record<string, unknown> } => ({
+      metadata: { [CAPABILITY_TASK_OWNER_METADATA_KEY]: { clientId: 'client-1', sessionId: 'session-a', workspaceId } },
+    });
+    const backend = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
+    const start = (timeoutSeconds: number): Promise<Result<unknown>> => backend.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', 'setTimeout(() => {}, 5000)'],
+      cwd: root, execution: 'background', timeout_seconds: timeoutSeconds, userConfirmed: true, ...owner(),
+    });
+    const running = await start(10);
+    const expiring = await start(0.5);
+    expect(running).toMatchObject({ ok: true, value: { task_id: expect.any(String) } });
+    expect(expiring).toMatchObject({ ok: true, value: { task_id: expect.any(String) } });
+    if (!running.ok || !expiring.ok) return;
+    const runningId = String((running.value as { task_id: string }).task_id);
+    const expiringId = String((expiring.value as { task_id: string }).task_id);
+
+    await expect(backend.taskLivenessForGoal('workspace-1', runningId)).resolves.toBe('live');
+    // Only a terminal state proves the work ended: the task its own timeout
+    // stopped is `gone`, and the sweep may release the pin on it.
+    const deadline = Date.now() + 15_000;
+    let expiringVerdict = await backend.taskLivenessForGoal('workspace-1', expiringId);
+    while (expiringVerdict === 'live' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expiringVerdict = await backend.taskLivenessForGoal('workspace-1', expiringId);
+    }
+    expect(expiringVerdict).toBe('gone');
+    await expect(backend.taskLivenessForGoal('workspace-1', runningId)).resolves.toBe('live');
+
+    // A foreign workspace and an id this host never wrote are not evidence: both
+    // keep the goal pinned instead of releasing it on the wrong task's terminal
+    // state, or on no task at all.
+    await expect(backend.taskLivenessForGoal('workspace-2', runningId)).resolves.toBe('unknown');
+    await expect(backend.taskLivenessForGoal('workspace-1', 'task-that-never-existed')).resolves.toBe('unknown');
+  }, 30_000);
 });

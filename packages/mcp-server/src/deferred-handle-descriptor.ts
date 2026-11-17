@@ -10,7 +10,7 @@
  */
 
 /** Providers a handle can be recorded for today. The ledger's closed set is wider. */
-export type RecordedDeferredHandleProvider = 'process';
+export type RecordedDeferredHandleProvider = 'process' | 'task';
 
 export interface RecordedDeferredHandle {
   readonly workspaceId: string;
@@ -58,6 +58,15 @@ export function isWrappedProcessTool(toolName: string): boolean {
   return WRAPPED_PROCESS_TOOLS.has(toolName);
 }
 
+/** Tools whose response carries a durable shell task id at the top level. */
+export const DURABLE_TASK_TOOLS: ReadonlySet<string> = new Set([
+  'task_create',
+]);
+
+export function isDurableTaskTool(toolName: string): boolean {
+  return DURABLE_TASK_TOOLS.has(toolName);
+}
+
 /**
  * Derive the recorded handle for a tool response, or `undefined` when this call
  * hands back nothing an authority in this runtime can answer for.
@@ -65,11 +74,11 @@ export function isWrappedProcessTool(toolName: string): boolean {
  * `shell`/`wsl_exec` are deliberately absent: their own process can exit while a
  * backgrounded child keeps working, so no handle they return speaks for the work.
  *
- * `task_create` is absent for a different reason: its `task_id` is a durable shell
- * task, and the runtime's task adapter only resolves the encoded ids of the MCP
- * Tasks extension, so recording one would keep the call pinned forever — the exact
- * thing recording a handle it cannot answer would cause. A durable-task adapter is
- * the prerequisite, not a looser match here.
+ * `task_create` records its `task_id` under provider `task`, whose closure route
+ * asks the shell backend that wrote the durable task, so the id it hands back can
+ * be answered for. A tool with no route is never recorded: recording a handle
+ * nothing can ask about would keep its call pinned forever, which is the exact
+ * failure recording a handle is meant to prevent.
  */
 export function recordableDeferredHandle(
   toolName: string,
@@ -81,6 +90,11 @@ export function recordableDeferredHandle(
   if (structured === undefined) return undefined;
   const workspaceId = boundedString(asRecord(input)?.workspaceId, 128);
   if (workspaceId === undefined) return undefined;
+
+  if (isDurableTaskTool(toolName)) {
+    const taskId = boundedString(structured.task_id, 256);
+    return taskId === undefined ? undefined : { workspaceId, provider: 'task', handleId: taskId };
+  }
 
   if (isDirectProcessTool(toolName)) {
     const processId = boundedString(structured.processId, 256);

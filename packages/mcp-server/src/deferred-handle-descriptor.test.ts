@@ -19,10 +19,15 @@ describe('recordableDeferredHandle', () => {
     expect(recordableDeferredHandle('shell', input, { ...done, structuredContent: { processId: 'proc-3' } })).toBeUndefined();
   });
 
-  it('records nothing for a durable task id no task adapter can resolve', (): void => {
+  it('records the durable task id task_create returned', (): void => {
     // Carries a processId too, so this fails if `task_create` is ever treated as a
-    // process tool: the exclusion is the tool name, not the missing handle.
-    expect(recordableDeferredHandle('task_create', input, { ...done, structuredContent: { task_id: 'task-1', processId: 'proc-1' } })).toBeUndefined();
+    // process tool: the provider is the tool name, not the extra handle.
+    expect(recordableDeferredHandle('task_create', input, { ...done, structuredContent: { task_id: 'task-1', processId: 'proc-1' } }))
+      .toEqual({ workspaceId: 'workspace-1', provider: 'task', handleId: 'task-1' });
+  });
+
+  it('records nothing for a task_create that returned no task id', (): void => {
+    expect(recordableDeferredHandle('task_create', input, { ...done, structuredContent: { processId: 'proc-1' } })).toBeUndefined();
   });
 
   it('records nothing for a failed call, a missing handle, or a call with no workspace', (): void => {

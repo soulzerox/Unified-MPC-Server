@@ -1,4 +1,5 @@
 import type { FileActor, ProcessService } from '@unified-mpc/application';
+import type { ShellCapabilityBackend } from '@unified-mpc/capabilities';
 import type { ManagedProcessState } from '@unified-mpc/process';
 
 const LIVE_PROCESS_STATES: ReadonlySet<ManagedProcessState> = new Set([
@@ -31,6 +32,16 @@ export interface DeferredTaskObservation {
   getTask(params: { readonly taskId: string }): Promise<{ readonly status: string }>;
 }
 
+/**
+ * The durable-task side of a `task` handle.
+ *
+ * `task_create` hands back a durable shell task id, and the shell backend is the
+ * only writer of that task directory, so the authority asks it for a verdict
+ * instead of opening a second store over the same files: one writer per directory
+ * is what keeps a probe from racing the store it reads.
+ */
+export type DurableTaskObservation = Pick<ShellCapabilityBackend, 'taskLivenessForGoal'>;
+
 export interface DeferredClosureAuthority {
   /**
    * Whether the workspace still owns a live managed process.
@@ -59,6 +70,8 @@ export interface DeferredClosureAuthority {
 export function createDeferredClosureAuthority(options: {
   readonly processes?: Pick<ProcessService, 'list'>;
   readonly tasks?: DeferredTaskObservation;
+  /** The backend that wrote the durable task directory a `task_create` id lives in. */
+  readonly durableTasks?: DurableTaskObservation;
 }): DeferredClosureAuthority {
   const listProcesses = async (
     actor: FileActor,
@@ -78,7 +91,7 @@ export function createDeferredClosureAuthority(options: {
     },
 
     async handleState({ actor, workspaceId, provider, handleId }): Promise<DeferredHandleState> {
-      if (provider === 'task') return taskState(options.tasks, handleId);
+      if (provider === 'task') return taskState(options.tasks, options.durableTasks, workspaceId, handleId);
       const listed = await listProcesses(actor, workspaceId);
       if (listed === undefined) return 'unknown';
       const handle = listed.find((entry) => entry.processId === handleId);
@@ -90,8 +103,17 @@ export function createDeferredClosureAuthority(options: {
 
 async function taskState(
   tasks: DeferredTaskObservation | undefined,
+  durableTasks: DurableTaskObservation | undefined,
+  workspaceId: string,
   handleId: string,
 ): Promise<DeferredHandleState> {
+  // A durable shell task id and an MCP task id are both opaque strings, so the
+  // backend that wrote the task directory is asked first: it answers `unknown`
+  // for an id it never wrote, which is exactly the case the protocol covers.
+  if (durableTasks !== undefined) {
+    const verdict = await durableTasks.taskLivenessForGoal(workspaceId, handleId);
+    if (verdict !== 'unknown') return verdict;
+  }
   if (tasks === undefined) return 'unknown';
   try {
     const observation = await tasks.getTask({ taskId: handleId });

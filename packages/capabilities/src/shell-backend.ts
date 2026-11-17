@@ -118,6 +118,16 @@ export interface ShellHeavyAdmissionPort {
 }
 type TaskState = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'termination_unverified';
 
+/**
+ * What a durable goal may learn about one shell task: `live` while the work can
+ * still be running, `gone` only once a terminal state proves it ended, and
+ * `unknown` when nothing could answer.
+ */
+export type GoalTaskLiveness = 'live' | 'gone' | 'unknown';
+
+const GOAL_TASK_LIVE_STATES: ReadonlySet<string> = new Set(['running', 'waiting_resource', 'termination_unverified']);
+const GOAL_TASK_GONE_STATES: ReadonlySet<string> = new Set(['completed', 'failed', 'timed_out', 'cancelled']);
+
 interface ShellRequest {
   readonly operation: ShellOperation;
   readonly executable?: string;
@@ -308,6 +318,28 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       case 'deny':
         return err(appError('INVALID_INPUT', `${parsed.value.operation} is not required by the local task runner`));
     }
+  }
+
+  /**
+   * The only reading of a task a goal may act on: whether the work behind this id
+   * can still be running. `unknown` is never a synonym for `gone` — a task id
+   * this host never wrote, another workspace's task and an unreadable state all
+   * keep the goal pinned, because none of them is evidence the work ended.
+   */
+  public async taskLivenessForGoal(workspaceId: string, taskId: string): Promise<GoalTaskLiveness> {
+    let observed: Result<unknown>;
+    try {
+      observed = await this.statusForGoalLiveness(workspaceId, taskId);
+    } catch {
+      // A store that throws has said nothing about the task; the pin stays.
+      return 'unknown';
+    }
+    const state = observed.ok && isRecord(observed.value) ? observed.value.state : undefined;
+    if (typeof state !== 'string') return 'unknown';
+    if (GOAL_TASK_LIVE_STATES.has(state)) return 'live';
+    if (GOAL_TASK_GONE_STATES.has(state)) return 'gone';
+    // A state added later is not proof of anything, so it keeps the pin too.
+    return 'unknown';
   }
 
   /** Trusted read-only host probe scoped to the durable goal's workspace. */

@@ -7,6 +7,7 @@ import type {
 import type { DeferredClosureAuthority, DeferredHandleProvider } from './deferred-closure-authority.js';
 
 export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
+export const NO_LIVE_TASK_CLOSURE_CODE = 'no_live_task';
 
 /**
  * How one recorded provider becomes a verdict: the adapter to ask, and the closure
@@ -14,10 +15,9 @@ export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
  *
  * A provider missing here has no closure code yet, so its `gone` answer has no
  * vocabulary to be written in: it is never asked and never closed, and its handle
- * keeps the pin, which is the only safe reading of "no verdict". The adapter may
- * well exist already — `task` has one — so the missing piece is the code, not the
- * question. Adding an adapter and its code together is what makes a provider
- * releasable, and one entry is all it takes, so the two can never disagree.
+ * keeps the pin, which is the only safe reading of "no verdict". Adding an adapter
+ * and its code together is what makes a provider releasable, and one entry is all
+ * it takes, so the two can never disagree.
  */
 interface ClosureRoute {
   readonly provider: DeferredHandleProvider;
@@ -26,6 +26,9 @@ interface ClosureRoute {
 
 const CLOSURE_ROUTES: Readonly<Partial<Record<StoredHandleProvider, ClosureRoute>>> = {
   process: { provider: 'process', closureCode: NO_LIVE_PROCESS_CLOSURE_CODE },
+  // `task_create` hands back a durable shell task id; the authority answers it
+  // from the shell backend that wrote the task directory, not from a second store.
+  task: { provider: 'task', closureCode: NO_LIVE_TASK_CLOSURE_CODE },
 };
 
 /**

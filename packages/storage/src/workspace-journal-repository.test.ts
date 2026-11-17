@@ -384,6 +384,43 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
   });
 
+  it('keeps a git_worktree_spawn call pinning after it completed, where a closable kind clears', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_worktree_spawn', phase: 'started', status: 'started', callId: 'spawn-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_worktree_spawn', phase: 'completed', status: 'completed', callId: 'spawn-1', resultCode: 'ok' });
+
+    // The completed row ends the request; the worktree it created outlives it, so
+    // the goal must stay present or cleanup would delete the worktree.
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    // An ordinary completed call in the same workspace closes its own row and is
+    // not evidence about the worktree, so it cannot settle the pin either.
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'started', status: 'started', callId: 'publish-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_publish', phase: 'completed', status: 'completed', callId: 'publish-1', resultCode: 'ok' });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    // Contrast with the kinds that do have a probe route: closing the only
+    // process_start row clears the same projection.
+    await workspaces.insert({
+      id: 'ws-other', displayName: 'Other', rootPath: path.join(root, 'other'), realRootPath: path.join(root, 'other'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-2',
+    });
+    journal.append({ workspaceId: 'ws-other', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'process-1' });
+    journal.append({ workspaceId: 'ws-other', operationKind: 'process_start', phase: 'completed', status: 'completed', callId: 'process-1', resultCode: 'ok' });
+    expect(journal.goalDurableReferenceStates(['goal-2']).get('goal-2')).toBe('present');
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-other', operationKinds: ['process_start'], callIds: ['process-1'], closureCode: 'no_live_process',
+    })).toBe(1);
+    expect(journal.goalDurableReferenceStates(['goal-2']).get('goal-2')).toBe('clear');
+    // ...while the worktree row survived all of it.
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+  });
+
   it('collects a closed deferred call but never the open one, under the same cap', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
     temporaryRoots.push(root);

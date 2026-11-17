@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appError, classifyWorkspaceSourceEvidence, err, ok, type InvocationAuthorization, type Result, type WorkspaceEvidenceFreshness, type WorkspaceSourceEvidenceIdentity } from '@unified-mpc/domain';
+import { appError, err, ok, type InvocationAuthorization, type Result, type WorkspaceEvidenceFreshness } from '@unified-mpc/domain';
 import type { McpToolContext } from './tools/tool-types.js';
 
 const DEFAULT_VERIFY_WAIT_MS = 5 * 60 * 1000;
@@ -173,25 +173,14 @@ async function buildDiffFingerprint(
   if (!staged.ok) return staged;
   const after = await git.observeWorkspace(context.actor, workspaceId, {}, signal);
   if (!after.ok) return after;
-  if (classifyWorkspaceSourceEvidence(
-    workspaceSourceEvidenceIdentity(before.value),
-    workspaceSourceEvidenceIdentity(after.value),
-  ) !== 'fresh') {
+  // The fence compares the same set the key decides on, so a branch rename that
+  // races the fingerprinting cannot abort a verification it could not invalidate.
+  if (sourceKey(before.value) !== sourceKey(after.value)) {
     return err(appError('CONFLICT', 'Workspace source changed during incremental verification fingerprinting', true));
   }
   const changedFiles = after.value.statusEntries.map((entry) => entry.path).sort();
-  // The branch name is deliberately absent: a rename or a detached checkout at the
-  // identical head with identical patches is the same source, and re-running the
-  // typecheck for it would be wasted work. Head, identity and both fingerprints
-  // already decide whether the source moved.
   const hash = createHash('sha256')
-    .update(JSON.stringify({
-      repositoryIdentity: after.value.repositoryIdentity,
-      worktreeIdentity: after.value.worktreeIdentity,
-      head: after.value.head,
-      dirtyFingerprint: after.value.dirtyFingerprint,
-      stagedFingerprint: after.value.stagedFingerprint,
-    }))
+    .update(sourceKey(after.value))
     .update('\0')
     .update(JSON.stringify(after.value.statusEntries))
     .update('\0')
@@ -206,24 +195,30 @@ async function buildDiffFingerprint(
   });
 }
 
-function workspaceSourceEvidenceIdentity(source: {
+/**
+ * The fields that decide whether a cached typecheck result still describes the
+ * source: the repository and worktree it belongs to, the head it was taken at and
+ * both dirty fingerprints.
+ *
+ * The branch name is deliberately absent. A rename or a detached checkout at an
+ * identical head with identical patches is the same source, and re-running the
+ * typecheck for it would be wasted work — so the mid-read fence and the cache key
+ * both ignore it.
+ */
+function sourceKey(source: {
   readonly repositoryIdentity: string;
-  readonly gitCommonDirIdentity: string;
   readonly worktreeIdentity: string;
-  readonly branch: string | null;
   readonly head: string;
   readonly dirtyFingerprint: string;
   readonly stagedFingerprint: string;
-}): WorkspaceSourceEvidenceIdentity {
-  return {
-    repositoryIdentity: source.repositoryIdentity,
-    gitCommonDirIdentity: source.gitCommonDirIdentity,
-    worktreeIdentity: source.worktreeIdentity,
-    ...(source.branch === null ? {} : { branchName: source.branch }),
-    workspaceHead: source.head,
-    dirtyFingerprint: source.dirtyFingerprint,
-    stagedFingerprint: source.stagedFingerprint,
-  };
+}): string {
+  return JSON.stringify([
+    source.repositoryIdentity,
+    source.worktreeIdentity,
+    source.head,
+    source.dirtyFingerprint,
+    source.stagedFingerprint,
+  ]);
 }
 
 function cancelledVerification(): Result<never> {

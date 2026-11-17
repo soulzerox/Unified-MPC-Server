@@ -204,6 +204,9 @@ describe('session tools', () => {
     const otherWorktree = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     repositoryIdentity = 'repo-2';
     const fifth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    // The entry was replaced by the new checkout's result, so the next call replays it
+    // instead of re-running the typecheck forever against a retained foreign entry.
+    const sixth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
 
     expect(first).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'unknown', passed: true } });
     expect(second).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
@@ -214,10 +217,11 @@ describe('session tools', () => {
     // it is unusable: reusing it would report another checkout's result as this one's.
     expect(otherWorktree).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
     expect(fifth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
-    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 2, misses: 5, hitRate: 2 / 7 });
+    expect(sixth).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
+    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 3, misses: 5, hitRate: 3 / 8 });
     expect(verifier.stats().bytesSaved).toBeGreaterThan(0);
     expect(verifier.invalidate('workspace-1')).toBe(1);
-    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 2, misses: 5 });
+    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 3, misses: 5 });
     expect(starts).toBe(5);
   });
 });

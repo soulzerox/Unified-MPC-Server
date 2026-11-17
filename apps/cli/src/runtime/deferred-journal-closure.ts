@@ -8,6 +8,7 @@ import type { DeferredClosureAuthority, DeferredHandleProvider } from './deferre
 
 export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
 export const NO_LIVE_TASK_CLOSURE_CODE = 'no_live_task';
+export const NO_LIVE_VERIFICATION_CLOSURE_CODE = 'no_live_verification';
 
 /**
  * How one recorded provider becomes a verdict: the adapter to ask, and the closure
@@ -29,6 +30,10 @@ const CLOSURE_ROUTES: Readonly<Partial<Record<StoredHandleProvider, ClosureRoute
   // `task_create` hands back a durable shell task id; the authority answers it
   // from the shell backend that wrote the task directory, not from a second store.
   task: { provider: 'task', closureCode: NO_LIVE_TASK_CLOSURE_CODE },
+  // A `queued` `merge_verification_run` hands back an attempt id and the status
+  // port owns the one honest reading of an attempt row, so its terminal answer
+  // releases the pin under its own code.
+  verification: { provider: 'verification', closureCode: NO_LIVE_VERIFICATION_CLOSURE_CODE },
 };
 
 /**

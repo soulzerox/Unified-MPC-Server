@@ -35,4 +35,27 @@ describe('recordableDeferredHandle', () => {
     expect(recordableDeferredHandle('process_start', input, { ...done, structuredContent: {} })).toBeUndefined();
     expect(recordableDeferredHandle('process_start', {}, { ...done, structuredContent: { processId: 'proc-5' } })).toBeUndefined();
   });
+
+  it('records the attempt id a queued merge_verification_run returned', (): void => {
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'queued', attemptId: 'attempt-1' },
+    })).toEqual({ workspaceId: 'workspace-1', provider: 'verification', handleId: 'attempt-1' });
+  });
+
+  it('records nothing for a verification run that already holds its receipt', (): void => {
+    // A run that reached a verdict is not deferred: its gate already ran, so there
+    // is no live work to ask about and no pin that needs releasing.
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'completed', receiptRef: 'receipt-1' },
+    })).toBeUndefined();
+  });
+
+  it('records nothing for a queued verification with no attempt id, or a failed call', (): void => {
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      ...done, structuredContent: { status: 'queued' },
+    })).toBeUndefined();
+    expect(recordableDeferredHandle('merge_verification_run', input, {
+      isError: true, structuredContent: { status: 'queued', attemptId: 'attempt-1' },
+    })).toBeUndefined();
+  });
 });

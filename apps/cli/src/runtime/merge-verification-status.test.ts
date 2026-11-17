@@ -104,7 +104,8 @@ describe('createMergeVerificationStatusPort', () => {
     expect(status.decision).toBeUndefined();
     expect(status.latestReceiptRef).toBeUndefined();
     // The read path must never write; only the owning runner repairs stored rows.
-    expect(Object.keys(port)).toEqual(['get']);
+    // `attemptState` is the same reading about one row, not a second writer.
+    expect(Object.keys(port)).toEqual(['get', 'attemptState']);
   });
 
   it('reconciles an expired attempt from a receipt persisted after it started', async () => {
@@ -144,7 +145,7 @@ describe('createMergeVerificationStatusPort', () => {
     expect(status.latestReceiptRef).toBe('merge-verification:305@head:receipt');
     expect(status.decision).toMatchObject({ status: 'MERGE_ALLOWED' });
     // Reconciliation is projected from durable evidence; it never writes the attempt row.
-    expect(Object.keys(port)).toEqual(['get']);
+    expect(Object.keys(port)).toEqual(['get', 'attemptState']);
   });
 
   it('reconciles an attempt already reaped as interrupted from a later receipt', async () => {
@@ -358,5 +359,77 @@ describe('createMergeVerificationStatusPort', () => {
 
     expect(status.latestReceiptRef).toBe('merge-verification:305@head:receipt');
     expect(status.decision).toBeUndefined();
+  });
+});
+
+describe('createMergeVerificationStatusPort — attemptState', () => {
+  const WORKSPACE = 'ws-1';
+
+  function port(options: {
+    readonly record?: Record<string, unknown>;
+    readonly thrown?: boolean;
+    readonly noLookup?: boolean;
+    readonly receipts?: readonly Record<string, unknown>[];
+  }): ReturnType<typeof createMergeVerificationStatusPort> {
+    return createMergeVerificationStatusPort({
+      attempts: {
+        list: vi.fn(async () => []),
+        ...(options.noLookup === true ? {} : {
+          getById: vi.fn(async () => {
+            if (options.thrown === true) throw new Error('row unreadable');
+            return options.record as never;
+          }),
+        }),
+      },
+      receipts: {
+        listForExactHead: vi.fn(async () => (options.receipts ?? []) as never),
+        listForPullRequest: vi.fn(async () => []),
+      },
+      policy: { getByRepository: async () => policy() },
+      now: () => new Date(NOW),
+    });
+  }
+
+  function record(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      attemptId: 'attempt-1',
+      headSha: HEAD,
+      workspaceId: WORKSPACE,
+      status: 'queued',
+      startedAt: '2026-10-27T09:00:00.000Z',
+      heartbeatAt: '2026-10-27T09:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('reads a queued or running attempt as live and a terminal one as gone', async () => {
+    for (const status of ['queued', 'running']) {
+      await expect(port({ record: record({ status, heartbeatAt: NOW }) })
+        .attemptState({ attemptId: 'attempt-1', workspaceId: WORKSPACE })).resolves.toBe('live');
+    }
+    for (const status of ['completed', 'failed', 'interrupted']) {
+      await expect(port({ record: record({ status }) })
+        .attemptState({ attemptId: 'attempt-1', workspaceId: WORKSPACE })).resolves.toBe('gone');
+    }
+  });
+
+  it('reads an expired running attempt as gone, because no runner can still report', async () => {
+    // The same reading `get` applies, without the receipt recovery: a dead runner
+    // is terminal for closure purposes either way, since the receipt is what
+    // authorizes a merge, not the attempt.
+    await expect(port({ record: record({ status: 'running', heartbeatAt: '2026-10-27T09:00:00.000Z' }) })
+      .attemptState({ attemptId: 'attempt-1', workspaceId: WORKSPACE })).resolves.toBe('gone');
+  });
+
+  it('answers unknown for another workspace, an absent row, an unreadable row, or no lookup', async () => {
+    for (const asker of [
+      port({ record: record({ workspaceId: 'ws-other' }) }),
+      port({ record: undefined }),
+      port({ thrown: true }),
+      port({ noLookup: true }),
+    ]) {
+      await expect(asker.attemptState({ attemptId: 'attempt-1', workspaceId: WORKSPACE }))
+        .resolves.toBe('unknown');
+    }
   });
 });

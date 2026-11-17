@@ -10,7 +10,7 @@ const TASK_LIVE_STATES: ReadonlySet<string> = new Set(['working', 'input_require
 const TASK_GONE_STATES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 
 /** Authorities this runtime can ask about directly; the ledger's closed set is wider. */
-export type DeferredHandleProvider = 'process' | 'task';
+export type DeferredHandleProvider = 'process' | 'task' | 'verification';
 
 /**
  * A verdict about one deferred handle, or about the workspace that owns it.
@@ -42,6 +42,21 @@ export interface DeferredTaskObservation {
  */
 export type DurableTaskObservation = Pick<ShellCapabilityBackend, 'taskLivenessForGoal'>;
 
+/**
+ * The verification side of a `verification` handle.
+ *
+ * `merge_verification_run` hands back an attempt id while the gate it queued has
+ * not run, and the status port is the one place that reads an attempt row
+ * honestly — it knows a `running` row whose heartbeat expired is a dead runner,
+ * not live work — so the authority asks it instead of decoding the row again.
+ */
+export type MergeVerificationObservation = {
+  attemptState(request: {
+    readonly attemptId: string;
+    readonly workspaceId: string;
+  }): Promise<DeferredHandleState>;
+};
+
 export interface DeferredClosureAuthority {
   /**
    * Whether the workspace still owns a live managed process.
@@ -72,6 +87,8 @@ export function createDeferredClosureAuthority(options: {
   readonly tasks?: DeferredTaskObservation;
   /** The backend that wrote the durable task directory a `task_create` id lives in. */
   readonly durableTasks?: DurableTaskObservation;
+  /** The status port that owns the reading of a queued `merge_verification_run`. */
+  readonly verification?: MergeVerificationObservation;
 }): DeferredClosureAuthority {
   const listProcesses = async (
     actor: FileActor,
@@ -92,6 +109,7 @@ export function createDeferredClosureAuthority(options: {
 
     async handleState({ actor, workspaceId, provider, handleId }): Promise<DeferredHandleState> {
       if (provider === 'task') return taskState(options.tasks, options.durableTasks, workspaceId, handleId);
+      if (provider === 'verification') return verificationState(options.verification, workspaceId, handleId);
       const listed = await listProcesses(actor, workspaceId);
       if (listed === undefined) return 'unknown';
       const handle = listed.find((entry) => entry.processId === handleId);
@@ -99,6 +117,22 @@ export function createDeferredClosureAuthority(options: {
       return LIVE_PROCESS_STATES.has(handle.state) ? 'live' : 'gone';
     },
   };
+}
+
+async function verificationState(
+  verification: MergeVerificationObservation | undefined,
+  workspaceId: string,
+  attemptId: string,
+): Promise<DeferredHandleState> {
+  // No adapter is the same answer as an adapter that cannot read the row: the
+  // call keeps its pin. Only a `gone` verdict releases it.
+  if (verification === undefined) return 'unknown';
+  try {
+    const verdict = await verification.attemptState({ attemptId, workspaceId });
+    return verdict === 'live' || verdict === 'gone' ? verdict : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 async function taskState(

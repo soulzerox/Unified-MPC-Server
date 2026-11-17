@@ -189,3 +189,52 @@ describe('deferred closure authority — codex adapter', () => {
     }
   });
 });
+
+describe('deferred closure authority — swarm adapter', () => {
+  type SwarmState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'termination_unverified';
+
+  function snapshot(state: SwarmState): ReturnType<typeof ok> {
+    return ok({ swarmId: 'swarm-1', workspaceId, state, maxConcurrency: 1, createdAt: at, updatedAt: at, tasks: [] });
+  }
+
+  const swarm = (
+    statusForGoalLiveness: (ws: string, swarmId: string) => ReturnType<typeof ok> | ReturnType<typeof err>,
+  ): ReturnType<typeof createDeferredClosureAuthority> => createDeferredClosureAuthority({
+    swarm: { statusForGoalLiveness } as unknown as NonNullable<
+      Parameters<typeof createDeferredClosureAuthority>[0]['swarm']
+    >,
+  });
+
+  it('reads the swarm service probe, with only a terminal swarm releasing the pin', async () => {
+    for (const state of ['queued', 'running', 'termination_unverified'] as const) {
+      await expect(swarm(() => snapshot(state))
+        .handleState({ actor, workspaceId, provider: 'swarm', handleId: 'swarm-1' })).resolves.toBe('live');
+    }
+    for (const state of ['completed', 'failed', 'cancelled'] as const) {
+      await expect(swarm(() => snapshot(state))
+        .handleState({ actor, workspaceId, provider: 'swarm', handleId: 'swarm-1' })).resolves.toBe('gone');
+    }
+  });
+
+  it('asks the service about this workspace and swarm', async () => {
+    const statusForGoalLiveness = vi.fn(() => snapshot('cancelled'));
+    await swarm(statusForGoalLiveness)
+      .handleState({ actor, workspaceId, provider: 'swarm', handleId: 'swarm-1' });
+    // A swarm of another workspace is not evidence about this one.
+    expect(statusForGoalLiveness).toHaveBeenCalledWith(workspaceId, 'swarm-1');
+  });
+
+  it('keeps a swarm pinned when the service errors, throws, cannot tell, or was never given', async () => {
+    for (const asker of [
+      swarm(() => err(appError('PROCESS_NOT_FOUND', 'missing'))),
+      swarm(() => { throw new Error('swarm store exploded'); }),
+      swarm(() => ok({
+        swarmId: 'swarm-1', workspaceId, state: 'paused', maxConcurrency: 1, createdAt: at, updatedAt: at, tasks: [],
+      }) as unknown as ReturnType<typeof ok>),
+      createDeferredClosureAuthority({}),
+    ]) {
+      await expect(asker.handleState({ actor, workspaceId, provider: 'swarm', handleId: 'swarm-1' }))
+        .resolves.toBe('unknown');
+    }
+  });
+});

@@ -61,7 +61,7 @@ import {
   type ExtensionsService,
   type ManagedPolicyRepairReport,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, DIRECT_PROCESS_TOOLS, isCodexTaskTool, isDirectProcessTool, isDurableTaskTool, isWrappedProcessTool, WRAPPED_PROCESS_TOOLS, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, DIRECT_PROCESS_TOOLS, isAgentSwarmTool, isCodexTaskTool, isDirectProcessTool, isDurableTaskTool, isWrappedProcessTool, WRAPPED_PROCESS_TOOLS, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   ThaiRagIndexJobStore,
@@ -234,11 +234,13 @@ export const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
  * reason: only a queued attempt carries a handle, so the recorder remembers the
  * call and a name entry would retry a completed run forever. `codex_run` is here
  * because every successful call hands back a `codexTaskId` its service can answer
- * for, and the process listing cannot see it.
+ * for, and the process listing cannot see it. An agent swarm (`agent_swarm_run`
+ * `start`, `delegate`, `parallel_delegate`) is here for the same reason: its swarm id
+ * is answered by the swarm service, never by a process listing.
  */
 const ownsDeferredHandle = (toolName: string): boolean =>
   isDirectProcessTool(toolName) || isWrappedProcessTool(toolName) || isDurableTaskTool(toolName)
-  || isCodexTaskTool(toolName);
+  || isCodexTaskTool(toolName) || isAgentSwarmTool(toolName);
 
 /**
  * Kinds a managed-process listing can speak for.
@@ -1778,6 +1780,9 @@ export function createStdioMcpRuntime(
     // A `codex_run` task is only visible to the codex service that launched it: the
     // CLI process listing is a different manager and cannot see its process.
     codex: codexService,
+    // An agent swarm's state lives in the swarm service that started it; the CLI
+    // process listing has no entry for it.
+    swarm: agentSwarmService,
   });
 
   return {

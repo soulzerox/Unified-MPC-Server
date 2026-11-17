@@ -67,6 +67,40 @@ describe('recordableDeferredHandle', () => {
     })).toBeUndefined();
   });
 
+  it('records the swarm id a started agent swarm returned under its own provider', (): void => {
+    expect(recordableDeferredHandle('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'start' }, {
+      ...done, structuredContent: { swarmId: 'swarm-1', state: 'queued', tasks: [] },
+    })).toEqual({ workspaceId: 'workspace-1', provider: 'swarm', handleId: 'swarm-1' });
+  });
+
+  it('records nothing for an agent_swarm_run read, which names a swarm it did not start', (): void => {
+    // `status`/`result`/`cancel`/`list` answer with the snapshot of some other
+    // swarm, so recording its id would let this call's pin be released by work it
+    // never started.
+    for (const operation of ['status', 'result', 'cancel', 'list']) {
+      expect(recordableDeferredHandle('agent_swarm_run', { workspaceId: 'workspace-1', operation }, {
+        ...done, structuredContent: { swarmId: 'swarm-9', state: 'running' },
+      })).toBeUndefined();
+    }
+  });
+
+  it('records the swarm id the delegate tools wrapped', (): void => {
+    for (const toolName of ['delegate', 'parallel_delegate']) {
+      expect(recordableDeferredHandle(toolName, input, {
+        ...done, structuredContent: { tool: toolName, delegateId: 'swarm-2', swarm: { swarmId: 'swarm-2', state: 'running' } },
+      })).toEqual({ workspaceId: 'workspace-1', provider: 'swarm', handleId: 'swarm-2' });
+    }
+  });
+
+  it('records nothing for an agent swarm with no id, or a failed call', (): void => {
+    expect(recordableDeferredHandle('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'start' }, {
+      ...done, structuredContent: { state: 'queued' },
+    })).toBeUndefined();
+    expect(recordableDeferredHandle('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'start' }, {
+      isError: true, structuredContent: { swarmId: 'swarm-1', state: 'queued' },
+    })).toBeUndefined();
+  });
+
   it('records nothing for a queued verification with no attempt id, or a failed call', (): void => {
     expect(recordableDeferredHandle('merge_verification_run', input, {
       ...done, structuredContent: { status: 'queued' },

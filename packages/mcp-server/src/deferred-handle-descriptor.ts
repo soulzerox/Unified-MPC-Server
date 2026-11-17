@@ -10,7 +10,7 @@
  */
 
 /** Providers a handle can be recorded for today. The ledger's closed set is wider. */
-export type RecordedDeferredHandleProvider = 'process' | 'task' | 'verification' | 'codex';
+export type RecordedDeferredHandleProvider = 'process' | 'task' | 'verification' | 'codex' | 'swarm';
 
 export interface RecordedDeferredHandle {
   readonly workspaceId: string;
@@ -142,6 +142,29 @@ export function isCodexTaskTool(toolName: string): boolean {
 }
 
 /**
+ * Tools that hand back the id of a Codex-backed agent swarm this host owns.
+ *
+ * `agent_swarm_run` carries read sub-actions too (`status`/`result`/`cancel`/`list`),
+ * so only its `start` operation is a handle: the response shapes are snapshots of a
+ * *different* swarm the caller merely asked about. `delegate`/`parallel_delegate` are
+ * always a start and answer `{ delegateId, swarm }`. All of them are answered by the
+ * `AgentSwarmService` that started the swarm, and its own goal-liveness probe is the
+ * one reading of that swarm's state no listing could reproduce.
+ */
+export const AGENT_SWARM_TOOLS: ReadonlySet<string> = new Set([
+  'agent_swarm_run',
+  'delegate',
+  'parallel_delegate',
+]);
+
+export function isAgentSwarmTool(toolName: string): boolean {
+  return AGENT_SWARM_TOOLS.has(toolName);
+}
+
+/** The only `agent_swarm_run` operation that starts work; the rest are reads. */
+const AGENT_SWARM_START_OPERATION = 'start';
+
+/**
  * Derive the recorded handle for a tool response, or `undefined` when this call
  * hands back nothing an authority in this runtime can answer for.
  *
@@ -157,6 +180,10 @@ export function isCodexTaskTool(toolName: string): boolean {
  * `codex_run` records its `codexTaskId` under provider `codex`, whose closure route
  * asks the codex service that launched it: the id is invisible to the CLI process
  * listing, so no other provider could answer for it.
+ * `agent_swarm_run`'s `start`, `delegate` and `parallel_delegate` record their swarm
+ * id under provider `swarm`, whose closure route asks the swarm service that started
+ * it. A read sub-action records nothing: it names a swarm this call did not start, so
+ * a handle there would let one call's pin be released by another call's work.
  * A tool with no route is never recorded: recording a handle nothing can ask about
  * would keep its call pinned forever, which is the exact failure recording a handle
  * is meant to prevent.
@@ -181,6 +208,19 @@ export function recordableDeferredHandle(
   if (isCodexTaskTool(toolName)) {
     const codexTaskId = boundedString(structured.codexTaskId, 256);
     return codexTaskId === undefined ? undefined : { workspaceId, provider: 'codex', handleId: codexTaskId };
+  }
+
+  if (isAgentSwarmTool(toolName)) {
+    // A `status`/`result`/`cancel`/`list` sub-action answers with a snapshot of a
+    // swarm this call did not start, so its id is not this call's handle.
+    if (toolName === 'agent_swarm_run' && asRecord(input)?.operation !== AGENT_SWARM_START_OPERATION) {
+      return undefined;
+    }
+    // `agent_swarm_run` answers the snapshot itself; the delegate tools wrap it.
+    const swarmId = boundedString(structured.swarmId, 256)
+      ?? boundedString(structured.delegateId, 256)
+      ?? boundedString(asRecord(structured.swarm)?.swarmId, 256);
+    return swarmId === undefined ? undefined : { workspaceId, provider: 'swarm', handleId: swarmId };
   }
 
   if (isDurableTaskTool(toolName)) {

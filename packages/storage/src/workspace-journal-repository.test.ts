@@ -140,6 +140,9 @@ describe('SqliteWorkspaceJournalRepository', () => {
     // call: the deferred set is a policy input, not a second code path.
     const closing = new SqliteWorkspaceJournalRepository(database, { deferredClosureKinds: new Set() });
     expect(closing.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
+    // The same policy also removes the kind clause from the open-call read: with no
+    // deferred kinds the statement must still bind in the right order and answer.
+    expect(closing.openCallIds({ workspaceId: 'ws-goal', callIds: ['spawn-1'] })).toEqual([]);
   });
 
   it('never lets retention delete the deferred evidence that pins a goal, and keeps the store bounded', async () => {

@@ -176,8 +176,30 @@ describe('workspace resume snapshot', () => {
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
-    expect(snapshot.value.events.map((event) => event.open)).toEqual([true, false, false]);
-    expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 1 });
+    // The completion row is open too: it is the same call, and the work it started is
+    // still pinned. One call, counted once, at the newest row it owns.
+    expect(snapshot.value.events.map((event) => event.open)).toEqual([true, true, false]);
+    expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 2 });
+  });
+
+  it('reports a handle-returning call open from a window that only holds its completion', () => {
+    // The cursor lands between the two rows, so the window cannot see the `started` row
+    // and cannot see that the kind is handle-returning. Reading "open" off the row's own
+    // phase would tell a resumed session the spawned work had finished.
+    const { journal, openRequests } = journalOf([
+      entry({ sequence: 1, operationKind: 'process_start', callId: 'spawn-1', phase: 'started', status: 'started' }),
+      entry({ sequence: 2, operationKind: 'process_start', callId: 'spawn-1', phase: 'completed', status: 'completed' }),
+      entry({ sequence: 3, operationKind: 'git_publish', callId: 'publish-1', phase: 'completed', status: 'completed' }),
+    ], ['process_start']);
+    const read = createWorkspaceResumeSnapshotReader({ journal, now });
+
+    const snapshot = read.read({ workspaceId: 'ws-1', afterSequence: 1, limit: 2 });
+
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    expect(snapshot.value.events.map((event) => [event.sequence, event.open])).toEqual([[2, true], [3, false]]);
+    expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 2 });
+    expect(openRequests).toEqual([{ workspaceId: 'ws-1', callIds: ['spawn-1', 'publish-1'] }]);
   });
 
   it('asks the store for one workspace only', () => {

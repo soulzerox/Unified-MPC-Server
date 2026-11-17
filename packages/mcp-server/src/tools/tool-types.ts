@@ -328,8 +328,8 @@ export interface McpApplicationServices {
   readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
   /**
    * Read-only, bounded journal projection for a session that was not there (#170).
-   * Omitted when the runtime has no workspace journal, which keeps the tool absent
-   * rather than answering `clear` from nothing.
+   * Omitted when the runtime has no workspace journal: the tool is still advertised
+   * but refuses the call, rather than answering `clear` from nothing.
    */
   readonly workspaceResume?: WorkspaceResumeSnapshotReader;
   readonly projectSnapshot?: ProjectSnapshotPort;

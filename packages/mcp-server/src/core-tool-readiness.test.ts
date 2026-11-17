@@ -127,7 +127,7 @@ describe('core tool readiness', () => {
     expect(calls).toContain('capabilities.accessibility');
   });
 
-  it('keeps the exhaustive success matrix aligned with all 123 core tools', () => {
+  it('keeps the exhaustive success matrix aligned with all 140 core tools', () => {
     const registry = coreRegistry();
     const generic = Object.keys(CORE_TOOL_SMOKE_INPUTS).filter((name) => !STATEFUL_CORE_SUCCESS_TOOLS.has(name));
     expect([...generic, ...STATEFUL_CORE_SUCCESS_TOOLS].sort()).toEqual(coreToolNames(registry));

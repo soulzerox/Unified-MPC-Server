@@ -1165,7 +1165,18 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
   // while read-only callers above stay permissive.
   const readSyncSettings = (): Result<ReturnType<typeof parseExtensionsSettings>> => {
     try {
-      return ok(parseExtensionsSettings(getWorkspaceState().settings.get(EXTENSIONS_SETTINGS_KEY)));
+      const persisted = getWorkspaceState().settings.get(EXTENSIONS_SETTINGS_KEY);
+      // `parseExtensionsSettings` swallows a malformed document and returns the
+      // defaults, so a damaged row would still authorise a default-policy write
+      // over a curated block (#872). Validate the raw value first: it must be a
+      // JSON object, which is the only shape the settings document has.
+      if (persisted !== undefined && persisted !== null) {
+        const parsed: unknown = JSON.parse(persisted);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error(`the stored document is ${Array.isArray(parsed) ? 'an array' : typeof parsed}, not an object`);
+        }
+      }
+      return ok(parseExtensionsSettings(persisted));
     } catch (error) {
       return err(appError(
         'INTERNAL_ERROR',

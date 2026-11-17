@@ -378,6 +378,53 @@ describe('CLI default dependency lifecycle', () => {
     }
   });
 
+  it('refuses to sync the policy block when the persisted extensions document is malformed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-sync-settings-malformed-'));
+    const canonical = path.join(root, 'canonical');
+    const home = path.join(root, 'home');
+
+    const previousDataPath = process.env.UNIFIED_MPC_DATA_PATH;
+    const previousHome = process.env.HOME;
+    const previousXdgDataHome = process.env.XDG_DATA_HOME;
+    process.env.UNIFIED_MPC_DATA_PATH = canonical;
+    process.env.HOME = home;
+    process.env.XDG_DATA_HOME = path.join(root, 'xdg');
+
+    try {
+      // Initialise the canonical store, then damage only the extensions row: the
+      // DB stays readable, so the parse-time default fallback is what has to be
+      // refused here rather than the store read.
+      await createDefaultCliDependencies().workspaceList();
+      const db = new DatabaseSync(path.join(canonical, 'unified-mpc.sqlite'));
+      try {
+        const write = db.prepare(
+          'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        );
+        for (const damaged of ['{not json', '[]', 'null', '"just a string"']) {
+          write.run('extensions', damaged);
+          const result = await createDefaultCliDependencies().sync?.(['opencode']);
+          expect(result?.ok).toBe(false);
+          if (result !== undefined && !result.ok) {
+            expect(result.error.message).toMatch(/persisted extensions settings cannot be read/u);
+          }
+          // The destructive half of #872: never write DEFAULT_POLICIES over a
+          // block whose persisted document could not be used.
+          expect(existsSync(path.join(home, '.config', 'opencode', 'AGENTS.md'))).toBe(false);
+        }
+      } finally {
+        db.close();
+      }
+    } finally {
+      if (previousDataPath === undefined) delete process.env.UNIFIED_MPC_DATA_PATH;
+      else process.env.UNIFIED_MPC_DATA_PATH = previousDataPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = previousXdgDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('recovers historical storage through the default CLI dependency without opening the guarded workspace DB first', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-cli-storage-recover-'));
     const canonical = path.join(root, 'canonical');

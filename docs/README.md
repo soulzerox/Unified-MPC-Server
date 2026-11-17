@@ -36,4 +36,6 @@ Unified-MPC-Server is a 100% Linux-native, local-first Model Context Protocol (M
    Generated inventory of the live `ToolRegistry` (permissions, advertised tier, delivery state, runtime evidence) plus the MCP protocol and result rules.
 15. **[Audit Remediation Record](AUDIT_REMEDIATION.md)**:
    The accepted-base audit, each finding's guardrail fix and its evidence, and the remediation status.
+16. **[Skill Precedence Decision](SKILL_PRECEDENCE_DECISION_294.md)**:
+   The recorded host Skill reconciliation (#294): the 12 imports into the canonical store, the canonical-copy-wins decision for all 43 divergent names with per-variant fingerprints, and the rollback path that keeps every legacy root intact.
 

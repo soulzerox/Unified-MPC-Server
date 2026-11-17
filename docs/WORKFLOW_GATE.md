@@ -425,17 +425,17 @@ workspace journal:
    process manager and a swarm in its own runtime, so neither is ever in the CLI
    listing: their ids are recorded under provider `codex` and `swarm`, never
    `process`, which could only read them all as gone. A `git_worktree_spawn` call
-   deliberately has no route: its row is a durable reference, not work in flight.
-   `goalDurableReferenceStates` reports the goal `present` while that row is open,
-   and that `present` is the `durable_references_present` blocker
-   `evaluateGoalWorkspaceCleanup` raises, which is what stops goal-workspace
-   cleanup discarding a worktree cleanup would otherwise delete. Closing it from
-   this runtime would report the goal `clear` and let the gate remove the only
-   handle to work the worktree still holds, so the pin is the answer rather than a
-   gap. There is no `worktree` provider and no `no_live_worktree` code: the
-   worktree lifecycle authorities (`GoalWorktreeReconciliationPort`,
-   `goal-worktree-ledger`) answer the removal question directly, and the journal
-   is not the place to duplicate it.
+   deliberately has no closure route: its row is a durable reference, not work in
+   flight. `goalDurableReferenceStates` reports the goal `present` while that row is
+   open, and that `present` is the `durable_references_present` blocker
+   `evaluateGoalWorkspaceCleanup` raises, which is what stops goal-workspace cleanup
+   from discarding a worktree that still holds work. Closing it from this runtime
+   would report the goal `clear` and let the gate remove the only handle to that
+   work, so the pin is the answer rather than a gap. The ledger's provider union does
+   list `worktree`, but there is deliberately no `CLOSURE_ROUTES` entry for the kind
+   and no `no_live_worktree` code: the worktree lifecycle authorities
+   (`GoalWorktreeReconciliationPort`, `goal-worktree-ledger`) answer the removal
+   question directly, and the journal is not the place to duplicate it.
    Retention collapses older *open* calls of the same kind, so the pin costs one
    row per kind instead of growing with every launch, and collects a closed call
    like any other evidence. `run_goal` stays out of that set: the

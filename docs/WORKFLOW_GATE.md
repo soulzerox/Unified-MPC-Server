@@ -454,9 +454,14 @@ workspace journal:
    that really spawned (`dryRun: false`) keeps its pin even when it failed: it may have
    created the worktree and then errored, so reading the error as "nothing was created"
    would release a pin over work that exists.
-   Retention collapses older *open* calls of the same kind, so the pin costs one
-   row per kind instead of growing with every launch, and collects a closed call
-   like any other evidence. `run_goal` stays out of that set: the
+   Retention collapses older *open* calls of a kind whose open row is interchangeable
+   in-flight work, so a launcher costs one row per kind instead of growing with every
+   launch, and collects a closed call like any other evidence. A kind whose newest open
+   row can settle itself is never collapsed (`DURABLE_REFERENCE_OPERATION_KINDS`:
+   `git_worktree_spawn`, `agent_swarm_run`, `merge_verification_run`): collapsing would
+   let that newer row evict an older open row that no later call represents, and then
+   close itself, leaving the kind with nothing open while the work it stood for still
+   runs. `run_goal` stays out of the pinning set entirely: the
    goal runtime already tracks goal liveness.
    `apps/cli` passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, and `gate check --phase close` reads it through

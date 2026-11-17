@@ -53,19 +53,25 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Kinds whose open row is a durable reference to work that outlives the call.
+ * Kinds whose open row is a reference to work that outlives the call, and whose newest
+ * open row can be closed by a later call of the same kind.
  *
- * A `git_worktree_spawn` row stands for a worktree that may still hold work, so two
- * open rows of that kind are two different references, not two reports of the same
- * in-flight work. Retention's per-kind collapse treats open rows as interchangeable
- * and keeps the newest; now that a preview settles its own row, that would let a
- * preview evict an open real spawn and then close itself, leaving the kind with no
- * open row and a worktree nothing pins. These kinds are therefore never collapsed:
- * losing one reference is the fail-open direction, and a spawn is a rare event next
- * to a launcher.
+ * Two open rows of such a kind are two different references, not two reports of the
+ * same in-flight work: a `git_worktree_spawn` row stands for a worktree that may still
+ * hold work, an `agent_swarm_run start` row for a swarm that still runs, and a
+ * `merge_verification_run` row for an attempt that is still queued. Retention's
+ * per-kind collapse treats open rows as interchangeable and keeps the newest, which is
+ * how each of them can lose its pin: the evicted row is the only evidence of that work,
+ * and the survivor then settles itself under `worktree_preview_settled`,
+ * `swarm_read_settled` or `verification_settled`, leaving the kind with nothing open
+ * while the work still runs. These kinds are therefore never collapsed — losing a
+ * reference is the fail-open direction, and each of them is rare next to a launcher.
+ *
+ * Adding a settlement rule for another kind means adding it here too. The journal
+ * cannot derive the list: the rules live in the MCP server, one layer up.
  */
 export const DURABLE_REFERENCE_OPERATION_KINDS: ReadonlySet<string> = new Set([
-  'git_worktree_spawn',
+  'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run',
 ]);
 
 export type WorkspaceJournalPhase = 'started' | 'completed';

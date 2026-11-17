@@ -54,6 +54,19 @@ export const VERIFICATION_SETTLED_CLOSURE_CODE = 'verification_settled';
  */
 export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
 
+/**
+ * Why a `git_worktree_spawn` preview ends its own deferral.
+ *
+ * The tool defaults to a preview: it reports the worktree it would create and creates
+ * nothing. Its journal row is a durable reference, so a preview's row left open pins
+ * the goal `present` over a worktree that was never made, and the lifecycle authorities
+ * that answer the removal question have nothing to answer about. A call that really
+ * spawned (`dryRun: false`) keeps its pin instead: a failure after creating the
+ * directory is indistinguishable from a refusal, so reading an error as "nothing was
+ * created" would release a pin over a worktree that exists.
+ */
+export const WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE = 'worktree_preview_settled';
+
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;
@@ -93,6 +106,12 @@ export function recordableDeferredSettlement(
   // probe could ever answer it.
   if (toolName === 'agent_swarm_run' && isAgentSwarmRead(input)) {
     return { workspaceId, closureCode: SWARM_READ_SETTLED_CLOSURE_CODE };
+  }
+  // A preview creates nothing, so its work ended inside the call whether it answered
+  // or errored. Decided from the input alone for the same reason a read is: the
+  // response cannot say whether a directory was created on the way to failing.
+  if (toolName === 'git_worktree_spawn' && asRecord(input)?.dryRun !== false) {
+    return { workspaceId, closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE };
   }
   if (response.isError === true) return undefined;
   if (isMergeVerificationTool(toolName)) {

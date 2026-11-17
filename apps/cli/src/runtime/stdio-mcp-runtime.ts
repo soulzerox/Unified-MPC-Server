@@ -143,7 +143,7 @@ import {
 import { parseRepositoryMergePoliciesSetting, parseRepositoryMergePolicySetting } from './merge-policy-settings.js';
 import { startPublishCredentialSweep } from './publish-credential-sweep.js';
 import { resolvePublishCredentialDeployment } from '../commands/publish-credential.js';
-import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest, DeferredHandleRecorder } from '@unified-mpc/mcp-server';
+import type { AuthorizationMode, UnifiedRuntimeAdmissionIdentity, HostMutationApprovalRequest, DeferredHandleRecorder, DeferredSettlementRecorder } from '@unified-mpc/mcp-server';
 import { createTrustedGoalRelocationHostFence, type TrustedGoalRelocationHostActor } from './goal-relocation-host-fence.js';
 
 export interface StdioMcpRuntime {
@@ -157,6 +157,8 @@ export interface StdioMcpRuntime {
   readonly actor: FileActor;
   /** Records the handle a deferred call returned, next to the journal row that names the call. */
   readonly deferredHandleRecorder: DeferredHandleRecorder;
+  /** Closes the journal row of a call whose own response proved the work ended. */
+  readonly deferredSettlementRecorder: DeferredSettlementRecorder;
   readonly extensions: ExtensionsService;
   /**
    * #4 §4: one-shot repair of generated workspace policy artifacts that still
@@ -448,6 +450,24 @@ export function createStdioMcpRuntime(
     } catch (error) {
       process.stderr.write(
         `Unified-MPC deferred handle record failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
+  const deferredSettlementRecorder: DeferredSettlementRecorder = (record): void => {
+    // A call whose own response ended its deferral never reaches the sweep: it
+    // recorded no handle, so nothing would ever ask about it and its `started` row
+    // would pin the goal `present` for good. The verdict is the call's own, so it
+    // is written here rather than by a later probe.
+    try {
+      workspaceJournal.closeDeferredCalls({
+        workspaceId: record.workspaceId,
+        operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS],
+        callIds: [record.callId],
+        closureCode: record.closureCode,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `Unified-MPC workspace journal settlement failed: ${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
   };
@@ -1761,6 +1781,7 @@ export function createStdioMcpRuntime(
     ...(goalRetentionEvidenceSealing === undefined ? {} : { goalRetentionEvidenceSealing }),
     actor,
     deferredHandleRecorder,
+    deferredSettlementRecorder,
     extensions,
     managedPolicyRepairReady,
     activityTracker,

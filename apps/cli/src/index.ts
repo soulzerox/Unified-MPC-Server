@@ -1208,6 +1208,7 @@ export function createDefaultCliDependencies(options: DefaultCliDependenciesOpti
           // call started, and the ledger says which handle it owns. Without this the
           // CLI launcher's call is journaled and can never be released.
           deferredHandleRecorder: mcpRuntime.deferredHandleRecorder,
+          deferredSettlementRecorder: mcpRuntime.deferredSettlementRecorder,
           activeWorkspaceScopeProvider: mcpRuntime.activeWorkspaceScopeProvider,
           activeWorkspaceScopeUnavailableProvider: mcpRuntime.activeWorkspaceScopeUnavailableProvider,
           activeWorkspaceScopesProvider: mcpRuntime.activeWorkspaceScopesProvider,

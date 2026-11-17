@@ -132,6 +132,8 @@ describe('session tools', () => {
     let patch = '+first-diff';
     let head = 'a'.repeat(40);
     let repositoryIdentity = 'repo-1';
+    let worktreeIdentity = 'worktree-1';
+    let branch = 'feat/task-7';
     let starts = 0;
     const context = {
       actor,
@@ -142,8 +144,8 @@ describe('session tools', () => {
             return ok({
               repositoryIdentity,
               gitCommonDirIdentity: 'common-1',
-              worktreeIdentity: 'worktree-1',
-              branch: 'feat/task-7',
+              worktreeIdentity,
+              branch,
               head,
               statusEntries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }],
               stagedFingerprint: 'staged-1',
@@ -190,24 +192,32 @@ describe('session tools', () => {
 
     const first = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     const second = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    // A branch rename at the identical head and patches is the same source, so the
+    // cached result is still the right answer for it.
+    branch = 'feat/task-7-renamed';
+    const branchOnly = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     patch = '+second-diff';
     const third = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     head = 'b'.repeat(40);
     const fourth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    worktreeIdentity = 'worktree-2';
+    const otherWorktree = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     repositoryIdentity = 'repo-2';
     const fifth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
 
     expect(first).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'unknown', passed: true } });
     expect(second).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
+    expect(branchOnly).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
     expect(third).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'stale', passed: true } });
     expect(fourth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'stale', passed: true } });
-    // Another repository under the same workspace id is not out of date, it is
-    // unusable: reusing it would report another checkout's result as this one's.
+    // Another worktree or repository under the same workspace id is not out of date,
+    // it is unusable: reusing it would report another checkout's result as this one's.
+    expect(otherWorktree).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
     expect(fifth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
-    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 1, misses: 4, hitRate: 1 / 5 });
+    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 2, misses: 5, hitRate: 2 / 7 });
     expect(verifier.stats().bytesSaved).toBeGreaterThan(0);
     expect(verifier.invalidate('workspace-1')).toBe(1);
-    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 1, misses: 4 });
-    expect(starts).toBe(4);
+    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 2, misses: 5 });
+    expect(starts).toBe(5);
   });
 });

@@ -70,7 +70,14 @@ export class IncrementalVerifier {
       });
     }
     // `fresh` is the hit above; everything else is why the previous result was not
-    // reused, in the vocabulary the domain already uses for workspace evidence.
+    // reused, in the domain's freshness vocabulary.
+    //
+    // This surface answers "may I reuse this result?", which is not the question
+    // `classifyWorkspaceSourceEvidence` answers ("does this evidence still describe
+    // this observation?"). For the same drift the two differ on purpose: that
+    // classifier reports every identity change as `stale` because evidence only ever
+    // describes one observation, while a cached result from another checkout is
+    // `not_reusable` — it can never apply here, no matter how the source moves.
     const reuse: WorkspaceEvidenceFreshness = cached === undefined
       ? 'unknown'
       : cached.evidenceIdentity === fingerprint.value.evidenceIdentity ? 'stale' : 'not_reusable';
@@ -173,11 +180,14 @@ async function buildDiffFingerprint(
     return err(appError('CONFLICT', 'Workspace source changed during incremental verification fingerprinting', true));
   }
   const changedFiles = after.value.statusEntries.map((entry) => entry.path).sort();
+  // The branch name is deliberately absent: a rename or a detached checkout at the
+  // identical head with identical patches is the same source, and re-running the
+  // typecheck for it would be wasted work. Head, identity and both fingerprints
+  // already decide whether the source moved.
   const hash = createHash('sha256')
     .update(JSON.stringify({
       repositoryIdentity: after.value.repositoryIdentity,
       worktreeIdentity: after.value.worktreeIdentity,
-      branch: after.value.branch,
       head: after.value.head,
       dirtyFingerprint: after.value.dirtyFingerprint,
       stagedFingerprint: after.value.stagedFingerprint,

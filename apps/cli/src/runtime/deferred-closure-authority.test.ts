@@ -137,3 +137,55 @@ describe('deferred closure authority — verification adapter', () => {
     }
   });
 });
+
+describe('deferred closure authority — codex adapter', () => {
+  type CodexState = 'starting' | 'running' | 'termination_unverified' | 'exited' | 'failed' | 'stopped' | 'timed_out';
+
+  function process(state: CodexState): ReturnType<typeof ok> {
+    return ok({ processId: 'codex-proc-1', executable: 'codex', args: [], cwd: '/w', state, startedAt: at });
+  }
+
+  const codex = (
+    statusForGoalLiveness: (ws: string, taskId: string) => ReturnType<typeof ok> | ReturnType<typeof err>,
+  ): ReturnType<typeof createDeferredClosureAuthority> => createDeferredClosureAuthority({
+    codex: { statusForGoalLiveness } as unknown as NonNullable<
+      Parameters<typeof createDeferredClosureAuthority>[0]['codex']
+    >,
+  });
+
+  it('takes the codex service probe, live states staying pinned', async () => {
+    for (const state of ['starting', 'running', 'termination_unverified'] as const) {
+      await expect(codex(() => process(state))
+        .handleState({ actor, workspaceId, provider: 'codex', handleId: 'codex-1' })).resolves.toBe('live');
+    }
+    for (const state of ['exited', 'failed', 'stopped', 'timed_out'] as const) {
+      await expect(codex(() => process(state))
+        .handleState({ actor, workspaceId, provider: 'codex', handleId: 'codex-1' })).resolves.toBe('gone');
+    }
+  });
+
+  it('asks the service about this workspace and task', async () => {
+    const statusForGoalLiveness = vi.fn(() => process('exited'));
+    await codex(statusForGoalLiveness)
+      .handleState({ actor, workspaceId, provider: 'codex', handleId: 'codex-1' });
+    // A codex task of another workspace is not evidence about this one, so the
+    // workspace travels with the id.
+    expect(statusForGoalLiveness).toHaveBeenCalledWith(workspaceId, 'codex-1');
+  });
+
+  it('keeps a codex task pinned when the service errors, throws, cannot tell, or was never given', async () => {
+    for (const asker of [
+      // `PROCESS_NOT_FOUND` is what a restarted host answers for a task it no
+      // longer owns, and that must never read as gone.
+      codex(() => err(appError('PROCESS_NOT_FOUND', 'missing'))),
+      codex(() => { throw new Error('adapter exploded'); }),
+      codex(() => ok({
+        processId: 'p', executable: 'codex', args: [], cwd: '/w', state: 'parked', startedAt: at,
+      }) as unknown as ReturnType<typeof ok>),
+      createDeferredClosureAuthority({}),
+    ]) {
+      await expect(asker.handleState({ actor, workspaceId, provider: 'codex', handleId: 'codex-1' }))
+        .resolves.toBe('unknown');
+    }
+  });
+});

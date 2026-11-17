@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
-import { DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, MERGE_VERIFICATION_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
+import { CODEX_TASK_TOOLS, DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, MERGE_VERIFICATION_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
 import { DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
 import type { DeferredClosureAuthority, DeferredHandleState } from './deferred-closure-authority.js';
 import {
+  NO_LIVE_CODEX_CLOSURE_CODE,
   NO_LIVE_PROCESS_CLOSURE_CODE,
   NO_LIVE_TASK_CLOSURE_CODE,
   NO_LIVE_VERIFICATION_CLOSURE_CODE,
@@ -209,6 +210,46 @@ describe('closeJudgedDeferredCalls', () => {
     expect(handles.forget).not.toHaveBeenCalled();
   });
 
+  it('closes a codex_run by its codex task id under the codex code', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'codex', handleId: 'codex-1' }]);
+    const asker = authority('gone');
+
+    await expect(probe({ store, handles, authority: asker })).resolves.toEqual({ closed: 1, accountedCallIds: ['call-1'] });
+
+    expect(asker.handleState).toHaveBeenCalledWith({
+      actor, workspaceId: 'ws-1', provider: 'codex', handleId: 'codex-1',
+    });
+    const call = store.closeDeferredCalls.mock.calls[0]?.[0] as unknown as { closureCode: string };
+    expect(call.closureCode).toBe(NO_LIVE_CODEX_CLOSURE_CODE);
+    // A codex task is in the codex adapter's own process manager, so the CLI
+    // listing answering for it could only ever call a live run gone.
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('keeps a running codex task pinned and re-asks it next sweep', async () => {
+    const store = journal();
+    const handles = ledger([{ callId: 'call-1', provider: 'codex', handleId: 'codex-1' }]);
+
+    await expect(probe({ store, handles, authority: authority('live', 'gone') }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+    expect(handles.forget).not.toHaveBeenCalled();
+  });
+
+  it('never answers a codex_run that recorded no handle with the process listing', async () => {
+    // A codex_run whose ledger write failed records nothing, and its process is
+    // invisible to the CLI listing, so that answer would release a live pin.
+    const store = journal(1, [], { 'call-1': 'codex_run' });
+    const asker = authority('gone', 'gone');
+
+    await expect(probe({ store, handles: ledger([]), authority: asker }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: [] });
+    expect(asker.workspaceProcessState).not.toHaveBeenCalled();
+    expect(store.closeDeferredCalls).not.toHaveBeenCalled();
+  });
+
   it('never lets a live call in the same probe settle the ones that are gone', async () => {
     const store = journal();
     const handles = ledger([{ callId: 'call-1' }, { callId: 'call-2', handleId: 'process-2' }]);
@@ -342,6 +383,7 @@ describe('closeJudgedDeferredCalls', () => {
   it('accepts a closure for every tool that records a handle', () => {
     for (const toolName of [
       ...DIRECT_PROCESS_TOOLS, ...WRAPPED_PROCESS_TOOLS, ...DURABLE_TASK_TOOLS, ...MERGE_VERIFICATION_TOOLS,
+      ...CODEX_TASK_TOOLS,
     ]) {
       expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(toolName)).toBe(true);
     }

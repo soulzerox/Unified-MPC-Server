@@ -9,6 +9,7 @@ import type { DeferredClosureAuthority, DeferredHandleProvider } from './deferre
 export const NO_LIVE_PROCESS_CLOSURE_CODE = 'no_live_process';
 export const NO_LIVE_TASK_CLOSURE_CODE = 'no_live_task';
 export const NO_LIVE_VERIFICATION_CLOSURE_CODE = 'no_live_verification';
+export const NO_LIVE_CODEX_CLOSURE_CODE = 'no_live_codex';
 
 /**
  * How one recorded provider becomes a verdict: the adapter to ask, and the closure
@@ -34,6 +35,9 @@ const CLOSURE_ROUTES: Readonly<Partial<Record<StoredHandleProvider, ClosureRoute
   // port owns the one honest reading of an attempt row, so its terminal answer
   // releases the pin under its own code.
   verification: { provider: 'verification', closureCode: NO_LIVE_VERIFICATION_CLOSURE_CODE },
+  // `codex_run` hands back a codex task id that only the codex service can read, so
+  // its terminal answer releases the pin under its own code.
+  codex: { provider: 'codex', closureCode: NO_LIVE_CODEX_CLOSURE_CODE },
 };
 
 /**

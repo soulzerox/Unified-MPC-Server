@@ -51,6 +51,22 @@ describe('recordableDeferredHandle', () => {
     })).toBeUndefined();
   });
 
+  it('records the codex task id codex_run returned under its own provider', (): void => {
+    // Carries a processId too, and that process lives in the codex adapter's own
+    // process manager: recording it under `process` would read "absent from the
+    // CLI listing" as gone for a task that is still running.
+    expect(recordableDeferredHandle('codex_run', input, {
+      ...done, structuredContent: { codexTaskId: 'codex-1', processId: 'proc-1' },
+    })).toEqual({ workspaceId: 'workspace-1', provider: 'codex', handleId: 'codex-1' });
+  });
+
+  it('records nothing for a codex_run with no task id, or a failed call', (): void => {
+    expect(recordableDeferredHandle('codex_run', input, { ...done, structuredContent: { processId: 'proc-1' } })).toBeUndefined();
+    expect(recordableDeferredHandle('codex_run', input, {
+      isError: true, structuredContent: { codexTaskId: 'codex-1' },
+    })).toBeUndefined();
+  });
+
   it('records nothing for a queued verification with no attempt id, or a failed call', (): void => {
     expect(recordableDeferredHandle('merge_verification_run', input, {
       ...done, structuredContent: { status: 'queued' },

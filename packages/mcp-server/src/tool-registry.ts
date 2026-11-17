@@ -1072,7 +1072,10 @@ export class ToolRegistry {
       await this.recordPonytailOutcome(name, activeRoutedInput, response, activityWorkspaceId, ponytailInvocation);
 
       if (this.deferredHandleRecorder !== undefined) {
-        const handle = recordableDeferredHandle(name, activeRoutedInput, response);
+        // The same input the activity row was opened with: the handle is only found
+        // again by a per-workspace `callId` lookup, so it must land in the workspace
+        // that owns the row, not the one routing moved the call to.
+        const handle = recordableDeferredHandle(name, activityInput, response);
         if (handle !== undefined) {
           try {
             this.deferredHandleRecorder({ ...handle, callId });

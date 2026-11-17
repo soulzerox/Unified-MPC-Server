@@ -280,6 +280,27 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-goal' }).filter((entry) => entry.phase === 'started')[0]?.closureCode).toBe('no_live_handle');
   });
 
+  it('reads back which calls are still open, so a no-op close is not a refused one', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    for (const callId of ['closed-call', 'open-call']) {
+      journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId });
+    }
+    journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: ['process_start'], callIds: ['closed-call'], closureCode: 'no_live_handle',
+    });
+
+    // `closeDeferredCalls` answers 0 for both "already closed" and "out of reach";
+    // this is the read that tells a sweeper which one it is looking at.
+    expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['closed-call', 'open-call'] }))
+      .toEqual(['open-call']);
+    expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['closed-call'] })).toEqual([]);
+    expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: [] })).toEqual([]);
+  });
+
   it('closes only the calls a probe names, so one host cannot answer for another', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({

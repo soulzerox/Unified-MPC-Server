@@ -61,7 +61,7 @@ import {
   type ExtensionsService,
   type ManagedPolicyRepairReport,
 } from '@unified-mpc/extensions';
-import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
+import { ActivityTracker, RuntimeGoalManagedTaskStateReader, SharedActivitySnapshotLease, activityLogMaxBytes, composeActivitySinks, createFileActivitySink, createGoalWorktreeLedgerReader, currentSharedActivityOwner, isDirectProcessTool, isWrappedProcessTool, mcpActivityLogPath, type ActivitySink, type ActivitySinkEvent, type McpApplicationServices, type WorkspaceScope, type WorkspaceScopeUnavailable } from '@unified-mpc/mcp-server';
 import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@unified-mpc/permissions';
 import {
   ThaiRagIndexJobStore,
@@ -109,7 +109,7 @@ import {
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
-import { PROCESS_HANDLE_DEFERRED_KINDS, closeObservedDeferredCalls, settleRememberedCalls } from './deferred-journal-closure.js';
+import { closeJudgedDeferredCalls, settleRememberedCalls } from './deferred-journal-closure.js';
 import {
   createDeferredClosureAuthority,
   type DeferredClosureAuthority,
@@ -220,6 +220,19 @@ export const RECOVERY_JOURNAL_TOOLS: ReadonlySet<string> = new Set([
   'git_publish', 'guarded_pr_merge', 'run_goal', 'rebase_goal_workspace',
   'git_worktree_remove', 'agent_swarm_run',
 ]);
+
+/**
+ * Tools whose response hands back a managed process this runtime can be asked
+ * about later.
+ *
+ * One definition, shared with the recorder that writes the handle ledger and with
+ * the MCP Tasks projection: a tool the recorder stores a handle for must be a tool
+ * the sweep will revisit, and vice versa, or a row is written that nothing reads.
+ * `shell`/`wsl_exec` are absent by contract — a backgrounded child outlives the
+ * shell that launched it.
+ */
+const ownsProcessHandle = (toolName: string): boolean =>
+  isDirectProcessTool(toolName) || isWrappedProcessTool(toolName);
 
 /** Builds stdio/CLI MCP services. Defaults stay full/unrestricted unless an explicit stdio policy constrains them. */
 export interface StdioMcpRuntimeOptions {
@@ -1472,15 +1485,15 @@ export function createStdioMcpRuntime(
   const MAX_REMEMBERED_PROCESS_CALLS = 256;
   /**
    * #170 freshness: a handle-returning call ends, but its `completed` row is not
-   * evidence the work did. Ask the store that owns the handles; only it may close
-   * the pin. A launcher returns while its process is still live, so every later
-   * completion in the workspace retries the calls this runtime opened — the pin
-   * is released by the first request that finds them gone, never by another
-   * host's view. Best-effort by contract: an unclosed pin errs closed.
+   * evidence the work did. Ask the authority that owns each recorded handle; only
+   * it may close the pin. A launcher returns while its process is still live, so
+   * every later completion in the workspace retries the calls this runtime opened
+   * — the pin is released by the first request that finds them gone, never by
+   * another host's view. Best-effort by contract: an unclosed pin errs closed.
    */
   const sweepDeferredClosure = async (event: ActivitySinkEvent): Promise<void> => {
     if (event.workspaceId === undefined) return;
-    if (event.phase === 'started' && PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)) {
+    if (event.phase === 'started' && ownsProcessHandle(event.toolName)) {
       ownProcessHandleCalls.set(event.callId, event.workspaceId);
       while (ownProcessHandleCalls.size > MAX_REMEMBERED_PROCESS_CALLS) {
         const oldest = ownProcessHandleCalls.keys().next().value;
@@ -1492,23 +1505,28 @@ export function createStdioMcpRuntime(
     if (event.phase !== 'completed') return;
     const completedWorkspaceId = event.workspaceId;
     if (
-      !PROCESS_HANDLE_DEFERRED_KINDS.has(event.toolName)
+      !ownsProcessHandle(event.toolName)
       && ![...ownProcessHandleCalls.values()].includes(completedWorkspaceId)
     ) return;
     try {
-      // The probe proved the workspace had no live process when it looked, so the
-      // calls it covered are closed for good and forgotten instead of costing a
-      // process list plus a journal UPDATE on every later completion.
+      // The handles this probe accounted for are forgotten instead of costing a
+      // store read plus a journal UPDATE on every later completion. The completing
+      // call is this runtime's own: its `started` event is where the ownership
+      // came from, so it may be judged even when the memory cap has since evicted
+      // it from the map.
       await settleRememberedCalls({
         remembered: ownProcessHandleCalls,
         workspaceId: completedWorkspaceId,
-        callId: event.callId,
-        probe: async (callIds) => closeObservedDeferredCalls({
+        additionalOwnedCallIds: ownsProcessHandle(event.toolName) ? [event.callId] : [],
+        maxRemembered: MAX_REMEMBERED_PROCESS_CALLS,
+        probe: async (ownedCallIds) => closeJudgedDeferredCalls({
           journal: workspaceJournal,
+          handles: deferredHandles,
           authority: deferredClosureAuthority.current,
+          operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS],
           actor,
           workspaceId: completedWorkspaceId,
-          callIds,
+          ownedCallIds,
           closedAt: event.timestamp,
         }),
       });

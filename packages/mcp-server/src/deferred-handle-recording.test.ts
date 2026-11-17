@@ -196,6 +196,40 @@ describe('recording a deferred settlement', () => {
     expect(records).toEqual([]);
   });
 
+  it('leaves a refused start alone, because a start that never ran may still have launched work', async (): Promise<void> => {
+    const records: DeferredSettlementRecord[] = [];
+    const registry = new ToolRegistry({} as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'workspace-a', rootPath: '/tmp/project-a' }),
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+      codexToolsEnabled: true,
+      activity: { async record(): Promise<void> {} },
+      deferredSettlementRecorder: (record): void => { records.push(record); },
+    });
+
+    // A refused `start` is not a read: the error envelope must not be read as "no
+    // work happened", because a cancellation is not proof that nothing launched.
+    const response = await registry.invoke('agent_swarm_run', { operation: 'start', workspaceId: 'workspace-a' });
+
+    expect(response.isError).toBe(true);
+    expect(records).toEqual([]);
+  });
+
+  it('never lets a throwing recorder fail a call refused before its handler', async (): Promise<void> => {
+    const registry = new ToolRegistry({} as unknown as McpApplicationServices, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<{ workspaceId: string; rootPath: string }> => ({ workspaceId: 'workspace-a', rootPath: '/tmp/project-a' }),
+      hostMutationApprovalProvider: async (): Promise<boolean> => true,
+      codexToolsEnabled: true,
+      activity: { async record(): Promise<void> {} },
+      deferredSettlementRecorder: (): void => { throw new Error('journal is down'); },
+    });
+
+    // The exit-path settlement is best-effort like the response path: a ledger
+    // failure must surface as the call's own error, never as a thrown invoke.
+    const response = await registry.invoke('agent_swarm_run', { operation: 'status', workspaceId: 'workspace-a' });
+
+    expect(response.isError).toBe(true);
+  });
+
   it('never fails the call it settles when the journal write throws', async (): Promise<void> => {
     const { registry } = verificationRegistry(() => { throw new Error('journal is down'); });
 

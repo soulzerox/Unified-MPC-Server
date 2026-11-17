@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileActor } from '@unified-mpc/application';
-import { AGENT_SWARM_TOOLS, CODEX_TASK_TOOLS, DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, MERGE_VERIFICATION_TOOLS, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
-import { DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
+import { AGENT_SWARM_TOOLS, CODEX_TASK_TOOLS, DIRECT_PROCESS_TOOLS, DURABLE_TASK_TOOLS, MERGE_VERIFICATION_TOOLS, SETTLEMENT_TOOL_NAMES, WRAPPED_PROCESS_TOOLS } from '@unified-mpc/mcp-server';
+import { DURABLE_REFERENCE_OPERATION_KINDS, DEFERRED_CLOSURE_OPERATION_KINDS, type DeferredHandle } from '@unified-mpc/storage';
 import type { DeferredClosureAuthority, DeferredHandleState } from './deferred-closure-authority.js';
 import {
   NO_LIVE_CODEX_CLOSURE_CODE,
@@ -443,6 +443,15 @@ describe('closeJudgedDeferredCalls', () => {
     ]) {
       expect(DEFERRED_CLOSURE_OPERATION_KINDS.has(toolName)).toBe(true);
     }
+  });
+
+  // Retention's per-kind collapse keeps the newest open row of a kind, so a kind whose
+  // newest row can close itself must be exempt: otherwise the collapse evicts the older
+  // row that still stands for live work, the survivor closes, and the goal reads `clear`
+  // while the worktree, swarm or verification still runs. The journal cannot derive the
+  // list, so both directions are pinned here.
+  it('exempts exactly the kinds whose own response can settle them', () => {
+    expect([...DURABLE_REFERENCE_OPERATION_KINDS].sort()).toEqual([...SETTLEMENT_TOOL_NAMES].sort());
   });
 });
 

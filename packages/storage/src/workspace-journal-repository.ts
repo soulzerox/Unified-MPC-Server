@@ -54,7 +54,7 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
 
 /**
  * Kinds whose open row is a reference to work that outlives the call, and whose newest
- * open row can be closed by a later call of the same kind.
+ * open row can settle itself.
  *
  * Two open rows of such a kind are two different references, not two reports of the
  * same in-flight work: a `git_worktree_spawn` row stands for a worktree that may still
@@ -62,13 +62,19 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
  * `merge_verification_run` row for an attempt that is still queued. Retention's
  * per-kind collapse treats open rows as interchangeable and keeps the newest, which is
  * how each of them can lose its pin: the evicted row is the only evidence of that work,
- * and the survivor then settles itself under `worktree_preview_settled`,
- * `swarm_read_settled` or `verification_settled`, leaving the kind with nothing open
- * while the work still runs. These kinds are therefore never collapsed — losing a
- * reference is the fail-open direction, and each of them is rare next to a launcher.
+ * and the survivor then closes itself from its own call under
+ * `worktree_preview_settled`, `swarm_read_settled` or `verification_settled`, leaving
+ * the kind with nothing open while the work still runs. These kinds are therefore never
+ * collapsed.
  *
- * Adding a settlement rule for another kind means adding it here too. The journal
- * cannot derive the list: the rules live in the MCP server, one layer up.
+ * That costs the bound: nothing else may delete an open row, so each real reference
+ * keeps its `started` row (and an uncollected completion) for the life of the
+ * workspace, and past `maxEventsPerWorkspace` the excess cannot be reduced. The trade
+ * is deliberate — a released pin over live work is worse than rows a rare event
+ * appends — and it is the only thing this exemption buys.
+ *
+ * Adding a settlement rule for another kind means adding it here too;
+ * `deferred-journal-closure.test.ts` in the CLI fails until both sides agree.
  */
 export const DURABLE_REFERENCE_OPERATION_KINDS: ReadonlySet<string> = new Set([
   'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run',

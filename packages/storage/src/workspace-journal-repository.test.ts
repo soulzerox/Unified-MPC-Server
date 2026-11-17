@@ -174,15 +174,26 @@ describe('SqliteWorkspaceJournalRepository', () => {
       expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['work', 'self-settling'] }).sort())
         .toEqual(['self-settling', 'work']);
 
+      // Close the launch rows first, so every later pin is decided by a reference
+      // row rather than by a launcher the overflow happened to leave open.
+      journal.closeDeferredCalls({
+        workspaceId: 'ws-goal',
+        operationKinds: ['process_start'],
+        callIds: ['run-1', 'run-2', 'run-3'],
+        closureCode: 'no_live_process',
+      });
+
       expect(journal.closeDeferredCalls({
         workspaceId: 'ws-goal',
         operationKinds: [kind],
         callIds: ['self-settling'],
         closureCode: selfSettledCode,
       })).toBe(1);
-      // The older reference survives and still pins the goal: no later call
-      // represents that work.
+      // The older reference is still the row that pins: on the parent it had been
+      // collapsed away, so this read was `clear`.
       expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+      expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['work', 'self-settling'] }))
+        .toEqual(['work']);
 
       expect(journal.closeDeferredCalls({
         workspaceId: 'ws-goal',
@@ -190,14 +201,6 @@ describe('SqliteWorkspaceJournalRepository', () => {
         callIds: ['work'],
         closureCode: 'work_ended',
       })).toBe(1);
-      // The launch rows the overflow left behind still pin; close them so the last
-      // assertion is about the reference and not about them.
-      journal.closeDeferredCalls({
-        workspaceId: 'ws-goal',
-        operationKinds: ['process_start'],
-        callIds: ['run-1', 'run-2', 'run-3'],
-        closureCode: 'no_live_process',
-      });
       expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
     }
   });

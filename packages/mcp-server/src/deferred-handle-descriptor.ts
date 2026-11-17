@@ -67,6 +67,21 @@ export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
  */
 export const WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE = 'worktree_preview_settled';
 
+/**
+ * Tools whose own response can close the journal row they opened.
+ *
+ * Every name here hands back work that outlives the call, and every such tool also has a
+ * settlement rule below, so its newest open row can end itself: retention therefore may
+ * not collapse it (`DURABLE_REFERENCE_OPERATION_KINDS` in `@unified-mpc/storage`), or a
+ * newer self-settling row would evict the older row that still stands for live work.
+ * The storage set cannot be derived from these rules — the journal sits one layer down —
+ * so the two lists are pinned to each other by
+ * `apps/cli/src/runtime/deferred-journal-closure.test.ts`.
+ */
+export const SETTLEMENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'agent_swarm_run', 'merge_verification_run', 'git_worktree_spawn',
+]);
+
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;

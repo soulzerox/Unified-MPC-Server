@@ -461,7 +461,10 @@ workspace journal:
    `git_worktree_spawn`, `agent_swarm_run`, `merge_verification_run`): collapsing would
    let that newer row evict an older open row that no later call represents, and then
    close itself, leaving the kind with nothing open while the work it stood for still
-   runs. `run_goal` stays out of the pinning set entirely: the
+   runs. That exemption is what those kinds cost: nothing else may delete an open row,
+   so every real reference keeps its rows for the life of the workspace and past
+   `maxEventsPerWorkspace` the excess stays — a released pin over live work is worse
+   than rows a rare event appends. `run_goal` stays out of the pinning set entirely: the
    goal runtime already tracks goal liveness.
    `apps/cli` passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, and `gate check --phase close` reads it through

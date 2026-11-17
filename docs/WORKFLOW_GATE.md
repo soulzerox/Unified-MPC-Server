@@ -475,6 +475,27 @@ workspace journal:
    the ports below, so a live journal no longer reports
    `durable_references_unknown` and the close gate no longer decides blind.
 
+The journal's read side is `workspace_resume`
+(`packages/application/src/workspace-resume-snapshot.ts`, wired in the stdio
+runtime over the same `SqliteWorkspaceJournalRepository` the host appends to):
+one call answers "what ran here since the cursor I hold" for a session that was
+not present — a new session, a reconnect, a handoff. It is bounded
+(`WORKSPACE_RESUME_DEFAULT_LIMIT` 20, `WORKSPACE_RESUME_MAX_LIMIT` 100, both
+below the store's own `MAX_LIST_LIMIT` 200 so the reader can ask for one row more
+than the bound and prove `truncated` rather than infer it from a clamped reply),
+cursor-based (`afterSequence` in, `cursor` out, oldest first so the caller can
+replay in order), and read-only. `openReferences` answers which calls in that
+window may still be running, using the store's own pin rule rather than the
+window's rows: a plain call ends at its `completed` row, which may sit past the
+cursor, while a handle-returning call stays open past its own `completed` row
+until a freshness probe writes `closure_code`. That rule is
+`SqliteWorkspaceJournalRepository.openCallIds` — the same predicate
+`goalDurableReferenceStates` pins with, asked for the window's call ids — so a
+resumed session cannot read finished work as running. A runtime without a journal
+still advertises the tool, and a call to it is refused with `INTERNAL_ERROR`
+rather than answered with an empty event list, which would read as "nothing
+happened here".
+
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as
 `createGoalWorktreeRemovalPreviewPort` in

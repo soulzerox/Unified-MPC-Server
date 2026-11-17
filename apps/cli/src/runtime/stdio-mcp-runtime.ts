@@ -40,6 +40,7 @@ import {
   type GoalRelocationCustodyPin,
   GoalWorkspaceRetentionEvidenceSealingService,
   createGoalWorktreeReconciliationPort,
+  createWorkspaceResumeSnapshotReader,
   type GoalCanonicalAdmissionOutcome,
   type GoalWorktreeClassificationReport,
 } from '@unified-mpc/application';
@@ -1748,6 +1749,10 @@ export function createStdioMcpRuntime(
       },
     },
     workspaceQuery,
+    // Read-only: the same journal this runtime appends and closes, projected into a
+    // bounded resumable view. No second store, so a resumed session cannot see a
+    // different history from the one this host wrote.
+    workspaceResume: createWorkspaceResumeSnapshotReader({ journal: workspaceJournal }),
     projectSnapshot: new ProjectSnapshotService(workspaceRepository, {
       projectService,
       gitService,

@@ -213,6 +213,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   workspace_index_stop: service({ workspaceId }, 'workspaceIndex.stopWatch'),
   session_handoff: service({ workspaceId }, 'file.readFile'),
   verify_incremental: service({ workspaceId, userConfirmed: true }, 'git.observeWorkspace'),
+  workspace_resume: service({ workspaceId }, 'workspaceResume.read'),
   run_goal: service({ workspaceId, goalKey: 'smoke-goal', objective: 'Smoke durable goal contract' }, 'goals.runGoal'),
   retry_goal_workspace_admission: service({ workspaceId, goalId: 'goal-1', leaseToken: 'lease-token', leaseGeneration: 1 }, 'goalRunWorkspace.recoverRunWorkspace'),
   rebase_goal_workspace: service({

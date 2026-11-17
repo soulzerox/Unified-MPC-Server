@@ -54,6 +54,19 @@ export const VERIFICATION_SETTLED_CLOSURE_CODE = 'verification_settled';
  */
 export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
 
+/**
+ * Why a `git_worktree_spawn` preview ends its own deferral.
+ *
+ * The tool defaults to a preview: it reports the worktree it would create and creates
+ * nothing. Its journal row is a durable reference, so a preview's row left open pins
+ * the goal `present` over a worktree that was never made, and the lifecycle authorities
+ * that answer the removal question have nothing to answer about. A call that really
+ * spawned (`dryRun: false`) keeps its pin instead: a failure after creating the
+ * directory is indistinguishable from a refusal, so reading an error as "nothing was
+ * created" would release a pin over a worktree that exists.
+ */
+export const WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE = 'worktree_preview_settled';
+
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;
@@ -93,6 +106,16 @@ export function recordableDeferredSettlement(
   // probe could ever answer it.
   if (toolName === 'agent_swarm_run' && isAgentSwarmRead(input)) {
     return { workspaceId, closureCode: SWARM_READ_SETTLED_CLOSURE_CODE };
+  }
+  // A preview creates nothing, so its work ended inside the call whether it answered
+  // or errored. Decided from the input alone for the same reason a read is: the
+  // response cannot say whether a directory was created on the way to failing. Both
+  // spellings of the flag count, exactly as the spawn runtime reads them
+  // (`gitWorktreeSpawn` takes `dryRun !== false && dry_run !== false`): reading only
+  // one would treat a real spawn as a preview and release its pin, the fail-open
+  // direction this rule exists to avoid.
+  if (toolName === 'git_worktree_spawn' && isWorktreeSpawnPreview(input)) {
+    return { workspaceId, closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE };
   }
   if (response.isError === true) return undefined;
   if (isMergeVerificationTool(toolName)) {
@@ -211,6 +234,23 @@ function agentSwarmOperation(input: unknown): string | undefined {
 function isAgentSwarmRead(input: unknown): boolean {
   const operation = agentSwarmOperation(input);
   return operation !== undefined && AGENT_SWARM_READ_OPERATIONS.has(operation);
+}
+
+/**
+ * True when the call created no worktree, so its durable-reference row must close.
+ *
+ * The tool's input schema is `.strict()` and lists only `dryRun`, so a call that
+ * carries the `dry_run` alias is refused before its handler runs and created nothing,
+ * whatever the alias says. The only reachable real spawn is therefore `dryRun === false`
+ * with no alias present, and it keeps its pin: a failure after `git worktree add` is
+ * indistinguishable from a refusal, so reading an error as "nothing was created" would
+ * release a pin over work that exists.
+ */
+function isWorktreeSpawnPreview(input: unknown): boolean {
+  const value = asRecord(input);
+  if (value === undefined) return false;
+  if (value.dry_run !== undefined) return true;
+  return value.dryRun !== false;
 }
 
 /** True only for the `start` sub-action. */

@@ -431,22 +431,29 @@ workspace journal:
    process manager and a swarm in its own runtime, so neither is ever in the CLI
    listing: their ids are recorded under provider `codex` and `swarm`, never
    `process`, which could only read them all as gone. A `git_worktree_spawn` call
-   deliberately has no closure route: its row is a durable reference, not work in
-   flight. `goalDurableReferenceStates` reports the goal `present` while that row
-   carries no `closure_code` — its `completed` row ends the request, not the pin —
-   and that `present` is the `durable_references_present` blocker
+   deliberately has no closure *route*: its row is a durable reference, not work in
+   flight, so no runtime probe may claim the worktree is gone.
+   `goalDurableReferenceStates` reports the goal `present` while that row carries no
+   `closure_code` — its `completed` row ends the request, not the pin — and that
+   `present` is the `durable_references_present` blocker
    `evaluateGoalWorkspaceCleanup` raises, which is what stops goal-workspace cleanup
    from discarding a worktree that still holds work. Closing the row from this
-   runtime would report the goal `clear`, and the close gate would then find no
-   blocker to refuse on, leaving a later `git_worktree_remove` free to delete the only
+   runtime would report the goal `clear`, and the close gate would lose one of the
+   blockers it refuses on, leaving a later `git_worktree_remove` free to delete the only
    handle to that work. So the pin is the answer rather than a gap. The ledger's
    provider union does list `worktree`, but there is deliberately no
    `CLOSURE_ROUTES` entry for the kind and no `no_live_worktree` code: the worktree
    lifecycle authorities (`GoalWorktreeReconciliationPort`,
    `goal-worktree-ledger`) answer the removal question directly, and the journal is
-   not the place to duplicate it. That covers a spawn that created a worktree; one
-   refused before it created anything still journals a `started` row and pins
-   without a worktree behind it, which is the exit-path settlement gap in #876.
+   not the place to duplicate it. That covers a spawn that created a worktree. A
+   `git_worktree_spawn` *preview* is the exception, and it settles itself from its
+   input under `worktree_preview_settled`: the tool defaults to a preview, which
+   creates nothing, so its row pins a goal over a worktree that was never made and the
+   lifecycle authorities have nothing to answer about. The preview settles whether it
+   answered or failed, because the input already said nothing would be created. A call
+   that really spawned (`dryRun: false`) keeps its pin even when it failed: it may have
+   created the worktree and then errored, so reading the error as "nothing was created"
+   would release a pin over work that exists.
    Retention collapses older *open* calls of the same kind, so the pin costs one
    row per kind instead of growing with every launch, and collects a closed call
    like any other evidence. `run_goal` stays out of that set: the

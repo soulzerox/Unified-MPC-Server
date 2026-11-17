@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SqliteDatabase } from './database.js';
 import { SqliteWorkspaceRepository } from './workspace-repository.js';
-import { SqliteWorkspaceJournalRepository, WorkspaceJournalStoreError } from './workspace-journal-repository.js';
+import { DEFERRED_CLOSURE_OPERATION_KINDS, SqliteWorkspaceJournalRepository, WorkspaceJournalStoreError } from './workspace-journal-repository.js';
 
 const temporaryRoots: string[] = [];
 
@@ -278,6 +278,27 @@ describe('SqliteWorkspaceJournalRepository', () => {
       workspaceId: 'ws-goal', operationKinds: ['process_start'], callIds: ['spawn-1'], closureCode: 'other_reason',
     })).toBe(0);
     expect(journal.list({ workspaceId: 'ws-goal' }).filter((entry) => entry.phase === 'started')[0]?.closureCode).toBe('no_live_handle');
+  });
+
+  it('closes a worktree preview row, so a spawn that created nothing stops pinning', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    // A preview creates nothing, but its row is a durable reference, so it pins the goal
+    // until the call's own verdict closes it. The kind has to be one this store will
+    // close: a kind outside the set answers 0 and pins forever.
+    expect(DEFERRED_CLOSURE_OPERATION_KINDS.has('git_worktree_spawn')).toBe(true);
+
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_worktree_spawn', phase: 'started', status: 'started', callId: 'preview-1' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'git_worktree_spawn', phase: 'completed', status: 'completed', callId: 'preview-1', resultCode: 'ok' });
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('present');
+
+    expect(journal.closeDeferredCalls({
+      workspaceId: 'ws-goal', operationKinds: [...DEFERRED_CLOSURE_OPERATION_KINDS], callIds: ['preview-1'], closureCode: 'worktree_preview_settled',
+    })).toBe(1);
+    expect(journal.goalDurableReferenceStates(['goal-1']).get('goal-1')).toBe('clear');
   });
 
   it('reads back which calls are still open, so a no-op close is not a refused one', async () => {

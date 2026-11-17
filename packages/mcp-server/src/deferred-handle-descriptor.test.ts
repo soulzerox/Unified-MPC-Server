@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recordableDeferredHandle, recordableDeferredSettlement, SWARM_READ_SETTLED_CLOSURE_CODE, VERIFICATION_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
+import { recordableDeferredHandle, recordableDeferredSettlement, SWARM_READ_SETTLED_CLOSURE_CODE, VERIFICATION_SETTLED_CLOSURE_CODE, WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
 
 const input = { workspaceId: 'workspace-1' };
 const done = { isError: false };
@@ -166,6 +166,50 @@ describe('recordableDeferredSettlement', () => {
     expect(recordableDeferredSettlement('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'cancel' }, {
       isError: true, structuredContent: { error: { code: 'PROCESS_NOT_FOUND' } },
     })).toEqual({ workspaceId: 'workspace-1', closureCode: SWARM_READ_SETTLED_CLOSURE_CODE });
+  });
+
+  it('settles a git_worktree_spawn preview, which creates no worktree to pin', (): void => {
+    // The tool defaults to a preview: it reports what it would create. Its row is a
+    // durable reference, so leaving a preview's row open pins the goal `present` over
+    // a worktree that was never made, and the lifecycle authorities have nothing to
+    // answer about.
+    for (const preview of [{ workspaceId: 'workspace-1' }, { workspaceId: 'workspace-1', dryRun: true }]) {
+      expect(recordableDeferredSettlement('git_worktree_spawn', preview, {
+        ...done, structuredContent: { dryRun: true, sideEffectsStarted: false },
+      })).toEqual({ workspaceId: 'workspace-1', closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE });
+    }
+  });
+
+  it('settles a preview that failed, since a preview creates nothing either way', (): void => {
+    expect(recordableDeferredSettlement('git_worktree_spawn', { workspaceId: 'workspace-1', dryRun: true }, {
+      isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } },
+    })).toEqual({ workspaceId: 'workspace-1', closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE });
+  });
+
+  it('leaves a real git_worktree_spawn pinned, since a failure can follow the worktree', (): void => {
+    // A spawn that really ran keeps its pin whether it answered or errored: it may have
+    // created the worktree and then failed, so reading the error as "nothing was
+    // created" would release a pin over work that exists.
+    for (const response of [done, { isError: true }]) {
+      expect(recordableDeferredSettlement('git_worktree_spawn', {
+        workspaceId: 'workspace-1', dryRun: false,
+      }, response)).toBeUndefined();
+    }
+  });
+
+  it('settles a call carrying the dry_run alias, which its schema refuses outright', (): void => {
+    // `git_worktree_spawn` accepts only `dryRun` (the schema is `.strict()`), so a call
+    // carrying `dry_run` never reaches the handler and created nothing — including
+    // `dry_run: false`, which would otherwise pin the goal with no worktree behind it.
+    for (const aliased of [
+      { workspaceId: 'workspace-1', dry_run: false },
+      { workspaceId: 'workspace-1', dry_run: true },
+      { workspaceId: 'workspace-1', dryRun: false, dry_run: true },
+    ]) {
+      expect(recordableDeferredSettlement('git_worktree_spawn', aliased, {
+        isError: true, structuredContent: { error: { code: 'INVALID_INPUT' } },
+      })).toEqual({ workspaceId: 'workspace-1', closureCode: WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE });
+    }
   });
 
   it('settles nothing for a read with no workspace, which nothing could be closed against', (): void => {

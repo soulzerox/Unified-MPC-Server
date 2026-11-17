@@ -46,7 +46,7 @@ export function sessionTools(context: McpToolContext, verifier: IncrementalVerif
     }),
     defineTool({
       name: 'workspace_resume',
-      description: 'Read a bounded, resumable view of this workspace\'s durable journal: what calls ran here, in order, since the cursor you pass back. Use it when you were not present for earlier work (a new session, a reconnect, a handoff) and need to know what finished or may still be running before acting. Read-only; pass the returned cursor as afterSequence to continue, and ask again while truncated is true.',
+      description: 'Read a bounded, resumable view of this workspace\'s durable journal: what calls ran here, in order, since the cursor you pass back. Use it when you were not present for earlier work (a new session, a reconnect, a handoff) and need to know what finished or may still be running before acting. `open` is a verdict on the call, not on the row: a `completed` row of a call that handed back a process or task stays open until something closes it, and a window can begin after that call\'s `started` row. `openReferences` covers only the calls whose rows are in this window, so ask again while `truncated` is true instead of reading a count of zero as nothing running. Read-only; pass the returned `cursor` as `afterSequence` to continue.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceResumeSchema,

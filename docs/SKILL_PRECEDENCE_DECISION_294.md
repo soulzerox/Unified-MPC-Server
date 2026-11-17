@@ -14,14 +14,14 @@ imports, prunes or chooses precedence on its own.
    entry resolves to is the content the host advertises. Legacy roots keep their
    files untouched, so nothing is deleted and the decision stays reversible.
 
-Seven imports are owned directory copies inside the store. Five are **symbolic
-links**, because their source (`~/.agents/skills/<name>`) is itself a link to
-`~/.gemini/config/skills/design/<name>` and the installer copies a linked source
-as a link (`fs.cp` without `dereference`, `packages/extensions/src/installer.ts`).
-For those five the store names the owner but does not own the bytes: the Gemini
-design directory remains the effective precedence winner, and editing it changes
-what the host advertises. That is stated per row instead of hidden behind
-"copied", and the installer gap is tracked separately (see *Known gap*).
+All 12 imports are owned directory copies inside the store. Five of them — the
+`~/.gemini/config/skills/design/<name>` group — were first installed as symbolic
+links, because their source (`~/.agents/skills/<name>`) is itself a link and the
+installer staged a linked source as a link. That installer gap is fixed (#871,
+PR #874): staging resolves the source root, and a re-install now replaces a
+linked canonical entry instead of short-circuiting on an unchanged content
+fingerprint. The five entries were re-installed after the merge, so the store
+holds their bytes and no legacy root can change what the host advertises.
 
 Not last-wins: each row below names the source, a full-directory content
 fingerprint, and which copy the decision keeps; where a name has several distinct
@@ -30,23 +30,24 @@ than every variant's fingerprint.
 
 ## Imports (12)
 
-Source root `~/.agents/skills/<name>`; canonical id `<name>` (install name must
-equal the `name:` declared in `SKILL.md`, `installer.ts:120`).
+Source root `~/.agents/skills/<name>`; canonical id `skill:<name>` (the audit's
+`canonicalId`; the install name must equal the `name:` declared in `SKILL.md`,
+`installer.ts:120`).
 
 | declared name | fingerprint | roots advertising the name | stored as | canonical id |
 | --- | --- | --- | --- | --- |
-| `canvas-design` | `4a36891e50d3` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | symlink → gemini design root | `unified-mpc-skills/canvas-design` |
-| `design-md` | `b283d2716e6e` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | symlink → gemini design root | `unified-mpc-skills/design-md` |
-| `frontend-design` | `9ac48827970a` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | symlink → gemini design root | `unified-mpc-skills/frontend-design` |
-| `theme-factory` | `07b00a9ae490` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | symlink → gemini design root | `unified-mpc-skills/theme-factory` |
-| `web-artifacts-builder` | `7851802f8e51` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | symlink → gemini design root | `unified-mpc-skills/web-artifacts-builder` |
-| `seo-ahrefs` | `64f84fc3564d` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-ahrefs` |
-| `seo-bing` | `6172da8f09c2` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-bing` |
-| `seo-firecrawl` | `d7da7d6b5dda` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-firecrawl` |
-| `seo-matomo` | `f1d066a855c0` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-matomo` |
-| `seo-profound` | `56e25acd8b77` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-profound` |
-| `seo-seranking` | `c6cc204a506d` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-seranking` |
-| `seo-unlighthouse` | `5318b5d6c7c6` | agents-skills, unified-mpc-skills | owned copy | `unified-mpc-skills/seo-unlighthouse` |
+| `canvas-design` | `4a36891e50d3` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | owned copy | `skill:canvas-design` |
+| `design-md` | `b283d2716e6e` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | owned copy | `skill:design-md` |
+| `frontend-design` | `9ac48827970a` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | owned copy | `skill:frontend-design` |
+| `theme-factory` | `07b00a9ae490` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | owned copy | `skill:theme-factory` |
+| `web-artifacts-builder` | `7851802f8e51` | agents-skills, antigravity-config-skills, cline-skills, unified-mpc-skills | owned copy | `skill:web-artifacts-builder` |
+| `seo-ahrefs` | `64f84fc3564d` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-ahrefs` |
+| `seo-bing` | `6172da8f09c2` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-bing` |
+| `seo-firecrawl` | `d7da7d6b5dda` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-firecrawl` |
+| `seo-matomo` | `f1d066a855c0` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-matomo` |
+| `seo-profound` | `56e25acd8b77` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-profound` |
+| `seo-seranking` | `c6cc204a506d` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-seranking` |
+| `seo-unlighthouse` | `5318b5d6c7c6` | agents-skills, unified-mpc-skills | owned copy | `skill:seo-unlighthouse` |
 
 ## Divergent names the canonical copy wins (43)
 
@@ -106,22 +107,25 @@ for every name if you need to check one.
 
 - Imports are additive: removing `~/.local/share/unified-mpc/extensions/skills/<name>`
   returns the host to the pre-import state.
-- Use the path **without a trailing slash**. GNU `rm -rf <name>/` on a symlink
-  exits 0 and removes nothing, which would leave the five symlinked entries
-  installed while reporting success. `rm -rf <name>` removes the link itself and
-  leaves its Gemini target untouched; `rm -f <name>` does the same and is the
-  safer spelling for the five links.
+- Every entry is now a real directory, so `rm -rf <name>` removes it and nothing
+  else. The five former links are owned copies too; their Gemini target is a
+  separate legacy root and was never modified.
 - No legacy root, copy or client catalog was modified or deleted, so the
   pre-decision host state is intact.
 - The audit is stable across runs, so a later run can be diffed against these
   fingerprints to detect drift.
 
-## Known gap (not fixed here)
+## Installer gap (fixed)
 
-`InstallerService` stages a skill with `fs.cp(sourceSkillDir, stagedDir,
-{ recursive: true })` and no `dereference`, so a **linked source directory is
-installed as a link**. That is why five of this batch are symlinks rather than
-owned copies, and why rollback has to name the link instead of a directory. A
-code fix (dereference at staging, which also makes vendored `.venv` links
-materialize and stop producing `unverified` names) is tracked as **#871**; this
-document describes the host as it is, not as that fix will leave it.
+`InstallerService` used to stage a skill with `fs.cp(sourceSkillDir, stagedDir,
+{ recursive: true })` and no `dereference`, so a **linked source directory was
+installed as a link**: the canonical store named content it did not own, and
+`rm -rf <entry>/` removed nothing. Fixed in #871 / PR #874 — staging resolves the
+source root with `realpath`, and an existing canonical entry that is itself a link
+is replaced instead of being kept by the idempotency fingerprint. The five
+affected entries were re-installed after that merge, which is why the table above
+says `owned copy` for all 12.
+
+A symlink *inside* a Skill tree is still refused by the fingerprint guard: that
+refusal is evidence-escape protection, not part of this gap, so the `seo` name
+below stays `unverified` until its `.venv` links are removed.

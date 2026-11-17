@@ -80,10 +80,10 @@ export async function closeJudgedDeferredCalls(options: {
   if (owned.size === 0) return { closed: 0, settled: false };
   const recorded = options.handles.take(options.workspaceId, [...owned]);
   const recordedIds = new Set(recorded.map((handle) => handle.callId));
-  const closedIds = new Set<string>();
+  /** Calls an adapter proved gone, with the code their verdict is written under. */
+  const gone = new Map<string, string>();
   /** Calls whose recorded provider has no adapter: nothing left to ask, nothing to retry. */
   const unaskable = new Set<string>();
-  const byCode = new Map<string, string[]>();
 
   for (const handle of recorded) {
     // A row outside the owned set is another host's evidence: judging it here
@@ -101,8 +101,7 @@ export async function closeJudgedDeferredCalls(options: {
       handleId: handle.handleId,
     });
     if (state !== 'gone') continue;
-    closedIds.add(handle.callId);
-    byCode.set(route.closureCode, [...(byCode.get(route.closureCode) ?? []), handle.callId]);
+    gone.set(handle.callId, route.closureCode);
   }
 
   const withoutHandle = [...owned].filter((callId) => !recordedIds.has(callId));
@@ -117,32 +116,33 @@ export async function closeJudgedDeferredCalls(options: {
       workspaceId: options.workspaceId,
     });
     if (state === 'gone') {
-      for (const callId of withoutHandle) closedIds.add(callId);
-      byCode.set(NO_LIVE_PROCESS_CLOSURE_CODE, [
-        ...(byCode.get(NO_LIVE_PROCESS_CLOSURE_CODE) ?? []),
-        ...withoutHandle,
-      ]);
+      for (const callId of withoutHandle) gone.set(callId, NO_LIVE_PROCESS_CLOSURE_CODE);
     }
   }
 
   let closed = 0;
-  for (const [closureCode, closedCallIds] of byCode) {
+  /** Calls whose row actually closed: only those may be called accounted for. */
+  const accounted = new Set<string>();
+  for (const [callId, closureCode] of gone) {
+    // One call per write: the store reports a count, so a shared bucket could not
+    // say which rows landed, and a row that did not land must stay retryable.
     const closedHere = options.journal.closeDeferredCalls({
       workspaceId: options.workspaceId,
       operationKinds: [...options.operationKinds],
       recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
-      callIds: closedCallIds,
+      callIds: [callId],
       closureCode,
       closedAt: options.closedAt,
     });
+    if (closedHere === 0) continue;
     closed += closedHere;
-    // Only a verdict that landed retires the correlation. A row the store
-    // refused (already closed, or recorded before this runtime) keeps its ledger
-    // entry, so a later sweep can still ask about it.
-    if (closedHere > 0) options.handles.forget(options.workspaceId, closedCallIds);
+    accounted.add(callId);
+    // The verdict landed, so the correlation has done its job. A call whose row
+    // the store refused keeps both its ledger row and its retry.
+    options.handles.forget(options.workspaceId, [callId]);
   }
 
-  const pending = [...owned].filter((callId) => !closedIds.has(callId) && !unaskable.has(callId));
+  const pending = [...owned].filter((callId) => !accounted.has(callId) && !unaskable.has(callId));
   return { closed, settled: pending.length === 0 };
 }
 
@@ -159,13 +159,20 @@ export async function closeJudgedDeferredCalls(options: {
 export async function settleRememberedCalls(options: {
   readonly remembered: Map<string, string>;
   readonly workspaceId: string;
+  /**
+   * Calls this runtime journaled that the bounded map no longer holds, such as the
+   * one whose completion is being handled now. Ownership comes from this runtime's
+   * own `started` event, not from the map, so an evicted call still gets judged.
+   */
+  readonly additionalOwnedCallIds?: readonly string[];
   readonly probe: (ownedCallIds: readonly string[]) => Promise<{ readonly closed: number; readonly settled: boolean }>;
 }): Promise<void> {
   const own = [...options.remembered]
     .filter(([, workspaceId]) => workspaceId === options.workspaceId)
     .map(([callId]) => callId);
-  if (own.length === 0) return;
-  const { settled } = await options.probe(own);
+  const judged = [...new Set([...own, ...(options.additionalOwnedCallIds ?? [])])];
+  if (judged.length === 0) return;
+  const { settled } = await options.probe(judged);
   if (!settled) return;
   for (const callId of own) options.remembered.delete(callId);
 }

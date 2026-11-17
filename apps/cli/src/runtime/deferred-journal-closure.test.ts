@@ -12,8 +12,12 @@ import {
 const actor: FileActor = { clientId: 'client', sessionId: 'session' };
 const closedAt = '2026-11-16T10:00:00.000Z';
 
-function journal(closedPerCall = 1): { readonly closeDeferredCalls: ReturnType<typeof vi.fn> } {
-  return { closeDeferredCalls: vi.fn(() => closedPerCall) };
+function journal(closed: number | ((callId: string) => number) = 1): { readonly closeDeferredCalls: ReturnType<typeof vi.fn> } {
+  return {
+    closeDeferredCalls: vi.fn((request: { readonly callIds: readonly string[] }) => (
+      typeof closed === 'function' ? closed(request.callIds[0] ?? '') : closed
+    )),
+  };
 }
 
 /**
@@ -178,15 +182,28 @@ describe('closeJudgedDeferredCalls', () => {
     expect(store.closeDeferredCalls).not.toHaveBeenCalled();
   });
 
-  it('keeps the correlation when the store closes nothing', async () => {
+  it('keeps a call whose close the store refused, and forgets only the one that landed', async () => {
+    // One close per call is what makes this judgeable: a shared bucket would let a
+    // landed row hide a refused one, and only the landed row may be settled.
+    const store = journal((callId) => (callId === 'call-1' ? 1 : 0));
+    const handles = ledger([{ callId: 'call-1' }, { callId: 'call-2', handleId: 'process-2' }]);
+
+    await expect(probe({
+      store, handles, authority: authority('gone'), ownedCallIds: ['call-1', 'call-2'],
+    })).resolves.toEqual({ closed: 1, settled: false });
+
+    expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+    expect(handles.forget).not.toHaveBeenCalledWith('ws-1', ['call-2']);
+  });
+
+  it('keeps the correlation and the retry when the store closes nothing', async () => {
     const store = journal(0);
     const handles = ledger([{ callId: 'call-1' }]);
 
+    // Not settled: the row did not close, so forgetting the call would drop the
+    // only path that can still ask about it.
     await expect(probe({ store, handles, authority: authority('gone') }))
-      .resolves.toEqual({ closed: 0, settled: true });
-    // A row the store refused (already closed, or older than this runtime) must
-    // keep its ledger entry: forgetting it would drop the correlation a later
-    // sweep needs to ask again.
+      .resolves.toEqual({ closed: 0, settled: false });
     expect(handles.forget).not.toHaveBeenCalled();
   });
 
@@ -259,5 +276,23 @@ describe('settleRememberedCalls', () => {
     const probe = vi.fn(async () => ({ closed: 0, settled: false }));
     await settleRememberedCalls({ remembered, workspaceId: 'ws-1', probe });
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('still judges a call the bounded map no longer holds', async () => {
+    // The memory cap may evict an in-flight call; its own `started` event is still
+    // where the ownership came from, so its completion gets one chance to close it.
+    const remembered = new Map([['probed-1', 'ws-1']]);
+    const probed: (readonly string[])[] = [];
+    await settleRememberedCalls({
+      remembered,
+      workspaceId: 'ws-1',
+      additionalOwnedCallIds: ['evicted'],
+      probe: async (ownedCallIds) => {
+        probed.push([...ownedCallIds]);
+        return { closed: 0, settled: false };
+      },
+    });
+    expect(probed).toEqual([['probed-1', 'evicted']]);
+    expect([...remembered]).toEqual([['probed-1', 'ws-1']]);
   });
 });

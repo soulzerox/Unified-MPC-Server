@@ -73,15 +73,17 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
  * What that costs: an exempt kind's open row is out of reach of every other pass here, so
  * a reference with no closure route — the real spawn above, and an `agent_swarm_run` row a
  * restarted host can no longer answer — keeps its `started` row and its completion for the
- * life of the workspace, contributing to a `maxEventsPerWorkspace` excess that only other
- * kinds' closed calls can bring down. The trade is deliberate: a released pin over live
+ * life of the workspace. Those rows count against `maxEventsPerWorkspace`, and only closed
+ * calls bring such an excess back down: a closed call of any kind is collected, including
+ * the exempt kind's own settled preview, while the per-kind collapse merely holds the open
+ * rows flat instead of reducing them. The trade is deliberate: a released pin over live
  * work is worse than rows a rare event appends.
  *
  * Adding a settlement rule for another tool means adding its kind here too. The MCP server
- * builds `SETTLEMENT_TOOL_NAMES` from its rules, and
+ * derives `SETTLEMENT_TOOL_NAMES` from its rules table, and
  * `apps/cli/src/runtime/deferred-journal-closure.test.ts` asserts the two sets are equal,
- * so that half fails loudly. The journal cannot derive the list itself: the rules live one
- * layer up.
+ * so a rule that names a new kind, or a rename that moves one, fails until this set says
+ * the same thing. The journal cannot derive the list itself: the rules live one layer up.
  */
 export const DURABLE_REFERENCE_OPERATION_KINDS: ReadonlySet<string> = new Set([
   'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run',

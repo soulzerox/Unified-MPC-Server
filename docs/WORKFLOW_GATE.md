@@ -466,8 +466,9 @@ workspace journal:
    their kinds are listed because they can also produce a row that does. What that costs:
    an exempt kind's open row is out of reach of every other retention pass, so a reference
    with no closure route does keep its rows for the life of the workspace and counts
-   against `maxEventsPerWorkspace` until other kinds' closed calls bring the excess down —
-   a released pin over live work is worse than rows a rare event appends. `run_goal` stays
+   against `maxEventsPerWorkspace` until closed calls bring that excess down — a closed
+   call of any kind is collected, the exempt kind's own settled preview among them — and a
+   released pin over live work is worse than rows a rare event appends. `run_goal` stays
    out of the pinning set entirely: the goal runtime already tracks goal liveness.
    `apps/cli` passes that map into `reconcileLifecycle` and
    `evaluateGoalWorkspaceCleanup`, and `gate check --phase close` reads it through

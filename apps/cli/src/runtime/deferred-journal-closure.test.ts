@@ -448,8 +448,10 @@ describe('closeJudgedDeferredCalls', () => {
   // Retention's per-kind collapse keeps the newest open row of a kind, so a kind whose
   // newest row can close itself must be exempt: otherwise the collapse evicts the older
   // row that still stands for live work, the survivor closes, and the goal reads `clear`
-  // while the worktree, swarm or verification still runs. The journal cannot derive the
-  // list, so both directions are pinned here.
+  // while the worktree, swarm or verification still runs. The rules live a layer up, so
+  // the journal cannot derive the list; `SETTLEMENT_TOOL_NAMES` is the MCP server's rules
+  // table's key set, so this equality catches a new rule, a renamed tool, and an addition
+  // on either side.
   it('exempts exactly the kinds whose own response can settle them', () => {
     expect([...DURABLE_REFERENCE_OPERATION_KINDS].sort()).toEqual([...SETTLEMENT_TOOL_NAMES].sort());
   });

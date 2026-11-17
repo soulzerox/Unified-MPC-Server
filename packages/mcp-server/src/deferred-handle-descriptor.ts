@@ -77,7 +77,8 @@ export type DeferredSettlementRecorder = (record: DeferredSettlementRecord) => v
  * can still be live — the pin stays rather than reading "errored" as "finished".
  *
  * An `agent_swarm_run` read sub-action settles too, for a different reason: it starts
- * nothing, so its work ended inside the call. Its `start` sibling does not: it hands
+ * nothing, so its work ended inside the call — including when the read failed, since
+ * a read that failed still started nothing. Its `start` sibling does not: it hands
  * back a swarm id whose authority answers later.
  */
 export function recordableDeferredSettlement(
@@ -85,16 +86,19 @@ export function recordableDeferredSettlement(
   input: unknown,
   response: { readonly structuredContent?: unknown; readonly isError?: boolean },
 ): RecordedDeferredSettlement | undefined {
-  if (response.isError === true) return undefined;
   const workspaceId = boundedString(asRecord(input)?.workspaceId, 128);
   if (workspaceId === undefined) return undefined;
+  // A read starts nothing, so even a failed read is finished: leaving it open
+  // would pin the goal on a call that could never have produced work, and no
+  // probe could ever answer it.
+  if (toolName === 'agent_swarm_run' && isAgentSwarmRead(input)) {
+    return { workspaceId, closureCode: SWARM_READ_SETTLED_CLOSURE_CODE };
+  }
+  if (response.isError === true) return undefined;
   if (isMergeVerificationTool(toolName)) {
     const structured = asRecord(response.structuredContent);
     if (structured?.status !== 'completed') return undefined;
     return { workspaceId, closureCode: VERIFICATION_SETTLED_CLOSURE_CODE };
-  }
-  if (toolName === 'agent_swarm_run' && asRecord(input)?.operation !== AGENT_SWARM_START_OPERATION) {
-    return { workspaceId, closureCode: SWARM_READ_SETTLED_CLOSURE_CODE };
   }
   return undefined;
 }
@@ -182,8 +186,37 @@ export function isAgentSwarmTool(toolName: string): boolean {
   return AGENT_SWARM_TOOLS.has(toolName);
 }
 
-/** The only `agent_swarm_run` operation that starts work; the rest are reads. */
+/** The only `agent_swarm_run` operation that starts work. */
 const AGENT_SWARM_START_OPERATION = 'start';
+
+/**
+ * The `agent_swarm_run` sub-actions that start nothing.
+ *
+ * Enumerated rather than "anything but `start`", so a sub-action added later is
+ * neither treated as a read (which would settle a call that may have started work)
+ * nor as a start (which would record a snapshot as a handle) until someone decides
+ * which it is. Both mistakes are the fail-open direction, so the unknown answer is
+ * "this call deferred nothing".
+ */
+const AGENT_SWARM_READ_OPERATIONS: ReadonlySet<string> = new Set([
+  'status', 'result', 'cancel', 'list',
+]);
+
+function agentSwarmOperation(input: unknown): string | undefined {
+  const operation = asRecord(input)?.operation;
+  return typeof operation === 'string' ? operation : undefined;
+}
+
+/** True only for a known read sub-action: an unknown operation is not one. */
+function isAgentSwarmRead(input: unknown): boolean {
+  const operation = agentSwarmOperation(input);
+  return operation !== undefined && AGENT_SWARM_READ_OPERATIONS.has(operation);
+}
+
+/** True only for the `start` sub-action. */
+function isAgentSwarmStart(input: unknown): boolean {
+  return agentSwarmOperation(input) === AGENT_SWARM_START_OPERATION;
+}
 
 /**
  * Derive the recorded handle for a tool response, or `undefined` when this call
@@ -233,8 +266,10 @@ export function recordableDeferredHandle(
 
   if (isAgentSwarmTool(toolName)) {
     // A `status`/`result`/`cancel`/`list` sub-action answers with a snapshot of a
-    // swarm this call did not start, so its id is not this call's handle.
-    if (toolName === 'agent_swarm_run' && asRecord(input)?.operation !== AGENT_SWARM_START_OPERATION) {
+    // swarm this call did not start, so its id is not this call's handle. An
+    // operation nobody classified records nothing either: a snapshot is never
+    // evidence of work this call started.
+    if (toolName === 'agent_swarm_run' && !isAgentSwarmStart(input)) {
       return undefined;
     }
     // `agent_swarm_run` answers the snapshot itself; the delegate tools wrap it.

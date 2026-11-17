@@ -410,13 +410,18 @@ workspace journal:
    that launched a `codex_run` task reports its managed process terminal
    (`no_live_codex`; that service is in-memory, so a host that restarted answers
    `PROCESS_NOT_FOUND` and the pin stays), or once the `AgentSwarmService` that
-   started a swarm reports it terminal (`no_live_swarm`), and a closed call stops
+   started a swarm reports it terminal (`no_live_swarm`; a host that restarted mid-swarm
+   downgrades it to `termination_unverified`, which never becomes terminal, so the pin
+   stays), and a closed call stops
    pinning while keeping its row. A verification that reached its verdict inside
    the call settles itself under `verification_settled`: nothing was queued, so no
    probe could ever answer for it. An `agent_swarm_run` read (`status`/`result`/
    `cancel`/`list`) settles itself under `swarm_read_settled`: it starts nothing, and
    the snapshot it answers for names a swarm this call did not start, so no handle
-   may be recorded and no probe can answer for it either. A codex process lives in the codex adapter's own
+   may be recorded and no probe can answer for it either. That holds for a read that
+   failed as well, since a read that failed still started nothing. A `start`,
+   `delegate` or `parallel_delegate` that failed records nothing and keeps its pin:
+   a cancelled start may have launched a swarm this host can no longer name. A codex process lives in the codex adapter's own
    process manager and a swarm in its own runtime, so neither is ever in the CLI
    listing: their ids are recorded under provider `codex` and `swarm`, never
    `process`, which could only read them all as gone. A kind owned by another

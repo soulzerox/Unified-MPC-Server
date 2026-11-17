@@ -92,6 +92,17 @@ describe('recordableDeferredHandle', () => {
     }
   });
 
+  it('records nothing for an agent_swarm_run operation nobody classified', (): void => {
+    // A sub-action added later must not be read as a start (recording a snapshot as
+    // a handle) or as a read (settling a call that may have started work).
+    expect(recordableDeferredHandle('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'pause' }, {
+      ...done, structuredContent: { swarmId: 'swarm-1', state: 'queued' },
+    })).toBeUndefined();
+    expect(recordableDeferredSettlement('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'pause' }, {
+      ...done, structuredContent: { swarm: { swarmId: 'swarm-1' } },
+    })).toBeUndefined();
+  });
+
   it('records nothing for an agent swarm with no id, or a failed call', (): void => {
     expect(recordableDeferredHandle('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'start' }, {
       ...done, structuredContent: { state: 'queued' },
@@ -149,10 +160,15 @@ describe('recordableDeferredSettlement', () => {
     })).toBeUndefined();
   });
 
-  it('settles nothing for a failed or workspace-less swarm read, which may still be live', (): void => {
+  it('settles a failed read too, since a read that failed still started nothing', (): void => {
+    // Left open, this row could never be closed: a swarm call records no handle,
+    // and the process listing cannot speak for a swarm.
     expect(recordableDeferredSettlement('agent_swarm_run', { workspaceId: 'workspace-1', operation: 'cancel' }, {
-      isError: true, structuredContent: { swarm: { swarmId: 'swarm-9' } },
-    })).toBeUndefined();
+      isError: true, structuredContent: { error: { code: 'PROCESS_NOT_FOUND' } },
+    })).toEqual({ workspaceId: 'workspace-1', closureCode: SWARM_READ_SETTLED_CLOSURE_CODE });
+  });
+
+  it('settles nothing for a read with no workspace, which nothing could be closed against', (): void => {
     expect(recordableDeferredSettlement('agent_swarm_run', { operation: 'status' }, {
       ...done, structuredContent: { swarm: { swarmId: 'swarm-9' } },
     })).toBeUndefined();

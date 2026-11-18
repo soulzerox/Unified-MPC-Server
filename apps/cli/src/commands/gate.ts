@@ -333,13 +333,13 @@ export async function findCloseGateReceiptForVerdict(options: {
  * Compared in canonical form, because the fingerprint is already order-free: the
  * caller's `--worktree` order must not turn one decision into a "contradiction",
  * and an older receipt that sorted its blockers differently still describes this
- * revision. A real disagreement (a different decision, or different blockers for
- * the same inputs) survives canonicalization and is still refused.
+ * revision. A real disagreement (a different decision, different blockers for the
+ * same inputs, or a different subject) survives canonicalization and is still
+ * refused. The whole verdict is compared, not a chosen field list, so a field the
+ * parser validates and this comparison forgets cannot become the forged one.
  */
 function sameVerdict(left: CloseGateVerdict, right: CloseGateVerdict): boolean {
-  return left.allowed === right.allowed
-    && left.fingerprint === right.fingerprint
-    && canonicalJson(left.blockers) === canonicalJson(right.blockers);
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 /** JSON with keys and arrays ordered, so equal values compare equal. */

@@ -582,6 +582,86 @@ describe('runCloseGate', () => {
     expect(result.error.message).toContain('a gate that may not contradict itself');
   });
 
+  it('refuses one fingerprint whose receipt decides the same thing with other blockers', async () => {
+    // `allowed` and the fingerprint match, so only the blocker content separates
+    // this file from the current decision: a comparison that stops looking at
+    // blockers would quietly reuse it as evidence for a different refusal.
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-blockers-'));
+    temporaryDirectories.push(directory);
+    const blockedPorts = (): CloseGatePorts => ports({
+      removal: async ({ worktreePath }) => ok(removal({ worktreePath, status: 'blocked', blockers: ['unmerged_changes'] })),
+    });
+    const decided = evaluateCloseGate({
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      cleanup: [cleanup()],
+      removals: [removal({ worktreePath: WORKTREE, status: 'blocked', blockers: ['unmerged_changes'] })],
+      completion: [],
+    });
+    expect(decided.allowed).toBe(false);
+    const written = await writeCloseGateReceipt({
+      directory,
+      verdict: {
+        ...decided,
+        blockers: [{
+          kind: 'removal',
+          worktreePath: '.unified-mpc/worktrees/elsewhere',
+          status: 'blocked',
+          blockers: ['unmerged_changes'],
+        }],
+      },
+      gateId: () => 'gate-1',
+    });
+    expect(written.ok).toBe(true);
+
+    const result = await runCloseGate({
+      ports: blockedPorts(),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [WORKTREE],
+      receiptDirectory: directory,
+      dryRun: false,
+      json: false,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain('a gate that may not contradict itself');
+  });
+
+  it('refuses a receipt that decides another subject for these inputs', async () => {
+    // The fingerprint covers the subject, so this is reachable only by editing the
+    // file: reusing it would hand back evidence that describes another workspace.
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-subject-'));
+    temporaryDirectories.push(directory);
+    const decided = evaluateCloseGate({
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      cleanup: [cleanup()],
+      removals: [removal({ worktreePath: WORKTREE })],
+      completion: [],
+    });
+    expect(decided.allowed).toBe(true);
+    const written = await writeCloseGateReceipt({
+      directory,
+      verdict: { ...decided, workspaceId: 'ws_ffffffffffffffffffffffffffffffff' },
+      gateId: () => 'gate-1',
+    });
+    expect(written.ok).toBe(true);
+
+    const result = await runCloseGate({
+      ports: ports(),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [WORKTREE],
+      receiptDirectory: directory,
+      dryRun: false,
+      json: false,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain('a gate that may not contradict itself');
+  });
+
   it('forwards the subject to every owner and omits an absent goal', async () => {
     const cleanupRequests: unknown[] = [];
     const completionRequests: unknown[] = [];

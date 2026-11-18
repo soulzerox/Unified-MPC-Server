@@ -128,6 +128,74 @@ describe('session tools', () => {
     expect(refused.error.code).toBe('INTERNAL_ERROR');
   });
 
+  it('fences the fingerprinting on head, and lets a branch rename race it', async () => {
+    // One invocation observes the workspace twice. A rename between the two is not a
+    // source move; a head change is. Neither case is reachable from a test that only
+    // mutates variables between calls, so the fence is exercised here.
+    let observeCalls = 0;
+    let race: 'branch' | 'head' | 'none' = 'branch';
+    const baseHead = 'c'.repeat(40);
+    const otherHead = 'd'.repeat(40);
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        git: {
+          async observeWorkspace() {
+            observeCalls += 1;
+            const second = observeCalls % 2 === 0;
+            return ok({
+              repositoryIdentity: 'repo-1',
+              gitCommonDirIdentity: 'common-1',
+              gitCommonDirFilesystemIdentity: 'fs-1',
+              worktreeIdentity: 'worktree-1',
+              branch: second && race === 'branch' ? 'feat/renamed-midway' : 'feat/race',
+              head: second && race === 'head' ? otherHead : baseHead,
+              statusEntries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }],
+              stagedFingerprint: 'staged-1',
+              dirtyFingerprint: '+race-diff',
+            });
+          },
+          async status() {
+            return ok({ entries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }] });
+          },
+          async diff(_actor: unknown, _workspaceId: string, request: { staged?: boolean }) {
+            return ok({ patch: request.staged === true ? '' : '+race-diff', truncated: false });
+          },
+        },
+        process: {
+          async startProjectCommand() {
+            return ok({
+              processId: 'typecheck-race',
+              executable: 'pnpm',
+              args: ['typecheck'],
+              cwd: 'E:/repo',
+              state: 'exited' as const,
+              startedAt: '2026-08-22T01:00:00.000Z',
+              finishedAt: '2026-08-22T01:00:01.000Z',
+              exitCode: 0,
+            });
+          },
+          async status() {
+            throw new Error('status should not be needed for an already-terminal start result');
+          },
+          async logs() {
+            return ok({ entries: [], truncated: false, nextSequence: 1 });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+    const tool = findTool(context, new IncrementalVerifier(), 'verify_incremental');
+    const signal = new AbortController().signal;
+
+    const renamed = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    race = 'head';
+    const moved = await tool.execute({ workspaceId: 'workspace-2' }, signal);
+
+    expect(renamed).toMatchObject({ ok: true, value: { passed: true } });
+    expect(moved).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+  });
+
   it('returns verify_incremental cache hit only while the exact source HEAD and diff stay unchanged', async () => {
     let patch = '+first-diff';
     let head = 'a'.repeat(40);

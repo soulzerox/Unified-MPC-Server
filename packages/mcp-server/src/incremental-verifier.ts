@@ -190,7 +190,14 @@ async function buildDiffFingerprint(
     .digest('hex');
   return ok({
     cacheKey: hash,
-    evidenceIdentity: `${after.value.repositoryIdentity}\0${after.value.worktreeIdentity}`,
+    // The path hashes cannot tell a repository replaced at the same canonical path
+    // from the original one, so the git directory's device/inode identity is part of
+    // what "another checkout" means here.
+    evidenceIdentity: [
+      after.value.repositoryIdentity,
+      after.value.worktreeIdentity,
+      after.value.gitCommonDirFilesystemIdentity ?? '',
+    ].join('\0'),
     changedFiles,
   });
 }
@@ -208,6 +215,7 @@ async function buildDiffFingerprint(
 function sourceKey(source: {
   readonly repositoryIdentity: string;
   readonly worktreeIdentity: string;
+  readonly gitCommonDirFilesystemIdentity?: string;
   readonly head: string;
   readonly dirtyFingerprint: string;
   readonly stagedFingerprint: string;
@@ -215,6 +223,7 @@ function sourceKey(source: {
   return JSON.stringify([
     source.repositoryIdentity,
     source.worktreeIdentity,
+    source.gitCommonDirFilesystemIdentity ?? '',
     source.head,
     source.dirtyFingerprint,
     source.stagedFingerprint,

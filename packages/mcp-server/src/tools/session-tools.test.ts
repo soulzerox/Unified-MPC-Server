@@ -128,9 +128,80 @@ describe('session tools', () => {
     expect(refused.error.code).toBe('INTERNAL_ERROR');
   });
 
+  it('fences the fingerprinting on head, and lets a branch rename race it', async () => {
+    // One invocation observes the workspace twice. A rename between the two is not a
+    // source move; a head change is. Neither case is reachable from a test that only
+    // mutates variables between calls, so the fence is exercised here.
+    let observeCalls = 0;
+    let race: 'branch' | 'head' | 'none' = 'branch';
+    const baseHead = 'c'.repeat(40);
+    const otherHead = 'd'.repeat(40);
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        git: {
+          async observeWorkspace() {
+            observeCalls += 1;
+            const second = observeCalls % 2 === 0;
+            return ok({
+              repositoryIdentity: 'repo-1',
+              gitCommonDirIdentity: 'common-1',
+              gitCommonDirFilesystemIdentity: 'fs-1',
+              worktreeIdentity: 'worktree-1',
+              branch: second && race === 'branch' ? 'feat/renamed-midway' : 'feat/race',
+              head: second && race === 'head' ? otherHead : baseHead,
+              statusEntries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }],
+              stagedFingerprint: 'staged-1',
+              dirtyFingerprint: '+race-diff',
+            });
+          },
+          async status() {
+            return ok({ entries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }] });
+          },
+          async diff(_actor: unknown, _workspaceId: string, request: { staged?: boolean }) {
+            return ok({ patch: request.staged === true ? '' : '+race-diff', truncated: false });
+          },
+        },
+        process: {
+          async startProjectCommand() {
+            return ok({
+              processId: 'typecheck-race',
+              executable: 'pnpm',
+              args: ['typecheck'],
+              cwd: 'E:/repo',
+              state: 'exited' as const,
+              startedAt: '2026-08-22T01:00:00.000Z',
+              finishedAt: '2026-08-22T01:00:01.000Z',
+              exitCode: 0,
+            });
+          },
+          async status() {
+            throw new Error('status should not be needed for an already-terminal start result');
+          },
+          async logs() {
+            return ok({ entries: [], truncated: false, nextSequence: 1 });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+    const tool = findTool(context, new IncrementalVerifier(), 'verify_incremental');
+    const signal = new AbortController().signal;
+
+    const renamed = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    race = 'head';
+    const moved = await tool.execute({ workspaceId: 'workspace-2' }, signal);
+
+    expect(renamed).toMatchObject({ ok: true, value: { passed: true } });
+    expect(moved).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+  });
+
   it('returns verify_incremental cache hit only while the exact source HEAD and diff stay unchanged', async () => {
     let patch = '+first-diff';
     let head = 'a'.repeat(40);
+    let repositoryIdentity = 'repo-1';
+    let worktreeIdentity = 'worktree-1';
+    let branch = 'feat/task-7';
     let starts = 0;
     const context = {
       actor,
@@ -139,10 +210,10 @@ describe('session tools', () => {
         git: {
           async observeWorkspace() {
             return ok({
-              repositoryIdentity: 'repo-1',
+              repositoryIdentity,
               gitCommonDirIdentity: 'common-1',
-              worktreeIdentity: 'worktree-1',
-              branch: 'feat/task-7',
+              worktreeIdentity,
+              branch,
               head,
               statusEntries: [{ path: 'src/app.ts', index: ' ', worktree: 'M' }],
               stagedFingerprint: 'staged-1',
@@ -189,19 +260,36 @@ describe('session tools', () => {
 
     const first = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     const second = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    // A branch rename at the identical head and patches is the same source, so the
+    // cached result is still the right answer for it.
+    branch = 'feat/task-7-renamed';
+    const branchOnly = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     patch = '+second-diff';
     const third = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     head = 'b'.repeat(40);
     const fourth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    worktreeIdentity = 'worktree-2';
+    const otherWorktree = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    repositoryIdentity = 'repo-2';
+    const fifth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    // The entry was replaced by the new checkout's result, so the next call replays it
+    // instead of re-running the typecheck forever against a retained foreign entry.
+    const sixth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
 
-    expect(first).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(second).toMatchObject({ ok: true, value: { cache: 'hit', passed: true } });
-    expect(third).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(fourth).toMatchObject({ ok: true, value: { cache: 'miss', passed: true } });
-    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 1, misses: 3, hitRate: 1 / 4 });
+    expect(first).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'unknown', passed: true } });
+    expect(second).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
+    expect(branchOnly).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
+    expect(third).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'stale', passed: true } });
+    expect(fourth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'stale', passed: true } });
+    // Another worktree or repository under the same workspace id is not out of date,
+    // it is unusable: reusing it would report another checkout's result as this one's.
+    expect(otherWorktree).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
+    expect(fifth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
+    expect(sixth).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
+    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 3, misses: 5, hitRate: 3 / 8 });
     expect(verifier.stats().bytesSaved).toBeGreaterThan(0);
     expect(verifier.invalidate('workspace-1')).toBe(1);
-    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 1, misses: 3 });
-    expect(starts).toBe(3);
+    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 3, misses: 5 });
+    expect(starts).toBe(5);
   });
 });

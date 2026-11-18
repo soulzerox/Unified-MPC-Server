@@ -24,6 +24,13 @@ export interface ActivitySinkEvent {
   readonly traceState?: string;
   readonly baggage?: string;
   readonly authorizationMode?: 'standard' | 'full_bypass';
+  /**
+   * The goal generation whose fenced mutation admitted this call. Completions carry
+   * it so the workspace journal can tell a dead generation's work from current work;
+   * the `started` event is emitted before admission, so it is usually absent there.
+   */
+  readonly goalId?: string;
+  readonly executionGeneration?: number;
 }
 
 export interface TraceContext {
@@ -88,6 +95,13 @@ export interface InFlightToolCall {
   readonly traceState?: string;
   readonly baggage?: string;
   readonly authorizationMode?: 'standard' | 'full_bypass';
+  /**
+   * The goal generation whose fenced mutation admitted this call. Completions carry
+   * it so the workspace journal can tell a dead generation's work from current work;
+   * the `started` event is emitted before admission, so it is usually absent there.
+   */
+  readonly goalId?: string;
+  readonly executionGeneration?: number;
 }
 
 export class ActivityTracker {
@@ -229,6 +243,19 @@ export class ActivityTracker {
     this.activityRevision += 1;
   }
 
+  /**
+   * Remember the goal generation that admitted this call, so its completion can carry
+   * the correlation into the journal. Only a proof the fence admitted is passed here:
+   * a caller-supplied claim must never become journal evidence.
+   */
+  public updateGoalCorrelation(callId: string, correlation: { readonly goalId: string; readonly executionGeneration: number }): void {
+    const existing = this.inflight.get(callId);
+    if (existing === undefined) return;
+    if (existing.goalId === correlation.goalId && existing.executionGeneration === correlation.executionGeneration) return;
+    this.inflight.set(callId, { ...existing, goalId: correlation.goalId, executionGeneration: correlation.executionGeneration });
+    this.activityRevision += 1;
+  }
+
   public async end(
     callId: string,
     resultCode: string,
@@ -266,6 +293,9 @@ export class ActivityTracker {
       ...(existing?.traceState === undefined ? {} : { traceState: existing.traceState }),
       ...(existing?.baggage === undefined ? {} : { baggage: existing.baggage }),
       ...(existing?.authorizationMode === undefined ? {} : { authorizationMode: existing.authorizationMode }),
+      ...(existing?.goalId === undefined || existing.executionGeneration === undefined
+        ? {}
+        : { goalId: existing.goalId, executionGeneration: existing.executionGeneration }),
       ...(resultMessage === undefined || resultMessage.length === 0 ? {} : { resultMessage }),
     }, resultDetail);
   }

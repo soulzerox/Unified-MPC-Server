@@ -192,6 +192,28 @@ describe('SqliteWorkspaceJournalRepository', () => {
     second.close();
   });
 
+  it("keeps the goal generation a call was admitted under, and refuses half a correlation", async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+
+    journal.append({ workspaceId: 'ws-a', operationKind: 'shell', phase: 'started', status: 'started', callId: 'fenced-call', goalId: 'goal-1', executionGeneration: 4 });
+    // Uncorrelated work is the normal case outside a rolling goal, not an error.
+    journal.append({ workspaceId: 'ws-a', operationKind: 'shell', phase: 'started', status: 'started', callId: 'plain-call' });
+
+    const rows = journal.list({ workspaceId: 'ws-a' });
+    // The generation is stored, not inferred: a resumed session reads which execution ran it.
+    expect(rows.map((entry) => [entry.callId, entry.goalId, entry.executionGeneration])).toEqual([
+      ['fenced-call', 'goal-1', 4],
+      ['plain-call', undefined, undefined],
+    ]);
+
+    // A goal without a generation (or the reverse) is refused before SQL sees it: the
+    // projection could only misjudge a correlation that only half exists.
+    expect(() => journal.append({ workspaceId: 'ws-a', operationKind: 'shell', phase: 'started', status: 'started', callId: 'half-a', goalId: 'goal-1' })).toThrow(WorkspaceJournalStoreError);
+    expect(() => journal.append({ workspaceId: 'ws-a', operationKind: 'shell', phase: 'started', status: 'started', callId: 'half-b', executionGeneration: 2 })).toThrow(WorkspaceJournalStoreError);
+    expect(() => journal.append({ workspaceId: 'ws-a', operationKind: 'shell', phase: 'started', status: 'started', callId: 'zero', goalId: 'goal-1', executionGeneration: 0 })).toThrow(WorkspaceJournalStoreError);
+  });
+
   it('is idempotent on a retried (workspace, callId, phase) write', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });

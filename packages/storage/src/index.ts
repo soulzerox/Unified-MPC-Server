@@ -22,6 +22,7 @@ export * from './migrations/retire-auto-machine-roots-migration.js';
 export * from './workspace-journal-repository.js';
 export * from './deferred-handle-repository.js';
 export * from './migrations/workspace-journal-closure-migration.js';
+export * from './migrations/workspace-journal-goal-correlation-migration.js';
 export * from './migrations/workspace-journal-migration.js';
 export * from './settings-repository.js';
 export * from './workspace-repository.js';

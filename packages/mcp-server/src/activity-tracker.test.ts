@@ -27,6 +27,26 @@ describe('ActivityTracker', () => {
     ]);
   });
 
+  it("carries an admitted goal generation on the completion, never on the start", async () => {
+    const events: ActivitySinkEvent[] = [];
+    const tracker = new ActivityTracker({
+      async record(event): Promise<void> {
+        events.push(event);
+      },
+    });
+
+    const callId = await tracker.begin("shell", { workspaceId: "ws-1" });
+    // Admission happens after the start event, so only the completion can say which
+    // generation ran the work. That is what the journal row records.
+    tracker.updateGoalCorrelation(callId, { goalId: "goal-1", executionGeneration: 4 });
+    await tracker.end(callId, "OK", 3);
+
+    expect(events.map((event) => [event.phase, event.goalId, event.executionGeneration])).toEqual([
+      ["started", undefined, undefined],
+      ["completed", "goal-1", 4],
+    ]);
+  });
+
   it('reports activity sink failures without failing the tool lifecycle', async () => {
     const failures: string[] = [];
     const tracker = new ActivityTracker({

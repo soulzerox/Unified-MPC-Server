@@ -838,6 +838,10 @@ export class ToolRegistry {
           goalId: admitted.value.goalId,
           executionGeneration: admitted.value.leaseGeneration,
         };
+        // Same proof, recorded on the in-flight call: the completion's journal row then
+        // says which generation ran the work, which is what lets a resumed session tell
+        // a dead generation's open row from current work.
+        this.activity.updateGoalCorrelation(callId, admittedGoalCorrelation);
         durableGoalExecutionAdmitted = true;
       }
       if (
@@ -1529,7 +1533,7 @@ export class ToolRegistry {
     let resume: WorkspaceResumeSnapshot | null | undefined;
     if (this.services.workspaceResume !== undefined) {
       try {
-        const read = this.services.workspaceResume.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+        const read = await this.services.workspaceResume.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
         if (read.ok) {
           resume = read.value;
         } else {

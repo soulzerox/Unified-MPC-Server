@@ -2341,7 +2341,7 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     };
     const withEmptyJournal = new ToolRegistry({
       ...services,
-      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => ok(emptySnapshot) },
+      workspaceResume: { read: async (): Promise<Result<WorkspaceResumeSnapshot>> => ok(emptySnapshot) },
     }, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
     const quiet = await withEmptyJournal.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
 
@@ -2356,9 +2356,9 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     const { services } = createHarnessServices();
     const registries = [
       // The reader refuses; the message is redacted at the sink, like the throwing branch.
-      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable for sk-live-refusal-secret')) } },
+      { ...services, workspaceResume: { read: async (): Promise<Result<WorkspaceResumeSnapshot>> => err(appError('INTERNAL_ERROR', 'journal unavailable for sk-live-refusal-secret')) } },
       // The store throws rather than returning a `Result`, which is what really happens.
-      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => { throw new Error('journal unavailable'); } } },
+      { ...services, workspaceResume: { read: async (): Promise<Result<WorkspaceResumeSnapshot>> => { throw new Error('journal unavailable'); } } },
     ];
 
     const diagnostics: Array<{ readonly name: string; readonly message: string }> = [];
@@ -2392,7 +2392,7 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     // proves the carrier line in the context literal actually passes the sink through.
     const registry = new ToolRegistry({
       ...services,
-      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable for sk-handoff-registry-secret')) },
+      workspaceResume: { read: async (): Promise<Result<WorkspaceResumeSnapshot>> => err(appError('INTERNAL_ERROR', 'journal unavailable for sk-handoff-registry-secret')) },
     }, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       activeWorkspaceScopeProvider,
@@ -2416,7 +2416,7 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     // A logger that throws must not turn the degraded read into a failed handoff.
     const throwingRegistry = new ToolRegistry({
       ...services,
-      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable')) },
+      workspaceResume: { read: async (): Promise<Result<WorkspaceResumeSnapshot>> => err(appError('INTERNAL_ERROR', 'journal unavailable')) },
     }, actor, {
       harnessActivationLedger: new HarnessActivationLedger(),
       activeWorkspaceScopeProvider,

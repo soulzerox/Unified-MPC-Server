@@ -70,7 +70,7 @@ async function readWorkspaceResume(
 ): Promise<Result<Record<string, unknown>>> {
   const resume = context.services.workspaceResume;
   if (resume === undefined) return missingService();
-  const snapshot = resume.read({
+  const snapshot = await resume.read({
     workspaceId: input.workspaceId,
     ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
     ...(input.window === undefined ? {} : { window: input.window }),
@@ -122,7 +122,7 @@ async function createSessionHandoff(
   const backgroundTasks = await readBackgroundTasks(context, signal);
   // The journal, not the chat, is where durable task state lives: a session that never
   // saw the earlier calls still reads what they were and which are still open here.
-  const journal = readHandoffJournal(context, input.workspaceId);
+  const journal = await readHandoffJournal(context, input.workspaceId);
   if (!journal.ok) return err(journal.error);
   const trackerExcerpt = compactTracker(tracker.value.content);
   const changedFiles = [...new Set(status.value.entries.map((entry) => entry.path))].sort();
@@ -163,17 +163,17 @@ async function createSessionHandoff(
  * answer. Neither is an empty event list: that would read as "nothing happened here",
  * which is the wrong thing to hand a session that is trying to recover work.
  */
-function readHandoffJournal(
+async function readHandoffJournal(
   context: McpToolContext,
   workspaceId: string,
-): Result<WorkspaceResumeSnapshot | null | undefined> {
+): Promise<Result<WorkspaceResumeSnapshot | null | undefined>> {
   const reader: WorkspaceResumeSnapshotReader | undefined = context.services.workspaceResume;
   if (reader === undefined) return ok(undefined);
-  let read: ReturnType<WorkspaceResumeSnapshotReader['read']>;
+  let read: Awaited<ReturnType<WorkspaceResumeSnapshotReader['read']>>;
   try {
     // The newest window, not the oldest: a recovering session needs the rows that
     // describe current work, and the projection says how far back the rest sits.
-    read = reader.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+    read = await reader.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
   } catch (error: unknown) {
     // The store throws rather than refusing; a handoff must still be produced, but the
     // reason has to reach the operator instead of dying in a `null`.
@@ -271,8 +271,13 @@ function describeJournalWindow(journal: WorkspaceResumeSnapshot | null | undefin
     const summary = event.summary === undefined ? '' : ` - ${event.summary}`;
     // A newest window is still bounded, so the row's own `recordedAt` is how a reader
     // tells a just-finished call from one written before it.
-    return `- #${event.sequence} ${event.operationKind}${tool} (${event.phase}/${event.status}) ${event.recordedAt}${event.open ? ' OPEN' : ''}${result}${summary}`;
+    return `- #${event.sequence} ${event.operationKind}${tool} (${event.phase}/${event.status}) ${event.recordedAt}${event.open ? ' OPEN' : ''}${event.superseded ? ' SUPERSEDED' : ''}${result}${summary}`;
   });
+  if (journal.events.some((event) => event.superseded)) {
+    lines.push(
+      '- a SUPERSEDED row was admitted under an older generation of this workspace\'s goal: its execution ended, so it is not open and must not be waited on or recovered as current work',
+    );
+  }
   if (journal.openReferences.count > 0) {
     lines.push(
       `- ${journal.openReferences.count} open call(s) in this window; latest row #${journal.openReferences.latestSequence ?? 'unknown'}`,

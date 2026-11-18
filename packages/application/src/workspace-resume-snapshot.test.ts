@@ -71,12 +71,12 @@ function journalOf(entries: readonly WorkspaceJournalEntry[], handleReturning: r
 
 const now = (): Date => new Date('2026-11-18T03:00:00.000Z');
 
-describe('workspace resume snapshot', () => {
-  it('projects the oldest rows first and hands back a cursor', () => {
+describe('workspace resume snapshot', async () => {
+  it('projects the oldest rows first and hands back a cursor', async () => {
     const { journal } = journalOf([entry({ sequence: 2 }), entry({ sequence: 1 })]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1' });
+    const snapshot = await read.read({ workspaceId: 'ws-1' });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -86,11 +86,11 @@ describe('workspace resume snapshot', () => {
     expect(snapshot.value.generatedAt).toBe('2026-11-18T03:00:00.000Z');
   });
 
-  it('resumes from the cursor instead of replaying what the caller already read', () => {
+  it('resumes from the cursor instead of replaying what the caller already read', async () => {
     const { journal, requests } = journalOf([entry({ sequence: 1 }), entry({ sequence: 2 }), entry({ sequence: 3 })]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1', afterSequence: 2 });
+    const snapshot = await read.read({ workspaceId: 'ws-1', afterSequence: 2 });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -99,11 +99,11 @@ describe('workspace resume snapshot', () => {
     expect(requests.at(-1)?.afterSequence).toBe(2);
   });
 
-  it('bounds the window and says so instead of silently cutting it', () => {
+  it('bounds the window and says so instead of silently cutting it', async () => {
     const { journal, requests } = journalOf([1, 2, 3].map((sequence) => entry({ sequence })));
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1', limit: 2 });
+    const snapshot = await read.read({ workspaceId: 'ws-1', limit: 2 });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -114,11 +114,11 @@ describe('workspace resume snapshot', () => {
     expect(requests.at(-1)?.limit).toBe(3);
   });
 
-  it('reports an empty window at the caller cursor rather than at zero', () => {
+  it('reports an empty window at the caller cursor rather than at zero', async () => {
     const { journal, openRequests } = journalOf([]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1', afterSequence: 7 });
+    const snapshot = await read.read({ workspaceId: 'ws-1', afterSequence: 7 });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -130,7 +130,7 @@ describe('workspace resume snapshot', () => {
     expect(openRequests).toEqual([]);
   });
 
-  it('counts only the calls whose work may still be running', () => {
+  it('counts only the calls whose work may still be running', async () => {
     // A `started` row with no verdict is open; a completed row is not, and neither is a
     // `started` row a settlement already closed.
     const { journal } = journalOf([
@@ -141,7 +141,7 @@ describe('workspace resume snapshot', () => {
     ]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1' });
+    const snapshot = await read.read({ workspaceId: 'ws-1' });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -149,7 +149,7 @@ describe('workspace resume snapshot', () => {
     expect(snapshot.value.events.map((event) => event.open)).toEqual([true, false, false, true]);
   });
 
-  it('does not call a call open just because its completion sits past the cursor', () => {
+  it('does not call a call open just because its completion sits past the cursor', async () => {
     // The window ends before `call-a` completes. Judging "open" from the window alone
     // would report a finished call as running; the store answers for the whole journal.
     const { journal, openRequests } = journalOf([
@@ -159,7 +159,7 @@ describe('workspace resume snapshot', () => {
     ]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1', limit: 2 });
+    const snapshot = await read.read({ workspaceId: 'ws-1', limit: 2 });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -168,7 +168,7 @@ describe('workspace resume snapshot', () => {
     expect(openRequests).toEqual([{ workspaceId: 'ws-1', callIds: ['call-a', 'call-b'] }]);
   });
 
-  it('keeps a handle-returning call open after its own request completed', () => {
+  it('keeps a handle-returning call open after its own request completed', async () => {
     // `process_start` returns as soon as the child spawns, so its `completed` row ends
     // the request, not the work; only a `closure_code` ends the pin.
     const { journal } = journalOf([
@@ -178,7 +178,7 @@ describe('workspace resume snapshot', () => {
     ], ['process_start']);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1' });
+    const snapshot = await read.read({ workspaceId: 'ws-1' });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -188,7 +188,7 @@ describe('workspace resume snapshot', () => {
     expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 2 });
   });
 
-  it('reports a handle-returning call open from a window that only holds its completion', () => {
+  it('reports a handle-returning call open from a window that only holds its completion', async () => {
     // The cursor lands between the two rows, so the window cannot see the `started` row
     // and cannot see that the kind is handle-returning. Reading "open" off the row's own
     // phase would tell a resumed session the spawned work had finished.
@@ -199,7 +199,7 @@ describe('workspace resume snapshot', () => {
     ], ['process_start']);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const snapshot = read.read({ workspaceId: 'ws-1', afterSequence: 1, limit: 2 });
+    const snapshot = await read.read({ workspaceId: 'ws-1', afterSequence: 1, limit: 2 });
 
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -208,19 +208,19 @@ describe('workspace resume snapshot', () => {
     expect(openRequests).toEqual([{ workspaceId: 'ws-1', callIds: ['spawn-1', 'publish-1'] }]);
   });
 
-  it('asks the store for one workspace only', () => {
+  it('asks the store for one workspace only', async () => {
     const { journal, requests } = journalOf([entry({ sequence: 1 }), entry({ sequence: 2, workspaceId: 'ws-2' })]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
-    const first = read.read({ workspaceId: 'ws-1' });
-    const second = read.read({ workspaceId: 'ws-2' });
+    const first = await read.read({ workspaceId: 'ws-1' });
+    const second = await read.read({ workspaceId: 'ws-2' });
 
     expect(first.ok && first.value.events.map((event) => event.sequence)).toEqual([1]);
     expect(second.ok && second.value.events.map((event) => event.sequence)).toEqual([2]);
     expect(requests.map((request) => request.workspaceId)).toEqual(['ws-1', 'ws-2']);
   });
 
-  it('refuses a request it cannot answer without guessing', () => {
+  it('refuses a request it cannot answer without guessing', async () => {
     const { journal, requests, openRequests } = journalOf([entry({ sequence: 1 })]);
     const read = createWorkspaceResumeSnapshotReader({ journal, now });
 
@@ -231,7 +231,7 @@ describe('workspace resume snapshot', () => {
       { workspaceId: 'ws-1', limit: 1.5 },
       { workspaceId: 'ws-1', afterSequence: -1 },
     ]) {
-      const snapshot = read.read(request);
+      const snapshot = await read.read(request);
       expect(snapshot.ok, JSON.stringify(request)).toBe(false);
       if (snapshot.ok) continue;
       expect(snapshot.error.code).toBe('INVALID_INPUT');
@@ -242,14 +242,14 @@ describe('workspace resume snapshot', () => {
   });
 });
 
-describe('workspace resume snapshot from the newest end', () => {
+describe('workspace resume snapshot from the newest end', async () => {
   const rows = Array.from({ length: 25 }, (_, index) => entry({ sequence: index + 1 }));
 
-  it('reads the current end of the journal and pages back through olderCursor', () => {
+  it('reads the current end of the journal and pages back through olderCursor', async () => {
     const { journal, requests } = journalOf(rows);
     const reader = createWorkspaceResumeSnapshotReader({ journal });
 
-    const latest = reader.read({ workspaceId: 'ws-1', window: 'newest', limit: 20 });
+    const latest = await reader.read({ workspaceId: 'ws-1', window: 'newest', limit: 20 });
     expect(latest.ok).toBe(true);
     if (!latest.ok) return;
     // The rows that describe today's work, not the first 20 ever recorded.
@@ -261,7 +261,7 @@ describe('workspace resume snapshot from the newest end', () => {
     expect(latest.value.olderCursor).toBe(6);
     expect(requests[0]).toMatchObject({ fromNewest: true, limit: 21 });
 
-    const older = reader.read({ workspaceId: 'ws-1', window: 'newest', beforeSequence: 6, limit: 20 });
+    const older = await reader.read({ workspaceId: 'ws-1', window: 'newest', beforeSequence: 6, limit: 20 });
     expect(older.ok).toBe(true);
     if (!older.ok) return;
     expect(older.value.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
@@ -270,40 +270,110 @@ describe('workspace resume snapshot from the newest end', () => {
     expect(older.value.olderCursor).toBeNull();
   });
 
-  it('leaves olderCursor null for a forward window, and for a newest window that fits', () => {
+  it('leaves olderCursor null for a forward window, and for a newest window that fits', async () => {
     const { journal } = journalOf(rows.slice(0, 3));
     const reader = createWorkspaceResumeSnapshotReader({ journal });
 
-    const forward = reader.read({ workspaceId: 'ws-1', limit: 20 });
+    const forward = await reader.read({ workspaceId: 'ws-1', limit: 20 });
     expect(forward.ok).toBe(true);
     if (!forward.ok) return;
     expect(forward.value.olderCursor).toBeNull();
 
-    const newest = reader.read({ workspaceId: 'ws-1', window: 'newest', limit: 20 });
+    const newest = await reader.read({ workspaceId: 'ws-1', window: 'newest', limit: 20 });
     expect(newest.ok).toBe(true);
     if (!newest.ok) return;
     expect(newest.value.truncated).toBe(false);
     expect(newest.value.olderCursor).toBeNull();
   });
 
-  it('refuses to read both directions in one request, from either side', () => {
+  it('refuses to read both directions in one request, from either side', async () => {
     const { journal, requests } = journalOf(rows);
     const reader = createWorkspaceResumeSnapshotReader({ journal });
-    expect(reader.read({ workspaceId: 'ws-1', window: 'newest', afterSequence: 4 })).toMatchObject({
+    expect(await reader.read({ workspaceId: 'ws-1', window: 'newest', afterSequence: 4 })).toMatchObject({
       ok: false,
       error: { code: 'INVALID_INPUT' },
     });
     // A backward cursor on a forward window is refused too: ignoring it would answer a
     // different question than the caller asked, and silently return the oldest rows.
-    expect(reader.read({ workspaceId: 'ws-1', beforeSequence: 4 })).toMatchObject({
+    expect(await reader.read({ workspaceId: 'ws-1', beforeSequence: 4 })).toMatchObject({
       ok: false,
       error: { code: 'INVALID_INPUT' },
     });
-    expect(reader.read({ workspaceId: 'ws-1', window: 'oldest', beforeSequence: 4 })).toMatchObject({
+    expect(await reader.read({ workspaceId: 'ws-1', window: 'oldest', beforeSequence: 4 })).toMatchObject({
       ok: false,
       error: { code: 'INVALID_INPUT' },
     });
     // Neither refusal reached the journal.
     expect(requests).toEqual([]);
+  });
+});
+
+describe('workspace resume stale-generation projection', () => {
+  const staleStarted = entry({
+    sequence: 1, callId: 'old-call', phase: 'started', status: 'started', goalId: 'goal-1', executionGeneration: 4,
+  });
+  const liveStarted = entry({
+    sequence: 2, callId: 'live-call', phase: 'started', status: 'started', goalId: 'goal-1', executionGeneration: 6,
+  });
+
+  it('does not report a dead generation\'s open call as work still running', async () => {
+    const { journal } = journalOf([staleStarted, liveStarted], ['process_start']);
+    const reader = createWorkspaceResumeSnapshotReader({ journal, now });
+
+    const snapshot = await reader.read({
+      workspaceId: 'ws-1',
+      currentGoal: { goalId: 'goal-1', executionGeneration: 6 },
+    });
+
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    // The stale call's row keeps its own generation, so a caller can see *why* it is not
+    // open; treating it as silently finished would be a different lie.
+    expect(snapshot.value.events.map((event) => [event.sequence, event.open, event.superseded, event.executionGeneration])).toEqual([
+      [1, false, true, 4],
+      [2, true, false, 6],
+    ]);
+    // Only the current generation's call counts as open work.
+    expect(snapshot.value.openReferences).toEqual({ count: 1, latestSequence: 2 });
+  });
+
+  it('leaves calls unjudged when no current generation is known', async () => {
+    const { journal } = journalOf([staleStarted, liveStarted], ['process_start']);
+    const reader = createWorkspaceResumeSnapshotReader({ journal, now });
+
+    const snapshot = await reader.read({ workspaceId: 'ws-1' });
+
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    // Unknown, not stale: the journal window cannot know which generation is live, and
+    // guessing would retire work that may still be running.
+    expect(snapshot.value.events.map((event) => [event.open, event.superseded])).toEqual([[true, false], [true, false]]);
+    expect(snapshot.value.openReferences.count).toBe(2);
+  });
+
+  it('judges a call by its newest correlated row and takes the scope from the reader', async () => {
+    const started = entry({ sequence: 1, callId: 'mixed-call', phase: 'started', status: 'started' });
+    const completed = entry({
+      sequence: 2, callId: 'mixed-call', phase: 'completed', status: 'completed', resultCode: 'ok',
+      goalId: 'goal-1', executionGeneration: 3,
+    });
+    const { journal } = journalOf([started, completed], ['process_start']);
+    const reader = createWorkspaceResumeSnapshotReader({
+      journal,
+      now,
+      // Wired once by the runtime from the mutation fence, so every caller judges alike.
+      currentGoal: async () => ({ goalId: 'goal-1', executionGeneration: 5 }),
+    });
+
+    const snapshot = await reader.read({ workspaceId: 'ws-1' });
+
+    expect(snapshot.ok).toBe(true);
+    if (!snapshot.ok) return;
+    // The admission correlation landed on the completion only; the call is still adjudicated.
+    expect(snapshot.value.events.map((event) => [event.sequence, event.open, event.superseded])).toEqual([
+      [1, false, true],
+      [2, false, true],
+    ]);
+    expect(snapshot.value.openReferences).toEqual({ count: 0, latestSequence: null });
   });
 });

@@ -324,6 +324,21 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-a' })).toHaveLength(0);
   });
 
+  it('redacts credentials in the summary before the row is stored', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+
+    journal.append({
+      workspaceId: 'ws-a', operationKind: 'task_create', phase: 'completed', status: 'completed', callId: 'call-1',
+      summary: 'deploy failed with sk-live-abcdef123456 and PASSWORD=hunter2',
+    });
+
+    // The row is replayed to sessions that were never present, so a credential
+    // pasted into a summary must not survive the write.
+    const [entry] = journal.list({ workspaceId: 'ws-a' });
+    expect(entry?.summary).toBe('deploy failed with [REDACTED] and PASSWORD=[REDACTED]');
+  });
+
   it('retires whole closed calls and never an open row, so no started row is left unclosable', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
     temporaryRoots.push(root);

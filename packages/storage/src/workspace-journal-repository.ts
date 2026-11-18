@@ -1,5 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { Redactor } from '@unified-mpc/audit';
 import type { SqliteDatabase } from './database.js';
+
+/**
+ * The one free-text column, redacted on the way in with the same rules the audit
+ * log applies. A journal row outlives the request that wrote it and is replayed
+ * to sessions that were never present, so a credential pasted into a summary
+ * would be re-published by every later resume.
+ */
+const JOURNAL_REDACTOR = new Redactor();
 
 /**
  * Per-field bounds, each mirroring the DDL. A value the schema would reject must
@@ -277,7 +286,12 @@ export class SqliteWorkspaceJournalRepository {
    * error and must not create a second row.
    */
   public append(request: WorkspaceJournalAppendRequest): number | null {
-    if (!validRequest(request)) {
+    // Redact before the bound is judged: the row that lands is the row that was
+    // checked, so a rewritten summary cannot slip past the length cap either.
+    const entry: WorkspaceJournalAppendRequest = request.summary === undefined
+      ? request
+      : { ...request, summary: JOURNAL_REDACTOR.redactText(request.summary) };
+    if (!validRequest(entry)) {
       throw new WorkspaceJournalStoreError('invalid_entry', 'Journal entry is not bounded or is missing a required field');
     }
     const db = this.database.connection;
@@ -297,7 +311,7 @@ export class SqliteWorkspaceJournalRepository {
       request.phase,
       request.status,
       request.resultCode ?? null,
-      request.summary ?? null,
+      entry.summary ?? null,
       request.traceId ?? null,
       request.recordedAt ?? new Date().toISOString(),
     );

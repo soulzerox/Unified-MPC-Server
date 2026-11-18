@@ -16,7 +16,7 @@ import {
   type McpClientFactory,
   type McpServerLaunchConfig,
 } from '@unified-mpc/extensions';
-import { parseBooleanSetting } from '@unified-mpc/shared';
+import { parseBooleanSetting, parseIntegerSetting } from '@unified-mpc/shared';
 import { redactDiagnosticText } from '@unified-mpc/application';
 import {
   CanonicalManifestStore,
@@ -83,7 +83,18 @@ export function codeIndexVectorsFromEnv(value: string | null | undefined): boole
 // Publishing a full generation (CPG resolution + generation copy) can take far
 // longer than a request; the provider answers as soon as the job is created,
 // but the follow-up status/often-blocking calls must survive the publish.
-const INDEX_CALL_TIMEOUT_MS = 3_600_000;
+//
+// issue #901: a cold hybrid build on a CPU-only host ran `duration_s 25096`
+// (~7 h), so the one-hour bound cut a call that was still making progress and
+// reported a false `failed` while the provider published normally. The default
+// stays one hour; a deployment that knows its build is slower raises it.
+export const DEFAULT_INDEX_CALL_TIMEOUT_MS = 3_600_000;
+const MAX_INDEX_CALL_TIMEOUT_MS = 24 * 60 * 60_000;
+
+/** Reads the index-call deadline (issue #901); an invalid value keeps the default. */
+export function indexCallTimeoutFromEnv(value: string | null | undefined): number {
+  return parseIntegerSetting(value, DEFAULT_INDEX_CALL_TIMEOUT_MS, 1_000, MAX_INDEX_CALL_TIMEOUT_MS);
+}
 const INDEX_ADMISSION_WAIT_MS = 5_000;
 /**
  * A terminal admission failure is surfaced for this long before an automatic
@@ -211,6 +222,12 @@ export interface NativeThaiRagProviderDriverOptions {
   readonly indexStatusTimeoutMs?: number;
   /** Consecutive index_status call timeouts tolerated by the admission monitor before the job is failed and the admission gate released (issue #407 deadline). */
   readonly indexStatusTimeoutCap?: number;
+  /**
+   * Per-call deadline for one `code_index`/index-session call (issue #901).
+   * Defaults to one hour and may be raised for a deployment whose cold build is
+   * slower than that; it is floored by the data-owner read budget.
+   */
+  readonly indexCallTimeoutMs?: number;
   /**
    * Ask the provider to embed code chunks as well as index them lexically
    * (issue #445 option 4). Default `false` keeps the #463 FTS5-first policy;
@@ -361,6 +378,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         })
       : options.clientFactory;
     this.snapshotProbeTimeoutMs = Math.max(1, Math.floor(options.snapshotProbeTimeoutMs ?? 5_000));
+    const indexCallTimeoutMs = Math.max(
+      1_000,
+      Math.floor(options.indexCallTimeoutMs ?? DEFAULT_INDEX_CALL_TIMEOUT_MS),
+    );
     this.sessions = new McpSessionManager({
       ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
       ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
@@ -372,7 +393,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       ...(chosenFactory === undefined ? {} : { clientFactory: chosenFactory }),
       callTimeoutMs: Math.max(
         options.callTimeoutMs ?? 60_000,
-        INDEX_CALL_TIMEOUT_MS,
+        indexCallTimeoutMs,
         // #770: an index start may wait for the same serial data owner, and the
         // provider's long-pass bound must stay the first deadline to fire.
         thaiRagReadCallBudgetMs(options.launchConfig.env),

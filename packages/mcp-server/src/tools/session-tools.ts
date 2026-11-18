@@ -3,6 +3,8 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import {
   WORKSPACE_RESUME_DEFAULT_LIMIT,
   WORKSPACE_RESUME_MAX_LIMIT,
+  redactDiagnosticText,
+  sanitizeException,
   type WorkspaceResumeSnapshot,
   type WorkspaceResumeSnapshotReader,
 } from '@unified-mpc/application';
@@ -172,11 +174,25 @@ function readHandoffJournal(
     // The newest window, not the oldest: a recovering session needs the rows that
     // describe current work, and the projection says how far back the rest sits.
     read = reader.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
-  } catch {
-    // The store throws rather than refusing; a handoff must still be produced.
+  } catch (error: unknown) {
+    // The store throws rather than refusing; a handoff must still be produced, but the
+    // reason has to reach the operator instead of dying in a `null`.
+    sanitizeException(error, context.diagnostic);
     return ok(null);
   }
-  if (!read.ok) return ok(null);
+  if (!read.ok) {
+    // Same redaction guarantee `workspace_bootstrap` gives its refusal branch, and the
+    // same resilience: a diagnostic sink must never change the safe result, which is why
+    // `sanitizeException` guards its own call. This branch calls the sink directly, so it
+    // guards its own too — a throwing logger would otherwise escalate a journal refusal
+    // into a failed handoff.
+    try {
+      context.diagnostic?.({ name: 'WorkspaceHandoffJournalUnavailable', message: redactDiagnosticText(read.error.message) });
+    } catch {
+      // Reporting is best effort; the handoff below is not.
+    }
+    return ok(null);
+  }
   // The reader is workspace-scoped, so a snapshot naming another workspace cannot be
   // one it produced: refuse it rather than hand one workspace's work to another session.
   if (read.value.workspaceId !== workspaceId.trim()) {

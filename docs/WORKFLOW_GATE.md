@@ -520,7 +520,11 @@ each rendered row carries its own `recordedAt` so a reader can tell a
 just-finished call from one written before it, and the prompt names
 `olderCursor` when older rows exist rather than implying the window is all. A snapshot the reader could not have
 produced — one naming another workspace — is refused as `CONFLICT` rather than
-handed to the next session.
+handed to the next session. A read that fails still produces a handoff, but not
+silently: the throwing path goes through `sanitizeException` and the refusal
+path reports `WorkspaceHandoffJournalUnavailable`, both through the same
+diagnostic sink `workspace_bootstrap` uses, so a broken journal is visible to
+whoever operates the host.
 
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as

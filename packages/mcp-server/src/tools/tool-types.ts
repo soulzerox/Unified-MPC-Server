@@ -16,6 +16,7 @@ import type {
   CheckpointService,
   CodexService,
   DeleteFileRequest,
+  DiagnosticLogger,
   EditFileRequest,
   FileActor,
   FileService,
@@ -387,6 +388,12 @@ export interface McpToolContext {
   readonly actor: FileActor;
   readonly services: McpApplicationServices;
   readonly contextEconomy: ContextEconomyRuntime;
+  /**
+   * Process diagnostic sink, when the runtime has one. A tool that degrades a failure to
+   * a sentinel value must still leave a trace here: a silent `null` tells whoever operates
+   * the host nothing. Same sink `workspace_bootstrap` reports journal failures through.
+   */
+  readonly diagnostic?: DiagnosticLogger;
   /** Process-owned controller shared across transports and expensive runtime subsystems. */
   readonly resourceAdmissionController?: ResourceAdmissionController;
   /** Stable caller/session owner used for admission accounting. */

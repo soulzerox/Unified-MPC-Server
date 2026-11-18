@@ -1,5 +1,5 @@
 import { ok, type Result } from '@unified-mpc/domain';
-import type { GoalWorktreeClassificationReport } from '@unified-mpc/application';
+import type { GoalWorktreeClassificationReport, WorkspaceResumeRequest, WorkspaceResumeSnapshot } from '@unified-mpc/application';
 import { hashHarnessText } from './harness-runtime.js';
 import type { McpApplicationServices } from './tools/tool-types.js';
 
@@ -161,13 +161,18 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     },
     workspaceQuery: serviceProxy('workspaceQuery', calls, () => ({ entries: [] })),
     workspaceResume: {
-      read(request: { readonly workspaceId: string; readonly afterSequence?: number }) {
+      // Typed against the reader contract, not a copy of it: a hand-written shape here
+      // would keep compiling while the real request/response moved, which is exactly
+      // what the surrounding `as unknown as McpApplicationServices` cannot catch.
+      read(request: WorkspaceResumeRequest): Result<WorkspaceResumeSnapshot> {
         calls.push('workspaceResume.read');
         return ok({
           workspaceId: request.workspaceId,
           generatedAt: new Date(0).toISOString(),
           cursor: request.afterSequence ?? 0,
           truncated: false,
+          // A snapshot that fits in one window has no older rows to point at.
+          olderCursor: null,
           events: [],
           openReferences: { count: 0, latestSequence: null },
         });

@@ -264,6 +264,8 @@ describe('native provider admission index status truth', () => {
       result: { status: 'complete', indexed: 3 },
     }), {
       admit: false,
+      // A candidate the provider answers as terminal is not adoptable either.
+      activeJobs: ['idx_otherjob01'],
       onCodeIndex: (call): unknown => {
         if (call === 2) throw new Error('Timed out calling thai-rag-native/code_index');
         return undefined;
@@ -290,6 +292,27 @@ describe('native provider admission index status truth', () => {
       // Trial probe + the timed-out start, and no third pass.
       expect(counts().indexStarts).toBe(2);
     } finally { await driver.stop(); }
+  });
+
+  it('never cancels a pass it only adopted when the runtime stops mid-build (issue #906)', async () => {
+    const { driver, counts, dataRoot } = await fixture(async () => response('index_status', {
+      status: 'running', job_id: 'idx_samejob01', workspace_id: workspaceId,
+    }), {
+      admit: false,
+      activeJobs: ['idx_samejob01'],
+      onCodeIndex: (call): unknown => {
+        if (call === 2) throw new Error('Timed out calling thai-rag-native/code_index');
+        return undefined;
+      },
+    });
+    const read = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+    expect(read.ok).toBe(false);
+    // The pass is still building and belongs to nobody we can prove.
+    await driver.stop();
+    expect(counts().cancels).toBe(0);
+    const [row] = await ledgerJobs(dataRoot);
+    expect(row?.providerJobId).toBe('idx_samejob01');
+    expect(row?.status).not.toBe('running');
   });
 
   it('fails the Unified job when outer done hides a failed provider result', async () => {

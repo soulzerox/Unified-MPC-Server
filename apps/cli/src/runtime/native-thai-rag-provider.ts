@@ -1865,6 +1865,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   ): Promise<Result<void>> {
     const ownerId = this.ownerId ?? '';
     const job = await this.jobs.create(workspace.id, force, ownerId, reindexReason);
+    // #906: declared outside the monitor's `try` so its `finally` cannot touch
+    // them in the temporal dead zone when an earlier await rejects.
+    // An adopted pass proves the workspace is being built, not that the bytes
+    // this read would skip came from our canonical claim, so the claim and the
+    // snapshot verification stay unrecorded and a later admission re-proves
+    // them.
+    let adoptedStart = false;
+    let adoptedProviderJobId: string | undefined;
     this.indexingWorkspaceId = workspace.id;
     this.workspaceIndexJobIds.set(workspace.id, job.jobId);
     const monitor = (async (): Promise<Result<void>> => {
@@ -1902,11 +1910,6 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // re-admit at once. Only a refusal to start is cooled down (issue #762),
         // because that one re-arms cheaply and can loop unnoticed.
         let passTerminalized = false;
-        // #906: an adopted pass proves the workspace is being built, not that
-        // the bytes this read would skip came from our canonical claim. Leave
-        // the claim and the snapshot verification unrecorded so a later
-        // admission re-proves them, instead of skipping on borrowed evidence.
-        let adoptedStart = false;
         // issue-202: trial-first — bounded foreground probe proves the
         // pipeline before full admission. Trial failure takes the same
         // fail-closed path below; pending stays set for a later retry.
@@ -1984,8 +1987,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
               indexed = err(appError('CONFLICT', 'Native Thai-RAG workspace indexing was interrupted during shutdown', true));
             } else {
               adoptedStart = true;
+              adoptedProviderJobId = adopted;
               indexed = await this.waitForWorkspaceAdmissionIndex(job.jobId, adopted, workspace.id, ownerId);
-              passTerminalized = true;
+              // Not `passTerminalized`: an adopted pass may still be building
+              // and is not ours to cancel, so a failed follow keeps #762's
+              // cooldown instead of re-arming at once.
             }
           } else {
             const providerJobId = nestedString(started.value, 'job_id');
@@ -2077,6 +2083,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // The terminal writes above already merged the admission's canonical
         // claim into the job ledger; keep only one entry per live admission.
         this.canonicalIndexRecords.delete(job.jobId);
+        // The row is terminal now, so cancel paths skip it on status alone.
+        if (adoptedProviderJobId !== undefined) this.adoptedProviderJobIds.delete(adoptedProviderJobId);
         if (releasedAdmissionSlot) this.scheduleNextQueuedWorkspaceAdmission(generation);
       }
     })();
@@ -2267,18 +2275,26 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     // after the admission wait lapsed.
     const config = this.launchConfig;
     if (!this.started || config === undefined) return undefined;
-    const raw = normalizeWorkerCallResult('health', await this.indexSessions.call(SERVER_NAME, config, 'health', {}));
+    const raw = normalizeWorkerCallResult('health', await this.indexSessions.call(
+      SERVER_NAME,
+      config,
+      'health',
+      {},
+      undefined,
+      {},
+      undefined,
+      this.indexStatusTimeoutMs,
+    ));
     if (!raw.ok) return undefined;
     const handshake = parseProviderHandshake(raw.value);
     if (!handshake.ok) return undefined;
     const activeJobs = handshake.value.components?.activeJobs ?? [];
     // A pass this process already mirrors belongs to another row; following it
     // twice would let two monitors complete or cancel one provider job. Read
-    // the ledger owner-agnostically: another live runtime at the same data root
-    // holds rows `active(ownerId)` never returns.
-    const ledger = await this.jobs.listForOperator({});
+    // the file, not the startup snapshot: another live runtime at the same data
+    // root binds rows after this driver started.
     const boundElsewhere = new Set(
-      ledger.jobs
+      (await this.jobs.reloadForRead())
         .filter((row) => row.status === 'running' || row.status === 'cancelling')
         .map((row) => row.providerJobId)
         .filter((id) => id !== undefined),

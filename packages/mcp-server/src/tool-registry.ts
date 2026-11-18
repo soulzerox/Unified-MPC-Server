@@ -1512,7 +1512,7 @@ export class ToolRegistry {
     let resume: WorkspaceResumeSnapshot | null | undefined;
     if (this.services.workspaceResume !== undefined) {
       try {
-        const read = this.services.workspaceResume.read({ workspaceId, limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+        const read = this.services.workspaceResume.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
         if (read.ok) {
           resume = read.value;
         } else {

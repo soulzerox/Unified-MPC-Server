@@ -484,7 +484,8 @@ not present — a new session, a reconnect, a handoff. It is bounded
 below the store's own `MAX_LIST_LIMIT` 200 so the reader can ask for one row more
 than the bound and prove `truncated` rather than infer it from a clamped reply),
 cursor-based (`afterSequence` in, `cursor` out, oldest first so the caller can
-replay in order), and read-only. `openReferences` answers which calls in that
+replay in order; `window: newest` starts at the current end instead and reports
+`olderCursor` to page back with `beforeSequence`), and read-only. `openReferences` answers which calls in that
 window may still be running, using the store's own pin rule rather than the
 window's rows: a plain call ends at its `completed` row, which may sit past the
 cursor, while a handle-returning call stays open past its own `completed` row
@@ -504,16 +505,20 @@ snapshot, which is an answer), the field absent when the runtime has no journal
 (no claim), and `null` when the journal could not be read — a journal failure is
 recorded as a diagnostic and never fails the bootstrap, because the harness was
 already marked bootstrapped by the time the journal is read. The window is the
-oldest rows, so `truncated: true` means to continue with `cursor` as
-`afterSequence`, and `openReferences` counts only the calls in that window.
+newest rows, because a session that just attached needs the rows describing
+current work rather than the first rows a busy workspace ever wrote, so
+`truncated: true` means older rows exist and `olderCursor` is the
+`beforeSequence` that reads them; `openReferences` counts only the calls in that
+window.
 
 `session_handoff` is a read side too, through the same projection rather than a
 second derivation: it includes the window as `workspace_journal`, with the same
 three states as bootstrap, and its recovery prompt states the journal verdict
 (absent, unreadable, empty, or a window with open calls) so durable task state
-comes from the journal instead of the chat. Because that window is the oldest
-rows, each rendered row carries its own `recordedAt` so a reader can tell a
-just-finished call from an old one. A snapshot the reader could not have
+comes from the journal instead of the chat. Because a newest window is bounded,
+each rendered row carries its own `recordedAt` so a reader can tell a
+just-finished call from one written before it, and the prompt names
+`olderCursor` when older rows exist rather than implying the window is all. A snapshot the reader could not have
 produced — one naming another workspace — is refused as `CONFLICT` rather than
 handed to the next session.
 

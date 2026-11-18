@@ -159,6 +159,15 @@ export interface OpenDeferredCallsRequest {
 export interface ListWorkspaceJournalRequest {
   readonly workspaceId: string;
   readonly afterSequence?: number;
+  /**
+   * Rows at or above this sequence are already read: select older rows instead.
+   *
+   * Only used with `fromNewest`. The reply is still ascending, so a caller pages
+   * backwards by passing the first sequence it received.
+   */
+  readonly beforeSequence?: number;
+  /** Select the newest rows rather than the oldest when reading from the start. */
+  readonly fromNewest?: boolean;
   readonly limit?: number;
 }
 
@@ -303,6 +312,21 @@ export class SqliteWorkspaceJournalRepository {
     }
     const limit = Math.min(Math.max(request.limit ?? MAX_LIST_LIMIT, 1), MAX_LIST_LIMIT);
     const after = Number.isSafeInteger(request.afterSequence) && (request.afterSequence ?? 0) > 0 ? request.afterSequence as number : 0;
+    if (request.fromNewest === true) {
+      // Still ascending on the way out: the newest rows are selected, then flipped, so a
+      // caller replays the window in order and pages back with the first sequence.
+      const before = Number.isSafeInteger(request.beforeSequence) && (request.beforeSequence ?? 0) > 0
+        ? request.beforeSequence as number
+        : Number.MAX_SAFE_INTEGER;
+      const newest = this.database.connection.prepare(`
+        SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at
+        FROM workspace_journal_events
+        WHERE workspace_id = ? AND sequence < ?
+        ORDER BY sequence DESC
+        LIMIT ?
+      `).all(request.workspaceId, before, limit) as unknown as JournalRow[];
+      return newest.reverse().map(toEntry);
+    }
     const rows = this.database.connection.prepare(`
       SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at
       FROM workspace_journal_events

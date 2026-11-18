@@ -2322,6 +2322,26 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     expect(bare.isError).not.toBe(true);
     // No journal means no claim: an absent field is not "nothing happened here".
     expect(bare.structuredContent).not.toHaveProperty('resume');
+
+    const emptySnapshot: WorkspaceResumeSnapshot = {
+      workspaceId: 'workspace-1',
+      generatedAt: '2026-11-18T00:00:00.000Z',
+      cursor: 0,
+      truncated: false,
+      events: [],
+      openReferences: { count: 0, latestSequence: null },
+    };
+    const withEmptyJournal = new ToolRegistry({
+      ...services,
+      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => ok(emptySnapshot) },
+    }, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    const quiet = await withEmptyJournal.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    // An empty journal is an answer; `null` is the failure. Collapsing the two would
+    // make "nothing has happened here yet" indistinguishable from "could not read".
+    expect(quiet.structuredContent).toMatchObject({
+      resume: { cursor: 0, truncated: false, events: [], openReferences: { count: 0, latestSequence: null } },
+    });
   });
 
   it('reports an unreadable journal as null instead of failing the bootstrap', async () => {

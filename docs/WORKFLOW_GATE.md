@@ -497,6 +497,16 @@ records neither field. Ownership matching is unchanged — workspace first, then
 client/session when neither side has one — because that is identity, not
 staleness.
 
+The journal is the discovery index, not the identity of durable work. A durable
+shell task's metadata is written to its task directory when the task is reserved
+or launched, before any telemetry exists, and ownership matching reads the
+workspace first, so a session that never saw the call id still lists a task
+another session started in the same workspace (`tasks/list` over the `shell`
+capability) and reads its state and result by id. A failed journal append
+therefore loses the resume row, not the task: the append is best-effort by
+contract and only writes to stderr, while the task directory is the authority.
+A task owned by another workspace stays invisible and unaddressable by id.
+
 Staleness is a separate question, and #170 answers it on both sides. A mutation
 is already refused unless the proof the fence admitted is the *current*
 generation (`GoalMutationFenceService.begin` validates the lease generation

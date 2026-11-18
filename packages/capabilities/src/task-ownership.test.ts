@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CAPABILITY_GOAL_CORRELATION_METADATA_KEY,
   CAPABILITY_TASK_OWNER_METADATA_KEY,
+  capabilityTaskOwnerMatches,
   readCapabilityGoalCorrelation,
   readCapabilityTaskOwner,
   withCapabilityGoalCorrelation,
@@ -50,5 +51,17 @@ describe('capability goal correlation', () => {
     expect(readCapabilityGoalCorrelation({
       metadata: { [CAPABILITY_GOAL_CORRELATION_METADATA_KEY]: { goalId: '', executionGeneration: 1 } },
     })).toBeUndefined();
+  });
+});
+
+describe('capability task ownership', () => {
+  it('lets a new session in the same workspace address a task another session started', () => {
+    const replacementSession = { clientId: 'chatgpt', sessionId: 'session-b', workspaceId: 'workspace-a' };
+
+    // Workspace identity outranks client/session: the journal row that named the
+    // call is telemetry, the workspace is what makes the task recoverable.
+    expect(capabilityTaskOwnerMatches(owner, replacementSession)).toBe(true);
+    expect(capabilityTaskOwnerMatches(owner, { ...replacementSession, workspaceId: 'workspace-b' })).toBe(false);
+    expect(capabilityTaskOwnerMatches(owner, { clientId: 'chatgpt', sessionId: 'session-b' })).toBe(false);
   });
 });

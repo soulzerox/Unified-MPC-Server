@@ -46,6 +46,23 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-b' }).map((entry) => entry.workspaceId)).toEqual(['ws-b']);
   });
 
+  it('selects the newest rows on request, still ascending, and pages back by sequence', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+
+    const sequences = Array.from({ length: 5 }, (_, index) =>
+      journal.append({ workspaceId: 'ws-a', operationKind: 'file_read', phase: 'completed', status: 'completed', callId: `call-${index + 1}` })!);
+
+    // Newest three, oldest first, so a caller replays the window in order.
+    expect(journal.list({ workspaceId: 'ws-a', fromNewest: true, limit: 3 }).map((entry) => entry.sequence))
+      .toEqual([sequences[2], sequences[3], sequences[4]]);
+    // The boundary is exclusive, exactly like `afterSequence`: page with the first sequence returned.
+    expect(journal.list({ workspaceId: 'ws-a', fromNewest: true, beforeSequence: sequences[2], limit: 3 }).map((entry) => entry.sequence))
+      .toEqual([sequences[0], sequences[1]]);
+    // A newest read stays inside its workspace.
+    expect(journal.list({ workspaceId: 'ws-b', fromNewest: true, limit: 3 })).toEqual([]);
+  });
+
   it('is idempotent on a retried (workspace, callId, phase) write', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });

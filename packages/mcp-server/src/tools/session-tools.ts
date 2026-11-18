@@ -28,6 +28,8 @@ const verifyIncrementalSchema = z.object({
 const workspaceResumeSchema = z.object({
   workspaceId: z.string().trim().min(1).max(128),
   afterSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  window: z.enum(['oldest', 'newest']).optional(),
+  beforeSequence: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   limit: z.number().int().min(1).max(WORKSPACE_RESUME_MAX_LIMIT).optional(),
 }).strict();
 
@@ -35,7 +37,7 @@ export function sessionTools(context: McpToolContext, verifier: IncrementalVerif
   return [
     defineTool({
       name: 'session_handoff',
-      description: 'Create a concise same-chat recovery message from the real phase tracker, current git status/diff, durable background task IDs, and the workspace journal window (the same projection `workspace_resume` serves, so durable task state comes from the journal rather than the chat). The window is oldest rows first, capped at the reader default, so `truncated: true` means pass its `cursor` as `afterSequence` to `workspace_resume` to continue; a recent call can therefore be outside it. The field is absent when the runtime has no journal and `null` when the journal could not be read. Use only when the user requests a handoff or an unavoidable client/platform interruption requires recovery; never trigger it merely because elapsed time passed. If a tool schema looks stale, Refresh connector first; open a new chat only if refresh does not fix it.',
+      description: 'Create a concise same-chat recovery message from the real phase tracker, current git status/diff, durable background task IDs, and the workspace journal window (the same projection `workspace_resume` serves, so durable task state comes from the journal rather than the chat). The window is the newest rows, capped at the reader default: `truncated: true` means older rows exist and `olderCursor` is the `beforeSequence` that reads them, while a `null` `olderCursor` means the window reached the start of the journal. The field is absent when the runtime has no journal and `null` when the journal could not be read. Use only when the user requests a handoff or an unavoidable client/platform interruption requires recovery; never trigger it merely because elapsed time passed. If a tool schema looks stale, Refresh connector first; open a new chat only if refresh does not fix it.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: sessionHandoffSchema,
@@ -51,7 +53,7 @@ export function sessionTools(context: McpToolContext, verifier: IncrementalVerif
     }),
     defineTool({
       name: 'workspace_resume',
-      description: 'Read a bounded, resumable view of this workspace\'s durable journal: what calls ran here, in order, since the cursor you pass back. Use it when you were not present for earlier work (a new session, a reconnect, a handoff) and need to know what finished or may still be running before acting. `open` is a verdict on the call, not on the row: a `completed` row of a call that handed back a process or task stays open until something closes it, and a window can begin after that call\'s `started` row. `openReferences` covers only the calls whose rows are in this window, so ask again while `truncated` is true instead of reading a count of zero as nothing running. Read-only; pass the returned `cursor` as `afterSequence` to continue.',
+      description: 'Read a bounded, resumable view of this workspace\'s durable journal: what calls ran here, in order. `window: newest` (what a recovering session wants) starts at the current end of the journal and reports `olderCursor` for paging further back via `beforeSequence`; `window: oldest`, the default, replays forward from `afterSequence`. Use it when you were not present for earlier work (a new session, a reconnect, a handoff) and need to know what finished or may still be running before acting. `open` is a verdict on the call, not on the row: a `completed` row of a call that handed back a process or task stays open until something closes it, and a window can begin after that call\'s `started` row. `openReferences` covers only the calls whose rows are in this window, so ask again while `truncated` is true instead of reading a count of zero as nothing running. Read-only; page with `cursor` as `afterSequence` when going forward, or with `olderCursor` as `beforeSequence` when reading back.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceResumeSchema,
@@ -69,6 +71,8 @@ async function readWorkspaceResume(
   const snapshot = resume.read({
     workspaceId: input.workspaceId,
     ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
+    ...(input.window === undefined ? {} : { window: input.window }),
+    ...(input.beforeSequence === undefined ? {} : { beforeSequence: input.beforeSequence }),
     ...(input.limit === undefined ? {} : { limit: input.limit }),
   });
   if (!snapshot.ok) return err(snapshot.error);
@@ -82,6 +86,7 @@ function projectResumeSnapshot(snapshot: WorkspaceResumeSnapshot): Record<string
     generatedAt: snapshot.generatedAt,
     cursor: snapshot.cursor,
     truncated: snapshot.truncated,
+    olderCursor: snapshot.olderCursor,
     events: [...snapshot.events],
     openReferences: {
       count: snapshot.openReferences.count,
@@ -164,7 +169,9 @@ function readHandoffJournal(
   if (reader === undefined) return ok(undefined);
   let read: ReturnType<WorkspaceResumeSnapshotReader['read']>;
   try {
-    read = reader.read({ workspaceId, limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+    // The newest window, not the oldest: a recovering session needs the rows that
+    // describe current work, and the projection says how far back the rest sits.
+    read = reader.read({ workspaceId, window: 'newest', limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
   } catch {
     // The store throws rather than refusing; a handoff must still be produced.
     return ok(null);
@@ -246,8 +253,8 @@ function describeJournalWindow(journal: WorkspaceResumeSnapshot | null | undefin
     const tool = event.toolName === undefined ? '' : ` ${event.toolName}`;
     const result = event.resultCode === undefined ? '' : ` ${event.resultCode}`;
     const summary = event.summary === undefined ? '' : ` - ${event.summary}`;
-    // The window is the oldest rows, so the row's own `recordedAt` is the only way a
-    // reader can tell a just-finished call from a week-old one.
+    // A newest window is still bounded, so the row's own `recordedAt` is how a reader
+    // tells a just-finished call from one written before it.
     return `- #${event.sequence} ${event.operationKind}${tool} (${event.phase}/${event.status}) ${event.recordedAt}${event.open ? ' OPEN' : ''}${result}${summary}`;
   });
   if (journal.openReferences.count > 0) {
@@ -255,8 +262,8 @@ function describeJournalWindow(journal: WorkspaceResumeSnapshot | null | undefin
       `- ${journal.openReferences.count} open call(s) in this window; latest row #${journal.openReferences.latestSequence ?? 'unknown'}`,
     );
   }
-  if (journal.truncated) {
-    lines.push(`- window truncated: continue from cursor ${journal.cursor} with workspace_resume rather than assuming this is all`);
+  if (journal.truncated && journal.olderCursor !== null) {
+    lines.push(`- this is the newest window only: older rows exist, pass window newest with beforeSequence ${journal.olderCursor} to workspace_resume to read further back`);
   }
   return lines.join('\n');
 }

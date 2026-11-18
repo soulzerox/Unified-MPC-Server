@@ -37,13 +37,19 @@ function journalOf(entries: readonly WorkspaceJournalEntry[], handleReturning: r
   const journal: WorkspaceResumeJournalReader = {
     list(request): readonly WorkspaceJournalEntry[] {
       requests.push(request);
-      return entries
+      const window = entries
         .filter((candidate) => candidate.workspaceId === request.workspaceId
-          && candidate.sequence > (request.afterSequence ?? 0))
+          && (request.fromNewest === true
+            ? candidate.sequence < (request.beforeSequence ?? Number.MAX_SAFE_INTEGER)
+            : candidate.sequence > (request.afterSequence ?? 0)))
         // The store orders by `sequence` ascending; the fake must too or the projection
         // would be tested against an order no real journal produces.
-        .sort((left, right) => left.sequence - right.sequence)
-        .slice(0, request.limit ?? entries.length);
+        .sort((left, right) => left.sequence - right.sequence);
+      // A newest read selects the tail of the journal, still ascending, which is what
+      // the store returns after flipping its descending query.
+      return request.fromNewest === true
+        ? window.slice(-(request.limit ?? window.length))
+        : window.slice(0, request.limit ?? window.length);
     },
     openCallIds(request): readonly string[] {
       openRequests.push(request);
@@ -233,5 +239,71 @@ describe('workspace resume snapshot', () => {
     // Nothing was read: a refused request must not spend a store query.
     expect(requests).toEqual([]);
     expect(openRequests).toEqual([]);
+  });
+});
+
+describe('workspace resume snapshot from the newest end', () => {
+  const rows = Array.from({ length: 25 }, (_, index) => entry({ sequence: index + 1 }));
+
+  it('reads the current end of the journal and pages back through olderCursor', () => {
+    const { journal, requests } = journalOf(rows);
+    const reader = createWorkspaceResumeSnapshotReader({ journal });
+
+    const latest = reader.read({ workspaceId: 'ws-1', window: 'newest', limit: 20 });
+    expect(latest.ok).toBe(true);
+    if (!latest.ok) return;
+    // The rows that describe today's work, not the first 20 ever recorded.
+    expect(latest.value.events.map((event) => event.sequence)).toEqual(
+      Array.from({ length: 20 }, (_, index) => index + 6),
+    );
+    expect(latest.value.cursor).toBe(25);
+    expect(latest.value.truncated).toBe(true);
+    expect(latest.value.olderCursor).toBe(6);
+    expect(requests[0]).toMatchObject({ fromNewest: true, limit: 21 });
+
+    const older = reader.read({ workspaceId: 'ws-1', window: 'newest', beforeSequence: 6, limit: 20 });
+    expect(older.ok).toBe(true);
+    if (!older.ok) return;
+    expect(older.value.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
+    // Reaching the start is what a null cursor proves: no older row is left to read.
+    expect(older.value.truncated).toBe(false);
+    expect(older.value.olderCursor).toBeNull();
+  });
+
+  it('leaves olderCursor null for a forward window, and for a newest window that fits', () => {
+    const { journal } = journalOf(rows.slice(0, 3));
+    const reader = createWorkspaceResumeSnapshotReader({ journal });
+
+    const forward = reader.read({ workspaceId: 'ws-1', limit: 20 });
+    expect(forward.ok).toBe(true);
+    if (!forward.ok) return;
+    expect(forward.value.olderCursor).toBeNull();
+
+    const newest = reader.read({ workspaceId: 'ws-1', window: 'newest', limit: 20 });
+    expect(newest.ok).toBe(true);
+    if (!newest.ok) return;
+    expect(newest.value.truncated).toBe(false);
+    expect(newest.value.olderCursor).toBeNull();
+  });
+
+  it('refuses to read both directions in one request, from either side', () => {
+    const { journal, requests } = journalOf(rows);
+    const reader = createWorkspaceResumeSnapshotReader({ journal });
+    expect(reader.read({ workspaceId: 'ws-1', window: 'newest', afterSequence: 4 })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    // A backward cursor on a forward window is refused too: ignoring it would answer a
+    // different question than the caller asked, and silently return the oldest rows.
+    expect(reader.read({ workspaceId: 'ws-1', beforeSequence: 4 })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    expect(reader.read({ workspaceId: 'ws-1', window: 'oldest', beforeSequence: 4 })).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+    // Neither refusal reached the journal.
+    expect(requests).toEqual([]);
   });
 });

@@ -2274,12 +2274,13 @@ describe('prepare_code_change active scope resolution (#428)', () => {
 describe('workspace_bootstrap journal resume (#170)', () => {
   it('carries the bounded resume snapshot, and omits it when the runtime has no journal', async () => {
     const { services } = createHarnessServices();
-    const requests: Array<{ readonly workspaceId: string; readonly afterSequence?: number; readonly limit?: number }> = [];
+    const requests: Array<{ readonly workspaceId: string; readonly window?: 'oldest' | 'newest'; readonly afterSequence?: number; readonly limit?: number }> = [];
     const snapshot: WorkspaceResumeSnapshot = {
       workspaceId: 'workspace-1',
       generatedAt: '2026-11-18T00:00:00.000Z',
       cursor: 7,
       truncated: true,
+      olderCursor: 7,
       events: [{
         sequence: 7,
         operationKind: 'shell',
@@ -2308,7 +2309,7 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     expect(bootstrapped.isError).not.toBe(true);
     // The projection is the reader's own default, so bootstrap stays bounded no matter
     // how much journal a workspace accumulates.
-    expect(requests).toEqual([{ workspaceId: 'workspace-1', limit: 20 }]);
+    expect(requests).toEqual([{ workspaceId: 'workspace-1', window: 'newest', limit: 20 }]);
     expect(bootstrapped.structuredContent).toMatchObject({
       resume: { cursor: 7, truncated: true, openReferences: { count: 1, latestSequence: 7 } },
     });

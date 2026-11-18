@@ -105,6 +105,7 @@ describe('session tools', () => {
             generatedAt: '2026-11-18T03:00:00.000Z',
             cursor: 9,
             truncated: true,
+            olderCursor: 8,
             events: [
               { sequence: 8, operationKind: 'process_start', toolName: 'project_test', phase: 'started', status: 'started', recordedAt: '2026-11-18T02:00:00.000Z', open: true },
               { sequence: 9, operationKind: 'file_read', phase: 'completed', status: 'succeeded', recordedAt: '2026-11-18T02:01:00.000Z', open: false },
@@ -122,7 +123,7 @@ describe('session tools', () => {
 
     // The window is workspace-scoped and bounded by the reader's own default, so a
     // handoff cannot widen it or ask for another workspace's journal.
-    expect(requests).toEqual([{ workspaceId: 'workspace-1', limit: 20 }]);
+    expect(requests).toEqual([{ workspaceId: 'workspace-1', window: 'newest', limit: 20 }]);
     expect(response.ok).toBe(true);
     if (!response.ok) return;
     const value = response.value as Record<string, unknown>;
@@ -138,7 +139,9 @@ describe('session tools', () => {
     });
     expect(value.prompt).toEqual(expect.stringContaining('#8 process_start project_test (started/started) 2026-11-18T02:00:00.000Z OPEN'));
     expect(value.prompt).toEqual(expect.stringContaining('1 open call(s) in this window; latest row #8'));
-    expect(value.prompt).toEqual(expect.stringContaining('window truncated: continue from cursor 9'));
+    // The recovery step names the direction too: `beforeSequence` alone is refused by
+    // the reader, so a prompt that omits `window: newest` would hand over a call that errors.
+    expect(value.prompt).toEqual(expect.stringContaining('pass window newest with beforeSequence 8 to workspace_resume'));
   });
 
   it('states why journal task state is missing instead of handing over an empty window', async () => {
@@ -189,6 +192,7 @@ describe('session tools', () => {
             generatedAt: '2026-11-18T03:00:00.000Z',
             cursor: 0,
             truncated: false,
+            olderCursor: null,
             events: [],
             openReferences: { count: 0, latestSequence: null },
           });
@@ -198,7 +202,7 @@ describe('session tools', () => {
     expect(empty.ok).toBe(true);
     if (!empty.ok) return;
     expect(empty.value as Record<string, unknown>).toMatchObject({
-      workspace_journal: { workspaceId: 'workspace-1', events: [], truncated: false },
+      workspace_journal: { workspaceId: 'workspace-1', events: [], truncated: false, olderCursor: null },
     });
     expect((empty.value as Record<string, unknown>).prompt).toEqual(
       expect.stringContaining('no journal rows in this window (an empty journal, not an unreadable one)'),
@@ -221,6 +225,45 @@ describe('session tools', () => {
       },
     });
     expect(foreign).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+  });
+
+  it('forwards the newest window and its backward cursor through workspace_resume', async () => {
+    const requests: unknown[] = [];
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: {
+        workspaceResume: {
+          read(request: unknown) {
+            requests.push(request);
+            return ok({
+              workspaceId: 'workspace-1',
+              generatedAt: '2026-11-18T03:00:00.000Z',
+              cursor: 25,
+              truncated: true,
+              olderCursor: 6,
+              events: [],
+              openReferences: { count: 0, latestSequence: null },
+            });
+          },
+        },
+      },
+    } as unknown as McpToolContext;
+    const execute = (input: Record<string, unknown>): ReturnType<McpToolDefinition['execute']> =>
+      findTool(context, new IncrementalVerifier(), 'workspace_resume').execute(input, new AbortController().signal);
+
+    // Both direction fields have to reach the port, or the newest/backward path the
+    // handoff prompt points at is unreachable through the public tool.
+    const newest = await execute({ workspaceId: 'workspace-1', window: 'newest', beforeSequence: 6 });
+    expect(newest.ok).toBe(true);
+    expect(requests.at(-1)).toEqual({ workspaceId: 'workspace-1', window: 'newest', beforeSequence: 6 });
+
+    // `olderCursor` survives the projection, which is what makes it pageable.
+    expect(newest.ok && (newest.value as Record<string, unknown>)).toMatchObject({ olderCursor: 6 });
+
+    // The default stays a forward read: no direction field is invented for the reader.
+    await execute({ workspaceId: 'workspace-1' });
+    expect(requests.at(-1)).toEqual({ workspaceId: 'workspace-1' });
   });
 
   it('projects the journal through the resume port and reports a runtime without one', async () => {

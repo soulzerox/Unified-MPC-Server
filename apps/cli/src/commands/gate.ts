@@ -327,11 +327,37 @@ export async function findCloseGateReceiptForVerdict(options: {
   return ok(undefined);
 }
 
-/** Two verdicts agree when they allow the same thing for the same fingerprint. */
+/**
+ * Two verdicts agree when they say the same thing about the same inputs.
+ *
+ * Compared in canonical form, because the fingerprint is already order-free: the
+ * caller's `--worktree` order must not turn one decision into a "contradiction",
+ * and an older receipt that sorted its blockers differently still describes this
+ * revision. A real disagreement (a different decision, or different blockers for
+ * the same inputs) survives canonicalization and is still refused.
+ */
 function sameVerdict(left: CloseGateVerdict, right: CloseGateVerdict): boolean {
   return left.allowed === right.allowed
     && left.fingerprint === right.fingerprint
-    && JSON.stringify(left.blockers) === JSON.stringify(right.blockers);
+    && canonicalJson(left.blockers) === canonicalJson(right.blockers);
+}
+
+/** JSON with keys and arrays ordered, so equal values compare equal. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalValue(value));
+}
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return [...value.map(canonicalValue)]
+      .sort((left, right) => compareText(JSON.stringify(left), JSON.stringify(right)));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value).sort(compareText).map((key) => [key, canonicalValue(value[key])]),
+    );
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

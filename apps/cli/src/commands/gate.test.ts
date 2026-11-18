@@ -513,6 +513,35 @@ describe('runCloseGate', () => {
     expect(await readdir(directory)).toEqual([path.basename(first.value.receiptPath!)]);
   });
 
+  it('reuses the receipt when the caller lists the same worktrees in another order', async () => {
+    // The fingerprint is order-free, so the caller's `--worktree` order must not
+    // turn one decision into a contradiction: the blockers come out in the order
+    // the worktrees were asked about, and only the canonical form may decide
+    // whether two verdicts agree.
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-order-'));
+    temporaryDirectories.push(directory);
+    const run = (worktrees: readonly string[], gateId: string): ReturnType<typeof runCloseGate> => runCloseGate({
+      ports: ports({
+        removal: async ({ worktreePath }) => ok(removal({ worktreePath, status: 'blocked', blockers: ['unmerged_changes'] })),
+      }),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees,
+      receiptDirectory: directory,
+      dryRun: false,
+      json: false,
+      gateId: () => gateId,
+    });
+
+    const first = await run(['.unified-mpc/worktrees/a', '.unified-mpc/worktrees/b'], 'gate-1');
+    const second = await run(['.unified-mpc/worktrees/b', '.unified-mpc/worktrees/a'], 'gate-2');
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.value.verdict.blockers).not.toEqual(second.value.verdict.blockers);
+    expect(second.value.receiptPath).toBe(first.value.receiptPath);
+    expect(await readdir(directory)).toEqual([path.basename(first.value.receiptPath!)]);
+  });
+
   it('refuses one fingerprint that already carries a different verdict', async () => {
     // A readable receipt keeps `allowed` consistent with its blockers, so this can
     // only arrive as a forged or hand-edited file. It is still refused: two

@@ -260,6 +260,13 @@ proven and only the job is gone (restart, retention expiry, or another provider
 instance owns it). `workspace_not_found` stays reserved for an unresolvable
 workspace scope.
 
+Open queue work is not a lost job. `pending` work reports `data.status:
+"queued"`; work left `interrupted` by restart reconciliation reports
+`data.status: "interrupted"` with `queued`/`interrupted` flags, because the next
+drain adopts the same id. Neither is `index_job_not_found`, and neither asks the
+caller to re-run an index the provider still intends to run. Cancellation stays
+job data too: a cancelled job is an `ok` envelope with cancellation flags.
+
 ## 6. Generation compatibility
 
 `metadata.generation` answers "is this generation current for the caller?"
@@ -335,12 +342,14 @@ round-trip fails here.
 | `indexing-conflict` | `code_index` | a second job names the active job instead of queueing silently |
 | `workspace-scope-denied` | `code_search` | canonical scope is authorization |
 | `code-search-success` | `code_search` | a successful search pins query, items, rescue diagnostics and warnings |
+| `profile-mismatch` | `code_search` | another profile's vectors are refused, not scored: `degraded` with the missing channel named |
 | `incompatible-index` | `attach_workspace_base` | a well-formed demand for an inactive generation is `incompatible_index`, not `invalid_input` |
 | `attach-success` | `attach_workspace_base` | a successful attach pins the base reference and identity |
 | `zero-change-verification` | `code_index` | an all-unchanged delta reuses the active generation and echoes identity |
 | `lexical-only-index` | `code_index` | lexical-only publication is `ok` with a named warning and `vectors_skipped:disabled` channel |
 | `stale-source` | `code_index` | stale fence is `review_required`, nothing published |
 | `job-lost-after-restart` | `index_status` | a lost job is a typed error with the restart reason, not a fake status |
+| `interrupted-job` | `index_status` | restart-interrupted queue work keeps its id and is job data, not `index_job_not_found` |
 | `cancelled-job` | `index_status` | cancellation is job data with requested/completed flags |
 | `typed-provider-failure` | `code_index` | sqlite busy carries `retryable` and `reason` |
 

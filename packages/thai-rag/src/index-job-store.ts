@@ -400,6 +400,20 @@ export class ThaiRagIndexJobStore {
     };
   }
 
+  /**
+   * Re-read the ledger from disk, read-only.
+   *
+   * Every live runtime at one data root writes the same file, so a guard that
+   * must see another owner's running rows cannot trust a snapshot hydrated at
+   * startup. Unlike `initialize` this never migrates, reaps or persists, and it
+   * keeps rows this process holds that the file no longer has.
+   */
+  public async reloadForRead(): Promise<readonly ThaiRagIndexJob[]> {
+    this.loaded = false;
+    await this.load();
+    return [...this.jobs.values()];
+  }
+
   private async reapStuckJobs(): Promise<boolean> {
     const now = this.now().getTime();
     let changed = false;

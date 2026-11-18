@@ -194,6 +194,22 @@ describe('ThaiRagIndexJobStore', () => {
     await expect(store.complete(job.jobId, { indexed: 1 }, 'owner-a')).resolves.toMatchObject({ status: 'completed' });
   });
 
+  it('re-reads rows another live runtime bound after this instance loaded', async () => {
+    const dataRoot = await root();
+    const workspaceId = '11111111-1111-4111-8111-111111111111';
+    const writer = new ThaiRagIndexJobStore(dataRoot);
+    const reader = new ThaiRagIndexJobStore(dataRoot);
+
+    // Hydrate the reader first: its snapshot predates the other runtime's write.
+    await expect(reader.active('reader-owner')).resolves.toEqual([]);
+    const job = await writer.create(workspaceId, false, 'writer-owner');
+    await writer.bindProviderJob(job.jobId, 'idx_other_owner', 'writer-owner');
+
+    await expect(reader.reloadForRead()).resolves.toEqual([
+      expect.objectContaining({ jobId: job.jobId, providerJobId: 'idx_other_owner', ownerId: 'writer-owner' }),
+    ]);
+  });
+
   it('persists provider job identity and cooperative cancellation lifecycle', async () => {
     const dataRoot = await root();
     const store = new ThaiRagIndexJobStore(dataRoot);

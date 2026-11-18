@@ -1899,6 +1899,11 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // re-admit at once. Only a refusal to start is cooled down (issue #762),
         // because that one re-arms cheaply and can loop unnoticed.
         let passTerminalized = false;
+        // #906: an adopted pass proves the workspace is being built, not that
+        // the bytes this read would skip came from our canonical claim. Leave
+        // the claim and the snapshot verification unrecorded so the next read
+        // re-proves them, instead of authorising a skip on borrowed evidence.
+        let adoptedStart = false;
         // issue-202: trial-first — bounded foreground probe proves the
         // pipeline before full admission. Trial failure takes the same
         // fail-closed path below; pending stays set for a later retry.
@@ -1961,17 +1966,21 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             // of recording a terminal failure: that record is what makes the
             // next read re-arm a second, competing generation.
             const adopted = isCodeIndexCallTimeout(started.error)
-              ? await this.adoptTimedOutIndexStart(job.jobId, workspace.id, ownerId)
+              ? await this.withJobHeartbeat(
+                job.jobId,
+                ownerId,
+                this.adoptTimedOutIndexStart(job.jobId, workspace.id, ownerId),
+              )
               : undefined;
             if (adopted === undefined) {
               indexed = started;
             } else if (this.shuttingDown) {
-              await this.callAdmissionWorker('cancel_index', {
-                job_id: adopted,
-                workspace_id: workspace.id,
-              }).catch(() => undefined);
+              // Adoption is inference, not proof of ownership: the provider may
+              // have refused our start (`indexing_conflict`) and the refusal is
+              // what timed out. Never cancel a pass another owner may hold.
               indexed = err(appError('CONFLICT', 'Native Thai-RAG workspace indexing was interrupted during shutdown', true));
             } else {
+              adoptedStart = true;
               indexed = await this.waitForWorkspaceAdmissionIndex(job.jobId, adopted, workspace.id, ownerId);
               passTerminalized = true;
             }
@@ -2011,7 +2020,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         }
 
         if (indexed.ok) {
-          await this.recordProviderGeneration(workspace.id, canonical.value, indexed.value);
+          if (!adoptedStart) await this.recordProviderGeneration(workspace.id, canonical.value, indexed.value);
           await this.jobs.complete(job.jobId, this.mergeCanonicalJobResult(job.jobId, indexed.value), ownerId);
         } else {
           await this.jobs.fail(job.jobId, indexed.error.message, ownerId);
@@ -2048,7 +2057,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         // A legacy 1.0 provider returns from the background-start call before
         // the pass is terminal. Recording freshness there would authorize a
         // permanent skip while the pass may still fail or be running.
-        if (this.cancellableIndexJobs) {
+        if (this.cancellableIndexJobs && !adoptedStart) {
           await this.recordWorkspaceVerification(workspace.id, sourceIdentity, job.jobId, indexed.value, ownerId);
         }
         return ok(undefined);
@@ -2249,8 +2258,14 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private async adoptTimedOutIndexStart(jobId: string, workspaceId: string, ownerId: string): Promise<string | undefined> {
     const health = await this.refreshHealth();
     if (!health.ok) return undefined;
+    // A pass this process already mirrors belongs to another row; following it
+    // twice would let two monitors complete or cancel one provider job.
+    const boundElsewhere = new Set(
+      (await this.jobs.active(ownerId)).map((row) => row.providerJobId).filter((id) => id !== undefined),
+    );
     for (const candidate of health.value.activeJobs) {
       if (!isProviderOwnedIndexJobId(candidate)) continue;
+      if (boundElsewhere.has(candidate)) continue;
       const status = await this.callAdmissionWorker('index_status', {
         job_id: candidate,
         workspace_id: workspaceId,
@@ -2258,8 +2273,9 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       if (!status.ok) continue;
       const remoteStatus = nestedString(status.value, 'status');
       if (remoteStatus === undefined || !NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
-      const echoedWorkspaceId = nestedString(status.value, 'workspace_id');
-      if (echoedWorkspaceId !== undefined && echoedWorkspaceId !== workspaceId) continue;
+      // Contract 1.1 guarantees the echo; a missing one is not evidence of
+      // scope, so it fails closed here rather than adopting a foreign pass.
+      if (nestedString(status.value, 'workspace_id') !== workspaceId) continue;
       const rebound = await this.jobs.bindProviderJob(jobId, candidate, ownerId);
       if (rebound === null) continue;
       return candidate;

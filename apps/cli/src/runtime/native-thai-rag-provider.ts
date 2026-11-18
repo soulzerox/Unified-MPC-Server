@@ -1956,7 +1956,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
             ...canonicalArgs,
           }));
           if (!started.ok) {
-            indexed = started;
+            // #906: a start that hit its call deadline carries no `job_id`, but
+            // the provider may still be building. Adopt the pass it owns instead
+            // of recording a terminal failure: that record is what makes the
+            // next read re-arm a second, competing generation.
+            const adopted = isCodeIndexCallTimeout(started.error)
+              ? await this.adoptTimedOutIndexStart(job.jobId, workspace.id, ownerId)
+              : undefined;
+            if (adopted === undefined) {
+              indexed = started;
+            } else if (this.shuttingDown) {
+              await this.callAdmissionWorker('cancel_index', {
+                job_id: adopted,
+                workspace_id: workspace.id,
+              }).catch(() => undefined);
+              indexed = err(appError('CONFLICT', 'Native Thai-RAG workspace indexing was interrupted during shutdown', true));
+            } else {
+              indexed = await this.waitForWorkspaceAdmissionIndex(job.jobId, adopted, workspace.id, ownerId);
+              passTerminalized = true;
+            }
           } else {
             const providerJobId = nestedString(started.value, 'job_id');
             if (providerJobId === undefined) {
@@ -2216,6 +2234,37 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       return err(appError('CONFLICT', `Native Thai-RAG provider returned unknown index status: ${remoteStatus ?? 'missing'}`, true));
     }
     return err(appError('CONFLICT', 'Native Thai-RAG workspace indexing stopped before completion', true));
+  }
+
+  /**
+   * #906: a `code_index` call that hits its deadline carries no `job_id`, so
+   * the id the provider assigned never reached this process. The provider does
+   * publish the ids it is running (`health.components.active_jobs`), and
+   * `index_status` echoes a job's own `workspace_id` while answering
+   * `scope_denied` for a foreign one, so one probe per active id identifies the
+   * pass this workspace owns. Returns `undefined` when nothing is adoptable, so
+   * the caller keeps the terminal path and #762's cooldown parks the next read
+   * instead of this function inventing a pass that does not exist.
+   */
+  private async adoptTimedOutIndexStart(jobId: string, workspaceId: string, ownerId: string): Promise<string | undefined> {
+    const health = await this.refreshHealth();
+    if (!health.ok) return undefined;
+    for (const candidate of health.value.activeJobs) {
+      if (!isProviderOwnedIndexJobId(candidate)) continue;
+      const status = await this.callAdmissionWorker('index_status', {
+        job_id: candidate,
+        workspace_id: workspaceId,
+      }, this.indexStatusTimeoutMs);
+      if (!status.ok) continue;
+      const remoteStatus = nestedString(status.value, 'status');
+      if (remoteStatus === undefined || !NON_TERMINAL_INDEX_STATUSES.has(remoteStatus)) continue;
+      const echoedWorkspaceId = nestedString(status.value, 'workspace_id');
+      if (echoedWorkspaceId !== undefined && echoedWorkspaceId !== workspaceId) continue;
+      const rebound = await this.jobs.bindProviderJob(jobId, candidate, ownerId);
+      if (rebound === null) continue;
+      return candidate;
+    }
+    return undefined;
   }
 
   private async restoreRefreshState(
@@ -2566,6 +2615,17 @@ function isIndexStatusPollTimeout(error: { readonly code: string; readonly messa
   if (error.code !== 'INTERNAL_ERROR') return false;
   if (error.message.startsWith('Timed out refreshing tool catalog for ')) return true;
   return error.message.startsWith('Timed out calling ') && error.message.endsWith('/index_status');
+}
+
+/**
+ * #906: a `code_index` call that ran out of deadline says nothing about the
+ * pass the provider already accepted — only that the answer never arrived.
+ * Terminal admission failures (a typed refusal, a lost registry entry) keep
+ * their own classification and are not matched here.
+ */
+function isCodeIndexCallTimeout(error: { readonly code: string; readonly message: string }): boolean {
+  if (error.code !== 'INTERNAL_ERROR') return false;
+  return error.message.startsWith('Timed out calling ') && error.message.endsWith('/code_index');
 }
 
 function parseProviderHandshake(value: unknown): Result<ThaiRagProviderHandshake> {

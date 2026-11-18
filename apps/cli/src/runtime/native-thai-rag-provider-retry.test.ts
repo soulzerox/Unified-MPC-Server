@@ -69,7 +69,7 @@ function lostProviderJob(tool: string): unknown {
   };
 }
 
-async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: (args: Record<string, unknown>) => unknown; admit?: false } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number; cancels: number } }> {
+async function fixture(onStatus: (poll: number, providerJobId?: string) => Promise<unknown>, options: { indexStatusTimeoutCap?: number; mode?: 'admission' | 'explicit'; indexJobStuckTimeoutMs?: number; onCodeIndex?: (call: number) => unknown; mirroredProviderJobId?: string; onCancel?: (args: Record<string, unknown>) => unknown; admit?: false; activeJobs?: string[] } = {}): Promise<{ driver: NativeThaiRagProviderDriver; jobId: string; indexStartsAtStart: number; dataRoot: string; counts: () => { connects: number; indexStarts: number; statusPolls: number; cancels: number } }> {
   const dataRoot = await tempRoot();
   const workspaceRoot = await tempRoot();
   let connects = 0;
@@ -85,7 +85,13 @@ async function fixture(onStatus: (poll: number, providerJobId?: string) => Promi
         })),
         listResources: async () => [],
         callTool: async (name, args): Promise<unknown> => {
-          if (name === 'health' || name === 'version') return response(name, handshake());
+          if (name === 'health' || name === 'version') {
+            const handshakePayload = handshake();
+            if (options.activeJobs !== undefined) {
+              (handshakePayload.components as Record<string, unknown>).active_jobs = [...options.activeJobs];
+            }
+            return response(name, handshakePayload);
+          }
           if (name === 'code_index') {
             indexStarts += 1;
             const custom = options.onCodeIndex?.(indexStarts);
@@ -177,6 +183,83 @@ describe('native provider admission index status truth', () => {
       // plus one background delta. A transient status timeout must not start a
       // replacement index.
       expect(counts()).toEqual({ connects: 2, indexStarts: 2, statusPolls: 2, cancels: 0 });
+    } finally { await driver.stop(); }
+  });
+
+  it('adopts the pass it can still see after a code_index call deadline instead of starting a duplicate (issue #906)', async () => {
+    const sameProbes = { count: 0 };
+    const { driver, counts, dataRoot } = await fixture(async (_poll, providerJobId) => {
+      // A foreign job answers scope_denied instead of echoing our workspace.
+      if (providerJobId === 'idx_otherjob01') {
+        return response('index_status', {
+          status: 'scope_denied', code: 'scope_denied',
+          job_id: 'idx_otherjob01', workspace_id: '22222222-2222-4222-8222-222222222222',
+        });
+      }
+      sameProbes.count += 1;
+      if (sameProbes.count === 1) {
+        return response('index_status', { status: 'running', job_id: 'idx_samejob01', workspace_id: workspaceId });
+      }
+      return response('index_status', {
+        status: 'done', job_id: 'idx_samejob01', workspace_id: workspaceId,
+        result: { status: 'complete', indexed: 3 },
+      });
+    }, {
+      admit: false,
+      activeJobs: ['idx_otherjob01', 'idx_samejob01'],
+      onCodeIndex: (call): unknown => {
+        if (call === 2) throw new Error('Timed out calling thai-rag-native/code_index');
+        return undefined;
+      },
+    });
+    try {
+      const read = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+      expect(read.ok).toBe(false);
+      const jobId = (read as { error: { details?: { jobId?: string } } }).error.details?.jobId;
+      expect(jobId).toBeTruthy();
+      const terminal = await terminalJob(driver, jobId as string);
+      expect(terminal).toMatchObject({ ok: true, value: {
+        status: 'completed', providerJobId: 'idx_samejob01',
+      } });
+      // The read answers as soon as the admission wait lapses; the monitor keeps
+      // running, so poll the ledger instead of reading it once.
+      const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+        jobs: Array<{ jobId: string; providerJobId?: string }>;
+      };
+      expect(persisted.jobs.find((job) => job.jobId === jobId)?.providerJobId).toBe('idx_samejob01');
+      // Trial probe + the timed-out start, and no third pass: the deadline was
+      // "stop waiting", so the adopted provider job was followed to completion.
+      expect(counts().indexStarts).toBe(2);
+    } finally { await driver.stop(); }
+  });
+
+  it('keeps the terminal failure and the cooldown when no provider pass is adoptable (issue #906)', async () => {
+    const { driver, counts } = await fixture(async () => response('index_status', {
+      status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
+      result: { status: 'complete', indexed: 3 },
+    }), {
+      admit: false,
+      onCodeIndex: (call): unknown => {
+        if (call === 2) throw new Error('Timed out calling thai-rag-native/code_index');
+        return undefined;
+      },
+    });
+    try {
+      const first = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+      expect(first.ok).toBe(false);
+      const jobId = (first as { error: { details?: { jobId?: string } } }).error.details?.jobId;
+      expect(jobId).toBeTruthy();
+      // With nothing adoptable the deadline stays terminal, and the recorded
+      // failure still names the provider call that timed out.
+      const terminal = await terminalJob(driver, jobId as string);
+      expect(terminal).toMatchObject({ ok: true, value: { status: 'failed' } });
+      expect(JSON.stringify(terminal)).toContain('Timed out calling thai-rag-native/code_index');
+      // #762: the cooldown parks the next read instead of re-arming a second
+      // pass while the provider may still be building.
+      const second = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
+      expect(second.ok).toBe(false);
+      // Trial probe + the timed-out start, and no third pass.
+      expect(counts().indexStarts).toBe(2);
     } finally { await driver.stop(); }
   });
 

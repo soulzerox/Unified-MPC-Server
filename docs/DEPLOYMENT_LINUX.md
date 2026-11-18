@@ -321,8 +321,11 @@ Materialize the already-built clean worktree into a self-contained release first
 runtime_dir="$HOME/.local/share/unified-mpc/runtime"
 deployment_id="20260922-$(git rev-parse --short=12 HEAD)"
 
+# No `--` before the id: pnpm forwards it verbatim and the script reads `$1` as
+# the deployment id, so a leading `--` becomes the id and the id becomes `$2`
+# (the source root) — which fails as RUNTIME_RELEASE_INCOMPLETE.
 UNIFIED_MPC_RUNTIME_DIR="$runtime_dir" \
-  pnpm release:materialize -- "$deployment_id"
+  pnpm release:materialize "$deployment_id"
 
 release="$runtime_dir/releases/$deployment_id"
 ```

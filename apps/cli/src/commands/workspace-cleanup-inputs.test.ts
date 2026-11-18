@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { ok } from '@unified-mpc/domain';
+import {
+  SqliteDatabase,
+  SqliteWorkspaceJournalRepository,
+  SqliteWorkspaceRepository,
+} from '@unified-mpc/storage';
 import type { GoalRuntimeProjection } from '@unified-mpc/domain';
 import type { WorkspaceCleanupEvaluationOptions } from '@unified-mpc/workspace';
 import { createGoalWorkspaceCleanupPort, goalWorkspaceCleanupInputs } from './workspace-cleanup-inputs.js';
@@ -97,6 +104,53 @@ describe('createGoalWorkspaceCleanupPort', () => {
  * dependency builder typechecks and leaves every suite green — `index.test.ts`
  * injects a fake `gateCheck` and never reaches this composition.
  */
+describe('goalDurableReferenceStates from a real journal', () => {
+  const temporaryRoots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it('reports a goal as present only while its workspace holds an unclosed durable reference', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-cleanup-inputs-'));
+    temporaryRoots.push(root);
+    const database = new SqliteDatabase(path.join(root, 'state.sqlite'));
+    const journal = new SqliteWorkspaceJournalRepository(database);
+    const workspaces = new SqliteWorkspaceRepository(database);
+    for (const [id, goalId] of [['goal-ws-live', 'goal-live'], ['goal-ws-closed', 'goal-closed']] as const) {
+      await workspaces.insert({
+        id,
+        displayName: id,
+        rootPath: path.join(root, id),
+        realRootPath: path.join(root, id),
+        createdAt: new Date(0).toISOString(),
+        goalId,
+      });
+    }
+    journal.append({ workspaceId: 'goal-ws-live', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'call-live' });
+    journal.append({ workspaceId: 'goal-ws-closed', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'call-closed' });
+    // A freshness probe found that handle gone, so the goal stops pinning anything.
+    journal.closeDeferredCalls({
+      workspaceId: 'goal-ws-closed',
+      operationKinds: ['task_create'],
+      callIds: ['call-closed'],
+      closureCode: 'probe:absent',
+    });
+
+    const inputs = await goalWorkspaceCleanupInputs({
+      settings: { get: () => null },
+      goals: { countWorkspaceGoalsForHost: async () => 0 },
+      journal,
+      workspaces: [{ id: 'goal-ws-live', goalId: 'goal-live' }, { id: 'goal-ws-closed', goalId: 'goal-closed' }],
+    });
+
+    expect(Object.fromEntries(inputs.goalDurableReferenceStates)).toEqual({
+      'goal-live': 'present',
+      'goal-closed': 'clear',
+    });
+  });
+});
+
 describe('close gate cleanup port wiring', () => {
   it('builds the port through the factory instead of spreading the inputs inline', () => {
     const source = readFileSync(path.resolve(import.meta.dirname, '..', 'index.ts'), 'utf8');

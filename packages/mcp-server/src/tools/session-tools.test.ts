@@ -14,10 +14,11 @@ function findTool(context: McpToolContext, verifier: IncrementalVerifier, name: 
 }
 
 /** The tracker and git stubs every handoff test shares; only the journal varies. */
-function handoffContext(services: Record<string, unknown>): McpToolContext {
+function handoffContext(services: Record<string, unknown>, diagnostic?: (event: { name: string; message: string }) => void): McpToolContext {
   return {
     actor,
     contextEconomy: new ContextEconomyRuntime(),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
     services: {
       file: {
         async readFile() {
@@ -146,8 +147,10 @@ describe('session tools', () => {
 
   it('states why journal task state is missing instead of handing over an empty window', async () => {
     const signal = new AbortController().signal;
+    const diagnostics: { name: string; message: string }[] = [];
     const handoff = (services: Record<string, unknown>): ReturnType<McpToolDefinition['execute']> =>
-      findTool(handoffContext(services), new IncrementalVerifier(), 'session_handoff').execute({ workspaceId: 'workspace-1' }, signal);
+      findTool(handoffContext(services, (event) => diagnostics.push(event)), new IncrementalVerifier(), 'session_handoff')
+        .execute({ workspaceId: 'workspace-1' }, signal);
 
     // No journal in this runtime: the field is absent (no claim) and the prompt says so.
     const absent = await handoff({});
@@ -155,12 +158,14 @@ describe('session tools', () => {
     if (!absent.ok) return;
     expect(absent.value as Record<string, unknown>).not.toHaveProperty('workspace_journal');
     expect((absent.value as Record<string, unknown>).prompt).toEqual(expect.stringContaining('journal is not wired in this runtime'));
+    // Nothing failed, so nothing is reported: an absent journal is a configuration, not an error.
+    expect(diagnostics).toEqual([]);
 
     // A journal that throws is "could not be read", never an empty journal.
     const throwing = await handoff({
       workspaceResume: {
         read() {
-          throw new Error('journal store is closed');
+          throw new Error('journal store is closed sk-handoff-secret');
         },
       },
     });
@@ -174,7 +179,7 @@ describe('session tools', () => {
     const refused = await handoff({
       workspaceResume: {
         read() {
-          return err(appError('RESOURCE_PRESSURE', 'journal store is busy', true));
+          return err(appError('RESOURCE_PRESSURE', 'journal store is busy sk-handoff-secret', true));
         },
       },
     });
@@ -182,6 +187,13 @@ describe('session tools', () => {
     if (!refused.ok) return;
     expect(refused.value as Record<string, unknown>).toMatchObject({ workspace_journal: null });
     expect((refused.value as Record<string, unknown>).prompt).toEqual(expect.stringContaining('journal could not be read'));
+
+    // Degrading to `null` silently would leave a broken journal invisible to whoever
+    // operates the host, so both failure branches reach the sink bootstrap uses.
+    expect(diagnostics.map((event) => event.name)).toEqual(['Error', 'WorkspaceHandoffJournalUnavailable']);
+    // Both branches meet the sink's redaction guarantee, not only the throwing one.
+    expect(diagnostics.every((event) => !event.message.includes('sk-handoff-secret'))).toBe(true);
+    expect(diagnostics[1]?.message).toContain('journal store is busy');
 
     // An empty window is a fourth, distinct answer: the journal answered and had nothing.
     const empty = await handoff({

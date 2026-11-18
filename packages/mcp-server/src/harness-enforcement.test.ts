@@ -124,6 +124,13 @@ function createHarnessServices(): {
           branch: 'goal/one', head, statusEntries: [], dirtyFingerprint: 'dirty-1', stagedFingerprint: 'staged-1',
         });
       },
+      // Enough git for `session_handoff`, which reads the tracker plus status and diff.
+      async status() {
+        return ok({ entries: [] });
+      },
+      async diff() {
+        return ok({ patch: '', truncated: false });
+      },
     },
     thaiRag: {
       async health() {
@@ -2375,5 +2382,52 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     expect(diagnostics.every((event) => event.message.includes('journal unavailable'))).toBe(true);
     // Both failure branches meet the sink's redaction guarantee, not only the throwing one.
     expect(diagnostics.every((event) => !event.message.includes('sk-live-refusal-secret'))).toBe(true);
+  });
+
+  it('carries the registry diagnostic sink into session_handoff and reports a refused journal there', async () => {
+    const { services } = createHarnessServices();
+    const diagnostics: Array<{ readonly name: string; readonly message: string }> = [];
+    // Reaches the tool the way a client does: through the registry, which owns the sink.
+    // A hand-built `McpToolContext` in a unit test injects its own, so only this path
+    // proves the carrier line in the context literal actually passes the sink through.
+    const registry = new ToolRegistry({
+      ...services,
+      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable for sk-handoff-registry-secret')) },
+    }, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider,
+      diagnostic: (event): void => {
+        diagnostics.push(event);
+      },
+    });
+
+    // The harness gate is real: mark the workspace bootstrapped the way a client would.
+    await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+    diagnostics.length = 0;
+    const handoff = await registry.invoke('session_handoff', { workspaceId: 'workspace-1' });
+
+    // The refusal degrades the journal field, it does not fail the handoff.
+    expect(handoff.isError).not.toBe(true);
+    expect(handoff.structuredContent).toMatchObject({ workspace_journal: null });
+    expect(diagnostics.map((event) => event.name)).toEqual(['WorkspaceHandoffJournalUnavailable']);
+    expect(diagnostics[0]?.message).toContain('journal unavailable');
+    expect(diagnostics[0]?.message).not.toContain('sk-handoff-registry-secret');
+
+    // A logger that throws must not turn the degraded read into a failed handoff.
+    const throwingRegistry = new ToolRegistry({
+      ...services,
+      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable')) },
+    }, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider,
+      diagnostic: (): void => {
+        throw new Error('sink is down');
+      },
+    });
+    await throwingRegistry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+    const survived = await throwingRegistry.invoke('session_handoff', { workspaceId: 'workspace-1' });
+
+    expect(survived.isError).not.toBe(true);
+    expect(survived.structuredContent).toMatchObject({ workspace_journal: null });
   });
 });

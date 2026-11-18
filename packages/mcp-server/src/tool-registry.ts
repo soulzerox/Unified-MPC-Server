@@ -398,6 +398,7 @@ export class ToolRegistry {
       services,
       actor,
       contextEconomy,
+      ...(this.diagnostic === undefined ? {} : { diagnostic: this.diagnostic }),
       ...(this.resourceAdmissionController === undefined ? {} : { resourceAdmissionController: this.resourceAdmissionController }),
       resourceAdmissionSessionId: this.sessionId ?? (this.actor.sessionId?.trim() || this.actor.clientId),
       lspProcessAdmissionCost: this.lspProcessAdmissionCost,

@@ -109,6 +109,89 @@ describe('SqliteWorkspaceJournalRepository', () => {
       .toEqual(streamA.map((entry) => entry.callId).sort());
   });
 
+  it('keeps the record of work whose session disappeared mid-call', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+
+    // Session A starts a build, an index and a terminal, then its tool call is
+    // interrupted: none of them ever writes a completion row. The rows are not
+    // held by the MCP session, so what it lost mid-flight is still the truth a
+    // later session reads.
+    const interrupted = ['verification_run', 'code_index', 'process_start'];
+    for (const kind of interrupted) {
+      journal.append({
+        workspaceId: 'ws-a',
+        operationKind: kind,
+        phase: 'started',
+        status: 'started',
+        callId: `${kind}-1`,
+        sessionId: 'session-a',
+      });
+    }
+    journal.append({ workspaceId: 'ws-a', operationKind: 'verification_run', phase: 'started', status: 'started', callId: 'build-done', sessionId: 'session-a' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'verification_run', phase: 'completed', status: 'completed', callId: 'build-done', sessionId: 'session-a', resultCode: 'ok' });
+
+    // Session B selects the same workspace and knows no call id in advance.
+    const window = journal.list({ workspaceId: 'ws-a', fromNewest: true });
+    expect(window.map((entry) => entry.sessionId)).toEqual([
+      'session-a', 'session-a', 'session-a', 'session-a', 'session-a',
+    ]);
+    const open = journal.openCallIds({ workspaceId: 'ws-a', callIds: window.map((entry) => entry.callId) });
+    // The interrupted calls read as still running, the finished build does not:
+    // session identity is provenance, not ownership, so another session sees both.
+    expect(open.sort()).toEqual(['code_index-1', 'process_start-1', 'verification_run-1']);
+  });
+
+  it('keeps an interrupted call open across a restart, so the next process does not rerun it blind', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const databasePath = path.join(root, 'state.sqlite');
+    const first = new SqliteDatabase(databasePath);
+    const workspaces = new SqliteWorkspaceRepository(first);
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+    new SqliteWorkspaceJournalRepository(first).append({
+      workspaceId: 'ws-a',
+      operationKind: 'process_start',
+      phase: 'started',
+      status: 'started',
+      callId: 'spawn-before-restart',
+      sessionId: 'session-a',
+    });
+    first.close();
+
+    // Unified restarts while the spawned work is still running.
+    const second = new SqliteDatabase(databasePath);
+    temporaryRoots.push(root);
+    const reopened = new SqliteWorkspaceJournalRepository(second);
+    expect(reopened.list({ workspaceId: 'ws-a' }).map((entry) => entry.callId)).toEqual(['spawn-before-restart']);
+    expect(reopened.openCallIds({ workspaceId: 'ws-a', callIds: ['spawn-before-restart'] })).toEqual(['spawn-before-restart']);
+    second.close();
+  });
+
+  it('returns work that finished before any client read it after a restart', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));
+    temporaryRoots.push(root);
+    const databasePath = path.join(root, 'state.sqlite');
+    const first = new SqliteDatabase(databasePath);
+    const workspaces = new SqliteWorkspaceRepository(first);
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+    const journal = new SqliteWorkspaceJournalRepository(first);
+    journal.append({ workspaceId: 'ws-a', operationKind: 'verification_run', phase: 'started', status: 'started', callId: 'build-1', sessionId: 'session-a' });
+    journal.append({ workspaceId: 'ws-a', operationKind: 'verification_run', phase: 'completed', status: 'completed', callId: 'build-1', sessionId: 'session-a', resultCode: 'ok' });
+    first.close();
+
+    // Nobody read the result before the restart; the reader after it is the first.
+    const second = new SqliteDatabase(databasePath);
+    const reopened = new SqliteWorkspaceJournalRepository(second);
+    const window = reopened.list({ workspaceId: 'ws-a' });
+    expect(window.map((entry) => entry.phase)).toEqual(['started', 'completed']);
+    expect(window.map((entry) => entry.resultCode)).toEqual([undefined, 'ok']);
+    // A completion written before the restart settles the call: no closure probe
+    // is needed to explain work the journal already saw finish.
+    expect(reopened.openCallIds({ workspaceId: 'ws-a', callIds: ['build-1'] })).toEqual([]);
+    second.close();
+  });
+
   it('is idempotent on a retried (workspace, callId, phase) write', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });

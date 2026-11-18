@@ -319,7 +319,7 @@ export async function findCloseGateReceiptForVerdict(options: {
     if (!sameVerdict(read.value.verdict, options.verdict)) {
       return err(appError(
         'CONFLICT',
-        `${file} already decides fingerprint ${options.verdict.fingerprint} with allowed=${String(read.value.verdict.allowed)}; a gate that may not contradict itself needs a new revision`,
+        `${file} already decides fingerprint ${options.verdict.fingerprint} with differing ${differingVerdictFields(read.value.verdict, options.verdict).join(', ')}; a gate that may not contradict itself needs that file inspected or removed`,
       ));
     }
     return ok({ path: file, receipt: read.value });
@@ -340,6 +340,21 @@ export async function findCloseGateReceiptForVerdict(options: {
  */
 function sameVerdict(left: CloseGateVerdict, right: CloseGateVerdict): boolean {
   return canonicalJson(left) === canonicalJson(right);
+}
+
+/**
+ * The fields that make two verdicts disagree.
+ *
+ * Named in the refusal because the values a contradiction can differ in are not
+ * the one an operator would guess: `allowed` agrees on both cases this store can
+ * be handed by hand (the same decision with other blockers, or under another
+ * subject), so a message that quotes it says nothing about what contradicts.
+ */
+function differingVerdictFields(left: CloseGateVerdict, right: CloseGateVerdict): readonly string[] {
+  const field = (verdict: CloseGateVerdict, key: string): unknown =>
+    (verdict as unknown as Readonly<Record<string, unknown>>)[key];
+  const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort(compareText);
+  return keys.filter((key) => canonicalJson(field(left, key)) !== canonicalJson(field(right, key)));
 }
 
 /** JSON with keys and arrays ordered, so equal values compare equal. */

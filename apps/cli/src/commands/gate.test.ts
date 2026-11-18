@@ -626,6 +626,7 @@ describe('runCloseGate', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.message).toContain('a gate that may not contradict itself');
+    expect(result.error.message).toContain('differing blockers');
   });
 
   it('refuses a receipt that decides another subject for these inputs', async () => {
@@ -660,6 +661,7 @@ describe('runCloseGate', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.message).toContain('a gate that may not contradict itself');
+    expect(result.error.message).toContain('differing workspaceId');
   });
 
   it('forwards the subject to every owner and omits an absent goal', async () => {

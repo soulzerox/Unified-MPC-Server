@@ -17,7 +17,7 @@ import {
 import { z } from 'zod';
 import { WORKSPACE_RESUME_DEFAULT_LIMIT, redactDiagnosticText, sanitizeException, type DiagnosticLogger, type FileActor, type WorkspaceResumeSnapshot } from '@unified-mpc/application';
 import type { ActivityTargetDetail } from '@unified-mpc/audit';
-import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capabilities';
+import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY, withCapabilityGoalCorrelation } from '@unified-mpc/capabilities';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
@@ -969,9 +969,20 @@ export class ToolRegistry {
         policyAllowsScopedDestructive,
         explicitUserConfirmation: hasExplicitUserConfirmation(activeRoutedInput),
       });
+      // A durable task started under a rolling goal keeps the goal and the
+      // generation it was started under, so a later reader can tell task
+      // evidence of generation N from what generation N+1 is doing. The
+      // correlation rides in the capability request metadata because that is
+      // the only per-call channel a tool definition closure does not share.
+      const executionInput = goalLease === undefined || (tool.name !== 'shell' && tool.name !== 'wsl_exec')
+        ? approvalExecutionInput
+        : withCapabilityGoalCorrelation(approvalExecutionInput, {
+            goalId: goalLease.goalId,
+            executionGeneration: goalLease.leaseGeneration,
+          });
       const execution = await this.executeWithinResponseBudget(
         tool,
-        approvalExecutionInput,
+        executionInput,
         invocationAuthorization,
         parentSignal,
         goalLease === undefined ? undefined : goalLease.goalId,

@@ -485,6 +485,18 @@ row outlives the request that wrote it and is replayed to sessions that were
 never present, so a credential in a summary would be re-published by every later
 resume. The runtime append itself passes no summary at all today.
 
+A durable task started under a rolling goal records the goal and the generation
+it was started under. The registry puts `CAPABILITY_GOAL_CORRELATION_METADATA_KEY`
+(`unified-mpc.goalCorrelation.v1`, `{ goalId, executionGeneration }` taken from
+the lease proof) beside `unified-mpc.taskOwner.v1` on a `shell`/`wsl_exec`
+request; the shell backend folds it into the owner, and the task metadata keeps
+it as `owner_goal_id`/`owner_execution_generation`, so the snapshots a resumed
+session reads say which generation the work belongs to instead of comparing it
+with whatever generation is current by then. A task started outside a goal
+records neither field. Ownership matching is unchanged — workspace first, then
+client/session when neither side has one — because the correlation is
+descriptive; refusing a stale generation's work is the next #170 step.
+
 `workspace_resume` is the journal's read side for a caller that asks directly
 (`packages/application/src/workspace-resume-snapshot.ts`, wired in the stdio
 runtime over the same `SqliteWorkspaceJournalRepository` the host appends to):

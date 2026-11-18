@@ -586,6 +586,42 @@ describe('durable shell task parking (#145)', () => {
     expect(waited).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
   });
 
+  it('correlates a task with the goal generation that started it, and leaves it absent otherwise', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-goal-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const base = {
+      executable: process.execPath,
+      arguments: ['-e', ''],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+    } as const;
+    const workspace = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+
+    const correlated = await store.reserve({
+      ...base,
+      taskId: 'goal-task',
+      owner: { ...workspace, goalId: 'goal-1', executionGeneration: 4 },
+    });
+    expect(correlated).toMatchObject({ ok: true, value: { goal_id: 'goal-1', execution_generation: 4 } });
+
+    // A task started outside a goal claims no goal, rather than a default one.
+    const plain = await store.reserve({ ...base, taskId: 'plain-task', owner: workspace });
+    expect(plain.ok).toBe(true);
+    expect(plain.ok && (plain.value as Record<string, unknown>).goal_id).toBeUndefined();
+    expect(plain.ok && (plain.value as Record<string, unknown>).execution_generation).toBeUndefined();
+
+    // The correlation is persisted, so a restart reads it back rather than
+    // inferring it from whatever generation happens to be current later.
+    const reopened = new DurableShellTaskStore(tasksRoot);
+    const reread = await reopened.snapshot('goal-task', undefined, workspace);
+    expect(reread).toMatchObject({ ok: true, value: { goal_id: 'goal-1', execution_generation: 4 } });
+  });
+
   it('cancels a waiting task without a process and refuses to start it later', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-park-'));
     temporaryRoots.push(root);

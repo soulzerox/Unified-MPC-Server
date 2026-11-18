@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { CAPABILITY_GOAL_CORRELATION_METADATA_KEY } from '@unified-mpc/capabilities';
 import { appError, err, ok } from '@unified-mpc/domain';
 import { permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import { ToolRegistry, type McpApplicationServices, type WorkspaceScope } from './tool-registry.js';
@@ -136,6 +137,39 @@ describe('scheduled continuation mutation fence', () => {
     expect(begin).toHaveBeenCalledWith(actor, 'workspace-1', expect.any(String), goalLease);
     expect(call).toHaveBeenCalledTimes(1);
     expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries the goal generation into a shell task request without leaking the lease token', async (): Promise<void> => {
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(activeFence());
+    const begin = vi.fn().mockResolvedValue(ok({ goalId: 'goal-1', leaseGeneration: 2 }));
+    const execute = vi.fn().mockImplementation(async (tool: string, args: Readonly<Record<string, unknown>>) => {
+      expect(tool).toBe('shell');
+      // The generation the task was started under is the correlation a later
+      // reader needs; the lease token that proves it is not part of it.
+      expect(args.metadata).toMatchObject({
+        [CAPABILITY_GOAL_CORRELATION_METADATA_KEY]: { goalId: 'goal-1', executionGeneration: 2 },
+      });
+      expect(JSON.stringify(args)).not.toContain('current-token');
+      return ok({ task_id: 'task-1', state: 'running', durable: true });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat: vi.fn().mockResolvedValue(undefined), end: vi.fn().mockResolvedValue(undefined) },
+      capabilities: { execute },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+    });
+
+    const response = await registry.invoke('shell', {
+      workspaceId: 'workspace-1',
+      executable: 'node',
+      arguments: ['-e', ''],
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a stale Thai-RAG index lease before provider dispatch', async (): Promise<void> => {

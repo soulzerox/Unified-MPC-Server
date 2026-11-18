@@ -597,6 +597,34 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: [] })).toEqual([]);
   });
 
+  it('reads a row the closer can never reach as settled, not as still open', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({
+      id: 'ws-goal', displayName: 'Goal', rootPath: path.join(root, 'goal'), realRootPath: path.join(root, 'goal'),
+      createdAt: new Date(0).toISOString(), workspaceKind: 'goal', goalId: 'goal-1',
+    });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'task_create', phase: 'started', status: 'started', callId: 'other-kind' });
+    journal.append({ workspaceId: 'ws-goal', operationKind: 'process_start', phase: 'started', status: 'started', callId: 'older' });
+    expect(journal.openDeferredCallIds({ workspaceId: 'ws-goal', callIds: ['other-kind', 'older'] }).sort())
+      .toEqual(['older', 'other-kind']);
+
+    // The same reach `closeDeferredCalls` applies: a kind it will not write and a
+    // row older than its floor are both out of reach, so the sweeper stops
+    // re-probing them on every later completion.
+    expect(journal.openDeferredCallIds({
+      workspaceId: 'ws-goal',
+      callIds: ['other-kind', 'older'],
+      operationKinds: ['process_start'],
+      recordedAtOrAfter: new Date(Date.now() + 60_000).toISOString(),
+    })).toEqual([]);
+    expect(journal.openDeferredCallIds({
+      workspaceId: 'ws-goal',
+      callIds: ['older'],
+      operationKinds: ['process_start'],
+      recordedAtOrAfter: new Date(0).toISOString(),
+    })).toEqual(['older']);
+  });
+
   it('names the kind that owns each still-open call, so a coarser answer is asked of the right ones', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({

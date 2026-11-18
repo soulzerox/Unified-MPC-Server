@@ -748,12 +748,14 @@ describe('ShellCapabilityBackend unrestricted', () => {
       metadata: { [CAPABILITY_TASK_OWNER_METADATA_KEY]: { clientId: 'client-1', sessionId: 'session-a', workspaceId } },
     });
     const backend = new ShellCapabilityBackend({ allowedRoots: [root], taskStateDirectory });
-    const start = (timeoutSeconds: number): Promise<Result<unknown>> => backend.execute({
-      operation: 'run', executable: process.execPath, arguments: ['-e', 'setTimeout(() => {}, 5000)'],
+    const start = (timeoutSeconds: number, script = 'setTimeout(() => {}, 30000)'): Promise<Result<unknown>> => backend.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', script],
       cwd: root, execution: 'background', timeout_seconds: timeoutSeconds, userConfirmed: true, ...owner(),
     });
     const running = await start(10);
-    const expiring = await start(0.5);
+    // Its own timeout ends this one, not its script: the script outlives the poll
+    // budget below, so a slow machine cannot turn the assertion into a load test.
+    const expiring = await start(0.5, 'setTimeout(() => {}, 5000)');
     expect(running).toMatchObject({ ok: true, value: { task_id: expect.any(String) } });
     expect(expiring).toMatchObject({ ok: true, value: { task_id: expect.any(String) } });
     if (!running.ok || !expiring.ok) return;

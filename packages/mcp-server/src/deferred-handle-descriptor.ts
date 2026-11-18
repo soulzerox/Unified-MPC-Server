@@ -67,6 +67,19 @@ export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
  */
 export const WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE = 'worktree_preview_settled';
 
+/**
+ * Why a `task_create` that answered without a task id ends its own deferral.
+ *
+ * The tool reported that the capability service is unavailable (`needs_setup`), so
+ * no durable task exists for the call and no probe could ever answer it. Left open,
+ * its row pins the goal `present` for good.
+ *
+ * An errored create keeps its pin: the launch path can fail after the worker was
+ * forked and still answer `INTERNAL_ERROR`, so an error is not evidence that nothing
+ * runs.
+ */
+export const TASK_CREATE_SETTLED_CLOSURE_CODE = 'task_create_settled';
+
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;
@@ -209,6 +222,15 @@ const SETTLEMENT_RULES: ReadonlyMap<string, SettlementRule> = new Map<string, Se
     settles: (_input, response) => response.isError !== true
       && asRecord(response.structuredContent)?.status === 'completed',
   }]),
+  // A create that answered without a task id started nothing: the capability service
+  // was unavailable and the call reported `needs_setup` instead of a handle. An error
+  // does not settle it — the launch path can fail after the worker was forked and
+  // still answer `INTERNAL_ERROR`, so "errored" is not "nothing runs".
+  ['task_create', {
+    closureCode: TASK_CREATE_SETTLED_CLOSURE_CODE,
+    settles: (_input, response) => response.isError !== true
+      && boundedString(asRecord(response.structuredContent)?.task_id, 256) === undefined,
+  }],
 ]);
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recordableDeferredHandle, recordableDeferredSettlement, SWARM_READ_SETTLED_CLOSURE_CODE, VERIFICATION_SETTLED_CLOSURE_CODE, WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
+import { recordableDeferredHandle, recordableDeferredSettlement, SWARM_READ_SETTLED_CLOSURE_CODE, TASK_CREATE_SETTLED_CLOSURE_CODE, VERIFICATION_SETTLED_CLOSURE_CODE, WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE } from './deferred-handle-descriptor.js';
 import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
 import { upgradeToolInputSchema } from './upgrade-tool-contracts.js';
 
@@ -240,6 +240,26 @@ describe('recordableDeferredSettlement', () => {
     })).toBeUndefined();
     expect(recordableDeferredSettlement('merge_verification_run', {}, {
       ...done, structuredContent: { status: 'completed' },
+    })).toBeUndefined();
+  });
+
+  it('settles a task_create that answered without a task id', (): void => {
+    // The capability service was unavailable, so the call reported `needs_setup` and
+    // started nothing: no handle was recorded and no probe could ever answer for it.
+    expect(recordableDeferredSettlement('task_create', input, {
+      ...done, structuredContent: { tool: 'task_create', status: 'needs_setup', available: false },
+    })).toEqual({ workspaceId: 'workspace-1', closureCode: TASK_CREATE_SETTLED_CLOSURE_CODE });
+  });
+
+  it('leaves a created task and an errored create pinned', (): void => {
+    // A create that handed back a task id is answered by the shell backend later. An
+    // error is not evidence that nothing launched: the launch path can fail after the
+    // worker was forked and still answer `INTERNAL_ERROR`.
+    expect(recordableDeferredSettlement('task_create', input, {
+      ...done, structuredContent: { task_id: 'task-1', state: 'running' },
+    })).toBeUndefined();
+    expect(recordableDeferredSettlement('task_create', input, {
+      isError: true, structuredContent: { error: { code: 'INTERNAL_ERROR' } },
     })).toBeUndefined();
   });
 });

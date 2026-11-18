@@ -201,6 +201,7 @@ describe('session tools', () => {
     let head = 'a'.repeat(40);
     let repositoryIdentity = 'repo-1';
     let worktreeIdentity = 'worktree-1';
+    let fsIdentity = 'fs-1';
     let branch = 'feat/task-7';
     let starts = 0;
     const context = {
@@ -212,6 +213,7 @@ describe('session tools', () => {
             return ok({
               repositoryIdentity,
               gitCommonDirIdentity: 'common-1',
+              gitCommonDirFilesystemIdentity: fsIdentity,
               worktreeIdentity,
               branch,
               head,
@@ -272,6 +274,10 @@ describe('session tools', () => {
     const otherWorktree = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     repositoryIdentity = 'repo-2';
     const fifth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
+    // The path hashes cannot see a repository replaced at the same canonical path, so the
+    // git directory's device/inode identity is what tells this case apart.
+    fsIdentity = 'fs-2';
+    const replacedRepository = await tool.execute({ workspaceId: 'workspace-1' }, signal);
     // The entry was replaced by the new checkout's result, so the next call replays it
     // instead of re-running the typecheck forever against a retained foreign entry.
     const sixth = await tool.execute({ workspaceId: 'workspace-1' }, signal);
@@ -285,11 +291,12 @@ describe('session tools', () => {
     // it is unusable: reusing it would report another checkout's result as this one's.
     expect(otherWorktree).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
     expect(fifth).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
+    expect(replacedRepository).toMatchObject({ ok: true, value: { cache: 'miss', reuse: 'not_reusable', passed: true } });
     expect(sixth).toMatchObject({ ok: true, value: { cache: 'hit', reuse: 'fresh', passed: true } });
-    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 3, misses: 5, hitRate: 3 / 8 });
+    expect(verifier.stats()).toMatchObject({ entries: 1, hits: 3, misses: 6, hitRate: 3 / 9 });
     expect(verifier.stats().bytesSaved).toBeGreaterThan(0);
     expect(verifier.invalidate('workspace-1')).toBe(1);
-    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 3, misses: 5 });
-    expect(starts).toBe(5);
+    expect(verifier.stats()).toMatchObject({ entries: 0, hits: 3, misses: 6 });
+    expect(starts).toBe(6);
   });
 });

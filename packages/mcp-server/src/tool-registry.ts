@@ -1513,8 +1513,18 @@ export class ToolRegistry {
     if (this.services.workspaceResume !== undefined) {
       try {
         const read = this.services.workspaceResume.read({ workspaceId, limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
-        resume = read.ok ? read.value : null;
-      } catch {
+        if (read.ok) {
+          resume = read.value;
+        } else {
+          // The refusal is safe text from the reader itself, so it can be logged as-is.
+          this.diagnostic?.({ name: 'WorkspaceResumeUnavailable', message: read.error.message });
+          resume = null;
+        }
+      } catch (error: unknown) {
+        // The store throws instead of refusing, and this runs after the harness was
+        // marked bootstrapped: record it the same way any other unexpected exception is
+        // recorded (redacted) and keep the call a success.
+        sanitizeException(error, this.diagnostic);
         resume = null;
       }
     }

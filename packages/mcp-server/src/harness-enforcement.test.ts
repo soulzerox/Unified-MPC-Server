@@ -2353,10 +2353,14 @@ describe('workspace_bootstrap journal resume (#170)', () => {
       { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => { throw new Error('journal unavailable'); } } },
     ];
 
+    const diagnostics: Array<{ readonly name: string; readonly message: string }> = [];
     for (const withJournal of registries) {
       const registry = new ToolRegistry(withJournal, actor, {
         harnessActivationLedger: new HarnessActivationLedger(),
         activeWorkspaceScopeProvider,
+        diagnostic: (event): void => {
+          diagnostics.push(event);
+        },
       });
       const bootstrapped = await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
 
@@ -2365,5 +2369,8 @@ describe('workspace_bootstrap journal resume (#170)', () => {
       expect(bootstrapped.isError).not.toBe(true);
       expect(bootstrapped.structuredContent).toMatchObject({ ready: true, resume: null });
     }
+    // Degrading silently would leave a broken journal invisible to whoever operates it.
+    expect(diagnostics.map((event) => event.name)).toEqual(['WorkspaceResumeUnavailable', 'Error']);
+    expect(diagnostics.every((event) => event.message.includes('journal unavailable'))).toBe(true);
   });
 });

@@ -496,6 +496,17 @@ still advertises the tool, and a call to it is refused with `INTERNAL_ERROR`
 rather than answered with an empty event list, which would read as "nothing
 happened here".
 
+`workspace_bootstrap` carries the same snapshot as `resume`, read through the
+same reader at its default cap, so the session-start call is a read side too and
+a caller that does not know to ask does not have to. Three states, and they stay
+distinct: the snapshot when the journal is wired (an empty journal is an empty
+snapshot, which is an answer), the field absent when the runtime has no journal
+(no claim), and `null` when the journal could not be read — a journal failure is
+recorded as a diagnostic and never fails the bootstrap, because the harness was
+already marked bootstrapped by the time the journal is read. The window is the
+oldest rows, so `truncated: true` means to continue with `cursor` as
+`afterSequence`, and `openReferences` counts only the calls in that window.
+
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as
 `createGoalWorktreeRemovalPreviewPort` in

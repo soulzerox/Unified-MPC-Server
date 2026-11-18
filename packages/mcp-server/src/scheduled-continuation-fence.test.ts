@@ -165,10 +165,46 @@ describe('scheduled continuation mutation fence', () => {
       workspaceId: 'workspace-1',
       executable: 'node',
       arguments: ['-e', ''],
-      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 2 },
+      // The caller's claim is not the record: the fence admitted generation 2,
+      // so a request that says 7 must still persist 2.
+      goalLease: { goalId: 'goal-1', leaseToken: 'current-token', leaseGeneration: 7 },
     });
 
     expect(response.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not record a goal correlation the fence never admitted', async (): Promise<void> => {
+    // No live fence means nothing validates a caller's `goalLease`, so a task
+    // started now belongs to no generation. A request that forges the
+    // correlation in call metadata must not get one persisted.
+    const inspectWorkspaceFence = vi.fn().mockResolvedValue(ok(null));
+    const begin = vi.fn();
+    const execute = vi.fn().mockImplementation(async (_tool: string, args: Readonly<Record<string, unknown>>) => {
+      expect(args.metadata).not.toHaveProperty(CAPABILITY_GOAL_CORRELATION_METADATA_KEY);
+      expect(JSON.stringify(args)).not.toContain('forged-goal');
+      return ok({ task_id: 'task-2', state: 'running', durable: true });
+    });
+    const services = {
+      goalMutationFence: { inspectWorkspaceFence, begin, heartbeat: vi.fn(), end: vi.fn() },
+      capabilities: { execute },
+    } as unknown as McpApplicationServices;
+    const registry = new ToolRegistry(services, actor, {
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope> => ({ workspaceId: 'workspace-1', rootPath: '/workspace' }),
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+    });
+
+    const response = await registry.invoke('shell', {
+      workspaceId: 'workspace-1',
+      executable: 'node',
+      arguments: ['-e', ''],
+      metadata: {
+        [CAPABILITY_GOAL_CORRELATION_METADATA_KEY]: { goalId: 'forged-goal', executionGeneration: 99 },
+      },
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(begin).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledTimes(1);
   });
 

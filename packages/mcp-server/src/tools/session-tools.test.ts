@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ok } from '@unified-mpc/domain';
+import { appError, err, ok } from '@unified-mpc/domain';
 import { ContextEconomyRuntime } from '../context-economy.js';
 import { IncrementalVerifier } from '../incremental-verifier.js';
 import { sessionTools } from './session-tools.js';
@@ -165,6 +165,44 @@ describe('session tools', () => {
     if (!throwing.ok) return;
     expect(throwing.value as Record<string, unknown>).toMatchObject({ workspace_journal: null });
     expect((throwing.value as Record<string, unknown>).prompt).toEqual(expect.stringContaining('journal could not be read'));
+
+    // A reader that refuses (rather than throws) is the same "unreadable" state: the
+    // handoff still happens, and no empty window is claimed.
+    const refused = await handoff({
+      workspaceResume: {
+        read() {
+          return err(appError('RESOURCE_PRESSURE', 'journal store is busy', true));
+        },
+      },
+    });
+    expect(refused.ok).toBe(true);
+    if (!refused.ok) return;
+    expect(refused.value as Record<string, unknown>).toMatchObject({ workspace_journal: null });
+    expect((refused.value as Record<string, unknown>).prompt).toEqual(expect.stringContaining('journal could not be read'));
+
+    // An empty window is a fourth, distinct answer: the journal answered and had nothing.
+    const empty = await handoff({
+      workspaceResume: {
+        read() {
+          return ok({
+            workspaceId: 'workspace-1',
+            generatedAt: '2026-11-18T03:00:00.000Z',
+            cursor: 0,
+            truncated: false,
+            events: [],
+            openReferences: { count: 0, latestSequence: null },
+          });
+        },
+      },
+    });
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    expect(empty.value as Record<string, unknown>).toMatchObject({
+      workspace_journal: { workspaceId: 'workspace-1', events: [], truncated: false },
+    });
+    expect((empty.value as Record<string, unknown>).prompt).toEqual(
+      expect.stringContaining('no journal rows in this window (an empty journal, not an unreadable one)'),
+    );
 
     // The reader echoes the workspace it was asked for, so a snapshot naming another
     // one cannot be its output: refuse it instead of handing over foreign work.

@@ -140,6 +140,21 @@
       "data_schema": "index_status_data"
     },
     {
+      "file": "fixtures/job-interrupted.json",
+      "operation": "index_status",
+      "state": "interrupted-job",
+      "expect": {
+        "status": "ok",
+        "error_codes": [],
+        "data_equals": {
+          "status": "interrupted",
+          "interrupted": true,
+          "cancellation_requested": false
+        }
+      },
+      "data_schema": "index_status_data"
+    },
+    {
       "file": "fixtures/typed-failure-sqlite-busy.json",
       "operation": "code_index",
       "state": "typed-provider-failure",
@@ -163,6 +178,22 @@
         "error_codes": [],
         "data_equals": {
           "query": "provider contract",
+          "semantic_error": null
+        }
+      },
+      "data_schema": "code_search_data"
+    },
+    {
+      "file": "fixtures/code-search-profile-mismatch.json",
+      "operation": "code_search",
+      "state": "profile-mismatch",
+      "expect": {
+        "status": "degraded",
+        "error_codes": [],
+        "data_equals": {
+          "vector_rescue.incompatible": true,
+          "vector_rescue.consult_requested": true,
+          "vector_rescue.consulted": false,
           "semantic_error": null
         }
       },

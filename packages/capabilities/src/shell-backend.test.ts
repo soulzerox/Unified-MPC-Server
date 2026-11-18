@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ok, type Result } from '@unified-mpc/domain';
+import { DurableShellTaskStore } from './durable-shell-task-store.js';
 import { ShellCapabilityBackend } from './shell-backend.js';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
 
@@ -780,4 +781,50 @@ describe('ShellCapabilityBackend unrestricted', () => {
     await expect(backend.taskLivenessForGoal('workspace-2', runningId)).resolves.toBe('unknown');
     await expect(backend.taskLivenessForGoal('workspace-1', 'task-that-never-existed')).resolves.toBe('unknown');
   }, 30_000);
+
+  it('keeps an unverified termination pinned, because the work may still be running', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-unverified-'));
+    temporaryRoots.push(root);
+    const taskStateDirectory = path.join(root, '.tasks');
+    const taskId = 'unverified-external-task';
+    const now = Date.now();
+    await mkdir(path.join(taskStateDirectory, taskId), { recursive: true });
+    // A durable task whose deadline elapsed while the work it externalises still
+    // reports itself running: nothing here proves the process ended, which is the
+    // state the goal probe must not read as `gone`.
+    await writeFile(path.join(taskStateDirectory, taskId, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'running',
+      owner_client_id: 'client-1',
+      owner_session_id: 'session-a',
+      owner_workspace_id: 'workspace-1',
+      started_at: new Date(now - 120_000).toISOString(),
+      deadline_at: new Date(now - 60_000).toISOString(),
+      include_stdout: true,
+      include_stderr: true,
+      max_output_bytes: 1024,
+      external_reconciliation: { kind: 'fixture', key: 'still-running' },
+    }), 'utf8');
+    const backend = new ShellCapabilityBackend({
+      allowedRoots: [root],
+      taskStateDirectory,
+      durableTaskReconciliation: {
+        describe: (): undefined => undefined,
+        reconcile: async (): Promise<{ state: 'running' }> => ({ state: 'running' }),
+      },
+    });
+
+    // Two states map to `live`, so the mapping under test is only pinned if the
+    // reconcile is shown to reach `termination_unverified` rather than leaving the
+    // task plainly `running`.
+    const store = new DurableShellTaskStore(taskStateDirectory, {
+      externalReconciler: async (): Promise<{ state: 'running' }> => ({ state: 'running' }),
+    });
+    await expect(store.snapshotForGoalLiveness(taskId, 'workspace-1')).resolves.toMatchObject({
+      ok: true,
+      value: { state: 'termination_unverified' },
+    });
+    await expect(backend.taskLivenessForGoal('workspace-1', taskId)).resolves.toBe('live');
+  }, 15_000);
 });

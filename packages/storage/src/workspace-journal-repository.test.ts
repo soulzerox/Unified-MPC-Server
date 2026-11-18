@@ -63,6 +63,52 @@ describe('SqliteWorkspaceJournalRepository', () => {
     expect(journal.list({ workspaceId: 'ws-b', fromNewest: true, limit: 3 })).toEqual([]);
   });
 
+  it('keeps two sessions writing two workspaces interleaved on separate streams', async () => {
+    const { journal, workspaces, root } = await setup();
+    await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });
+    await workspaces.insert({ id: 'ws-b', displayName: 'B', rootPath: path.join(root, 'b'), realRootPath: path.join(root, 'b'), createdAt: new Date(0).toISOString() });
+
+    // Two MCP sessions attached at once, each writing its own workspace. The
+    // append is synchronous, so interleaving is the concurrency that matters:
+    // no write may borrow the other stream's sequence, cursor or pin.
+    const writes = Array.from({ length: 20 }, (_, index) => Promise.resolve().then(() => {
+      const odd = index % 2 === 1;
+      return journal.append({
+        workspaceId: odd ? 'ws-b' : 'ws-a',
+        sessionId: odd ? 'session-b' : 'session-a',
+        operationKind: 'process_start',
+        phase: 'started',
+        status: 'started',
+        callId: `call-${index}`,
+      });
+    }));
+    const sequences = await Promise.all(writes);
+    expect(new Set(sequences).size).toBe(20);
+
+    const streamA = journal.list({ workspaceId: 'ws-a' });
+    const streamB = journal.list({ workspaceId: 'ws-b' });
+    expect(streamA).toHaveLength(10);
+    expect(streamB).toHaveLength(10);
+    expect(streamA.every((entry) => entry.workspaceId === 'ws-a' && entry.sessionId === 'session-a')).toBe(true);
+    expect(streamB.every((entry) => entry.workspaceId === 'ws-b' && entry.sessionId === 'session-b')).toBe(true);
+    // Each stream is ordered on its own: global autoincrement interleaves, but a
+    // caller replaying one workspace never sees the other's rows or a gap.
+    expect(streamA.map((entry) => entry.sequence)).toEqual([...streamA.map((entry) => entry.sequence)].sort((left, right) => left - right));
+    expect(streamA.map((entry) => entry.sequence)).not.toEqual(streamB.map((entry) => entry.sequence));
+
+    // A cursor taken from one stream pages only inside it.
+    const cursorA = streamA[0]!.sequence;
+    expect(journal.list({ workspaceId: 'ws-a', afterSequence: cursorA }).map((entry) => entry.workspaceId))
+      .toEqual(Array.from({ length: 9 }, () => 'ws-a'));
+    // The pin rule is per workspace too: ws-a's open calls are not visible as
+    // ws-b's, even when the reader asks with every call id it has seen.
+    const everyCall = [...streamA, ...streamB].map((entry) => entry.callId);
+    expect(journal.openCallIds({ workspaceId: 'ws-b', callIds: everyCall }).sort())
+      .toEqual(streamB.map((entry) => entry.callId).sort());
+    expect(journal.openCallIds({ workspaceId: 'ws-a', callIds: everyCall }).sort())
+      .toEqual(streamA.map((entry) => entry.callId).sort());
+  });
+
   it('is idempotent on a retried (workspace, callId, phase) write', async () => {
     const { journal, workspaces, root } = await setup();
     await workspaces.insert({ id: 'ws-a', displayName: 'A', rootPath: path.join(root, 'a'), realRootPath: path.join(root, 'a'), createdAt: new Date(0).toISOString() });

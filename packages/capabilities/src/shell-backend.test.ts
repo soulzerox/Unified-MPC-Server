@@ -752,7 +752,7 @@ describe('ShellCapabilityBackend unrestricted', () => {
       operation: 'run', executable: process.execPath, arguments: ['-e', script],
       cwd: root, execution: 'background', timeout_seconds: timeoutSeconds, userConfirmed: true, ...owner(),
     });
-    const running = await start(10);
+    const running = await start(60);
     // Its own timeout ends this one, not its script: the script outlives the poll
     // budget below, so a slow machine cannot turn the assertion into a load test.
     const expiring = await start(0.5, 'setTimeout(() => {}, 5000)');

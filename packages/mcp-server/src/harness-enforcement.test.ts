@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { appError, err, ok } from '@unified-mpc/domain';
 import type { AppErrorCode } from '@unified-mpc/domain';
+import type { WorkspaceResumeSnapshot } from '@unified-mpc/application';
+import type { Result } from '@unified-mpc/domain';
 import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import type { PermissionProfile } from '@unified-mpc/permissions';
 import { ResourceAdmissionController } from '@unified-mpc/workspace';
@@ -2266,5 +2268,102 @@ describe('prepare_code_change active scope resolution (#428)', () => {
     expect(result.structuredContent).not.toMatchObject({
       error: { details: { scopeReason: expect.anything() } },
     });
+  });
+});
+
+describe('workspace_bootstrap journal resume (#170)', () => {
+  it('carries the bounded resume snapshot, and omits it when the runtime has no journal', async () => {
+    const { services } = createHarnessServices();
+    const requests: Array<{ readonly workspaceId: string; readonly afterSequence?: number; readonly limit?: number }> = [];
+    const snapshot: WorkspaceResumeSnapshot = {
+      workspaceId: 'workspace-1',
+      generatedAt: '2026-11-18T00:00:00.000Z',
+      cursor: 7,
+      truncated: true,
+      events: [{
+        sequence: 7,
+        operationKind: 'shell',
+        toolName: 'shell',
+        phase: 'completed',
+        status: 'completed',
+        resultCode: 'ok',
+        summary: 'typecheck passed',
+        recordedAt: '2026-11-18T00:00:00.000Z',
+        open: true,
+      }],
+      openReferences: { count: 1, latestSequence: 7 },
+    };
+    const registry = new ToolRegistry({
+      ...services,
+      workspaceResume: {
+        read(request): Result<WorkspaceResumeSnapshot> {
+          requests.push(request);
+          return ok(snapshot);
+        },
+      },
+    }, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    const bootstrapped = await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    expect(bootstrapped.isError).not.toBe(true);
+    // The projection is the reader's own default, so bootstrap stays bounded no matter
+    // how much journal a workspace accumulates.
+    expect(requests).toEqual([{ workspaceId: 'workspace-1', limit: 20 }]);
+    expect(bootstrapped.structuredContent).toMatchObject({
+      resume: { cursor: 7, truncated: true, openReferences: { count: 1, latestSequence: 7 } },
+    });
+
+    const withoutJournal = new ToolRegistry(services, actor, {
+      harnessActivationLedger: new HarnessActivationLedger(),
+      activeWorkspaceScopeProvider,
+    });
+    const bare = await withoutJournal.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    expect(bare.isError).not.toBe(true);
+    // No journal means no claim: an absent field is not "nothing happened here".
+    expect(bare.structuredContent).not.toHaveProperty('resume');
+
+    const emptySnapshot: WorkspaceResumeSnapshot = {
+      workspaceId: 'workspace-1',
+      generatedAt: '2026-11-18T00:00:00.000Z',
+      cursor: 0,
+      truncated: false,
+      events: [],
+      openReferences: { count: 0, latestSequence: null },
+    };
+    const withEmptyJournal = new ToolRegistry({
+      ...services,
+      workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => ok(emptySnapshot) },
+    }, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+    const quiet = await withEmptyJournal.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+    // An empty journal is an answer; `null` is the failure. Collapsing the two would
+    // make "nothing has happened here yet" indistinguishable from "could not read".
+    expect(quiet.structuredContent).toMatchObject({
+      resume: { cursor: 0, truncated: false, events: [], openReferences: { count: 0, latestSequence: null } },
+    });
+  });
+
+  it('reports an unreadable journal as null instead of failing the bootstrap', async () => {
+    const { services } = createHarnessServices();
+    const registries = [
+      // The reader refuses.
+      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable')) } },
+      // The store throws rather than returning a `Result`, which is what really happens.
+      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => { throw new Error('journal unavailable'); } } },
+    ];
+
+    for (const withJournal of registries) {
+      const registry = new ToolRegistry(withJournal, actor, {
+        harnessActivationLedger: new HarnessActivationLedger(),
+        activeWorkspaceScopeProvider,
+      });
+      const bootstrapped = await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+      // The harness was already marked bootstrapped by this point, so reporting a
+      // failure here would tell the client the opposite of the recorded state.
+      expect(bootstrapped.isError).not.toBe(true);
+      expect(bootstrapped.structuredContent).toMatchObject({ ready: true, resume: null });
+    }
   });
 });

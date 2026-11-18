@@ -101,7 +101,7 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'workspace_bootstrap',
-      description: 'Load and fingerprint the workspace engineering harness, verify required native capabilities, and fail closed when they are unavailable before code mutation. Optional child MCP connections cannot replace canonical native tools. The result also carries `resume`, the bounded journal snapshot a session that was not here reads (absent when the runtime has no journal, null when it could not be read — `workspace_resume` reports that in detail), so attaching does not need a second call.',
+      description: 'Load and fingerprint the workspace engineering harness, verify required native capabilities, and fail closed when they are unavailable before code mutation. Optional child MCP connections cannot replace canonical native tools. The result also carries `resume`, the first bounded window of the workspace journal so a session that was not here can see what happened without a second call: oldest rows first, capped at the reader default limit, so `truncated: true` means pass its `cursor` to `workspace_resume` to continue. The field is absent when the runtime has no journal and `null` when the journal could not be read (a journal failure never fails bootstrap; `workspace_resume` reports the reason).',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: workspaceBootstrapSchema,

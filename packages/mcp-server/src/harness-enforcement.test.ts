@@ -2323,4 +2323,27 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     // No journal means no claim: an absent field is not "nothing happened here".
     expect(bare.structuredContent).not.toHaveProperty('resume');
   });
+
+  it('reports an unreadable journal as null instead of failing the bootstrap', async () => {
+    const { services } = createHarnessServices();
+    const registries = [
+      // The reader refuses.
+      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable')) } },
+      // The store throws rather than returning a `Result`, which is what really happens.
+      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => { throw new Error('journal unavailable'); } } },
+    ];
+
+    for (const withJournal of registries) {
+      const registry = new ToolRegistry(withJournal, actor, {
+        harnessActivationLedger: new HarnessActivationLedger(),
+        activeWorkspaceScopeProvider,
+      });
+      const bootstrapped = await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' });
+
+      // The harness was already marked bootstrapped by this point, so reporting a
+      // failure here would tell the client the opposite of the recorded state.
+      expect(bootstrapped.isError).not.toBe(true);
+      expect(bootstrapped.structuredContent).toMatchObject({ ready: true, resume: null });
+    }
+  });
 });

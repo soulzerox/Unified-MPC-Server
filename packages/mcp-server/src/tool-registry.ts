@@ -15,7 +15,7 @@ import {
   type WorkspaceSourceEvidenceIdentity,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
-import { WORKSPACE_RESUME_DEFAULT_LIMIT, sanitizeException, type DiagnosticLogger, type FileActor } from '@unified-mpc/application';
+import { WORKSPACE_RESUME_DEFAULT_LIMIT, sanitizeException, type DiagnosticLogger, type FileActor, type WorkspaceResumeSnapshot } from '@unified-mpc/application';
 import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
@@ -1501,10 +1501,23 @@ export class ToolRegistry {
       preferredGoal = null;
     }
     // A session that attaches here needs to know what happened before it arrived, so
-    // the bounded journal view rides along instead of costing a second round trip. The
-    // reader is the same one `workspace_resume` uses and stays bounded by default, so
-    // bootstrap cannot grow with the journal.
-    const resume = this.services.workspaceResume?.read({ workspaceId, limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+    // the journal window rides along instead of costing a second round trip. It stays
+    // bounded by the reader's own default, so bootstrap cannot grow with the journal.
+    //
+    // Best effort on purpose: `bootstrap` fails closed for the capabilities it must
+    // have, and the journal is not one of them. This also runs after the harness was
+    // marked bootstrapped, so a journal that throws (the store does, rather than
+    // returning a `Result`) must not turn that recorded success into a failed call.
+    // `null` means "could not read"; `workspace_resume` reports the reason.
+    let resume: WorkspaceResumeSnapshot | null | undefined;
+    if (this.services.workspaceResume !== undefined) {
+      try {
+        const read = this.services.workspaceResume.read({ workspaceId, limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+        resume = read.ok ? read.value : null;
+      } catch {
+        resume = null;
+      }
+    }
     return ok({
       ready: true,
       agentsMdLoaded: true,
@@ -1523,7 +1536,7 @@ export class ToolRegistry {
           }
         : {}),
       preferredGoal,
-      ...(resume === undefined ? {} : { resume: resume.ok ? resume.value : null }),
+      ...(resume === undefined ? {} : { resume }),
     });
   }
 

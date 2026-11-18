@@ -13,6 +13,30 @@ function findTool(context: McpToolContext, verifier: IncrementalVerifier, name: 
   return tool;
 }
 
+/** The tracker and git stubs every handoff test shares; only the journal varies. */
+function handoffContext(services: Record<string, unknown>): McpToolContext {
+  return {
+    actor,
+    contextEconomy: new ContextEconomyRuntime(),
+    services: {
+      file: {
+        async readFile() {
+          return ok({ path: 'docs/PHASE_PROGRESS.md', content: '# Tracker\n## Next chat startup probe\nRUN-SMOKE-42', startLine: 1, endLine: 3 });
+        },
+      },
+      git: {
+        async status() {
+          return ok({ entries: [{ path: 'packages/mcp-server/src/run-budget.ts', index: ' ', worktree: 'M' }] });
+        },
+        async diff() {
+          return ok({ patch: '', truncated: false });
+        },
+      },
+      ...services,
+    },
+  } as unknown as McpToolContext;
+}
+
 describe('session tools', () => {
   it('creates a same-chat handoff from the real tracker content, git changes, and durable task IDs', async () => {
     const context = {
@@ -68,6 +92,97 @@ describe('session tools', () => {
     expect(value.prompt).toEqual(expect.stringContaining('Refresh connector'));
     expect(value.prompt).toEqual(expect.stringContaining('Continue until the requested acceptance is complete'));
     expect(value.prompt).not.toEqual(expect.stringContaining('Before ending'));
+  });
+
+  it('derives handoff task state from the journal projection rather than the chat', async () => {
+    const requests: unknown[] = [];
+    const context = handoffContext({
+      workspaceResume: {
+        read(request: unknown) {
+          requests.push(request);
+          return ok({
+            workspaceId: 'workspace-1',
+            generatedAt: '2026-11-18T03:00:00.000Z',
+            cursor: 9,
+            truncated: true,
+            events: [
+              { sequence: 8, operationKind: 'process_start', toolName: 'project_test', phase: 'started', status: 'started', recordedAt: '2026-11-18T02:00:00.000Z', open: true },
+              { sequence: 9, operationKind: 'file_read', phase: 'completed', status: 'succeeded', recordedAt: '2026-11-18T02:01:00.000Z', open: false },
+            ],
+            openReferences: { count: 1, latestSequence: 8 },
+          });
+        },
+      },
+    });
+
+    const response = await findTool(context, new IncrementalVerifier(), 'session_handoff').execute(
+      { workspaceId: 'workspace-1' },
+      new AbortController().signal,
+    );
+
+    // The window is workspace-scoped and bounded by the reader's own default, so a
+    // handoff cannot widen it or ask for another workspace's journal.
+    expect(requests).toEqual([{ workspaceId: 'workspace-1', limit: 20 }]);
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    const value = response.value as Record<string, unknown>;
+    expect(value.workspace_journal).toMatchObject({
+      workspaceId: 'workspace-1',
+      cursor: 9,
+      truncated: true,
+      openReferences: { count: 1, latestSequence: 8 },
+      events: [
+        expect.objectContaining({ sequence: 8, toolName: 'project_test', open: true }),
+        expect.objectContaining({ sequence: 9, open: false }),
+      ],
+    });
+    expect(value.prompt).toEqual(expect.stringContaining('#8 process_start project_test (started/started) 2026-11-18T02:00:00.000Z OPEN'));
+    expect(value.prompt).toEqual(expect.stringContaining('1 open call(s) in this window; latest row #8'));
+    expect(value.prompt).toEqual(expect.stringContaining('window truncated: continue from cursor 9'));
+  });
+
+  it('states why journal task state is missing instead of handing over an empty window', async () => {
+    const signal = new AbortController().signal;
+    const handoff = (services: Record<string, unknown>): ReturnType<McpToolDefinition['execute']> =>
+      findTool(handoffContext(services), new IncrementalVerifier(), 'session_handoff').execute({ workspaceId: 'workspace-1' }, signal);
+
+    // No journal in this runtime: the field is absent (no claim) and the prompt says so.
+    const absent = await handoff({});
+    expect(absent.ok).toBe(true);
+    if (!absent.ok) return;
+    expect(absent.value as Record<string, unknown>).not.toHaveProperty('workspace_journal');
+    expect((absent.value as Record<string, unknown>).prompt).toEqual(expect.stringContaining('journal is not wired in this runtime'));
+
+    // A journal that throws is "could not be read", never an empty journal.
+    const throwing = await handoff({
+      workspaceResume: {
+        read() {
+          throw new Error('journal store is closed');
+        },
+      },
+    });
+    expect(throwing.ok).toBe(true);
+    if (!throwing.ok) return;
+    expect(throwing.value as Record<string, unknown>).toMatchObject({ workspace_journal: null });
+    expect((throwing.value as Record<string, unknown>).prompt).toEqual(expect.stringContaining('journal could not be read'));
+
+    // The reader echoes the workspace it was asked for, so a snapshot naming another
+    // one cannot be its output: refuse it instead of handing over foreign work.
+    const foreign = await handoff({
+      workspaceResume: {
+        read() {
+          return ok({
+            workspaceId: 'workspace-2',
+            generatedAt: '2026-11-18T03:00:00.000Z',
+            cursor: 4,
+            truncated: false,
+            events: [],
+            openReferences: { count: 0, latestSequence: null },
+          });
+        },
+      },
+    });
+    expect(foreign).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
   });
 
   it('projects the journal through the resume port and reports a runtime without one', async () => {

@@ -15,7 +15,7 @@ import {
   type WorkspaceSourceEvidenceIdentity,
 } from '@unified-mpc/domain';
 import { z } from 'zod';
-import { WORKSPACE_RESUME_DEFAULT_LIMIT, sanitizeException, type DiagnosticLogger, type FileActor, type WorkspaceResumeSnapshot } from '@unified-mpc/application';
+import { WORKSPACE_RESUME_DEFAULT_LIMIT, redactDiagnosticText, sanitizeException, type DiagnosticLogger, type FileActor, type WorkspaceResumeSnapshot } from '@unified-mpc/application';
 import type { ActivityTargetDetail } from '@unified-mpc/audit';
 import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capabilities';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
@@ -1516,8 +1516,9 @@ export class ToolRegistry {
         if (read.ok) {
           resume = read.value;
         } else {
-          // The refusal is safe text from the reader itself, so it can be logged as-is.
-          this.diagnostic?.({ name: 'WorkspaceResumeUnavailable', message: read.error.message });
+          // Reader refusals carry the message the reader built, but both failure branches
+          // must meet the sink's redaction/cap guarantee before they reach a log.
+          this.diagnostic?.({ name: 'WorkspaceResumeUnavailable', message: redactDiagnosticText(read.error.message) });
           resume = null;
         }
       } catch (error: unknown) {

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
-import { WORKSPACE_RESUME_MAX_LIMIT } from '@unified-mpc/application';
+import {
+  WORKSPACE_RESUME_DEFAULT_LIMIT,
+  WORKSPACE_RESUME_MAX_LIMIT,
+  type WorkspaceResumeSnapshot,
+  type WorkspaceResumeSnapshotReader,
+} from '@unified-mpc/application';
 import { IncrementalVerifier } from '../incremental-verifier.js';
 import { defineTool, missingService, type McpToolContext, type McpToolDefinition } from './tool-types.js';
 
@@ -30,7 +35,7 @@ export function sessionTools(context: McpToolContext, verifier: IncrementalVerif
   return [
     defineTool({
       name: 'session_handoff',
-      description: 'Create a concise same-chat recovery message from the real phase tracker, current git status/diff, and durable background task IDs. Use only when the user requests a handoff or an unavoidable client/platform interruption requires recovery; never trigger it merely because elapsed time passed. If a tool schema looks stale, Refresh connector first; open a new chat only if refresh does not fix it.',
+      description: 'Create a concise same-chat recovery message from the real phase tracker, current git status/diff, durable background task IDs, and the workspace journal window (the same projection `workspace_resume` serves, so durable task state comes from the journal rather than the chat). Use only when the user requests a handoff or an unavoidable client/platform interruption requires recovery; never trigger it merely because elapsed time passed. If a tool schema looks stale, Refresh connector first; open a new chat only if refresh does not fix it.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: sessionHandoffSchema,
@@ -67,17 +72,22 @@ async function readWorkspaceResume(
     ...(input.limit === undefined ? {} : { limit: input.limit }),
   });
   if (!snapshot.ok) return err(snapshot.error);
-  return ok({
-    workspaceId: snapshot.value.workspaceId,
-    generatedAt: snapshot.value.generatedAt,
-    cursor: snapshot.value.cursor,
-    truncated: snapshot.value.truncated,
-    events: [...snapshot.value.events],
+  return ok(projectResumeSnapshot(snapshot.value));
+}
+
+/** One wire shape for the resume window, whether a caller asked directly or read it off a handoff. */
+function projectResumeSnapshot(snapshot: WorkspaceResumeSnapshot): Record<string, unknown> {
+  return {
+    workspaceId: snapshot.workspaceId,
+    generatedAt: snapshot.generatedAt,
+    cursor: snapshot.cursor,
+    truncated: snapshot.truncated,
+    events: [...snapshot.events],
     openReferences: {
-      count: snapshot.value.openReferences.count,
-      latestSequence: snapshot.value.openReferences.latestSequence,
+      count: snapshot.openReferences.count,
+      latestSequence: snapshot.openReferences.latestSequence,
     },
-  });
+  };
 }
 
 async function createSessionHandoff(
@@ -103,6 +113,10 @@ async function createSessionHandoff(
   if (!staged.ok) return err(staged.error);
 
   const backgroundTasks = await readBackgroundTasks(context, signal);
+  // The journal, not the chat, is where durable task state lives: a session that never
+  // saw the earlier calls still reads what they were and which are still open here.
+  const journal = readHandoffJournal(context, input.workspaceId);
+  if (!journal.ok) return err(journal.error);
   const trackerExcerpt = compactTracker(tracker.value.content);
   const changedFiles = [...new Set(status.value.entries.map((entry) => entry.path))].sort();
   const diffSummary = compactDiff(unstaged.value.patch, staged.value.patch, maxDiffBytes);
@@ -112,6 +126,7 @@ async function createSessionHandoff(
     changedFiles,
     diffSummary,
     backgroundTasks,
+    journal: journal.value,
   });
 
   return ok({
@@ -126,7 +141,41 @@ async function createSessionHandoff(
       truncated: unstaged.value.truncated || staged.value.truncated,
     },
     background_tasks: backgroundTasks,
+    // Same three states as `workspace_bootstrap`: the snapshot when the journal is
+    // wired, absent when the runtime has none, `null` when it could not be read.
+    ...(journal.value === undefined
+      ? {}
+      : { workspace_journal: journal.value === null ? null : projectResumeSnapshot(journal.value) }),
   });
+}
+
+/**
+ * Read the resume window for a handoff.
+ *
+ * `undefined` means this runtime has no journal, `null` means it has one that would not
+ * answer. Neither is an empty event list: that would read as "nothing happened here",
+ * which is the wrong thing to hand a session that is trying to recover work.
+ */
+function readHandoffJournal(
+  context: McpToolContext,
+  workspaceId: string,
+): Result<WorkspaceResumeSnapshot | null | undefined> {
+  const reader: WorkspaceResumeSnapshotReader | undefined = context.services.workspaceResume;
+  if (reader === undefined) return ok(undefined);
+  let read: ReturnType<WorkspaceResumeSnapshotReader['read']>;
+  try {
+    read = reader.read({ workspaceId, limit: WORKSPACE_RESUME_DEFAULT_LIMIT });
+  } catch {
+    // The store throws rather than refusing; a handoff must still be produced.
+    return ok(null);
+  }
+  if (!read.ok) return ok(null);
+  // The reader is workspace-scoped, so a snapshot naming another workspace cannot be
+  // one it produced: refuse it rather than hand one workspace's work to another session.
+  if (read.value.workspaceId !== workspaceId.trim()) {
+    return err(appError('CONFLICT', 'session_handoff refused a journal snapshot from another workspace', true));
+  }
+  return ok(read.value);
 }
 
 async function readBackgroundTasks(context: McpToolContext, signal: AbortSignal): Promise<readonly Record<string, unknown>[]> {
@@ -154,6 +203,7 @@ function buildHandoffPrompt(input: {
   readonly changedFiles: readonly string[];
   readonly diffSummary: string;
   readonly backgroundTasks: readonly Record<string, unknown>[];
+  readonly journal: WorkspaceResumeSnapshot | null | undefined;
 }): string {
   const tasks = input.backgroundTasks.length === 0
     ? '- none recorded by the durable shell task store'
@@ -171,16 +221,44 @@ function buildHandoffPrompt(input: {
     'Durable background tasks:',
     tasks,
     '',
+    'Workspace journal (durable task state, projected the same way `workspace_resume` reads it):',
+    describeJournalWindow(input.journal),
+    '',
     'Start by:',
     '1. Run the "Next chat startup probe" from the tracker.',
     '2. Recover durable jobs by task_id with shell status/logs/result; do not tight-poll.',
-    '3. Inspect git status/diff only as needed for the current phase.',
-    '4. Work one phase only and use search_text/read_file_page instead of re-reading large files.',
-    '5. Use verify_incremental for repeated typecheck; use targeted project_* verification as needed.',
-    '6. Continue until the requested acceptance is complete. Update the tracker at meaningful milestones; use durable shell background tasks when a command is naturally asynchronous and keep checking them until terminal.',
+    '3. Read the workspace journal section first: a call still marked OPEN may be running, so settle it before starting the same work again.',
+    '4. Inspect git status/diff only as needed for the current phase.',
+    '5. Work one phase only and use search_text/read_file_page instead of re-reading large files.',
+    '6. Use verify_incremental for repeated typecheck; use targeted project_* verification as needed.',
+    '7. Continue until the requested acceptance is complete. Update the tracker at meaningful milestones; use durable shell background tasks when a command is naturally asynchronous and keep checking them until terminal.',
     '',
     'Do not redo completed phases unless verification proves a regression. If tool schema looks stale, Refresh connector first; open a new chat only if Refresh connector does not fix it.',
   ].join('\n');
+}
+
+/** State the journal verdict, never an empty list that would read as "nothing happened". */
+function describeJournalWindow(journal: WorkspaceResumeSnapshot | null | undefined): string {
+  if (journal === undefined) return '- journal is not wired in this runtime; durable task state is unknown here';
+  if (journal === null) return '- journal could not be read; durable task state is unknown here';
+  if (journal.events.length === 0) return '- no journal rows in this window (an empty journal, not an unreadable one)';
+  const lines = journal.events.map((event) => {
+    const tool = event.toolName === undefined ? '' : ` ${event.toolName}`;
+    const result = event.resultCode === undefined ? '' : ` ${event.resultCode}`;
+    const summary = event.summary === undefined ? '' : ` - ${event.summary}`;
+    // The window is the oldest rows, so the row's own `recordedAt` is the only way a
+    // reader can tell a just-finished call from a week-old one.
+    return `- #${event.sequence} ${event.operationKind}${tool} (${event.phase}/${event.status}) ${event.recordedAt}${event.open ? ' OPEN' : ''}${result}${summary}`;
+  });
+  if (journal.openReferences.count > 0) {
+    lines.push(
+      `- ${journal.openReferences.count} open call(s) in this window; latest row #${journal.openReferences.latestSequence ?? 'unknown'}`,
+    );
+  }
+  if (journal.truncated) {
+    lines.push(`- window truncated: continue from cursor ${journal.cursor} with workspace_resume rather than assuming this is all`);
+  }
+  return lines.join('\n');
 }
 
 function compactTracker(content: string): string {

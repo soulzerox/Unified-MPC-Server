@@ -475,6 +475,16 @@ workspace journal:
    the ports below, so a live journal no longer reports
    `durable_references_unknown` and the close gate no longer decides blind.
 
+The write side is the runtime's own append beside the audit log
+(`apps/cli/src/runtime/stdio-mcp-runtime.ts`), and its only free text is the
+500-character `summary`. That column is redacted in the store before the bound is
+judged (`SqliteWorkspaceJournalRepository.append`), with the same `Redactor` the
+audit log uses: bearer tokens, `*_TOKEN`/`_SECRET`/`_PASSWORD`/`_API_KEY`
+assignments and provider key prefixes are rewritten to `[REDACTED]`. A journal
+row outlives the request that wrote it and is replayed to sessions that were
+never present, so a credential in a summary would be re-published by every later
+resume. The runtime append itself passes no summary at all today.
+
 `workspace_resume` is the journal's read side for a caller that asks directly
 (`packages/application/src/workspace-resume-snapshot.ts`, wired in the stdio
 runtime over the same `SqliteWorkspaceJournalRepository` the host appends to):

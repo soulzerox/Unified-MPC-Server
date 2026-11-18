@@ -120,7 +120,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '049_deferred_handle_providers' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '050_journal_goal_correlation' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (

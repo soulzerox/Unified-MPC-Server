@@ -624,6 +624,75 @@ describe('WorkspaceService', () => {
     });
   });
 
+  it('keeps Goal Workspace output out of retention while a durable reference is live', async () => {
+    const rootPath = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-goal-cleanup-live-refs-'));
+    temporaryRoots.push(rootPath);
+    const repository = lifecycleRepository([{
+      id: 'goal-workspace-live-refs',
+      displayName: 'Goal workspace',
+      rootPath,
+      realRootPath: await realpath(rootPath),
+      createdAt: new Date(0).toISOString(),
+      lifecycleKind: 'goal',
+      goalId: 'goal-1',
+      parentWorkspaceId: 'project-1',
+      goalWorkspaceKind: 'git_worktree',
+      baseRevision: 'abc123',
+      branchName: 'goal/goal-1',
+      integrationState: 'integrated',
+    }]);
+
+    // Every other input is retention-ready: the projection is completed/idle/
+    // integrated/clean and the grace window is zero. The live reference is the
+    // only thing standing between this workspace and `retention_candidate`.
+    const service = new WorkspaceService(repository, { now: (): Date => new Date('2026-09-22T12:00:00.000Z') });
+    const result = await service.reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'present' as const]]),
+      goalRetentionGraceMs: 0,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        goalCleanupEvaluations: [{
+          workspaceId: 'goal-workspace-live-refs',
+          goalId: 'goal-1',
+          disposition: 'blocked',
+          blockers: ['durable_references_present'],
+          durableReferenceState: 'present',
+        }],
+      },
+    });
+    const evaluation = result.ok ? result.value.goalCleanupEvaluations[0] : undefined;
+    expect(evaluation?.retentionEligibleAt).toBeUndefined();
+    expect(evaluation?.retentionRemainingMs).toBeUndefined();
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
+
+    // Same setup, same clock, only the reference state differs: the verdict
+    // flips, which is what proves the live reference is the reason it was blocked.
+    const released = await service.reconcileLifecycle({
+      goalRuntimeProjections: new Map([['goal-1', goalRuntimeProjection()]]),
+      goalDurableReferenceStates: new Map([['goal-1', 'clear' as const]]),
+      goalRetentionGraceMs: 0,
+    });
+
+    expect(released).toMatchObject({
+      ok: true,
+      value: {
+        archivedWorkspaceIds: [],
+        goalCleanupEvaluations: [{
+          workspaceId: 'goal-workspace-live-refs',
+          disposition: 'retention_candidate',
+          blockers: [],
+          durableReferenceState: 'clear',
+        }],
+      },
+    });
+    expect(repository.entries[0]?.archivedAt).toBeUndefined();
+  });
+
   it('never auto-archives legacy Goal Workspace rows and reports unavailable source as a cleanup blocker', async () => {
     const missingRoot = path.join(os.tmpdir(), 'unified-mpc-legacy-goal-autocleanup-missing');
     const repository = lifecycleRepository([{

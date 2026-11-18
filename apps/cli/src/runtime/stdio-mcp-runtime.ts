@@ -105,6 +105,7 @@ import {
   DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
   NativeThaiRagProviderDriver,
   codeIndexVectorsFromEnv,
+  indexCallTimeoutFromEnv,
   type NativeThaiRagWorkspace,
 } from './native-thai-rag-provider.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
@@ -611,6 +612,12 @@ export function createStdioMcpRuntime(
       DEFAULT_INDEX_STATUS_TIMEOUT_POLLS,
       1,
       600,
+    ),
+    // #901: a cold hybrid build can outlast the one-hour index-call default, and
+    // the status-poll timeout is clamped to an hour too, so this is the only
+    // knob that can raise the deadline a slow build needs.
+    indexCallTimeoutMs: indexCallTimeoutFromEnv(
+      process.env.UNIFIED_MPC_THAI_RAG_INDEX_CALL_TIMEOUT_MS,
     ),
     // #463 keeps code indexing FTS5-first. Enabling vectors is a deliberate
     // per-deployment opt-in: on a CPU-only host it is a multi-hour baseline

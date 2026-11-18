@@ -31,7 +31,7 @@ import {
   type ProviderError,
   type ProviderResult,
 } from '@unified-mpc/thai-rag';
-import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv } from './native-thai-rag-provider.js';
+import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv, indexCallTimeoutFromEnv } from './native-thai-rag-provider.js';
 
 const roots: string[] = [];
 const workspaceId = '11111111-1111-4111-8111-111111111111';
@@ -345,6 +345,16 @@ describe('NativeThaiRagProviderDriver', () => {
     expect(codeIndexVectorsFromEnv('1')).toBe(true);
     expect(codeIndexVectorsFromEnv('true')).toBe(true);
     expect(codeIndexVectorsFromEnv(' ON ')).toBe(true);
+
+    // issue #901: the index-call deadline is one hour unless a deployment raises
+    // it; a build slower than the bound must not need a code change. An
+    // out-of-range value falls back to the default rather than clamping.
+    expect(indexCallTimeoutFromEnv(undefined)).toBe(3_600_000);
+    expect(indexCallTimeoutFromEnv('')).toBe(3_600_000);
+    expect(indexCallTimeoutFromEnv('banana')).toBe(3_600_000);
+    expect(indexCallTimeoutFromEnv('0')).toBe(3_600_000);
+    expect(indexCallTimeoutFromEnv('999999999999')).toBe(3_600_000);
+    expect(indexCallTimeoutFromEnv('28800000')).toBe(28_800_000);
   });
 
   it('mirrors provider-owned cancellable background jobs into durable Unified job status', async () => {
@@ -5098,6 +5108,8 @@ describe('canonical code_index source identity (#210 §13)', () => {
       'fixtures/job-cancelled.json',
       'fixtures/workspace-scope-denied.json',
       'fixtures/code-search-success.json',
+      'fixtures/job-interrupted.json',
+      'fixtures/code-search-profile-mismatch.json',
     ] as const;
 
     it('accounts for every vendored fixture on the adapter or a named surface', async () => {

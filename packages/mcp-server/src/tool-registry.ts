@@ -17,7 +17,7 @@ import {
 import { z } from 'zod';
 import { WORKSPACE_RESUME_DEFAULT_LIMIT, redactDiagnosticText, sanitizeException, type DiagnosticLogger, type FileActor, type WorkspaceResumeSnapshot } from '@unified-mpc/application';
 import type { ActivityTargetDetail } from '@unified-mpc/audit';
-import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY } from '@unified-mpc/capabilities';
+import { CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY, CAPABILITY_GOAL_CORRELATION_METADATA_KEY, withCapabilityGoalCorrelation } from '@unified-mpc/capabilities';
 import { DefaultPermissionEngine, permissionProfiles, type PermissionProfile } from '@unified-mpc/permissions';
 import {
   DEFAULT_CHILD_MCP_CALL_ADMISSION_COST,
@@ -523,7 +523,7 @@ export class ToolRegistry {
     const fullBypass = profile.name === 'full' && this.authorizationModeProvider() === 'full_bypass';
     const authorizationMode: AuthorizationMode = fullBypass ? 'full_bypass' : 'standard';
     const activityWorkspaceId = await this.resolveActivityWorkspaceId(name, input);
-    const workspaceActivityInput = withActivityWorkspaceId(stripGoalLeaseEnvelope(input), activityWorkspaceId);
+    const workspaceActivityInput = withActivityWorkspaceId(stripCallerGoalCorrelation(stripGoalLeaseEnvelope(input)), activityWorkspaceId);
     const activityInput = this.withRememberedActivityTarget(name, workspaceActivityInput);
     const callId = await this.activity.begin(
       name,
@@ -557,7 +557,7 @@ export class ToolRegistry {
         return response;
       }
       const goalLease = readGoalLeaseProof(parsed.value);
-      const parsedInput = stripGoalLeaseEnvelope(parsed.value);
+      const parsedInput = stripCallerGoalCorrelation(stripGoalLeaseEnvelope(parsed.value));
       let activeRoutedInput = await this.routeInputToActiveWorkspace(tool.name, parsedInput);
       const hardBlockedReason = hardBlockedInvocationReason(tool.name, activeRoutedInput);
       if (hardBlockedReason !== undefined) {
@@ -600,6 +600,10 @@ export class ToolRegistry {
       }
       const mutationFenceWorkspaceId = mutationWorkspaceId ?? activeWorkspaceScope?.workspaceId ?? activityWorkspaceId;
       let mutationFenceProof: GoalLeaseProof | undefined;
+      // Only a proof the fence actually admitted may be recorded on a task. The
+      // caller-supplied `goalLease` is a claim; without a live fence nothing
+      // validates it, so a task must not inherit an unproven goal generation.
+      let admittedGoalCorrelation: { readonly goalId: string; readonly executionGeneration: number } | undefined;
       if (
         mutationDecision.kind !== 'read'
         && mutationFenceWorkspaceId !== undefined
@@ -830,6 +834,10 @@ export class ToolRegistry {
           callId,
           admitted.value.leaseGeneration,
         );
+        admittedGoalCorrelation = {
+          goalId: admitted.value.goalId,
+          executionGeneration: admitted.value.leaseGeneration,
+        };
         durableGoalExecutionAdmitted = true;
       }
       if (
@@ -969,9 +977,17 @@ export class ToolRegistry {
         policyAllowsScopedDestructive,
         explicitUserConfirmation: hasExplicitUserConfirmation(activeRoutedInput),
       });
+      // A durable task started under a rolling goal keeps the goal and the
+      // generation it was started under, so a later reader can tell task
+      // evidence of generation N from what generation N+1 is doing. The
+      // correlation rides in the capability request metadata because that is
+      // the only per-call channel a tool definition closure does not share.
+      const executionInput = admittedGoalCorrelation === undefined || (tool.name !== 'shell' && tool.name !== 'wsl_exec')
+        ? approvalExecutionInput
+        : withCapabilityGoalCorrelation(approvalExecutionInput, admittedGoalCorrelation);
       const execution = await this.executeWithinResponseBudget(
         tool,
-        approvalExecutionInput,
+        executionInput,
         invocationAuthorization,
         parentSignal,
         goalLease === undefined ? undefined : goalLease.goalId,
@@ -3140,7 +3156,7 @@ function withGoalLeaseEnvelope(tool: McpToolDefinition): McpToolDefinition {
       if (parsedGoalLease !== undefined && !parsedGoalLease.success) {
         return err(appError('INVALID_INPUT', 'goalLease is invalid'));
       }
-      const parsed = tool.parse(stripGoalLeaseEnvelope(input));
+      const parsed = tool.parse(stripCallerGoalCorrelation(stripGoalLeaseEnvelope(input)));
       if (!parsed.ok || parsedGoalLease === undefined) return parsed;
       if (!isRecord(parsed.value)) return err(appError('INVALID_INPUT', 'Fenced tool input must be an object'));
       return ok({ ...parsed.value, goalLease: parsedGoalLease.data });
@@ -3212,6 +3228,23 @@ function readGoalLeaseProof(input: unknown): GoalLeaseProof | undefined {
 function stripGoalLeaseEnvelope(input: unknown): unknown {
   if (!isRecord(input) || !Object.prototype.hasOwnProperty.call(input, 'goalLease')) return input;
   return Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'goalLease'));
+}
+
+/**
+ * A capability request's `metadata` is caller-controlled (`z.record`), and the
+ * shell backend reads the goal correlation from it. Dropping the caller's copy
+ * before the registry adds the admitted one keeps a request that carries no
+ * proof from claiming a goal generation it was never admitted under.
+ */
+function stripCallerGoalCorrelation(input: unknown): unknown {
+  if (!isRecord(input) || !isRecord(input.metadata)) return input;
+  if (!Object.prototype.hasOwnProperty.call(input.metadata, CAPABILITY_GOAL_CORRELATION_METADATA_KEY)) return input;
+  return {
+    ...input,
+    metadata: Object.fromEntries(
+      Object.entries(input.metadata).filter(([key]) => key !== CAPABILITY_GOAL_CORRELATION_METADATA_KEY),
+    ),
+  };
 }
 
 function stripUserConfirmationEnvelope(input: unknown): unknown {

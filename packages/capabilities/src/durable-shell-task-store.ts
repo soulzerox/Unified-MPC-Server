@@ -65,6 +65,8 @@ interface DurableTaskMetadata {
   readonly owner_client_id?: string;
   readonly owner_session_id?: string;
   readonly owner_workspace_id?: string;
+  readonly owner_goal_id?: string;
+  readonly owner_execution_generation?: number;
   readonly cwd?: string;
   readonly external_reconciliation?: DurableShellTaskExternalReconciliationDescriptor;
   readonly admission_class?: string;
@@ -155,6 +157,8 @@ export class DurableShellTaskStore {
       owner_client_id: request.owner.clientId,
       owner_session_id: request.owner.sessionId,
       ...(request.owner.workspaceId === undefined ? {} : { owner_workspace_id: request.owner.workspaceId }),
+      ...(request.owner.goalId === undefined ? {} : { owner_goal_id: request.owner.goalId }),
+      ...(request.owner.executionGeneration === undefined ? {} : { owner_execution_generation: request.owner.executionGeneration }),
       cwd: request.cwd,
       ...(request.externalReconciliation === undefined ? {} : { external_reconciliation: request.externalReconciliation }),
       ...(request.admissionClass === undefined ? {} : { admission_class: request.admissionClass }),
@@ -573,6 +577,8 @@ export class DurableShellTaskStore {
       task_id: metadata.task_id,
       state: metadata.state,
       ...(metadata.owner_workspace_id === undefined ? {} : { workspace_id: metadata.owner_workspace_id }),
+      ...(metadata.owner_goal_id === undefined ? {} : { goal_id: metadata.owner_goal_id }),
+      ...(metadata.owner_execution_generation === undefined ? {} : { execution_generation: metadata.owner_execution_generation }),
       ...(metadata.cwd === undefined ? {} : { cwd: metadata.cwd }),
       ...(metadata.exit_code === undefined ? {} : { exit_code: metadata.exit_code }),
       ...(stdout === undefined ? {} : { stdout }),
@@ -689,6 +695,8 @@ function isMetadata(value: unknown): value is DurableTaskMetadata {
     && (record.owner_client_id === undefined || typeof record.owner_client_id === 'string')
     && (record.owner_session_id === undefined || typeof record.owner_session_id === 'string')
     && (record.owner_workspace_id === undefined || typeof record.owner_workspace_id === 'string')
+    && (record.owner_goal_id === undefined || typeof record.owner_goal_id === 'string')
+    && (record.owner_execution_generation === undefined || Number.isSafeInteger(record.owner_execution_generation))
     && (record.cwd === undefined || typeof record.cwd === 'string')
     && (record.worker_started_at === undefined || typeof record.worker_started_at === 'string')
     && (record.child_started_at === undefined || typeof record.child_started_at === 'string')
@@ -740,6 +748,8 @@ function metadataOwner(metadata: DurableTaskMetadata): CapabilityTaskOwner {
     clientId: metadata.owner_client_id,
     sessionId: metadata.owner_session_id,
     ...(metadata.owner_workspace_id === undefined ? {} : { workspaceId: metadata.owner_workspace_id }),
+    ...(metadata.owner_goal_id === undefined ? {} : { goalId: metadata.owner_goal_id }),
+    ...(metadata.owner_execution_generation === undefined ? {} : { executionGeneration: metadata.owner_execution_generation }),
   };
 }
 

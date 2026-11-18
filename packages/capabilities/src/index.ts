@@ -53,11 +53,15 @@ export {
 } from './durable-shell-task-store.js';
 export {
   CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY,
+  CAPABILITY_GOAL_CORRELATION_METADATA_KEY,
   CAPABILITY_TASK_OWNER_METADATA_KEY,
   capabilityTaskOwnerMatches,
   legacyCapabilityTaskOwner,
   readCapabilityActiveWorkspaceRoot,
+  readCapabilityGoalCorrelation,
   readCapabilityTaskOwner,
+  withCapabilityGoalCorrelation,
+  type CapabilityGoalCorrelation,
   type CapabilityTaskOwner,
 } from './task-ownership.js';
 export { BrowserCdpBackend, type BrowserCdpProtocol, type BrowserCdpTab } from './browser-cdp-backend.js';

@@ -6,9 +6,6 @@ const LIVE_PROCESS_STATES: ReadonlySet<ManagedProcessState> = new Set([
   'starting', 'running', 'termination_unverified',
 ]);
 
-const TASK_LIVE_STATES: ReadonlySet<string> = new Set(['working', 'input_required']);
-const TASK_GONE_STATES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
-
 /**
  * How a Codex task's managed process reads.
  *
@@ -46,16 +43,6 @@ export type DeferredHandleProvider = 'process' | 'task' | 'verification' | 'code
  * goal on a store that never spoke.
  */
 export type DeferredHandleState = 'live' | 'gone' | 'unknown';
-
-/**
- * The part of `ModernTasksProtocol` this module needs, spelled structurally so
- * the CLI runtime does not depend on the MCP server package to ask a task store
- * whether a task is still running. `getTask` is public there, so the protocol
- * satisfies this without an adapter.
- */
-export interface DeferredTaskObservation {
-  getTask(params: { readonly taskId: string }): Promise<{ readonly status: string }>;
-}
 
 /**
  * The durable-task side of a `task` handle.
@@ -134,7 +121,6 @@ export interface DeferredClosureAuthority {
  */
 export function createDeferredClosureAuthority(options: {
   readonly processes?: Pick<ProcessService, 'list'>;
-  readonly tasks?: DeferredTaskObservation;
   /** The backend that wrote the durable task directory a `task_create` id lives in. */
   readonly durableTasks?: DurableTaskObservation;
   /** The status port that owns the reading of a queued `merge_verification_run`. */
@@ -162,7 +148,7 @@ export function createDeferredClosureAuthority(options: {
     },
 
     async handleState({ actor, workspaceId, provider, handleId }): Promise<DeferredHandleState> {
-      if (provider === 'task') return taskState(options.tasks, options.durableTasks, workspaceId, handleId);
+      if (provider === 'task') return taskState(options.durableTasks, workspaceId, handleId);
       if (provider === 'verification') return verificationState(options.verification, workspaceId, handleId);
       if (provider === 'codex') return codexState(options.codex, workspaceId, handleId);
       if (provider === 'swarm') return swarmState(options.swarm, workspaceId, handleId);
@@ -237,28 +223,14 @@ async function swarmState(
 }
 
 async function taskState(
-  tasks: DeferredTaskObservation | undefined,
   durableTasks: DurableTaskObservation | undefined,
   workspaceId: string,
   handleId: string,
 ): Promise<DeferredHandleState> {
-  // A durable shell task id and an MCP task id are both opaque strings, so the
-  // backend that wrote the task directory is asked first: it answers `unknown`
-  // for an id it never wrote, which is exactly the case the protocol covers.
-  if (durableTasks !== undefined) {
-    const verdict = await durableTasks.taskLivenessForGoal(workspaceId, handleId);
-    if (verdict !== 'unknown') return verdict;
-  }
-  if (tasks === undefined) return 'unknown';
-  try {
-    const observation = await tasks.getTask({ taskId: handleId });
-    if (TASK_LIVE_STATES.has(observation.status)) return 'live';
-    if (TASK_GONE_STATES.has(observation.status)) return 'gone';
-    // A status the protocol adds later is not evidence the work ended.
-    return 'unknown';
-  } catch {
-    // An unreadable task id, an expired task and an unavailable store all look
-    // the same from here, and none of them may release the pin.
-    return 'unknown';
-  }
+  // A `task` handle is a durable shell task id, and the backend that wrote the
+  // task directory is the only store that can answer for it: a second reader over
+  // the same opaque string could only answer about an id it never wrote, and a
+  // `gone` there would release the pin on a task that is still running.
+  if (durableTasks === undefined) return 'unknown';
+  return durableTasks.taskLivenessForGoal(workspaceId, handleId);
 }

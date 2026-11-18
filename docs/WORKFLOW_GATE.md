@@ -497,6 +497,24 @@ records neither field. Ownership matching is unchanged — workspace first, then
 client/session when neither side has one — because that is identity, not
 staleness.
 
+The journal is the discovery index, not the identity of durable work. A durable
+shell task's metadata is written to its task directory when the task is reserved
+or launched, before any telemetry exists, and ownership matching reads the
+workspace first, so a session that never saw the call id still lists a task
+another session started in the same workspace and reads its state and result by
+id. That route needs the workspace id in the call: `task_list`, `task_status`,
+`task_result` and `task_cancel` (or `shell` with the same operation) forward it
+as the requester's owner metadata, so a workspace-scoped caller reaches the task
+with no journal row at all. The MCP `tasks/list` protocol has no workspace
+parameter and the request scope carries none, so it only sees tasks owned by the
+same client/session; a workspace-owned task is invisible there and must be read
+through those tools. A failed journal append therefore loses the resume row, not
+the task: the append is best-effort by contract and only writes to stderr, while
+the task directory is the authority. A requester whose owner names another
+workspace does not match the stored owner, so the store answers as if the task
+did not exist; the workspace id is a caller-supplied scope, not a credential,
+and this path makes no stronger claim than that.
+
 Staleness is a separate question, and #170 answers it on both sides. A mutation
 is already refused unless the proof the fence admitted is the *current*
 generation (`GoalMutationFenceService.begin` validates the lease generation

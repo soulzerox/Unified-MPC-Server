@@ -738,6 +738,54 @@ describe('durable shell task parking (#145)', () => {
   }, 15000);
 });
 
+describe('durable task recovery identity (#170)', () => {
+  it('keeps a running task addressable to a new session in the same workspace, with no journal row', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-recovery-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const firstSession = { clientId: 'chatgpt', sessionId: 'session-a', workspaceId: 'workspace-a' };
+
+    const launched = await store.launch({
+      taskId: 'recoverable-task',
+      executable: process.execPath,
+      arguments: ['-e', 'setTimeout(() => {}, 10000)'],
+      cwd: root,
+      environment: process.env,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner: firstSession,
+    });
+    expect(launched).toMatchObject({ ok: true, value: { task_id: 'recoverable-task', state: 'running' } });
+
+    try {
+      // The journal is a discovery index, not the identity: a telemetry write can
+      // fail after this task started and leave no row naming the call, yet the
+      // metadata on disk is what a later session lists and reads by id.
+      const replacementSession = { clientId: 'chatgpt', sessionId: 'session-b', workspaceId: 'workspace-a' };
+      expect(await store.list(replacementSession)).toMatchObject([
+        { task_id: 'recoverable-task', state: 'running' },
+      ]);
+      expect(await store.snapshot('recoverable-task', undefined, replacementSession)).toMatchObject({
+        ok: true,
+        value: { task_id: 'recoverable-task', state: 'running' },
+      });
+
+      // Recovery is workspace-scoped, not global: another workspace can neither
+      // list the task nor address it by id.
+      const foreignWorkspace = { clientId: 'chatgpt', sessionId: 'session-c', workspaceId: 'workspace-b' };
+      expect(await store.list(foreignWorkspace)).toEqual([]);
+      expect(await store.snapshot('recoverable-task', undefined, foreignWorkspace)).toMatchObject({
+        ok: false,
+        error: { code: 'PERMISSION_DENIED' },
+      });
+    } finally {
+      await store.cancel('recoverable-task', firstSession);
+    }
+  }, 15_000);
+});
+
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

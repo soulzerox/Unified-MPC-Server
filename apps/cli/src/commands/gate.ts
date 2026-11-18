@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { GoalCompletionWorktreeBlocker } from '@unified-mpc/application';
@@ -283,6 +283,55 @@ export async function readCloseGateReceipt(file: string): Promise<Result<CloseGa
     ...(headSha === undefined ? {} : { headSha }),
     verdict,
   });
+}
+
+/**
+ * The receipt an earlier run already wrote for exactly these inputs, when there
+ * is one.
+ *
+ * A close verdict is a pure function of the inputs it fingerprints, so two runs
+ * over one revision must not leave two receipts: a restarted host that re-asks
+ * gets the evidence the first run wrote. The opposite case is a contradiction —
+ * one fingerprint with two different verdicts would mean the gate stopped being
+ * a function of its inputs — so it is refused instead of picking a winner. An
+ * unreadable file refuses the whole lookup rather than being skipped: the point
+ * of the answer is that the surviving evidence is trustworthy.
+ */
+export async function findCloseGateReceiptForVerdict(options: {
+  readonly directory: string;
+  readonly verdict: CloseGateVerdict;
+}): Promise<Result<{ readonly path: string; readonly receipt: CloseGateReceipt } | undefined>> {
+  let names: string[];
+  try {
+    names = (await readdir(options.directory)).filter((name) => name.endsWith('.json')).sort(compareText);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return ok(undefined);
+    return err(appError('INTERNAL_ERROR', `Could not read ${options.directory}: ${(cause as Error).message}`));
+  }
+
+  for (const name of names) {
+    const file = path.join(options.directory, name);
+    const read = await readCloseGateReceipt(file);
+    if (!read.ok) {
+      return err(appError('INVALID_INPUT', `${file} cannot be read as a close gate receipt; inspect or remove it`));
+    }
+    if (read.value.verdict.fingerprint !== options.verdict.fingerprint) continue;
+    if (!sameVerdict(read.value.verdict, options.verdict)) {
+      return err(appError(
+        'CONFLICT',
+        `${file} already decides fingerprint ${options.verdict.fingerprint} with allowed=${String(read.value.verdict.allowed)}; a gate that may not contradict itself needs a new revision`,
+      ));
+    }
+    return ok({ path: file, receipt: read.value });
+  }
+  return ok(undefined);
+}
+
+/** Two verdicts agree when they allow the same thing for the same fingerprint. */
+function sameVerdict(left: CloseGateVerdict, right: CloseGateVerdict): boolean {
+  return left.allowed === right.allowed
+    && left.fingerprint === right.fingerprint
+    && JSON.stringify(left.blockers) === JSON.stringify(right.blockers);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

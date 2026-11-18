@@ -484,6 +484,75 @@ describe('runCloseGate', () => {
     expect((await readCloseGateReceipt(result.value.receiptPath!)).ok).toBe(true);
   });
 
+  it('reuses the receipt an earlier run wrote for the same revision', async () => {
+    // A close verdict is a pure function of its inputs, so a restarted host that
+    // re-asks the same question must not leave a second receipt claiming the same
+    // revision.
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-reuse-'));
+    temporaryDirectories.push(directory);
+    const run = (gateId: string): ReturnType<typeof runCloseGate> => runCloseGate({
+      ports: ports(),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [WORKTREE],
+      receiptDirectory: directory,
+      dryRun: false,
+      json: false,
+      now: () => new Date('2026-11-14T00:00:00.000Z'),
+      gateId: () => gateId,
+    });
+
+    const first = await run('gate-1');
+    const second = await run('gate-2');
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.value.receiptPath).toBe(first.value.receiptPath);
+    expect(second.value.lines.at(-1)).toBe(
+      `receipt ${first.value.receiptPath} (unchanged: these inputs already have this receipt)`,
+    );
+    expect(await readdir(directory)).toEqual([path.basename(first.value.receiptPath!)]);
+  });
+
+  it('refuses one fingerprint that already carries a different verdict', async () => {
+    // A readable receipt keeps `allowed` consistent with its blockers, so this can
+    // only arrive as a forged or hand-edited file. It is still refused: two
+    // verdicts for one fingerprint would mean the surviving evidence decides
+    // something the current inputs do not.
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-contradiction-'));
+    temporaryDirectories.push(directory);
+    const decided = evaluateCloseGate({
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      cleanup: [cleanup()],
+      removals: [removal({ worktreePath: WORKTREE })],
+      completion: [],
+    });
+    const written = await writeCloseGateReceipt({
+      directory,
+      verdict: {
+        ...decided,
+        allowed: false,
+        blockers: [{ kind: 'cleanup', workspaceId: WORKSPACE, disposition: 'blocked', reasons: ['forged'] }],
+      },
+      gateId: () => 'gate-1',
+    });
+    expect(written.ok).toBe(true);
+    expect(written.ok && (await readCloseGateReceipt(written.value.path)).ok).toBe(true);
+
+    const result = await runCloseGate({
+      ports: ports(),
+      workspaceId: WORKSPACE,
+      goalId: GOAL,
+      worktrees: [WORKTREE],
+      receiptDirectory: directory,
+      dryRun: false,
+      json: false,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain('a gate that may not contradict itself');
+  });
+
   it('forwards the subject to every owner and omits an absent goal', async () => {
     const cleanupRequests: unknown[] = [];
     const completionRequests: unknown[] = [];

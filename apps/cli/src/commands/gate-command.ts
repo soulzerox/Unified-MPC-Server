@@ -1,6 +1,7 @@
 import {
   closeGateExitCode,
   evaluateCloseGate,
+  findCloseGateReceiptForVerdict,
   formatCloseGateVerdict,
   writeCloseGateReceipt,
   type CloseGateRemovalPreview,
@@ -95,6 +96,7 @@ export async function runCloseGate(options: RunCloseGateOptions): Promise<Result
   });
 
   let receiptPath: string | undefined;
+  let reusedReceipt = false;
   if (!options.dryRun) {
     if (options.receiptDirectory === undefined) {
       // A gate that refuses still records why; only an explicit dry run skips the
@@ -102,22 +104,36 @@ export async function runCloseGate(options: RunCloseGateOptions): Promise<Result
       // reason to silently drop the evidence.
       return err(appError('INVALID_INPUT', 'A receipt directory is required unless --dry-run is set'));
     }
-    const written = await writeCloseGateReceipt({
+    const existing = await findCloseGateReceiptForVerdict({
       directory: options.receiptDirectory,
       verdict,
-      ...(options.now === undefined ? {} : { now: options.now }),
-      ...(options.gateId === undefined ? {} : { gateId: options.gateId }),
-      ...(options.headSha === undefined ? {} : { headSha: options.headSha }),
     });
-    if (!written.ok) return written;
-    receiptPath = written.value.path;
+    if (!existing.ok) return existing;
+    if (existing.value !== undefined) {
+      // Same inputs, same verdict, already on disk: reuse it instead of writing a
+      // second receipt that claims the same revision.
+      receiptPath = existing.value.path;
+      reusedReceipt = true;
+    } else {
+      const written = await writeCloseGateReceipt({
+        directory: options.receiptDirectory,
+        verdict,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.gateId === undefined ? {} : { gateId: options.gateId }),
+        ...(options.headSha === undefined ? {} : { headSha: options.headSha }),
+      });
+      if (!written.ok) return written;
+      receiptPath = written.value.path;
+    }
   }
 
   const lines = options.json
     ? [JSON.stringify({ verdict, ...(receiptPath === undefined ? {} : { receiptPath }) }, null, 2)]
     : [
       ...formatCloseGateVerdict(verdict),
-      ...(receiptPath === undefined ? ['dry run: no receipt written'] : [`receipt ${receiptPath}`]),
+      ...(receiptPath === undefined
+        ? ['dry run: no receipt written']
+        : [`receipt ${receiptPath}${reusedReceipt ? ' (unchanged: these inputs already have this receipt)' : ''}`]),
     ];
 
   return {

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ok, type Result } from '@unified-mpc/domain';
+import { DurableShellTaskStore } from './durable-shell-task-store.js';
 import { ShellCapabilityBackend } from './shell-backend.js';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
 
@@ -814,9 +815,16 @@ describe('ShellCapabilityBackend unrestricted', () => {
       },
     });
 
-    await expect(backend.taskLivenessForGoal('workspace-1', taskId)).resolves.toBe('live');
-    // The reconcile the probe triggers wrote the unverified state back, so the next
-    // reader sees the same thing: this is a pinned task, not a stale read.
+    // Two states map to `live`, so the mapping under test is only pinned if the
+    // reconcile is shown to reach `termination_unverified` rather than leaving the
+    // task plainly `running`.
+    const store = new DurableShellTaskStore(taskStateDirectory, {
+      externalReconciler: async (): Promise<{ state: 'running' }> => ({ state: 'running' }),
+    });
+    await expect(store.snapshotForGoalLiveness(taskId, 'workspace-1')).resolves.toMatchObject({
+      ok: true,
+      value: { state: 'termination_unverified' },
+    });
     await expect(backend.taskLivenessForGoal('workspace-1', taskId)).resolves.toBe('live');
   }, 15_000);
 });

@@ -137,7 +137,11 @@ export async function closeJudgedDeferredCalls(options: {
   }
 
   const withoutHandle = [...owned].filter((callId) => !recordedIds.has(callId));
-  /** Calls a settlement already finished: their rows are closed before this sweep. */
+  /**
+   * Calls nothing is left to ask about: a row a settlement already closed, or one
+   * this runtime can never close because its kind or timestamp is outside the
+   * closer's reach. The pin lives on the row, not on this set.
+   */
   const settledElsewhere = new Set<string>();
   if (withoutHandle.length > 0) {
     // No handle to ask about: a launch that failed, an `isError` response, or a
@@ -145,7 +149,8 @@ export async function closeJudgedDeferredCalls(options: {
     // and it is asked only for calls this runtime journaled and only for the
     // kinds that question can answer — a durable task never appears in the
     // process listing, so answering for one would release a pin on live work.
-    // Leaving those judged by nothing keeps their pin and re-asks them later.
+    // A call of such a kind is left to the last question: is its row open inside
+    // the reach the closer has?
     const kinds = options.journal.openDeferredCallKinds({
       workspaceId: options.workspaceId,
       callIds: withoutHandle,
@@ -164,12 +169,14 @@ export async function closeJudgedDeferredCalls(options: {
         for (const callId of answerable) gone.set(callId, NO_LIVE_PROCESS_CLOSURE_CODE);
       }
     }
-    // A handle-less call of a kind the listing cannot speak for is only finished if
-    // its own response closed the row (a `merge_verification_run` that reached its
-    // verdict, an `agent_swarm_run` read). Those are done: remembering them would
-    // grow the bounded retry map with calls nothing can ever account for, and evict
-    // live ones whose rows then stay pinned. A row still open keeps its pin and its
-    // retry, exactly as before.
+    // A handle-less call of a kind the listing cannot speak for is finished when
+    // nothing can close its row any more: its own response already closed it (a
+    // `merge_verification_run` that reached its verdict, an `agent_swarm_run`
+    // read), or the row sits outside the kinds and floor `closeDeferredCalls`
+    // writes. Those are accounted for, because remembering them would grow the
+    // bounded retry map with calls nothing can ever settle, and evict live ones
+    // whose rows then stay pinned. A row still open inside the reach keeps its pin
+    // and its retry.
     const unanswerable = withoutHandle.filter((callId) => !answerable.includes(callId));
     if (unanswerable.length > 0) {
       const stillOpen = new Set(options.journal.openDeferredCallIds({

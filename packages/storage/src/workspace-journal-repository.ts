@@ -487,7 +487,8 @@ export class SqliteWorkspaceJournalRepository {
     const calls = [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
     if (calls.length === 0) return [];
     const kinds = [...new Set((request.operationKinds ?? []).filter((kind) => this.deferredClosureKinds.has(kind)))];
-    // A named reach the store can never close is the same as no reach at all.
+    // A named reach that can close nothing makes every row unreachable — the
+    // opposite of omitting `operationKinds`, which keeps the old unfiltered read.
     if (request.operationKinds !== undefined && kinds.length === 0) return [];
     const floor = request.recordedAtOrAfter;
     const rows = this.database.connection.prepare(`

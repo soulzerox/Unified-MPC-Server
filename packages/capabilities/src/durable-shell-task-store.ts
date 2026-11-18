@@ -341,13 +341,9 @@ export class DurableShellTaskStore {
 
   /** Trusted read-only host probe scoped to the durable goal's workspace. */
   public async snapshotForGoalLiveness(taskId: string, workspaceId: string): Promise<Result<Record<string, unknown>>> {
-    const metadata = await this.readMetadata(taskId);
-    if (!metadata.ok) return metadata;
-    if (metadataOwner(metadata.value).workspaceId !== workspaceId) {
-      return err(appError('PERMISSION_DENIED', 'Task belongs to another or unknown workspace'));
-    }
-    const reconciled = await this.reconcile(metadata.value);
-    return ok(await this.snapshotFromMetadata(reconciled));
+    const reconciled = await this.reconciledForGoal(taskId, workspaceId);
+    if (!reconciled.ok) return reconciled;
+    return ok(await this.snapshotFromMetadata(reconciled.value));
   }
 
   /**
@@ -359,13 +355,23 @@ export class DurableShellTaskStore {
    * size per remembered task would make the pin cost grow with the work it pins.
    */
   public async livenessForGoal(taskId: string, workspaceId: string): Promise<Result<{ readonly state: DurableShellTaskState }>> {
+    const reconciled = await this.reconciledForGoal(taskId, workspaceId);
+    if (!reconciled.ok) return reconciled;
+    return ok({ state: reconciled.value.state });
+  }
+
+  /**
+   * Read, scope-check and reconcile one task: the single place the goal-scoped
+   * ownership rule lives, so the two probes above cannot drift apart on who may
+   * read a task.
+   */
+  private async reconciledForGoal(taskId: string, workspaceId: string): Promise<Result<DurableTaskMetadata>> {
     const metadata = await this.readMetadata(taskId);
     if (!metadata.ok) return metadata;
     if (metadataOwner(metadata.value).workspaceId !== workspaceId) {
       return err(appError('PERMISSION_DENIED', 'Task belongs to another or unknown workspace'));
     }
-    const reconciled = await this.reconcile(metadata.value);
-    return ok({ state: reconciled.state });
+    return ok(await this.reconcile(metadata.value));
   }
 
   /** Trusted cancellation path used by durable goals; it deliberately ignores the transient MCP session. */

@@ -152,6 +152,13 @@ async function fixture(onStatus: (poll: number, providerJobId?: string) => Promi
   return { driver, jobId: indexJob.jobId, indexStartsAtStart, dataRoot, counts: (): { connects: number; indexStarts: number; statusPolls: number; cancels: number } => ({ connects, indexStarts, statusPolls, cancels }) };
 }
 
+async function ledgerJobs(dataRoot: string): Promise<Array<{ jobId: string; status: string; providerJobId?: string }>> {
+  const ledger = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
+    jobs: Array<{ jobId: string; status: string; providerJobId?: string }>;
+  };
+  return ledger.jobs;
+}
+
 async function terminalJob(driver: NativeThaiRagProviderDriver, jobId: string): Promise<unknown> {
   for (let i = 0; i < 120; i += 1) {
     const result = await driver.call('index_status', { workspace_id: workspaceId, job_id: jobId });
@@ -213,29 +220,23 @@ describe('native provider admission index status truth', () => {
       },
     });
     try {
+      // Adoption runs before the admission wait lapses, so a pass that finishes
+      // fast now satisfies the read instead of parking it for the full window.
       const read = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
-      expect(read.ok).toBe(false);
-      const jobId = (read as { error: { details?: { jobId?: string } } }).error.details?.jobId;
-      expect(jobId).toBeTruthy();
-      const terminal = await terminalJob(driver, jobId as string);
-      expect(terminal).toMatchObject({ ok: true, value: {
-        status: 'completed', providerJobId: 'idx_samejob01',
-      } });
-      // The read answers as soon as the admission wait lapses and the monitor
-      // keeps running, so read the ledger only after the job is terminal: the
-      // bind lands before that terminal write.
-      const persisted = JSON.parse(await readFile(path.join(dataRoot, 'thai-rag', 'index-jobs.json'), 'utf8')) as {
-        jobs: Array<{ jobId: string; providerJobId?: string }>;
-      };
-      expect(persisted.jobs.find((job) => job.jobId === jobId)?.providerJobId).toBe('idx_samejob01');
+      expect(read.ok).toBe(true);
+      const [row] = await ledgerJobs(dataRoot);
+      expect(row?.providerJobId).toBe('idx_samejob01');
+      expect(row?.status).toBe('completed');
       // Trial probe + the timed-out start, and no third pass: the deadline was
       // "stop waiting", so the adopted provider job was followed to completion.
       expect(counts().indexStarts).toBe(2);
+      // An adopted pass is never cancelled by this process.
+      expect(counts().cancels).toBe(0);
     } finally { await driver.stop(); }
   });
 
   it('does not adopt a pass whose answer omits the workspace echo (issue #906)', async () => {
-    const { driver, counts } = await fixture(async () => response('index_status', {
+    const { driver, counts, dataRoot } = await fixture(async () => response('index_status', {
       // Contract 1.1 guarantees the echo; without it scope is unproven.
       status: 'running', job_id: 'idx_samejob01',
     }), {
@@ -249,16 +250,16 @@ describe('native provider admission index status truth', () => {
     try {
       const read = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
       expect(read.ok).toBe(false);
-      const jobId = (read as { error: { details?: { jobId?: string } } }).error.details?.jobId;
-      const terminal = await terminalJob(driver, jobId as string);
-      expect(terminal).toMatchObject({ ok: true, value: { status: 'failed' } });
+      const [row] = await ledgerJobs(dataRoot);
+      expect(row?.status).toBe('failed');
+      expect(row?.providerJobId).toBeUndefined();
       // Trial probe + the timed-out start, and no third pass.
       expect(counts().indexStarts).toBe(2);
     } finally { await driver.stop(); }
   });
 
   it('keeps the terminal failure and the cooldown when no provider pass is adoptable (issue #906)', async () => {
-    const { driver, counts } = await fixture(async () => response('index_status', {
+    const { driver, counts, dataRoot } = await fixture(async () => response('index_status', {
       status: 'done', job_id: 'idx_provider_same', workspace_id: workspaceId,
       result: { status: 'complete', indexed: 3 },
     }), {
@@ -271,11 +272,11 @@ describe('native provider admission index status truth', () => {
     try {
       const first = await driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/probe.ts' });
       expect(first.ok).toBe(false);
-      const jobId = (first as { error: { details?: { jobId?: string } } }).error.details?.jobId;
-      expect(jobId).toBeTruthy();
+      const [row] = await ledgerJobs(dataRoot);
+      expect(row?.providerJobId).toBeUndefined();
       // With nothing adoptable the deadline stays terminal, and the recorded
       // failure still names the provider call that timed out.
-      const terminal = await terminalJob(driver, jobId as string);
+      const terminal = await terminalJob(driver, row!.jobId);
       expect(terminal).toMatchObject({ ok: true, value: { status: 'failed' } });
       expect(JSON.stringify(terminal)).toContain('Timed out calling thai-rag-native/code_index');
       // #762: the cooldown parks the next read instead of re-arming a second

@@ -322,6 +322,7 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private readonly pendingReindexIds = new Set<string>();
   private readonly pendingReindexReasons = new Map<string, ThaiRagReindexReason>();
   private readonly queuedAdmissionWorkspaceIds = new Set<string>();
+  private readonly adoptedProviderJobIds = new Set<string>();
   private readonly workspaceIndexJobIds = new Map<string, string>();
   private readonly workspaceIndexMonitors = new Map<string, Promise<Result<void>>>();
   /**
@@ -1504,6 +1505,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     const active = await this.jobs.active(ownerId);
     for (const job of active) {
       if (job.providerJobId === undefined) continue;
+      // Never cancel a pass this process only adopted: another owner may hold it.
+      if (this.adoptedProviderJobIds.has(job.providerJobId)) continue;
       const isAdmissionJob = this.workspaceIndexJobIds.get(job.workspaceId) === job.jobId;
       const cancellation = isAdmissionJob
         ? this.callAdmissionWorker('cancel_index', { job_id: job.providerJobId, workspace_id: job.workspaceId })
@@ -1901,8 +1904,8 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
         let passTerminalized = false;
         // #906: an adopted pass proves the workspace is being built, not that
         // the bytes this read would skip came from our canonical claim. Leave
-        // the claim and the snapshot verification unrecorded so the next read
-        // re-proves them, instead of authorising a skip on borrowed evidence.
+        // the claim and the snapshot verification unrecorded so a later
+        // admission re-proves them, instead of skipping on borrowed evidence.
         let adoptedStart = false;
         // issue-202: trial-first — bounded foreground probe proves the
         // pipeline before full admission. Trial failure takes the same
@@ -2185,12 +2188,15 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
           // hostage: fire a non-blocking best-effort cancel, fail the local
           // job, and surface an actionable CONFLICT so the finally block in
           // the admission monitor releases the gate deterministically.
-          const deadlineCancel = this.callAdmissionWorker(
-            'cancel_index',
-            { job_id: providerJobId, workspace_id: workspaceId },
-            this.indexStatusTimeoutMs,
-          );
-          void deadlineCancel.catch(() => undefined);
+          // An adopted pass is not ours to cancel; fail the local row only.
+          if (!this.adoptedProviderJobIds.has(providerJobId)) {
+            const deadlineCancel = this.callAdmissionWorker(
+              'cancel_index',
+              { job_id: providerJobId, workspace_id: workspaceId },
+              this.indexStatusTimeoutMs,
+            );
+            void deadlineCancel.catch(() => undefined);
+          }
           return err(appError('CONFLICT', `Native Thai-RAG index_status stayed unreachable for ${this.indexStatusTimeoutCap} consecutive polls; workspace ${workspaceId} index job marked failed (index-status-unreachable)`, true, {
             reason: 'index-status-unreachable',
             workspaceId,
@@ -2256,14 +2262,28 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
    * instead of this function inventing a pass that does not exist.
    */
   private async adoptTimedOutIndexStart(jobId: string, workspaceId: string, ownerId: string): Promise<string | undefined> {
-    const health = await this.refreshHealth();
-    if (!health.ok) return undefined;
+    // Deliberately not `refreshHealth()`: it enqueues on `workerQueue`, and this
+    // runs inside the queued refresh, so it would wait on itself and only run
+    // after the admission wait lapsed.
+    const config = this.launchConfig;
+    if (!this.started || config === undefined) return undefined;
+    const raw = normalizeWorkerCallResult('health', await this.indexSessions.call(SERVER_NAME, config, 'health', {}));
+    if (!raw.ok) return undefined;
+    const handshake = parseProviderHandshake(raw.value);
+    if (!handshake.ok) return undefined;
+    const activeJobs = handshake.value.components?.activeJobs ?? [];
     // A pass this process already mirrors belongs to another row; following it
-    // twice would let two monitors complete or cancel one provider job.
+    // twice would let two monitors complete or cancel one provider job. Read
+    // the ledger owner-agnostically: another live runtime at the same data root
+    // holds rows `active(ownerId)` never returns.
+    const ledger = await this.jobs.listForOperator({});
     const boundElsewhere = new Set(
-      (await this.jobs.active(ownerId)).map((row) => row.providerJobId).filter((id) => id !== undefined),
+      ledger.jobs
+        .filter((row) => row.status === 'running' || row.status === 'cancelling')
+        .map((row) => row.providerJobId)
+        .filter((id) => id !== undefined),
     );
-    for (const candidate of health.value.activeJobs) {
+    for (const candidate of activeJobs) {
       if (!isProviderOwnedIndexJobId(candidate)) continue;
       if (boundElsewhere.has(candidate)) continue;
       const status = await this.callAdmissionWorker('index_status', {
@@ -2278,6 +2298,10 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
       if (nestedString(status.value, 'workspace_id') !== workspaceId) continue;
       const rebound = await this.jobs.bindProviderJob(jobId, candidate, ownerId);
       if (rebound === null) continue;
+      // Adopted, not started: we may never cancel it. ponytail: memory only —
+      // after a restart the row looks like any other, so cancel-on-stop
+      // resumes; persist a marker on the row if that ever matters.
+      this.adoptedProviderJobIds.add(candidate);
       return candidate;
     }
     return undefined;

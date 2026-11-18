@@ -6,6 +6,7 @@ import { link, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
+import { workflowStamp } from './workflow-definition.mjs';
 import {
   HEAD_SHA_PATTERN,
   createGatePolicy,
@@ -715,6 +716,7 @@ async function recordCommand(options) {
     reviewId,
     role: 'reviewer',
     workflowVersion: WORKFLOW_VERSION,
+    workflow: workflowStamp('review'),
     repository,
     prNumber: pr.number,
     baseSha: pr.baseRefOid,

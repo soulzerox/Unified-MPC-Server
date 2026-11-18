@@ -6,6 +6,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { workflowStamp } from './workflow-definition.mjs';
+
 /**
  * Local-only merge-readiness verification profile (#144).
  *
@@ -74,7 +76,7 @@ export const STEP_DEFINITIONS = [
   { name: 'lint', profiles: ['targeted', 'merge'], command: [PNPM, ...PNPM_PREFIX, 'lint'] },
   // The merge gate's own tests run before the expensive build: a broken guard
   // must fail fast, and these suites need no workspace output.
-  { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/workflow-gate-core.test.mjs', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs', 'scripts/user-services.test.mjs', 'scripts/prune-unused-husky-hooks.test.mjs', 'scripts/prune-evidence.test.mjs', 'scripts/smoke-runtime-child-env.test.mjs', 'scripts/smoke-materialized-runtime.test.mjs', 'scripts/release-verify.test.mjs', 'scripts/check-native-rag-generation.test.mjs', 'scripts/check-dist-provenance-freshness.test.mjs'] },
+  { name: 'test:merge-gate', profiles: ['merge'], command: ['node', '--test', 'scripts/workflow-gate-core.test.mjs', 'scripts/workflow-definition.test.mjs', 'scripts/local-verify.test.mjs', 'scripts/guarded-merge.test.mjs', 'scripts/review-gate.test.mjs', 'scripts/check-issue-closing-keywords.test.mjs', 'scripts/user-services.test.mjs', 'scripts/prune-unused-husky-hooks.test.mjs', 'scripts/prune-evidence.test.mjs', 'scripts/smoke-runtime-child-env.test.mjs', 'scripts/smoke-materialized-runtime.test.mjs', 'scripts/release-verify.test.mjs', 'scripts/check-native-rag-generation.test.mjs', 'scripts/check-dist-provenance-freshness.test.mjs'] },
   { name: 'build', profiles: ['merge'], command: [PNPM, ...PNPM_PREFIX, 'build'] },
   // The runtime scripts are not package tests, so nothing ran them and two of the
   // six had rotted. They need a built dist (the materializer reads the CLI's
@@ -225,6 +227,7 @@ export function buildReceipt(input) {
   const ok = input.steps.length > 0 && input.steps.every((step) => step.status === 'passed');
   const receipt = {
     verificationId: input.verificationId,
+    workflow: workflowStamp('verify'),
     profile: input.profile,
     profileVersion: PROFILE_VERSION,
     workspacePath: input.workspacePath,

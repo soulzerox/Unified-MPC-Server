@@ -317,6 +317,7 @@ Each step ships alone and leaves the repository working.
 | Step | Change | Acceptance |
 |---|---|---|
 | 1 ✅ | Promote the shared CLI policy (`evaluateReviewEvidence`, `selectVerificationReceipt`, merge-readiness) into build-free ESM under `scripts/`; `merge:pr` delegates | shipped in #820, #821, #824 |
+| 1a ✅ | Give every gate receipt a workflow identity: one versioned definition (`scripts/workflow-definition.mjs`) that the verify and review receipts name, and a merge guard that refuses a receipt produced under another definition | shipped here: the definition owns `WORKFLOW_ID`, `WORKFLOW_VERSION`, the gated phases and their gate ids, plus a `sha256` fingerprint over that meaning which an append-only test table records per version. `buildReceipt` (`scripts/local-verify.mjs`) and the review receipt (`scripts/review-gate.mjs`) carry `workflow: workflowStamp(phase)`, and `verificationGateBlockers`/`evaluateReviewEvidence` in `scripts/workflow-gate-core.mjs` refuse a block with the wrong id, version, phase, gate or fingerprint — including a receipt that carries no block at all, because it was written before the definition existed and vouched for a step set this gate does not apply. `apps/cli/src/workflow-gate-conformance.test.ts` supplies the real stamp, so both evaluators stay in agreement. The close gate receipt (`apps/cli/src/commands/gate.ts`) still carries its own literal `version: 1`: it is written by compiled TypeScript, which cannot import `scripts/` without a build dependency the close gate does not have, so it joins this definition when open question 2 decides whether a profile is data or code |
 | 2 ✅ | Make the shared rule enforceable across both worlds: not by packaging the core (both routes rejected, see open question 4) but by a conformance corpus that runs the CLI evaluator and the runtime evaluator over one scenario table | shipped in #833: `apps/cli/src/workflow-gate-conformance.test.ts` — one passing row, eight shared-rule rows, one row for the runtime-only repository clause, and each refusal must name the rule it broke |
 | 3a ✅ | Add the `close` phase as a pure decision (`evaluateCloseGate`), its receipt reader/writer, `parseGateArgs` and `runCloseGate` over injected ports | shipped in #828: every refusal path, the fingerprint binding and the receipt round-trip are tested; the command has no production caller yet |
 | 3b ✅ | Wire `gate check --phase close`, the receipt store under `.unified-mpc/gates` and the matching `prune-evidence` update and test | shipped with #170's deferred-closure follow-up (#848): `apps/cli/src/index.ts` routes `gate check` through `parseGateArgs`/`runCloseGate` with the three real ports — `evaluateGoalWorkspaceCleanup` over the #170 journal projection, `createGoalWorktreeRemovalPreviewPort` (client-scoped) and `goalCompletionWorktreeBlockers` — and writes the receipt to `<workspace>/.unified-mpc/gates` unless `--dry-run`; `scripts/prune-evidence.mjs` plans that store as a third one (newest `--keep` receipts survive, an unreadable receipt refuses the whole run) with six tests; a refusal exits `1` and still records its receipt. Bundled with #848 on purpose: wiring the gate before the closure fix would point it at a projection that called live work `clear` |
@@ -338,7 +339,7 @@ that pays for the rest, and the one that must not invent new policy.
 Step 1 is shipped and the core is already independent of the profile runner:
 
 ```
-scripts/workflow-gate-core.mjs     imports only check-issue-closing-keywords.mjs
+scripts/workflow-gate-core.mjs     imports check-issue-closing-keywords.mjs, workflow-definition.mjs
   createGatePolicy({ profileVersion, fingerprintFor })
     ├─ evaluateMergeEligibility
     ├─ selectVerificationReceipt
@@ -353,9 +354,24 @@ builds the policy for a foreign profile version and a foreign fingerprint rule
 and asserts the verdict moves, because every other suite only ever exercises the
 real profile's values.
 
+The definition those gates are decided under is one module:
+`scripts/workflow-definition.mjs` owns `WORKFLOW_ID`, `WORKFLOW_VERSION`, the
+phase list and the gate that decides each phase, and exports
+`workflowStamp(phase)` and `workflowStampBlockers(stamp, phase)`.
+`scripts/local-verify.mjs` and `scripts/review-gate.mjs` write the stamp into
+their receipts. The close receipt still does not: `apps/cli/src/commands/gate.ts`
+is compiled TypeScript, and the published `apps/cli` package does not ship
+repo-root `scripts/`, so a `import()` of the definition would resolve to a path
+the installed CLI does not have. It keeps its own literal `version: 1` until
+open question 2 decides whether a profile is data or code.
+`scripts/guarded-merge.mjs` refuses a verification or review receipt whose block
+names none or another definition.
+The fingerprint is recorded per version in
+`scripts/workflow-definition.test.mjs`, so editing a phase or gate without a
+version bump fails before any receipt can be believed.
+
 That is why step 2 no longer gates step 3. The `close` gate's three inputs are
 application state, and all three are reachable from `apps/cli` today:
-
 | Question | Reached through | Caveat |
 |---|---|---|
 | may this worktree be removed? | `createGoalWorktreeRemovalPreviewPort` over `GoalWorktreeReconciliationPort.classify` with `ownershipScope: 'client'`, or the `git_worktree_remove` **dry run** for the owning session | the dry run is ownership-scoped *before* the dry-run return, so a session that does not own the worktree gets `PERMISSION_DENIED` instead of a preview; the client-scoped preview is the read-only viewer for that case (open question 5) |

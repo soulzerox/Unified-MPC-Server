@@ -5,6 +5,7 @@ import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 import { evaluateEligibility } from './guarded-merge.mjs';
 import { verificationGateBlockers } from './review-gate.mjs';
 import { createGatePolicy } from './workflow-gate-core.mjs';
+import { workflowStamp } from './workflow-definition.mjs';
 
 /**
  * The shared policy takes its two profile rules as inputs (#821) so it can
@@ -24,6 +25,7 @@ function verification(overrides = {}) {
     dirty: false,
     profile: 'merge',
     profileVersion: PROFILE_VERSION,
+    workflow: workflowStamp('verify'),
     diffFingerprint: expectedFingerprint(HEAD),
     completedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,

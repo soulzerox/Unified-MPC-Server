@@ -99,7 +99,7 @@ describe('session tools', () => {
     const requests: unknown[] = [];
     const context = handoffContext({
       workspaceResume: {
-        read(request: unknown) {
+        async read(request: unknown) {
           requests.push(request);
           return ok({
             workspaceId: 'workspace-1',
@@ -164,7 +164,7 @@ describe('session tools', () => {
     // A journal that throws is "could not be read", never an empty journal.
     const throwing = await handoff({
       workspaceResume: {
-        read() {
+        async read() {
           throw new Error('journal store is closed sk-handoff-secret');
         },
       },
@@ -178,7 +178,7 @@ describe('session tools', () => {
     // handoff still happens, and no empty window is claimed.
     const refused = await handoff({
       workspaceResume: {
-        read() {
+        async read() {
           return err(appError('RESOURCE_PRESSURE', 'journal store is busy sk-handoff-secret', true));
         },
       },
@@ -198,7 +198,7 @@ describe('session tools', () => {
     // An empty window is a fourth, distinct answer: the journal answered and had nothing.
     const empty = await handoff({
       workspaceResume: {
-        read() {
+        async read() {
           return ok({
             workspaceId: 'workspace-1',
             generatedAt: '2026-11-18T03:00:00.000Z',
@@ -224,7 +224,7 @@ describe('session tools', () => {
     // one cannot be its output: refuse it instead of handing over foreign work.
     const foreign = await handoff({
       workspaceResume: {
-        read() {
+        async read() {
           return ok({
             workspaceId: 'workspace-2',
             generatedAt: '2026-11-18T03:00:00.000Z',
@@ -246,7 +246,7 @@ describe('session tools', () => {
       contextEconomy: new ContextEconomyRuntime(),
       services: {
         workspaceResume: {
-          read(request: unknown) {
+          async read(request: unknown) {
             requests.push(request);
             return ok({
               workspaceId: 'workspace-1',
@@ -285,7 +285,7 @@ describe('session tools', () => {
       contextEconomy: new ContextEconomyRuntime(),
       services: {
         workspaceResume: {
-          read(request: unknown) {
+          async read(request: unknown) {
             requests.push(request);
             return ok({
               workspaceId: 'workspace-1',

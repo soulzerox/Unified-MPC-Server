@@ -10,9 +10,27 @@ import type { ListWorkspaceJournalRequest, WorkspaceJournalEntry } from '@unifie
 export const WORKSPACE_RESUME_DEFAULT_LIMIT = 20;
 export const WORKSPACE_RESUME_MAX_LIMIT = 100;
 
+/** What the projection compares a row's inherited generation against. */
+export interface WorkspaceResumeGoalScope {
+  /** The goal that currently fences this workspace's mutations. */
+  readonly goalId: string;
+  /**
+   * That goal's current generation, read from the mutation fence at snapshot time.
+   * Rows admitted under an older generation of the same goal belong to an execution
+   * that is over: whoever held them is gone, so their work must not read as current.
+   */
+  readonly executionGeneration: number;
+}
+
 /** What a session that was not there asks: what happened here, from where I stopped. */
 export interface WorkspaceResumeRequest {
   readonly workspaceId: string;
+  /**
+   * Optional authoritative scope. Without it no row is judged superseded: only the
+   * goal runtime knows which generation is current, and guessing from the window
+   * would let a dead generation's newer row look like the live one.
+   */
+  readonly currentGoal?: WorkspaceResumeGoalScope;
   /** The `cursor` of the previous snapshot; rows at or below it are already read. */
   readonly afterSequence?: number;
   /**
@@ -48,6 +66,19 @@ export interface WorkspaceResumeEvent {
    * two rows.
    */
   readonly open: boolean;
+  /**
+   * The call was admitted under an older generation of the scope's goal, so its work
+   * belongs to an execution that already ended. A superseded row is never `open`, even
+   * when the journal still holds it open, and its generation is reported so a caller
+   * can see why rather than treating a silent `open: false` as proof of completion.
+   *
+   * Only a call the window can judge is marked: a call whose correlated row fell
+   * outside the window stays `false` and reads as unknown, not stale.
+   */
+  readonly superseded: boolean;
+  /** Absent for work outside a goal and for calls the journal never correlated. */
+  readonly goalId?: string;
+  readonly executionGeneration?: number;
 }
 
 export interface WorkspaceResumeSnapshot {
@@ -94,7 +125,12 @@ export interface WorkspaceResumeJournalReader {
 }
 
 export interface WorkspaceResumeSnapshotReader {
-  read(request: WorkspaceResumeRequest): Result<WorkspaceResumeSnapshot>;
+  /**
+   * Async because the superseded judgement needs the goal's *current* generation, which
+   * only the mutation fence can answer. A resolver that fails leaves every call unjudged
+   * (unknown) instead of failing the snapshot: a resume must still be able to read.
+   */
+  read(request: WorkspaceResumeRequest): Promise<Result<WorkspaceResumeSnapshot>>;
 }
 
 /**
@@ -108,9 +144,14 @@ export interface WorkspaceResumeSnapshotReader {
 export function createWorkspaceResumeSnapshotReader(options: {
   readonly journal: WorkspaceResumeJournalReader;
   readonly now?: () => Date;
+  /**
+   * The workspace's current goal generation, read from the authoritative fence. Wired
+   * once here so every caller of the projection judges staleness the same way.
+   */
+  readonly currentGoal?: (workspaceId: string) => Promise<WorkspaceResumeGoalScope | null>;
 }): WorkspaceResumeSnapshotReader {
   return {
-    read(request): Result<WorkspaceResumeSnapshot> {
+    async read(request): Promise<Result<WorkspaceResumeSnapshot>> {
       const workspaceId = request.workspaceId.trim();
       if (workspaceId.length === 0) {
         return err(appError('INVALID_INPUT', 'workspace_resume requires a workspaceId'));
@@ -157,9 +198,31 @@ export function createWorkspaceResumeSnapshotReader(options: {
       const openCallIds = windowCallIds.length === 0
         ? new Set<string>()
         : new Set(options.journal.openCallIds({ workspaceId, callIds: windowCallIds }));
-      const events = included.map((entry) => toEvent(entry, openCallIds));
-      const openRows = included.filter((entry) => openCallIds.has(entry.callId));
-      const openCallCount = new Set(openRows.map((row) => row.callId)).size;
+      // One generation per call: a call's rows are the same admission, so the newest
+      // correlated row speaks for it whichever phase the window happens to hold.
+      const callGenerations = new Map<string, WorkspaceResumeGoalScope>();
+      for (const entry of included) {
+        if (entry.goalId === undefined || entry.executionGeneration === undefined) continue;
+        const seen = callGenerations.get(entry.callId);
+        if (seen === undefined || entry.executionGeneration > seen.executionGeneration) {
+          callGenerations.set(entry.callId, { goalId: entry.goalId, executionGeneration: entry.executionGeneration });
+        }
+      }
+      const supersededCallIds = new Set<string>();
+      const scope = await resolveScope(request.currentGoal, options.currentGoal, workspaceId);
+      if (scope !== null) {
+        for (const [callId, correlation] of callGenerations) {
+          if (correlation.goalId === scope.goalId && correlation.executionGeneration < scope.executionGeneration) {
+            supersededCallIds.add(callId);
+          }
+        }
+      }
+      const events = included.map((entry) => toEvent(entry, openCallIds, supersededCallIds));
+      // Counted per call, not per row, and superseded calls are dropped first: a dead
+      // generation must not make `openReferences` claim the workspace still has live work.
+      const standingOpenCallIds = new Set([...openCallIds].filter((callId) => !supersededCallIds.has(callId)));
+      const openRows = included.filter((entry) => standingOpenCallIds.has(entry.callId));
+      const openCallCount = standingOpenCallIds.size;
       const first = included.at(0);
       const last = included.at(-1);
 
@@ -182,7 +245,29 @@ export function createWorkspaceResumeSnapshotReader(options: {
   };
 }
 
-function toEvent(entry: WorkspaceJournalEntry, openCallIds: ReadonlySet<string>): WorkspaceResumeEvent {
+async function resolveScope(
+  explicit: WorkspaceResumeGoalScope | undefined,
+  resolver: ((workspaceId: string) => Promise<WorkspaceResumeGoalScope | null>) | undefined,
+  workspaceId: string,
+): Promise<WorkspaceResumeGoalScope | null> {
+  if (explicit !== undefined) return explicit;
+  if (resolver === undefined) return null;
+  try {
+    return await resolver(workspaceId);
+  } catch {
+    // Unjudged, not failed: a fence read that dies must not hide the journal from a
+    // session that just lost its context. A missing scope only costs the superseded
+    // marking, and callers still see each row's own generation.
+    return null;
+  }
+}
+
+function toEvent(
+  entry: WorkspaceJournalEntry,
+  openCallIds: ReadonlySet<string>,
+  supersededCallIds: ReadonlySet<string>,
+): WorkspaceResumeEvent {
+  const superseded = supersededCallIds.has(entry.callId);
   return {
     sequence: entry.sequence,
     operationKind: entry.operationKind,
@@ -192,6 +277,11 @@ function toEvent(entry: WorkspaceJournalEntry, openCallIds: ReadonlySet<string>)
     ...(entry.resultCode === undefined ? {} : { resultCode: entry.resultCode }),
     ...(entry.summary === undefined ? {} : { summary: entry.summary }),
     recordedAt: entry.recordedAt,
-    open: openCallIds.has(entry.callId),
+    // A superseded call is not open: its generation ended, so no caller can still
+    // reach the work, and reporting it open is what makes a session wait or rerun.
+    open: openCallIds.has(entry.callId) && !superseded,
+    superseded,
+    ...(entry.goalId === undefined ? {} : { goalId: entry.goalId }),
+    ...(entry.executionGeneration === undefined ? {} : { executionGeneration: entry.executionGeneration }),
   };
 }

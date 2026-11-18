@@ -54,6 +54,7 @@ import { PUBLISH_APPROVAL_MIGRATION_SQL } from './migrations/publish-approval-mi
 import { PUBLISH_CREDENTIAL_MIGRATION_SQL } from './migrations/publish-credential-migration.js';
 import { PUBLISH_APPROVAL_FINGERPRINT_MIGRATION_SQL } from './migrations/publish-approval-fingerprint-migration.js';
 import { WORKSPACE_JOURNAL_CLOSURE_MIGRATION_SQL } from './migrations/workspace-journal-closure-migration.js';
+import { WORKSPACE_JOURNAL_GOAL_CORRELATION_MIGRATION_SQL } from './migrations/workspace-journal-goal-correlation-migration.js';
 import { DEFERRED_HANDLE_MIGRATION_SQL } from './migrations/deferred-handle-migration.js';
 import { DEFERRED_HANDLE_PROVIDER_MIGRATION_SQL } from './migrations/deferred-handle-provider-migration.js';
 import { WORKSPACE_JOURNAL_MIGRATION_SQL } from './migrations/workspace-journal-migration.js';
@@ -210,6 +211,7 @@ export class SqliteDatabase {
       sql: DEFERRED_HANDLE_PROVIDER_MIGRATION_SQL,
       reclaimFreePages: true,
     });
+    this.applyMigration({ id: '050_journal_goal_correlation', sql: WORKSPACE_JOURNAL_GOAL_CORRELATION_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

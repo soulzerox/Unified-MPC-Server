@@ -25,6 +25,7 @@ const MAX_SESSION_CHARS = 512;
 const MAX_TRACE_CHARS = 512;
 const MAX_RECORDED_AT_CHARS = 64;
 const MAX_EVENT_ID_CHARS = 512;
+const MAX_GOAL_ID_CHARS = 128;
 const DEFAULT_MAX_EVENTS_PER_WORKSPACE = 5_000;
 const MAX_LIST_LIMIT = 200;
 
@@ -118,6 +119,13 @@ export interface WorkspaceJournalAppendRequest {
   readonly traceId?: string;
   readonly recordedAt?: string;
   readonly eventId?: string;
+  /**
+   * The goal whose fenced mutation admitted this call, and the generation it was
+   * admitted under. Absent for work outside a goal and for a call whose admission
+   * the journal never saw: absent means "unknown", never "generation zero".
+   */
+  readonly goalId?: string;
+  readonly executionGeneration?: number;
 }
 
 export interface WorkspaceJournalEntry {
@@ -137,6 +145,9 @@ export interface WorkspaceJournalEntry {
   /** Set once a freshness probe proved no durable handle of this call is live. */
   readonly closureCode?: string;
   readonly closedAt?: string;
+  /** The goal generation this call was admitted under, when the journal knows it. */
+  readonly goalId?: string;
+  readonly executionGeneration?: number;
 }
 
 export interface WorkspaceJournalClosureRequest {
@@ -196,6 +207,8 @@ interface JournalRow {
   readonly recorded_at: string;
   readonly closure_code: string | null;
   readonly closed_at: string | null;
+  readonly goal_id: string | null;
+  readonly execution_generation: number | null;
 }
 
 export class WorkspaceJournalStoreError extends Error {
@@ -216,6 +229,15 @@ function required(value: string | undefined, max: number): boolean {
   return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
+function validGoalCorrelation(request: WorkspaceJournalAppendRequest): boolean {
+  // Both or neither: a goal without a generation (or the reverse) would read as a
+  // correlation the projection could misjudge, so it is refused rather than stored.
+  if (request.goalId === undefined && request.executionGeneration === undefined) return true;
+  return required(request.goalId, MAX_GOAL_ID_CHARS)
+    && Number.isSafeInteger(request.executionGeneration)
+    && (request.executionGeneration ?? 0) >= 1;
+}
+
 function validRequest(request: WorkspaceJournalAppendRequest): boolean {
   // Closed list, not "anything but started": the DDL accepts five statuses and a
   // stray string must not reach it as a raw SQLITE_CONSTRAINT.
@@ -234,7 +256,8 @@ function validRequest(request: WorkspaceJournalAppendRequest): boolean {
     && bounded(request.summary, MAX_SUMMARY_CHARS)
     && bounded(request.traceId, MAX_TRACE_CHARS)
     && bounded(request.recordedAt, MAX_RECORDED_AT_CHARS)
-    && bounded(request.eventId, MAX_EVENT_ID_CHARS);
+    && bounded(request.eventId, MAX_EVENT_ID_CHARS)
+    && validGoalCorrelation(request);
 }
 
 function toEntry(row: JournalRow): WorkspaceJournalEntry {
@@ -254,6 +277,9 @@ function toEntry(row: JournalRow): WorkspaceJournalEntry {
     recordedAt: row.recorded_at,
     ...(row.closure_code === null ? {} : { closureCode: row.closure_code }),
     ...(row.closed_at === null ? {} : { closedAt: row.closed_at }),
+    ...(row.goal_id === null || row.execution_generation === null
+      ? {}
+      : { goalId: row.goal_id, executionGeneration: row.execution_generation }),
   };
 }
 
@@ -297,8 +323,8 @@ export class SqliteWorkspaceJournalRepository {
     const db = this.database.connection;
     const insert = db.prepare(`
       INSERT INTO workspace_journal_events
-        (event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, goal_id, execution_generation)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(workspace_id, call_id, phase) DO NOTHING
     `);
     const result = insert.run(
@@ -314,6 +340,8 @@ export class SqliteWorkspaceJournalRepository {
       entry.summary ?? null,
       request.traceId ?? null,
       request.recordedAt ?? new Date().toISOString(),
+      request.goalId ?? null,
+      request.executionGeneration ?? null,
     );
     if (Number(result.changes) === 0) return null;
     this.trim(request.workspaceId, db);
@@ -333,7 +361,7 @@ export class SqliteWorkspaceJournalRepository {
         ? request.beforeSequence as number
         : Number.MAX_SAFE_INTEGER;
       const newest = this.database.connection.prepare(`
-        SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at
+        SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at, goal_id, execution_generation
         FROM workspace_journal_events
         WHERE workspace_id = ? AND sequence < ?
         ORDER BY sequence DESC
@@ -342,7 +370,7 @@ export class SqliteWorkspaceJournalRepository {
       return newest.reverse().map(toEntry);
     }
     const rows = this.database.connection.prepare(`
-      SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at
+      SELECT sequence, event_id, workspace_id, session_id, operation_kind, tool_name, call_id, phase, status, result_code, summary, trace_id, recorded_at, closure_code, closed_at, goal_id, execution_generation
       FROM workspace_journal_events
       WHERE workspace_id = ? AND sequence > ?
       ORDER BY sequence ASC

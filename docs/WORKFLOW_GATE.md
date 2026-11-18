@@ -494,8 +494,25 @@ it as `owner_goal_id`/`owner_execution_generation`, so the snapshots a resumed
 session reads say which generation the work belongs to instead of comparing it
 with whatever generation is current by then. A task started outside a goal
 records neither field. Ownership matching is unchanged — workspace first, then
-client/session when neither side has one — because the correlation is
-descriptive; refusing a stale generation's work is the next #170 step.
+client/session when neither side has one — because that is identity, not
+staleness.
+
+Staleness is a separate question, and #170 answers it on both sides. A mutation
+is already refused unless the proof the fence admitted is the *current*
+generation (`GoalMutationFenceService.begin` validates the lease generation
+against the durable fence), so an old generation cannot change goal state. It
+must not be able to pretend its work is current either, which is what the journal
+columns `goal_id`/`execution_generation` are for: the completion's journal row
+carries the same admitted correlation the task metadata does, and the resume
+projection compares a call's newest correlated row with the generation the fence
+reports now. A call admitted under an older generation of the same goal is
+projected as `superseded: true` and is not open, so `workspace_resume`,
+`workspace_bootstrap` and `session_handoff` report it as an execution that ended
+rather than as work to wait on or rerun. Two deliberate limits: a row with no
+correlation stays unjudged (`superseded: false`, its own generation absent) rather
+than assumed stale, and a fence that cannot answer leaves the whole window
+unjudged, because a resume must still be readable and guessing staleness could
+retire work that is still running.
 
 `workspace_resume` is the journal's read side for a caller that asks directly
 (`packages/application/src/workspace-resume-snapshot.ts`, wired in the stdio

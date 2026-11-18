@@ -35,7 +35,7 @@ export function sessionTools(context: McpToolContext, verifier: IncrementalVerif
   return [
     defineTool({
       name: 'session_handoff',
-      description: 'Create a concise same-chat recovery message from the real phase tracker, current git status/diff, durable background task IDs, and the workspace journal window (the same projection `workspace_resume` serves, so durable task state comes from the journal rather than the chat). Use only when the user requests a handoff or an unavoidable client/platform interruption requires recovery; never trigger it merely because elapsed time passed. If a tool schema looks stale, Refresh connector first; open a new chat only if refresh does not fix it.',
+      description: 'Create a concise same-chat recovery message from the real phase tracker, current git status/diff, durable background task IDs, and the workspace journal window (the same projection `workspace_resume` serves, so durable task state comes from the journal rather than the chat). The window is oldest rows first, capped at the reader default, so `truncated: true` means pass its `cursor` as `afterSequence` to `workspace_resume` to continue; a recent call can therefore be outside it. The field is absent when the runtime has no journal and `null` when the journal could not be read. Use only when the user requests a handoff or an unavoidable client/platform interruption requires recovery; never trigger it merely because elapsed time passed. If a tool schema looks stale, Refresh connector first; open a new chat only if refresh does not fix it.',
       permission: 'READ',
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: sessionHandoffSchema,

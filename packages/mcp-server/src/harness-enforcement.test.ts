@@ -2347,8 +2347,8 @@ describe('workspace_bootstrap journal resume (#170)', () => {
   it('reports an unreadable journal as null instead of failing the bootstrap', async () => {
     const { services } = createHarnessServices();
     const registries = [
-      // The reader refuses.
-      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable')) } },
+      // The reader refuses; the message is redacted at the sink, like the throwing branch.
+      { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => err(appError('INTERNAL_ERROR', 'journal unavailable for sk-live-refusal-secret')) } },
       // The store throws rather than returning a `Result`, which is what really happens.
       { ...services, workspaceResume: { read: (): Result<WorkspaceResumeSnapshot> => { throw new Error('journal unavailable'); } } },
     ];
@@ -2372,5 +2372,7 @@ describe('workspace_bootstrap journal resume (#170)', () => {
     // Degrading silently would leave a broken journal invisible to whoever operates it.
     expect(diagnostics.map((event) => event.name)).toEqual(['WorkspaceResumeUnavailable', 'Error']);
     expect(diagnostics.every((event) => event.message.includes('journal unavailable'))).toBe(true);
+    // Both failure branches meet the sink's redaction guarantee, not only the throwing one.
+    expect(diagnostics.every((event) => !event.message.includes('sk-live-refusal-secret'))).toBe(true);
   });
 });

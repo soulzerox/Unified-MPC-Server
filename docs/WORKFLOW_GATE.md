@@ -475,7 +475,7 @@ workspace journal:
    the ports below, so a live journal no longer reports
    `durable_references_unknown` and the close gate no longer decides blind.
 
-The journal's read side is `workspace_resume`
+`workspace_resume` is the journal's read side for a caller that asks directly
 (`packages/application/src/workspace-resume-snapshot.ts`, wired in the stdio
 runtime over the same `SqliteWorkspaceJournalRepository` the host appends to):
 one call answers "what ran here since the cursor I hold" for a session that was
@@ -506,6 +506,16 @@ recorded as a diagnostic and never fails the bootstrap, because the harness was
 already marked bootstrapped by the time the journal is read. The window is the
 oldest rows, so `truncated: true` means to continue with `cursor` as
 `afterSequence`, and `openReferences` counts only the calls in that window.
+
+`session_handoff` is a read side too, through the same projection rather than a
+second derivation: it includes the window as `workspace_journal`, with the same
+three states as bootstrap, and its recovery prompt states the journal verdict
+(absent, unreadable, empty, or a window with open calls) so durable task state
+comes from the journal instead of the chat. Because that window is the oldest
+rows, each rendered row carries its own `recordedAt` so a reader can tell a
+just-finished call from an old one. A snapshot the reader could not have
+produced — one naming another workspace — is refused as `CONFLICT` rather than
+handed to the next session.
 
 The other prerequisite — a removal preview that can classify a worktree the
 asking session does not own — is answered by open question 5 and shipped as

@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 
 import { findNegatedClosingKeywordHazards } from './check-issue-closing-keywords.mjs';
+import { workflowStampBlockers } from './workflow-definition.mjs';
 
 /**
  * Shared Workflow Gate policy (#142, step 1).
@@ -166,6 +167,8 @@ export function evaluateReviewEvidence({ receipt, capsule, headReceiptCount, cor
   }
 
   if (receipt.role !== 'reviewer') blockers.push(`review receipt role is '${String(receipt.role)}', expected 'reviewer'`);
+  // A review receipt is evidence only under the definition that recorded it.
+  blockers.push(...workflowStampBlockers(receipt.workflow, 'review'));
   if (receipt.prNumber !== pr.number) blockers.push(`review receipt is for PR #${String(receipt.prNumber)}`);
   if (receipt.headSha !== pr.headRefOid) blockers.push('review receipt was produced for a different head');
   if (receipt.baseSha !== pr.baseRefOid) blockers.push('review receipt was produced against a different base');
@@ -260,6 +263,10 @@ export function createGatePolicy({ profileVersion, fingerprintFor } = {}) {
     if (verification.diffFingerprint !== fingerprintFor(headSha)) {
       blockers.push('verification receipt fingerprint does not match the head');
     }
+    // The receipt must also name the workflow definition it was decided under: one
+    // from an older definition vouched for a step set this gate no longer applies,
+    // and one carrying no block at all is not evidence for any gate.
+    blockers.push(...workflowStampBlockers(verification.workflow, 'verify'));
     return blockers;
   }
 

@@ -194,6 +194,7 @@ interface CliModules {
     fingerprintFor: (headSha: string) => string;
   }) => { evaluateMergeEligibility: (input: unknown) => CliVerdict };
   readonly reviewFingerprint: (input: { baseSha: string; headSha: string; diff: string }) => string;
+  readonly workflowStamp: (phase: string) => unknown;
 }
 
 async function loadCliModules(): Promise<CliModules> {
@@ -204,7 +205,12 @@ async function loadCliModules(): Promise<CliModules> {
   // `href` is the specifier — round-tripping it through a path would re-encode
   // any `%` and break a checkout whose directory name contains a space.
   const specifier = new URL('../../../scripts/workflow-gate-core.mjs', import.meta.url).href;
-  return await import(specifier) as CliModules;
+  // The definition is a second build-free module: the core refuses a receipt
+  // whose `workflow` block it does not recognize, so the corpus needs the real
+  // stamp rather than a fixture that would only pass while the block is absent.
+  const definitionSpecifier = new URL('../../../scripts/workflow-definition.mjs', import.meta.url).href;
+  const definition = await import(definitionSpecifier) as Pick<CliModules, 'workflowStamp'>;
+  return { ...await import(specifier) as CliModules, workflowStamp: definition.workflowStamp };
 }
 
 function runtimePolicy(): RepositoryMergePolicy {
@@ -273,6 +279,10 @@ function cliVerdict(scenario: Scenario, modules: CliModules): { allowed: boolean
         dirty: false,
         profile: 'merge',
         profileVersion: 0,
+        // Every gate receipt names the workflow definition it was decided under,
+        // so the corpus supplies the real stamp instead of a fixture that only
+        // passes while the block is absent.
+        workflow: modules.workflowStamp('verify'),
         // The corpus varies only the subject fields both worlds share; this
         // receipt carries exactly the values the bound policy asks for.
         diffFingerprint: 'sha256:conformance',
@@ -290,6 +300,7 @@ function cliVerdict(scenario: Scenario, modules: CliModules): { allowed: boolean
         skillId: 'unified-code-review',
         skillVersion: 1,
         skillSha256: 'sha256:conformance',
+        workflow: modules.workflowStamp('review'),
         reviewedFingerprint: fingerprint,
         blockingOpenCount: scenario.reviewRejected === true ? 1 : 0,
         verdict: scenario.reviewRejected === true ? 'blocked' : 'clean',

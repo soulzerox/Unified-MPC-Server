@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { discoverPackages } from './check-workspace-dependencies.mjs';
+import { workflowStamp } from './workflow-definition.mjs';
 import {
   PROFILE_VERSION,
   assertProfileStepSet,
@@ -256,6 +257,9 @@ test('buildReceipt records the exact head, fingerprint and verdict', () => {
   });
 
   assert.equal(receipt.profileVersion, PROFILE_VERSION);
+  // A receipt names the workflow definition it was decided under, so a later gate
+  // can refuse evidence produced by a definition it does not apply.
+  assert.deepEqual(receipt.workflow, workflowStamp('verify'));
   assert.equal(receipt.ok, true);
   assert.equal(receipt.mergeReady, true);
   assert.equal(receipt.headSha, 'a'.repeat(40));

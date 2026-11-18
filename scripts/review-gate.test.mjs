@@ -30,6 +30,7 @@ import {
   verificationGateBlockers,
   writeReviewReceipt,
 } from './review-gate.mjs';
+import { workflowStamp } from './workflow-definition.mjs';
 import { PROFILE_VERSION, expectedFingerprint } from './local-verify.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -55,6 +56,7 @@ function receipt(overrides = {}) {
   return {
     reviewId: 'review-1',
     role: 'reviewer',
+    workflow: workflowStamp('review'),
     prNumber: 536,
     baseSha: BASE,
     headSha: HEAD,
@@ -607,6 +609,7 @@ test('verificationGateBlockers accepts a merge-ready receipt for the exact head'
       dirty: false,
       profile: 'merge',
       profileVersion: PROFILE_VERSION,
+      workflow: workflowStamp('verify'),
       diffFingerprint: expectedFingerprint(headSha),
     },
     headSha,
@@ -630,6 +633,7 @@ test('verificationGateBlockers reports every reason a receipt cannot gate a revi
       dirty: true,
       profile: 'targeted',
       profileVersion: PROFILE_VERSION - 1,
+      workflow: workflowStamp('verify'),
       diffFingerprint: expectedFingerprint(receiptHead),
     },
     headSha: 'd'.repeat(40),
@@ -654,6 +658,7 @@ test('verificationGateBlockers refuses a receipt from an older profile version',
       dirty: false,
       profile: 'merge',
       profileVersion: PROFILE_VERSION - 1,
+      workflow: workflowStamp('verify'),
       diffFingerprint: expectedFingerprint(headSha),
     },
     headSha,
@@ -671,6 +676,7 @@ test('verificationGateBlockers refuses a receipt whose fingerprint does not matc
       dirty: false,
       profile: 'merge',
       profileVersion: PROFILE_VERSION,
+      workflow: workflowStamp('verify'),
       diffFingerprint: expectedFingerprint('b'.repeat(40)),
     },
     headSha,
@@ -685,6 +691,7 @@ function verificationReceipt(overrides = {}) {
     verificationId: 'v-merge',
     profile: 'merge',
     profileVersion: PROFILE_VERSION,
+      workflow: workflowStamp('verify'),
     headSha,
     dirty: false,
     mergeReady: true,

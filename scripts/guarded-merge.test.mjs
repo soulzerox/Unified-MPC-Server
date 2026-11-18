@@ -10,6 +10,7 @@ import {
 } from './guarded-merge.mjs';
 import { PROFILE_VERSION } from './local-verify.mjs';
 import { reviewFingerprint } from './review-gate.mjs';
+import { workflowStamp } from './workflow-definition.mjs';
 
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -32,6 +33,7 @@ const PR = {
 const REVIEW = {
   reviewId: 'review-1',
   role: 'reviewer',
+  workflow: workflowStamp('review'),
   prNumber: 534,
   baseSha: BASE,
   headSha: HEAD,
@@ -47,6 +49,7 @@ const REVIEW = {
 
 const RECEIPT = {
   verificationId: 'verification-1',
+  workflow: workflowStamp('verify'),
   profile: 'merge',
   profileVersion: PROFILE_VERSION,
   headSha: HEAD,
@@ -133,6 +136,34 @@ test('findReceipt does not let a later targeted run revoke a merge-ready head', 
 
 test('a green receipt on the exact head is eligible', () => {
   assert.deepEqual(evaluate(), { eligible: true, blockers: [] });
+});
+
+test('a receipt that names no workflow definition cannot authorize a merge', () => {
+  const { workflow, ...legacyReceipt } = RECEIPT;
+  assert.equal(workflow.phase, 'verify');
+  assert.match(
+    evaluate({ receipt: legacyReceipt }).blockers.join('\n'),
+    /names no workflow definition/,
+  );
+  assert.match(
+    evaluate({ review: { ...REVIEW, workflow: undefined } }).blockers.join('\n'),
+    /names no workflow definition/,
+  );
+});
+
+test('a receipt decided under another workflow definition cannot authorize a merge', () => {
+  assert.match(
+    evaluate({ receipt: { ...RECEIPT, workflow: { ...RECEIPT.workflow, version: 99 } } }).blockers.join('\n'),
+    /workflow block used version 99, current is 1/,
+  );
+  assert.match(
+    evaluate({ review: { ...REVIEW, workflow: { ...REVIEW.workflow, gate: 'merge_evidence' } } }).blockers.join('\n'),
+    /gate 'merge_evidence' is not 'exact_head_review'/,
+  );
+  assert.match(
+    evaluate({ review: { ...REVIEW, workflow: workflowStamp('verify') } }).blockers.join('\n'),
+    /names phase 'verify', expected 'review'/,
+  );
 });
 
 test('structural PR problems block the merge', () => {

@@ -174,6 +174,18 @@ export interface OpenDeferredCallsRequest {
   readonly workspaceId: string;
   /** The calls to check. An empty list asks nothing. */
   readonly callIds: readonly string[];
+  /**
+   * The kinds a closer can reach, when the caller is reading back its own close.
+   *
+   * `closeDeferredCalls` only touches these kinds and nothing older than its
+   * floor, so a row outside that reach reads back as "not open" and its call is
+   * settled instead of being re-probed for the process lifetime. Honoured by
+   * `openDeferredCallIds`; the sibling reads take these two fields out of the type
+   * so a caller cannot pass a reach they would ignore.
+   */
+  readonly operationKinds?: readonly string[];
+  /** The same floor the closer applies; omitted means no floor. */
+  readonly recordedAtOrAfter?: string;
 }
 
 export interface ListWorkspaceJournalRequest {
@@ -435,7 +447,7 @@ export class SqliteWorkspaceJournalRepository {
    * The journal already knows the kind, so the caller asks it instead of guessing
    * from the tool name it no longer has.
    */
-  public openDeferredCallKinds(request: OpenDeferredCallsRequest): ReadonlyMap<string, string> {
+  public openDeferredCallKinds(request: Pick<OpenDeferredCallsRequest, 'workspaceId' | 'callIds'>): ReadonlyMap<string, string> {
     if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
       throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
     }
@@ -460,19 +472,37 @@ export class SqliteWorkspaceJournalRepository {
    * or it may be out of reach for this runtime. A caller that kept asking about an
    * already-closed call would never finish; one that stopped asking about an open
    * call would strand its pin. So the difference is read back, not guessed.
+   *
+   * The reach the closer applies is applied here too when the caller names it: a
+   * row of a kind, or below a floor, that `closeDeferredCalls` can never touch is
+   * not "still open" in the only sense the caller can act on, and reading it as
+   * open is what keeps an unreachable call re-probed forever.
    */
   public openDeferredCallIds(request: OpenDeferredCallsRequest): readonly string[] {
-    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
-      throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
+    if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)
+      || (request.recordedAtOrAfter !== undefined && !required(request.recordedAtOrAfter, MAX_RECORDED_AT_CHARS))
+      || (request.operationKinds ?? []).some((kind) => !required(kind, MAX_OPERATION_CHARS))) {
+      throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require bounded identifiers');
     }
     const calls = [...new Set(request.callIds.filter((callId) => required(callId, MAX_CALL_ID_CHARS)))];
     if (calls.length === 0) return [];
+    const kinds = [...new Set((request.operationKinds ?? []).filter((kind) => this.deferredClosureKinds.has(kind)))];
+    // A named reach the store can never close is the same as no reach at all.
+    if (request.operationKinds !== undefined && kinds.length === 0) return [];
+    const floor = request.recordedAtOrAfter;
     const rows = this.database.connection.prepare(`
       SELECT DISTINCT call_id
       FROM workspace_journal_events
       WHERE workspace_id = ? AND phase = 'started' AND closure_code IS NULL
+        ${kinds.length === 0 ? '' : `AND operation_kind IN (${kinds.map(() => '?').join(', ')})`}
+        ${floor === undefined ? '' : 'AND recorded_at >= ?'}
         AND call_id IN (${calls.map(() => '?').join(', ')})
-    `).all(request.workspaceId, ...calls) as unknown as { readonly call_id: string }[];
+    `).all(
+      request.workspaceId,
+      ...kinds,
+      ...(floor === undefined ? [] : [floor]),
+      ...calls,
+    ) as unknown as { readonly call_id: string }[];
     return rows.map((row) => row.call_id);
   }
 
@@ -488,7 +518,7 @@ export class SqliteWorkspaceJournalRepository {
    * still running. So the whole predicate is applied here — a handle-returning kind
    * is open until it is closed, and every other kind ends at its own `completed` row.
    */
-  public openCallIds(request: OpenDeferredCallsRequest): readonly string[] {
+  public openCallIds(request: Pick<OpenDeferredCallsRequest, 'workspaceId' | 'callIds'>): readonly string[] {
     if (!required(request.workspaceId, MAX_WORKSPACE_ID_CHARS)) {
       throw new WorkspaceJournalStoreError('invalid_entry', 'Journal reads require a bounded workspaceId');
     }

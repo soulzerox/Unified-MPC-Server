@@ -403,7 +403,14 @@ describe('closeJudgedDeferredCalls', () => {
     // would drop the only path that can still ask about it.
     await expect(probe({ store, handles, authority: authority('gone') }))
       .resolves.toEqual({ closed: 0, accountedCallIds: [] });
-    expect(store.openDeferredCallIds).toHaveBeenCalledWith({ workspaceId: 'ws-1', callIds: ['call-1'] });
+    expect(store.openDeferredCallIds).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      callIds: ['call-1'],
+      // The read-back applies the closer's reach, so a row it can never touch is
+      // not called open and its call is not retried forever.
+      operationKinds,
+      recordedAtOrAfter: expect.any(String),
+    });
     expect(handles.forget).not.toHaveBeenCalled();
   });
 
@@ -417,6 +424,22 @@ describe('closeJudgedDeferredCalls', () => {
     await expect(probe({ store, handles, authority: authority('gone') }))
       .resolves.toEqual({ closed: 0, accountedCallIds: ['call-1'] });
     expect(handles.forget).toHaveBeenCalledWith('ws-1', ['call-1']);
+  });
+
+  it('accounts for a handle-less call whose row is outside the closer reach', async () => {
+    // A durable task never appears in the process listing, so the workspace
+    // question cannot speak for it. The only remaining question is whether its
+    // row can still be closed: this one cannot (another host wrote it), so the
+    // call is settled instead of being re-probed on every later completion.
+    const store = journal(0, [], { 'call-1': 'task_create' });
+    const handles = ledger([]);
+
+    await expect(probe({ store, handles, authority: authority('live', 'gone') }))
+      .resolves.toEqual({ closed: 0, accountedCallIds: ['call-1'] });
+    expect(store.openDeferredCallIds).toHaveBeenCalledWith(expect.objectContaining({
+      callIds: ['call-1'],
+      operationKinds,
+    }));
   });
 
   it('does nothing when there is no call to judge', async () => {
@@ -547,5 +570,19 @@ describe('settleRememberedCalls', () => {
     });
     expect(probed).toEqual([['probed-1', 'evicted']]);
     expect([...remembered]).toEqual([['evicted', 'ws-1']]);
+  });
+
+  it('evicts the oldest call when re-remembering crosses the cap', async () => {
+    // The cap is what keeps the retry map bounded, so it has to be exercised at
+    // the size it protects: three calls judged, two kept.
+    const remembered = new Map([['oldest', 'ws-1'], ['middle', 'ws-1']]);
+    await settleRememberedCalls({
+      remembered,
+      workspaceId: 'ws-1',
+      additionalOwnedCallIds: ['newest'],
+      maxRemembered: 2,
+      probe: async () => ({ closed: 0, accountedCallIds: [] }),
+    });
+    expect([...remembered]).toEqual([['middle', 'ws-1'], ['newest', 'ws-1']]);
   });
 });

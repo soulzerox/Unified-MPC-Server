@@ -748,7 +748,9 @@ describe('durable task recovery identity (#170)', () => {
     const launched = await store.launch({
       taskId: 'recoverable-task',
       executable: process.execPath,
-      arguments: ['-e', 'setTimeout(() => {}, 10000)'],
+      // Outlives the test body: a fixture that expires mid-assertion turns a slow
+      // machine into a failure that has nothing to do with recovery.
+      arguments: ['-e', 'setTimeout(() => {}, 30000)'],
       cwd: root,
       environment: process.env,
       timeoutSeconds: 30,

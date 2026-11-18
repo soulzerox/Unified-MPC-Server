@@ -71,16 +71,19 @@ const RUNTIME_OBSERVED_FROM = new Date().toISOString();
  * `gone` only for a call this runtime journaled.
  *
  * `unknown` — no adapter, an unaskable provider, or a store that cannot answer —
- * closes nothing. A provider with no route is never asked, so it also never
- * settles.
+ * closes nothing. A provider with no route is never asked, so it never closes
+ * either: its handle keeps the pin and its call is accounted for, because no
+ * later sweep could learn anything new about it.
  *
  * `accountedCallIds` is the answer the caller acts on: a call is accounted for
  * only when nothing is left to ask about it — its row closed (now or by an
  * earlier sweep), it recorded a provider no adapter can ask about, or it recorded
- * no handle at all and the workspace held nothing live for its kind. Callers
- * forget exactly these and keep the rest for a later sweep: `live` and `unknown`
- * keep the pin and are asked again on the next completion, and so does a row the
- * store refused.
+ * no handle at all and the remaining question cannot reach its row either: the
+ * workspace held nothing live for its kind, or the row sits outside the kinds and
+ * floor `closeDeferredCalls` writes. Callers forget exactly these and keep the
+ * rest for a later sweep: `live` and `unknown` keep the pin and are asked again
+ * on the next completion, and so does a call whose close the store refused while
+ * its row is still open inside the reach.
  */
 export async function closeJudgedDeferredCalls(options: {
   readonly journal: Pick<SqliteWorkspaceJournalRepository, 'closeDeferredCalls' | 'openDeferredCallIds' | 'openDeferredCallKinds'>;
@@ -172,6 +175,10 @@ export async function closeJudgedDeferredCalls(options: {
       const stillOpen = new Set(options.journal.openDeferredCallIds({
         workspaceId: options.workspaceId,
         callIds: unanswerable,
+        // The same reach the closer has: a row it could never touch is settled,
+        // not re-asked on every later completion.
+        operationKinds: options.operationKinds,
+        recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
       }));
       for (const callId of unanswerable) {
         if (!stillOpen.has(callId)) settledElsewhere.add(callId);
@@ -212,6 +219,8 @@ export async function closeJudgedDeferredCalls(options: {
     const stillOpen = new Set(options.journal.openDeferredCallIds({
       workspaceId: options.workspaceId,
       callIds: refused,
+      operationKinds: options.operationKinds,
+      recordedAtOrAfter: RUNTIME_OBSERVED_FROM,
     }));
     for (const callId of refused) {
       if (stillOpen.has(callId)) continue;

@@ -62,6 +62,8 @@ describe('capability task ownership', () => {
     // call is telemetry, the workspace is what makes the task recoverable.
     expect(capabilityTaskOwnerMatches(owner, replacementSession)).toBe(true);
     expect(capabilityTaskOwnerMatches(owner, { ...replacementSession, workspaceId: 'workspace-b' })).toBe(false);
-    expect(capabilityTaskOwnerMatches(owner, { clientId: 'chatgpt', sessionId: 'session-b' })).toBe(false);
+    // Same client and session as the owner: only the missing workspace can be what
+    // refuses this, so the assertion fails if the workspace branch ever falls through.
+    expect(capabilityTaskOwnerMatches(owner, { clientId: 'client-a', sessionId: 'session-a' })).toBe(false);
   });
 });

@@ -58,9 +58,13 @@ test('a valid stamp has no blockers', () => {
   assert.deepEqual(workflowStampBlockers(workflowStamp('verify'), 'verify'), []);
 });
 
-test('a receipt that names no definition is refused', () => {
-  assert.deepEqual(workflowStampBlockers(undefined), ['receipt names no workflow definition']);
-  assert.deepEqual(workflowStampBlockers(null), ['workflow block must be an object']);
+test('a receipt that names no definition is refused with the remedy', () => {
+  // This PR invalidates every receipt already on disk, so the refusal has to say
+  // what writes a new one instead of only naming the absence.
+  const [missing] = workflowStampBlockers(undefined);
+  assert.match(missing, /^receipt names no workflow definition; rerun `corepack pnpm@10\.15\.0 verify:local`/);
+  const [malformed] = workflowStampBlockers(null);
+  assert.match(malformed, /^workflow block must be an object; rerun `corepack pnpm@10\.15\.0 verify:local`/);
 });
 
 test('each wrong field is named as its own refusal', () => {

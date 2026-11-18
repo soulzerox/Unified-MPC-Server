@@ -70,9 +70,11 @@ export function workflowStamp(phase) {
  * the definition existed, so nothing on disk says which contract it satisfied.
  */
 export function workflowStampBlockers(stamp, expectedPhase) {
-  if (stamp === undefined) return ['receipt names no workflow definition'];
+  if (stamp === undefined) {
+    return ['receipt names no workflow definition; rerun `corepack pnpm@10.15.0 verify:local` on this commit to write one'];
+  }
   if (stamp === null || typeof stamp !== 'object' || Array.isArray(stamp)) {
-    return ['workflow block must be an object'];
+    return ['workflow block must be an object; rerun `corepack pnpm@10.15.0 verify:local` on this commit to write one'];
   }
   const blockers = [];
   if (stamp.id !== WORKFLOW_ID) {

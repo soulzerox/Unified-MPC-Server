@@ -330,7 +330,6 @@ Each step ships alone and leaves the repository working.
 | 5b-1 ✅ | Give the phase a subject instead of a request: `mutation-subject.ts` resolves a request named path, a store named path (`restore_deleted_file`, `restore_recovery_item`, `restore_checkpoint`) and a command into one value the gate decides from | shipped in #840 and closed out here: a restore in the opt-in mode is refused until the prepared target it overwrites still has content, and spends that preparation when it lands; a store-named path with no content to bind to (the delete-recovery case) is not demanded, because `prepare_code_change` cannot bind an absent target; the checkpoint subject is read by id, so an old checkpoint is still named; an id the store cannot resolve, and every command-shaped mutation, stay opaque and keep the default behaviour; the default mode is unchanged, including that it does not auto-prepare a restore and does not even read the store |
 | 5b-2 ✅ | Give the phase an answer for what it cannot gate: command-shaped mutations (`shell`, `wsl_exec`, `git`, `process_start`) reach the seam, and an opaque subject is either admitted with a durable record or refused by the workspace's policy | shipped in #844: `workflowGate.mutateOpaque` (`allow` \| `refuse`, default `allow`) is a setting *of* the opt-in phase, so it is inert while `mutate` is `auto_prepare`; `allow` admits the mutation and writes `admitted <tool> with an opaque <reason> subject` to the call's audit detail, `refuse` answers CONFLICT with `reason: 'opaque_mutation'` and the subject's kind, and a command classified `read` (a task `status`, a `dry_run`, a read-only git subcommand) never reaches the phase at all. A mutation with no resolved `workspaceId` is still allowed, and a workspace that does not opt in is unchanged |
 | 5b-3 ✅ | Decide the residual the phase still cannot see: the path-less families 5b-2 excluded (`git_publish`, `office`, `docx_merge`, `scheduler`, `self_heal_apply`, `agent_swarm_run`, `process_stop`, `mcp_call`, `codex_run`, `computer_use`). A mutation with no resolved `workspaceId` was listed in the same residue; without a workspace there is no profile, so the phase allows it by policy rather than deciding it from a posture | shipped in #846: the four-tool list is gone, and so is the union of "tools that mutate" sets it was replaced with — five reviews each found one more declaration outside the union (a scheduled task, a recording, a background shell task, a goal rebase, a merge). The reach is now the complement of `DELEGATED_EFFECT_TOOLS`: every non-`read` mutation the extractor table cannot turn into a path is decided, including `publish_approve`, `codex_stop`, the git worktree tools, `scheduler`, `audio`, `screen_record`, `task_create`, `task_cancel`, `delegate`, `parallel_delegate`, `delegate_cancel`, `guarded_pr_merge` and `rebase_goal_workspace`; what stays delegated is the gateway (`mcp_call`, `web_fetch`, `dom_cdp`), the desktop tools and the file dialog, the commands the workspace configured, the lifecycle of a goal that already exists with its scheduled continuation, runtime selection and registration state, a preview whose contract admits no write, and the native provider's own memory and code index, each with a stated reason. `run_goal` is decided, because starting a goal creates its Goal Workspace, so `refuse` cannot create a worktree by another name; a strict workspace therefore cannot start or resume a goal, and relaxing `mutateOpaque` is the way through. A mutation with no resolved `workspaceId` is still allowed: without a workspace there is no profile, so the phase allows it by policy, and that half of the original residue is a limit rather than something this step decided |
-| 6 ✅ | Version the workflow definition itself instead of each gate script: one id, phase list and gate table in build-free ESM, a fingerprint recorded per version, and a stamp in every receipt that says which definition authorized the decision | shipped for #142 criterion 1: `scripts/workflow-definition.mjs` owns `WORKFLOW_ID`/`WORKFLOW_VERSION`/`WORKFLOW_PHASES`/`WORKFLOW_GATES`, `workflowStamp(phase)` writes `{ id, version, phase, gate, definitionFingerprint }` into the verification (`scripts/local-verify.mjs`), review (`scripts/review-gate.mjs`) and close (`apps/cli/src/commands/gate.ts`) receipts, `scripts/guarded-merge.mjs` refuses a receipt whose block fails `workflowStampBlockers` (including one that predates the definition), and `scripts/workflow-definition.test.mjs` records the digest per version so a silent phase or gate edit fails |
 
 Step 1 is deliberately a refactor with no user-visible change. It is the step
 that pays for the rest, and the one that must not invent new policy.
@@ -340,7 +339,7 @@ that pays for the rest, and the one that must not invent new policy.
 Step 1 is shipped and the core is already independent of the profile runner:
 
 ```
-scripts/workflow-gate-core.mjs     imports only check-issue-closing-keywords.mjs
+scripts/workflow-gate-core.mjs     imports check-issue-closing-keywords.mjs, workflow-definition.mjs
   createGatePolicy({ profileVersion, fingerprintFor })
     ├─ evaluateMergeEligibility
     ├─ selectVerificationReceipt
@@ -360,10 +359,13 @@ The definition those gates are decided under is one module:
 phase list and the gate that decides each phase, and exports
 `workflowStamp(phase)` and `workflowStampBlockers(stamp, phase)`.
 `scripts/local-verify.mjs` and `scripts/review-gate.mjs` write the stamp into
-their receipts, and `apps/cli/src/commands/gate.ts` writes it into the close
-receipt through a variable `import()` because the module is build-free ESM
-rather than a TypeScript input. `scripts/guarded-merge.mjs` refuses a
-verification or review receipt whose block names none or another definition.
+their receipts. The close receipt still does not: `apps/cli/src/commands/gate.ts`
+is compiled TypeScript, and the published `apps/cli` package does not ship
+repo-root `scripts/`, so a `import()` of the definition would resolve to a path
+the installed CLI does not have. It keeps its own literal `version: 1` until
+open question 2 decides whether a profile is data or code.
+`scripts/guarded-merge.mjs` refuses a verification or review receipt whose block
+names none or another definition.
 The fingerprint is recorded per version in
 `scripts/workflow-definition.test.mjs`, so editing a phase or gate without a
 version bump fails before any receipt can be believed.

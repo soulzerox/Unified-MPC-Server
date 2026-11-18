@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { appError, err, ok } from '@unified-mpc/domain';
+import { CAPABILITY_TASK_OWNER_METADATA_KEY } from '@unified-mpc/capabilities';
 import type { FileActor } from '@unified-mpc/application';
 import { UpgradeRuntimeService } from './upgrade-runtime.js';
 import { UpgradeRuntimeStateStore } from './upgrade-runtime-state-store.js';
@@ -1980,4 +1981,34 @@ describe('self-healing (Wave 8)', () => {
     expect(plan).toMatchObject({ ok: true, value: { safeReversibleFixes: [], mutationRequired: false } });
   });
 });
+});
+
+describe('durable task recovery routing (#170)', () => {
+  it('forwards the workspace id as task owner metadata, and only then', async () => {
+    const calls: Record<string, unknown>[] = [];
+    const runtime = new UpgradeRuntimeService({
+      capabilities: {
+        async execute(tool: string, request: Record<string, unknown>): Promise<ReturnType<typeof ok>> {
+          expect(tool).toBe('shell');
+          calls.push(request);
+          return ok({ tasks: [] });
+        },
+      },
+    }, actor);
+
+    await expect(runtime.execute('task_list', { workspaceId: 'workspace-a' })).resolves.toMatchObject({ ok: true });
+    const scoped = (calls[0]?.metadata ?? {}) as Record<string, unknown>;
+    expect(scoped[CAPABILITY_TASK_OWNER_METADATA_KEY]).toMatchObject({
+      clientId: actor.clientId,
+      workspaceId: 'workspace-a',
+    });
+
+    // The workspace is what the store matches on. Without it the request stays
+    // client/session-scoped, which is also why the MCP `tasks/list` protocol —
+    // which has no workspace parameter — cannot see a workspace-owned task.
+    calls.length = 0;
+    await expect(runtime.execute('task_list', {})).resolves.toMatchObject({ ok: true });
+    const unscoped = (calls[0]?.metadata ?? {}) as Record<string, unknown>;
+    expect(unscoped[CAPABILITY_TASK_OWNER_METADATA_KEY]).not.toHaveProperty('workspaceId');
+  });
 });

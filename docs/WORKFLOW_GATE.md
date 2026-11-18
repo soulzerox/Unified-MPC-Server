@@ -510,8 +510,10 @@ parameter and the request scope carries none, so it only sees tasks owned by the
 same client/session; a workspace-owned task is invisible there and must be read
 through those tools. A failed journal append therefore loses the resume row, not
 the task: the append is best-effort by contract and only writes to stderr, while
-the task directory is the authority. A task owned by another workspace stays
-invisible and unaddressable by id.
+the task directory is the authority. A requester whose owner names another
+workspace does not match the stored owner, so the store answers as if the task
+did not exist; the workspace id is a caller-supplied scope, not a credential,
+and this path makes no stronger claim than that.
 
 Staleness is a separate question, and #170 answers it on both sides. A mutation
 is already refused unless the proof the fence admitted is the *current*

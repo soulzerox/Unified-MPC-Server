@@ -2003,6 +2003,15 @@ describe('durable task recovery routing (#170)', () => {
       workspaceId: 'workspace-a',
     });
 
+    // The by-id operations shape their request in a separate branch, so a lost
+    // workspace there would make a task findable but unreadable.
+    for (const tool of ['task_status', 'task_result', 'task_cancel'] as const) {
+      calls.length = 0;
+      await expect(runtime.execute(tool, { taskId: 'task-1', workspaceId: 'workspace-a' })).resolves.toMatchObject({ ok: true });
+      const metadata = (calls[0]?.metadata ?? {}) as Record<string, unknown>;
+      expect(metadata[CAPABILITY_TASK_OWNER_METADATA_KEY]).toMatchObject({ workspaceId: 'workspace-a' });
+    }
+
     // The workspace is what the store matches on. Without it the request stays
     // client/session-scoped, which is also why the MCP `tasks/list` protocol —
     // which has no workspace parameter — cannot see a workspace-owned task.

@@ -325,7 +325,12 @@ export class DurableShellTaskStore {
         killer.once('error', () => resolve(null));
         killer.once('close', resolve);
       });
-      return exitCode === 0 || !isProcessRunning(workerPid);
+      if (exitCode === 0) return true;
+      // `taskkill` could not run. The worker being gone is not proof its child is:
+      // a failed start kills the worker's group, and the command owns another one.
+      if (isProcessRunning(workerPid)) return false;
+      const observed = await this.readFailedStartChild(taskDirectory, 0);
+      return observed.childPid === undefined || !isProcessRunning(observed.childPid);
     }
     const observed = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
     if (observed.childPid === undefined) {
@@ -348,13 +353,17 @@ export class DurableShellTaskStore {
    */
   private async stopTrackedPid(primaryPid: number, relatedPid?: number): Promise<boolean> {
     const identities = new Map<number, string>();
+    let unverifiable = false;
     for (const pid of [primaryPid, relatedPid]) {
       if (pid === undefined) continue;
       const identity = await probeProcessIdentity(pid, this.platform).catch(() => undefined);
       if (identity?.state === 'live') identities.set(pid, identity.processStartedAt);
+      // A probe that could not answer is not "already gone": claiming a clean stop
+      // for a process nobody could see is the fail-open this path exists to avoid.
+      else if (identity?.state !== 'gone') unverifiable = true;
     }
     const terminationPid = identities.has(primaryPid) ? primaryPid : relatedPid;
-    if (terminationPid === undefined || !identities.has(terminationPid)) return true;
+    if (terminationPid === undefined || !identities.has(terminationPid)) return !unverifiable;
     const relatedPids = [primaryPid, relatedPid]
       .filter((pid): pid is number => pid !== undefined && pid !== terminationPid && identities.has(pid));
     return stopProcessTree(terminationPid, relatedPids, this.platform, identities);
@@ -1217,10 +1226,6 @@ try {
     ...(spec.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: spec.windowsVerbatimArguments }),
   });
   metadata.child_pid = child.pid;
-  // Publish the pid before probing its start time: a launcher that has to stop this
-  // worker after a failed start reads the metadata file to find the child, and the
-  // probe can take a second under load.
-  await persist().catch(() => undefined);
   child.stdout?.on('data', (chunk) => { appendBounded(stdoutHandle, chunk, 'stdout'); });
   child.stderr?.on('data', (chunk) => { appendBounded(stderrHandle, chunk, 'stderr'); });
   child.once('error', (error) => { void finish('failed', -1, 'Local task failed to start: ' + error.message); });
@@ -1239,6 +1244,12 @@ try {
       await finish(code === 0 ? 'completed' : 'failed', code ?? -1);
     })();
   });
+  // Publish the pid before probing its start time: a launcher that has to stop this
+  // worker after a failed start reads the metadata file to find the child, and the
+  // probe can take a second under load. The listeners above are registered first, so
+  // a command that exits immediately still has its exit heard rather than emitted
+  // into nothing while this write is pending.
+  if (!settled) await persist().catch(() => undefined);
   metadata.child_started_at = child.pid ? await processStartedAt(child.pid) : null;
   if (metadata.child_started_at === null) delete metadata.child_started_at;
   if (!settled) await persist();

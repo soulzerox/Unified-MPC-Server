@@ -533,15 +533,11 @@ export class DurableShellTaskStore {
       return err(appError('PERMISSION_DENIED', 'Task belongs to another client or workspace'));
     }
 
-    const before = await this.reconcile(metadataResult.value);
-    if (isTerminal(before.state)) {
-      // A terminal record can still name a live process — a start that failed after
-      // the fork records `failed` — so goal cleanup delegates to `cancel`, which
-      // finishes that stop without changing the outcome.
-      const settled = await this.cancel(taskId, storedOwner);
-      if (!settled.ok) return settled;
-      return ok({ matched: true, state: 'already_terminal', detail: before.state });
-    }
+    // A terminal record can still name a live process — a start that failed after the
+    // fork records `failed` — so this delegates to `cancel`, which finishes that stop.
+    // What is reported is what happened, not what was read first: the worker of a
+    // failed start can still rewrite the record to `running`, and that cancel really
+    // cancels it, so this must not answer `already_terminal` from the pre-read.
     const cancelled = await this.cancel(taskId, storedOwner);
     if (!cancelled.ok) return cancelled;
     const state = cancelled.value.state;
@@ -619,8 +615,10 @@ export class DurableShellTaskStore {
       hydrated.error = appendTerminationNote(hydrated.error,
         'the process this record named before it reached its final state was stopped by a later cancel');
     } else {
-      hydrated.error = appendTerminationNote(hydrated.error,
-        'the process this record named before it reached its final state could not be stopped and may still be running');
+      // The stop can be retried, and a retry must not grow the field it reports in:
+      // the sentence is the state, so it is written once.
+      const note = 'the process this record named before it reached its final state could not be stopped and may still be running';
+      if (hydrated.error?.includes(note) !== true) hydrated.error = appendTerminationNote(hydrated.error, note);
     }
     await this.writeMetadata(hydrated);
     return this.snapshotFromMetadata(hydrated);
@@ -634,7 +632,8 @@ export class DurableShellTaskStore {
    *
    * `no_process` means nothing this record names is still the process it named: the
    * pids are absent, gone, or reused by something else. `unverified` is the case
-   * where a signal was sent but the stop could not be proven.
+   * where the stop could not be proven — a signal was sent and did not settle, or a
+   * pid exists whose identity could not be read.
    */
   private async terminateTrackedProcesses(metadata: DurableTaskMetadata): Promise<'stopped' | 'unverified' | 'no_process'> {
     const workerProbe = metadata.worker_pid === undefined
@@ -648,7 +647,13 @@ export class DurableShellTaskStore {
     const terminationPid = this.platform !== 'win32' && childRunning
       ? metadata.child_pid
       : workerRunning ? metadata.worker_pid : (childRunning ? metadata.child_pid : undefined);
-    if (terminationPid === undefined) return 'no_process';
+    if (terminationPid === undefined) {
+      // A pid whose identity could not be read is not a pid this record has been
+      // shown not to name: say the stop is unproven, never that there is nothing to
+      // stop, or a live process would be reported as settled.
+      const unreadable = workerProbe.state === 'unverifiable' || childProbe.state === 'unverifiable';
+      return unreadable ? 'unverified' : 'no_process';
+    }
     const relatedPids = [metadata.worker_pid, metadata.child_pid]
       .filter((pid): pid is number => pid !== undefined && pid !== terminationPid);
     const identities = new Map<number, string>();

@@ -342,7 +342,6 @@ describe('close gate receipts', () => {
           blockers: [{ kind: 'cleanup', workspaceId: WORKSPACE, disposition: 'retention_candidate', reasons: [] }],
         },
       }],
-      ['a non-string headSha', { ...base, headSha: 42 }],
       ['a non-string goalId', { ...base, verdict: { ...verdict, goalId: 42 } }],
     ];
     for (const [name, body] of mutations) {
@@ -350,6 +349,26 @@ describe('close gate receipts', () => {
       await writeFile(candidate, JSON.stringify(body), 'utf8');
       expect((await readCloseGateReceipt(candidate)).ok, name).toBe(false);
     }
+  });
+
+  it('reads a receipt an older caller stamped with a head', async () => {
+    // The close receipt names no revision, so a file that carries one anyway is
+    // still this module's receipt: the field is ignored rather than refused.
+    const directory = await mkdtemp(path.join(tmpdir(), 'close-gate-'));
+    temporaryDirectories.push(directory);
+    const candidate = path.join(directory, 'from-an-older-build.json');
+    await writeFile(candidate, JSON.stringify({
+      kind: 'workflow-gate',
+      phase: 'close',
+      version: 1,
+      gateId: 'g',
+      createdAt: '2026-11-14T00:00:00.000Z',
+      headSha: 'a'.repeat(40),
+      verdict: evaluateCloseGate(input()),
+    }), 'utf8');
+    const read = await readCloseGateReceipt(candidate);
+    expect(read.ok).toBe(true);
+    expect(read.ok && 'headSha' in read.value).toBe(false);
   });
 
   it('refuses a receipt whose envelope is not the one this module writes', async () => {

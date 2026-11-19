@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -584,6 +585,67 @@ describe('durable shell task parking (#145)', () => {
 
     const waited = await store.wait('waiting-one', 5, undefined, owner);
     expect(waited).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
+  });
+
+  it('stops the child a failed start already forked', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-orphan-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const marker = path.join(root, 'child-survived.txt');
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    await store.reserve({
+      taskId: 'orphan-check',
+      executable: process.execPath,
+      // The worker forks this command into its own detached group, so the marker
+      // is written only if that child outlived the failed start — the worker is
+      // not what leaks here.
+      arguments: ['-e', `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 800)`],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+    // A directory where the launcher publishes the worker pid makes that write fail
+    // after the worker was spawned, which is the leak this pins.
+    await mkdir(path.join(tasksRoot, 'orphan-check', 'worker.pid'), { recursive: true });
+
+    const started = await store.startReserved('orphan-check', process.env);
+
+    expect(started).toMatchObject({ ok: false });
+    expect(await store.snapshot('orphan-check')).toMatchObject({ ok: true, value: { state: 'failed' } });
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('reports a command it could not spawn as a failed task, not as a dead worker', async () => {
+    // `spawn` reports a missing executable through the child's `error` event, which
+    // only a registered listener can turn into `failed`. If the worker awaits a write
+    // between the fork and attaching that listener, the event is unhandled and takes
+    // the worker down instead, leaving the task `running` until its timeout.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-spawn-'));
+    temporaryRoots.push(root);
+    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    await store.reserve({
+      taskId: 'missing-executable',
+      executable: path.join(root, 'no-such-executable'),
+      arguments: [],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+
+    expect(await store.startReserved('missing-executable', process.env)).toMatchObject({ ok: true });
+    const waited = await store.wait('missing-executable', 10, undefined, owner);
+
+    expect(waited).toMatchObject({ ok: true, value: { state: 'failed', exit_code: -1 } });
+    expect(String((waited.ok && waited.value.error) ?? '')).toContain('failed to start');
   });
 
   it('correlates a task with the goal generation that started it, and leaves it absent otherwise', async () => {

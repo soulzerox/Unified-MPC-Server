@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -100,6 +100,15 @@ const WORKER_STARTED_FILENAME = 'worker.started';
 const METADATA_READ_RETRIES = 4;
 const PROCESS_EXIT_RECONCILE_DELAY_MS = 75;
 const PROCESS_HANDLE_RELEASE_GRACE_MS = 150;
+// A failed start kills the child the worker already forked. The worker persists
+// that pid immediately after spawning, so this only covers a slow `ps` probe
+// inside the worker, not a task that legitimately has no child.
+const FAILED_START_CHILD_PID_WAIT_MS = 2_000;
+// A worker that wrote one of these has finished: it cannot fork a child afterwards,
+// so a missing `child_pid` is then a fact rather than a race.
+const WORKER_SETTLED_STATES: ReadonlySet<string> = new Set([
+  'completed', 'failed', 'timed_out', 'cancelled', 'termination_unverified',
+]);
 // Host process identity probes start a second PowerShell/`ps` process. Under
 // a busy desktop test run that probe can be delayed even though the durable
 // worker is healthy. Keep the startup window finite (so a genuinely
@@ -241,11 +250,12 @@ export class DurableShellTaskStore {
     delete metadata.error;
     delete metadata.exit_code;
     const spec: DurableWorkerSpec = { ...specResult.value, startedAt, deadlineAt };
+    let worker: ChildProcess | undefined;
     try {
       await writeFile(specPath, JSON.stringify(spec), 'utf8');
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
       const workerPath = await this.ensureWorkerScript();
-      const worker = spawn(process.execPath, [workerPath, specPath], {
+      worker = spawn(process.execPath, [workerPath, specPath], {
         // The durable worker only coordinates the real child process; it does not need
         // the workspace as its own cwd. Keeping the worker outside the workspace avoids
         // a transient Windows directory lock after the child has already completed.
@@ -274,13 +284,138 @@ export class DurableShellTaskStore {
       worker.unref();
       return ok(await this.snapshotFromMetadata(metadata));
     } catch (error: unknown) {
+      // A failure after the fork leaves a worker this store can no longer name: the
+      // metadata below records `failed` and the pid is never published, so no status,
+      // cancel or sweep can find it, and that worker keeps the real child alive. Stop
+      // the tree before recording the failure — the worker also owns `task.json`, so
+      // writing it a live process may overwrite is a losing race anyway.
+      const stopped = worker?.pid === undefined
+        ? true
+        : await this.stopFailedStart(worker.pid, taskDirectory).catch(() => false);
       const message = error instanceof Error ? error.message : 'Durable task could not start';
       metadata.state = 'failed';
       metadata.exit_code = -1;
-      metadata.error = `Durable task could not start: ${message}`;
+      metadata.error = stopped
+        ? `Durable task could not start: ${message}`
+        : `Durable task could not start: ${message}; the worker it forked could not be stopped and may still be running`;
       metadata.finished_at = new Date().toISOString();
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8').catch(() => undefined);
       return err(appError('INTERNAL_ERROR', 'Durable task could not start', true));
+    }
+  }
+
+  /**
+   * Stop the worker a failed start forked, and the real child it already started.
+   *
+   * The worker is spawned detached and spawns the command into a second detached
+   * process group, so signalling the worker's group alone leaves the command
+   * running with nothing naming it. `cancel` stops the child first for the same
+   * reason; a failed start has no metadata to read it from, so the child is taken
+   * from the `task.json` the worker publishes as soon as it has a pid. Windows
+   * needs neither: `taskkill /T` walks the tree from the worker.
+   *
+   * Returns whether the processes are gone. A `false` is reported in the task's
+   * error rather than swallowed, because the alternative is a live orphan nobody
+   * can find.
+   */
+  private async stopFailedStart(workerPid: number, taskDirectory: string): Promise<boolean> {
+    if (this.platform === 'win32') {
+      const exitCode = await new Promise<number | null>((resolve) => {
+        const killer = spawn('taskkill', ['/PID', String(workerPid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => resolve(null));
+        killer.once('close', resolve);
+      });
+      if (exitCode === 0) return true;
+      // `taskkill` could not run. The worker being gone is not proof its child is:
+      // a failed start kills the worker's group, and the command owns another one.
+      if (isProcessRunning(workerPid)) return false;
+      const childPid = await this.readFailedStartChild(taskDirectory, 0);
+      if (childPid === undefined || !isProcessRunning(childPid)) return true;
+      // The child outlived the worker, which is the leak this path exists to close.
+      // Walk its tree the same way the worker's was walked, then check it again
+      // rather than reporting a gap the caller would read as a clean stop.
+      const childExitCode = await new Promise<number | null>((resolve) => {
+        const killer = spawn('taskkill', ['/PID', String(childPid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => resolve(null));
+        killer.once('close', resolve);
+      });
+      return childExitCode === 0 || !isProcessRunning(childPid);
+    }
+    const observed = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
+    if (observed === undefined) {
+      // No child was published in time. Stop the worker first: a dead worker cannot
+      // fork the command afterwards, and the one read after the kill catches the case
+      // where it forked just before dying. Reporting `true` without that second look
+      // would call an unverifiable stop clean.
+      //
+      // The second read is the whole test. A worker stopped here was killed by a
+      // signal, and it has no handler that would write a terminal state on the way
+      // out, so waiting for one would report every such stop as unverified — a claim
+      // about the worker that `workerStopped` has already answered.
+      const workerStopped = await this.stopTrackedPid(workerPid);
+      const late = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
+      if (late === undefined) return workerStopped;
+      return workerStopped && await this.stopTrackedPid(late, workerPid);
+    }
+    return this.stopTrackedPid(observed, workerPid);
+  }
+
+  /**
+   * Stop one process, optionally keeping a related pid alive long enough to reap it.
+   * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid
+   * is probed first and handed over; a pid already gone needs no signal.
+   *
+   * The start time bounds the POSIX group signal — that path never signals a pid whose
+   * identity changed. Windows goes through `taskkill /T`, which has no identity check,
+   * so a pid reused inside this window could be killed there; the pinned start time is
+   * still what decides whether the stop counts as verified.
+   */
+  private async stopTrackedPid(primaryPid: number, relatedPid?: number): Promise<boolean> {
+    const identities = new Map<number, string>();
+    let unverifiable = false;
+    for (const pid of [primaryPid, relatedPid]) {
+      if (pid === undefined) continue;
+      const identity = await probeProcessIdentity(pid, this.platform).catch(() => undefined);
+      if (identity?.state === 'live') identities.set(pid, identity.processStartedAt);
+      // A probe that could not answer is not "already gone": claiming a clean stop
+      // for a process nobody could see is the fail-open this path exists to avoid.
+      else if (identity?.state !== 'gone') unverifiable = true;
+    }
+    const terminationPid = identities.has(primaryPid) ? primaryPid : relatedPid;
+    if (terminationPid === undefined || !identities.has(terminationPid)) return !unverifiable;
+    const relatedPids = [primaryPid, relatedPid]
+      .filter((pid): pid is number => pid !== undefined && pid !== terminationPid && identities.has(pid));
+    // Still signal what was verified — a second look may reap more than it can prove —
+    // but an unprobed pid keeps the stop unclean even when this one is gone.
+    const stopped = await stopProcessTree(terminationPid, relatedPids, this.platform, identities);
+    return stopped && !unverifiable;
+  }
+
+  /**
+   * Read the child pid the worker publishes, waiting for the write. The worker
+   * persists it right after spawning, before it probes the child's start time, so a
+   * short wait covers a slow probe rather than a slow fork. A worker that already
+   * wrote a terminal state cannot fork afterwards, so the wait ends there instead of
+   * spending its budget on an answer that will not change.
+   */
+  private async readFailedStartChild(
+    taskDirectory: string,
+    budgetMs: number,
+  ): Promise<number | undefined> {
+    const deadline = Date.now() + budgetMs;
+    for (;;) {
+      const raw = await readFile(path.join(taskDirectory, METADATA_FILENAME), 'utf8').catch(() => undefined);
+      if (raw !== undefined) {
+        try {
+          const parsed = JSON.parse(raw) as { child_pid?: unknown; state?: unknown };
+          if (typeof parsed.child_pid === 'number') return parsed.child_pid;
+          if (WORKER_SETTLED_STATES.has(parsed.state as string)) return undefined;
+        } catch {
+          // The worker owns this file and may be mid-write; keep waiting.
+        }
+      }
+      if (Date.now() >= deadline) return undefined;
+      await delay(25);
     }
   }
 
@@ -1131,6 +1266,12 @@ try {
       await finish(code === 0 ? 'completed' : 'failed', code ?? -1);
     })();
   });
+  // Publish the pid before probing its start time: a launcher that has to stop this
+  // worker after a failed start reads the metadata file to find the child, and the
+  // probe can take a second under load. The listeners above are registered first, so
+  // a command that exits immediately still has its exit heard rather than emitted
+  // into nothing while this write is pending.
+  if (!settled) await persist().catch(() => undefined);
   metadata.child_started_at = child.pid ? await processStartedAt(child.pid) : null;
   if (metadata.child_started_at === null) delete metadata.child_started_at;
   if (!settled) await persist();

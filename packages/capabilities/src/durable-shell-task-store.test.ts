@@ -629,32 +629,39 @@ describe('durable shell task parking (#145)', () => {
     const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
     sleeper.unref();
     const startedAt = await readProcessStartedAt(sleeper.pid);
-    const taskId = 'failed-start-residue';
-    await mkdir(path.join(tasksRoot, taskId), { recursive: true });
-    await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
-      version: 1,
-      task_id: taskId,
-      // What a start that failed after the fork records: the outcome already
-      // happened, and the worker pid is the only handle to the tree it could not stop.
-      state: 'failed',
-      started_at: new Date(Date.now() - 1_000).toISOString(),
-      finished_at: new Date(Date.now() - 500).toISOString(),
-      include_stdout: false,
-      include_stderr: false,
-      max_output_bytes: 1024,
-      deadline_at: new Date(Date.now() + 60_000).toISOString(),
-      error: 'Durable task could not start: publish failed; the worker it forked could not be stopped and may still be running',
-      worker_pid: sleeper.pid,
-      worker_started_at: startedAt,
-    }), 'utf8');
+    try {
+      const taskId = 'failed-start-residue';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        // What a start that failed after the fork records: the outcome already
+        // happened, and the worker pid is the only handle to the tree it could not stop.
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start: publish failed; the worker it forked could not be stopped and may still be running',
+        worker_pid: sleeper.pid,
+        worker_started_at: startedAt,
+      }), 'utf8');
 
-    const cancelled = await store.cancel(taskId);
+      const cancelled = await store.cancel(taskId);
 
-    expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
-    // The outcome is history and stays; the pid that is no longer live is not evidence.
-    expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
-    expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
-    expect(isProcessAlive(sleeper.pid)).toBe(false);
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      // The outcome is history and stays; the pid that is no longer live is not evidence.
+      expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
+      expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      // A failing assertion must not leave the fixture running for a minute.
+      if (sleeper.pid !== undefined && await readProcessStartedAt(sleeper.pid).then((current) => current === startedAt, () => false)) {
+        process.kill(sleeper.pid, 'SIGKILL');
+      }
+    }
   });
 
   it('does not signal a terminal record pid that now names a different process', async () => {
@@ -665,29 +672,38 @@ describe('durable shell task parking (#145)', () => {
     const store = new DurableShellTaskStore(tasksRoot);
     const bystander = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
     bystander.unref();
-    const taskId = 'reused-pid';
-    await mkdir(path.join(tasksRoot, taskId), { recursive: true });
-    await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
-      version: 1,
-      task_id: taskId,
-      state: 'failed',
-      started_at: new Date(Date.now() - 1_000).toISOString(),
-      finished_at: new Date(Date.now() - 500).toISOString(),
-      include_stdout: false,
-      include_stderr: false,
-      max_output_bytes: 1024,
-      deadline_at: new Date(Date.now() + 60_000).toISOString(),
-      error: 'Durable task could not start',
-      worker_pid: bystander.pid,
-      // A live pid with a different start time is the reused-pid case: the identity is
-      // what authorizes a signal, never the number alone.
-      worker_started_at: new Date(0).toISOString(),
-    }), 'utf8');
+    const bystanderStartedAt = await readProcessStartedAt(bystander.pid);
+    try {
+      const taskId = 'reused-pid';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start',
+        worker_pid: bystander.pid,
+        // A live pid with a different start time is the reused-pid case: the identity is
+        // what authorizes a signal, never the number alone.
+        worker_started_at: new Date(0).toISOString(),
+      }), 'utf8');
 
-    const cancelled = await store.cancel(taskId);
+      const cancelled = await store.cancel(taskId);
 
-    expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed', error: 'Durable task could not start' } });
-    expect(isProcessAlive(bystander.pid)).toBe(true);
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed', error: 'Durable task could not start' } });
+      expect(isProcessAlive(bystander.pid)).toBe(true);
+    } finally {
+      // The fixture is the test's own process and nothing else may share it, so the
+      // captured identity is what authorizes the kill, exactly as for a task pid.
+      if (bystander.pid !== undefined && await readProcessStartedAt(bystander.pid).then((startedAt) => startedAt === bystanderStartedAt, () => false)) {
+        process.kill(bystander.pid, 'SIGKILL');
+      }
+    }
   });
 
   it('reports a command it could not spawn as a failed task, not as a dead worker', async () => {

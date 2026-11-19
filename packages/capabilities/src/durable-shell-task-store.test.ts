@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ShellCapabilityBackend } from './shell-backend.js';
 import { DurableShellTaskStore, parsePosixProcessProbe } from './durable-shell-task-store.js';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const temporaryRoots: string[] = [];
@@ -620,6 +620,76 @@ describe('durable shell task parking (#145)', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it('stops a process a terminal record still names, instead of leaving the pid as a note', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-late-cancel-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const taskId = 'failed-start-residue';
+    await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+    await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      // What a start that failed after the fork records: the outcome already
+      // happened, and the worker pid is the only handle to the tree it could not stop.
+      state: 'failed',
+      started_at: new Date(Date.now() - 1_000).toISOString(),
+      finished_at: new Date(Date.now() - 500).toISOString(),
+      include_stdout: false,
+      include_stderr: false,
+      max_output_bytes: 1024,
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+      error: 'Durable task could not start: publish failed; the worker it forked could not be stopped and may still be running',
+      worker_pid: sleeper.pid,
+      worker_started_at: startedAt,
+    }), 'utf8');
+
+    const cancelled = await store.cancel(taskId);
+
+    expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
+    // The outcome is history and stays; the pid that is no longer live is not evidence.
+    expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
+    expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
+    expect(isProcessAlive(sleeper.pid)).toBe(false);
+  });
+
+  it('does not signal a terminal record pid that now names a different process', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-reused-pid-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const bystander = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    bystander.unref();
+    const taskId = 'reused-pid';
+    await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+    await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'failed',
+      started_at: new Date(Date.now() - 1_000).toISOString(),
+      finished_at: new Date(Date.now() - 500).toISOString(),
+      include_stdout: false,
+      include_stderr: false,
+      max_output_bytes: 1024,
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+      error: 'Durable task could not start',
+      worker_pid: bystander.pid,
+      // A live pid with a different start time is the reused-pid case: the identity is
+      // what authorizes a signal, never the number alone.
+      worker_started_at: new Date(0).toISOString(),
+    }), 'utf8');
+
+    const cancelled = await store.cancel(taskId);
+
+    expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed', error: 'Durable task could not start' } });
+    expect(isProcessAlive(bystander.pid)).toBe(true);
+  });
+
   it('reports a command it could not spawn as a failed task, not as a dead worker', async () => {
     // `spawn` reports a missing executable through the child's `error` event, which
     // only a registered listener can turn into `failed`. If the worker awaits a write
@@ -857,4 +927,25 @@ async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): 
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error('Condition was not met before timeout');
+}
+
+function isProcessAlive(pid: number | undefined): boolean {
+  if (pid === undefined) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readProcessStartedAt(pid: number | undefined): Promise<string> {
+  if (pid === undefined) throw new Error('fixture process has no pid');
+  const { stdout } = await promisify(execFile)('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'stat='], {
+    encoding: 'utf8',
+    env: { ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }), LC_ALL: 'C', LANG: 'C' },
+  });
+  const probe = parsePosixProcessProbe(stdout);
+  if (probe.state !== 'live') throw new Error(`fixture process identity is ${probe.state}`);
+  return probe.processStartedAt;
 }

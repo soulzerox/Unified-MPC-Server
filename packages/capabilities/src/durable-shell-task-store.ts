@@ -344,14 +344,20 @@ export class DurableShellTaskStore {
     const observed = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
     if (observed === undefined) {
       // No child was published in time. Stop the worker first: a dead worker cannot
-      // fork afterwards, and the read after the kill catches a child whose pid landed
-      // just before the worker died.
+      // fork afterwards, and the read after the kill finds a child whose pid is in
+      // `task.json` when the worker dies.
       //
-      // What that read cannot see: a worker killed inside its first `child_pid` write
-      // leaves a detached child no read can find, and this path then reports a clean
-      // stop over it. Narrow — one write, only reachable when no pid appeared within
-      // the wait — and the alternative, never claiming a stop, would misreport every
-      // ordinary case where the worker is provably dead.
+      // The worker rewrites `task.json` with a plain `writeFile` at least three times
+      // after the fork — the publish below, `child_started_at`, and `finish` — so a
+      // kill inside any of those writes leaves a truncated file that reads as no task
+      // at all, and this path then reports a clean stop over a live detached child. A
+      // pid that had already landed is destroyed by the next truncated rewrite, not
+      // just missed by the first one.
+      //
+      // The residue is therefore "any rewrite the worker is inside when it dies", not
+      // one narrow window; it stays narrow in practice only because it needs a kill to
+      // land inside a write. The alternative, never claiming a stop, would misreport
+      // every ordinary case where the worker is provably dead.
       //
       // The worker's terminal state is not the test: a stopped worker was killed by a
       // signal and has no handler that would write one, so waiting for it would report

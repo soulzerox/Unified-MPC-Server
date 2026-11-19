@@ -799,6 +799,7 @@ describe('ShellCapabilityBackend unrestricted', () => {
     if (!started.ok) return;
     const taskId = String((started.value as { task_id: string }).task_id);
 
+    let cleanup: Awaited<ReturnType<typeof backend.cancelForGoal>> | undefined;
     // A task this host still holds in memory is read through the same workspace
     // check by both probes, which return different shapes. Relaxing one and not
     // the other would let a goal read another workspace's task through the door
@@ -810,10 +811,15 @@ describe('ShellCapabilityBackend unrestricted', () => {
         .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
       await expect(backend.taskLivenessForGoal('workspace-2', taskId)).resolves.toBe('unknown');
     } finally {
-      // Cleanup, not an assertion: a failed probe must not leave its 30 s sleeper
-      // alive for the rest of the run, and must not be reported as a cancel fault.
-      await backend.cancelForGoal('client-1', 'workspace-1', taskId);
+      // Cleanup must run even when a probe fails, so it lives here and its result is
+      // asserted below rather than inside: an assertion that throws in `finally`
+      // would blame this cancel for a probe's failure, and no assertion at all would
+      // leave the in-memory cancel branch uncovered.
+      cleanup = await backend.cancelForGoal('client-1', 'workspace-1', taskId);
     }
+    // `durableStore` is undefined here, so this result comes from the record held in
+    // memory — the branch nothing else in this suite reaches.
+    expect(cleanup).toMatchObject({ ok: true, value: { matched: true } });
   }, 15_000);
 
   it('keeps an unverified termination pinned, because the work may still be running', async () => {

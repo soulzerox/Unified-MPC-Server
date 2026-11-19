@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { explainMutationBlockers } from './workflow-blockers.js';
 
 const optedIn = { mutate: 'require_preparation', mutateOpaque: 'allow' } as const;
+const optedInAndOpaqueRefused = { mutate: 'require_preparation', mutateOpaque: 'refuse' } as const;
 const byDefault = { mutate: 'auto_prepare', mutateOpaque: 'allow' } as const;
 
 describe('explainMutationBlockers', () => {
@@ -38,8 +39,8 @@ describe('explainMutationBlockers', () => {
     }]);
   });
 
-  it('treats an unreadable harness as the refusal the gate would give, and says the answer is incomplete', () => {
-    const projection = explainMutationBlockers({ gate: optedIn, harness: 'unknown', requestedPaths: ['src/a.ts'] });
+  it('treats a harness this session never activated as the refusal the gate would give', () => {
+    const projection = explainMutationBlockers({ gate: optedIn, harness: 'unknown', unreadable: 'no_activation', requestedPaths: ['src/a.ts'] });
 
     // The gate refuses in this state (an absent harness is `inactive`), so the
     // projection reports that refusal rather than inventing "unblocked" — and it
@@ -47,13 +48,40 @@ describe('explainMutationBlockers', () => {
     // workspace will ask for once the harness is up.
     expect(projection).toMatchObject({ blocked: true, evaluated: false });
     expect(projection.blockers.map((blocker) => blocker.code)).toEqual(['harness_inactive', 'preparation_missing']);
-    expect(projection.note).toContain('could not read this workspace harness state');
+    expect(projection.note).toContain('No harness is active for this session');
   });
 
-  it('does not turn an unreadable harness into a blocker for a workspace that never opted in', () => {
-    const projection = explainMutationBlockers({ gate: byDefault, harness: 'unknown' });
+  it('says which read failed, so an unreadable harness is not reported as an absent one', () => {
+    const projection = explainMutationBlockers({ gate: optedIn, harness: 'unknown', unreadable: 'agents_md' });
 
-    expect(projection).toMatchObject({ blocked: false, evaluated: false });
+    expect(projection).toMatchObject({ blocked: true, evaluated: false });
+    expect(projection.note).toContain('AGENTS.md');
+  });
+
+  it('does not call an unreadable harness a missing fact for a posture that never reads it', () => {
+    const projection = explainMutationBlockers({ gate: byDefault, harness: 'unknown', unreadable: 'no_activation' });
+
+    expect(projection).toMatchObject({ blocked: false, evaluated: true });
     expect(projection.blockers).toEqual([]);
+  });
+
+  it('drops a preparation the seam would have wiped when the workspace source moved', () => {
+    const projection = explainMutationBlockers({
+      gate: optedIn,
+      harness: 'active',
+      requestedPaths: ['src/a.ts'],
+      preparedPaths: ['src/a.ts'],
+      sourceMoved: true,
+    });
+
+    expect(projection.blockers.map((blocker) => blocker.code)).toEqual(['preparation_missing']);
+    expect(projection.note).toContain('source moved');
+  });
+
+  it('names the opaque half instead of implying the whole phase is satisfied', () => {
+    const projection = explainMutationBlockers({ gate: optedInAndOpaqueRefused, harness: 'active' });
+
+    expect(projection).toMatchObject({ blocked: false, evaluated: true });
+    expect(projection.note).toContain('mutateOpaque: refuse');
   });
 });

@@ -628,7 +628,9 @@ function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {
  * A projection that guessed "active" would tell an operator the opposite of what
  * their next mutation will hear.
  */
-export function createWorkflowGateProbe(workspaces: WorkspaceService): WorkflowGateProbe {
+export function createWorkflowGateProbe(
+  workspaces: Pick<WorkspaceService, 'list'>,
+): WorkflowGateProbe {
   return async (workspaceId: string) => {
     const workspace = (await workspaces.list()).find((entry) => entry.id === workspaceId);
     if (workspace === undefined) return undefined;

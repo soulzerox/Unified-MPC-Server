@@ -320,7 +320,7 @@ describe('workspace engineering harness enforcement', () => {
   });
 
   it('explains the mutate phase from the same decision it enforces, and reports a harness it cannot see as unreadable rather than active', async () => {
-    const { services, writes, setFileContent, setAgentsMd } = createHarnessServices();
+    const { services, writes, setFileContent, setAgentsMd, setHead } = createHarnessServices();
     const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
 
     // Default posture: the phase prepares on demand, so there is nothing to explain
@@ -356,6 +356,17 @@ describe('workspace engineering harness enforcement', () => {
     await expect(registry.workflowGateProjection('workspace-1', ['src/app.ts'])).resolves.toMatchObject({
       evaluated: true, blocked: false, blockers: [],
     });
+
+    // The seam voids every preparation when the admitted source view moves. A
+    // projection that read only the ledger would keep reporting the path as
+    // prepared while the next mutation demands it again — the disagreement this
+    // module exists to prevent.
+    setHead('b'.repeat(40));
+    const moved = await registry.workflowGateProjection('workspace-1', ['src/app.ts']);
+    expect(moved.blocked).toBe(true);
+    expect(moved.blockers.map((blocker) => blocker.code)).toEqual(['preparation_missing']);
+    expect(moved.note).toContain('source moved');
+    setHead('a'.repeat(40));
 
     // A harness that moved under the preparation is what the seam refuses next, and
     // the projection reads the same hash to say so instead of reporting `active`.

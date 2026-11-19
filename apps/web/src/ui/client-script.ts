@@ -1368,9 +1368,15 @@ export function getClientScriptJs(): string {
         block.className = 'project-goal-blockers';
         const heading = 'Mutate gate: ' + projection.mode;
         const verdict = projection.blocked
-          ? 'requires evidence before writing'
-          : 'nothing required before writing';
+          ? 'requires evidence for a path-named write'
+          : 'nothing required for a path-named write';
         block.textContent = heading + ' — ' + verdict;
+        if (typeof projection.note === 'string' && projection.note.length > 0) {
+          const note = document.createElement('div');
+          note.className = 'project-goal-blockers';
+          note.textContent = projection.note;
+          block.appendChild(note);
+        }
         if (projection.evaluated === false) {
           const unseen = document.createElement('div');
           unseen.className = 'project-goal-blockers';

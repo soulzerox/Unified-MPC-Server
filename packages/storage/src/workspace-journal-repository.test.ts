@@ -348,6 +348,11 @@ describe('SqliteWorkspaceJournalRepository', () => {
       ['git_worktree_spawn', 'worktree_preview_settled'],
       ['agent_swarm_run', 'swarm_read_settled'],
       ['merge_verification_run', 'verification_settled'],
+      // A create that reported the capability unavailable settles itself, and its
+      // kind joined the durable set in #921: without this row the test would keep
+      // passing if `task_create` were dropped from that set, which is the retention
+      // half of the same decision.
+      ['task_create', 'task_create_settled'],
     ] as const;
     for (const [kind, selfSettledCode] of kinds) {
       const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-journal-'));

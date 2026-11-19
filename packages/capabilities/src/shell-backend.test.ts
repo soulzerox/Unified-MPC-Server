@@ -819,8 +819,11 @@ describe('ShellCapabilityBackend unrestricted', () => {
     }
     // `durableStore` is undefined here, so this result comes from the record held in
     // memory — the branch nothing else in this suite reaches. The state is pinned, not
-    // just `matched`: `matched` is also true for `termination_unverified`, which is
-    // exactly the outcome where the sleeper this cleanup exists to kill survives.
+    // just `matched`: `matched` is also true for `termination_unverified`, which says
+    // only that the stop could not be proven — a state that covers both a sleeper that
+    // survived and one that died while the verification failed (the test above,
+    // 'retains an explicit unverified state when the root closes before termination
+    // rejection', builds that second case). `cancelled` is the state that claims death.
     expect(cleanup).toMatchObject({ ok: true, value: { matched: true, state: 'cancelled' } });
   }, 15_000);
 

@@ -54,8 +54,11 @@ export type UnreadableHarnessFact = 'no_activation' | 'agents_md' | 'source_iden
 
 export interface MutationBlockedWorkFacts {
   readonly gate: WorkspaceWorkflowGate;
-  /** `unknown` means the runtime could not read its harness ledger. */
-  readonly harness: 'active' | 'inactive' | 'stale' | 'unknown';
+  /**
+   * `unknown` means the runtime could not read its harness ledger. Absent means the
+   * caller's posture never reads it (`auto_prepare`), so no harness fact is claimed.
+   */
+  readonly harness?: 'active' | 'inactive' | 'stale' | 'unknown';
   /** Present when `harness` is `unknown`; both are the seam's refusal, for two reasons. */
   readonly unreadable?: UnreadableHarnessFact;
   /** Development artifact paths the question is about; empty asks about the phase. */
@@ -75,6 +78,16 @@ const CLEARED_BY: Readonly<Record<MutateBlockerCode, string>> = {
   preparation_missing: 'Run prepare_code_change for this path against the current workspace state',
 };
 
+/**
+ * A read that failed is not cleared by `workspace_bootstrap`: bootstrap re-reads the
+ * same file or the same git identity and fails the same way. Naming it saves an
+ * operator from a command that cannot help.
+ */
+const UNREADABLE_CLEARED_BY: Readonly<Record<'agents_md' | 'source_identity', string>> = {
+  agents_md: 'Fix the harness read first: the AGENTS.md read itself fails, so workspace_bootstrap fails the same way',
+  source_identity: 'Fix the workspace source read first: the git identity read itself fails, so no preparation can be shown to apply',
+};
+
 const UNREADABLE_NOTE: Readonly<Record<UnreadableHarnessFact, string>> = {
   no_activation: 'No harness is active for this session, so the mutate phase is treated as inactive — the same refusal a mutation from here would receive.',
   agents_md: 'The harness could not be read (AGENTS.md), so the mutate phase is treated as inactive — a mutation from here would fail on that read before it reached the preparation check.',
@@ -86,15 +99,19 @@ export function explainMutationBlockers(facts: MutationBlockedWorkFacts): Blocke
   // A moved workspace source voids every preparation the ledger still holds, exactly
   // as the seam's `synchronizeSource` does.
   const preparedPaths = facts.sourceMoved === true ? [] : facts.preparedPaths ?? [];
-  const harness = facts.harness === 'unknown' ? 'inactive' : facts.harness;
+  const harness = facts.harness === undefined || facts.harness === 'unknown' ? 'inactive' : facts.harness;
   // `auto_prepare` never reads the harness, so an unreadable one is not a missing fact
   // for that posture.
   const evaluated = facts.harness !== 'unknown' || facts.gate.mutate === DEFAULT_MUTATE_MODE;
+  // The seam stops at the harness fact: `inactive` refuses before it reads a
+  // preparation and `stale` refuses before the preparation check. Reporting a path
+  // blocker beside either would claim the gate demands something it never asks for.
+  const decidedPaths = harness === 'active' ? requestedPaths : [];
 
   const decision = evaluateMutateGate({
     mode: facts.gate.mutate,
     harness,
-    paths: requestedPaths,
+    paths: decidedPaths,
     preparedPaths,
   });
 
@@ -140,7 +157,12 @@ export function explainMutationBlockers(facts: MutationBlockedWorkFacts): Blocke
     blockers: decision.blockers.map((blocker) => ({
       code: blocker.code,
       ...(blocker.path === undefined ? {} : { detail: blocker.path }),
-      clearedBy: CLEARED_BY[blocker.code],
+      clearedBy: blocker.code === 'harness_inactive'
+        && facts.harness === 'unknown'
+        && facts.unreadable !== undefined
+        && facts.unreadable !== 'no_activation'
+        ? UNREADABLE_CLEARED_BY[facts.unreadable]
+        : CLEARED_BY[blocker.code],
     })),
     note: notes.join(' '),
   };

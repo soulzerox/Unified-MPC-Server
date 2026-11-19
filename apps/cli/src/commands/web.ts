@@ -69,7 +69,7 @@ import {
   workspaceLifecycleKind,
 } from '@unified-mpc/workspace';
 import { ThaiRagWorkspaceVerificationStore } from '@unified-mpc/thai-rag';
-import { explainMutationBlockers, workspaceWorkflowGate } from '@unified-mpc/mcp-server';
+import { DEFAULT_MUTATE_MODE, explainMutationBlockers, workspaceWorkflowGate } from '@unified-mpc/mcp-server';
 import { EXTENSIONS_SETTINGS_KEY, IdeSyncService, ensureExtensionsSettingsMigrated, parseExtensionsSettings, type ManagedPolicyRepairReport } from '@unified-mpc/extensions';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -623,10 +623,11 @@ function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {
 /**
  * The WebUI's honest half of the `mutate` gate (#142): it can read the workspace's
  * posture — the profile is a file on disk — and it cannot read the harness ledger,
- * which is in-process and keyed by session. So it reports the phase, its mode, and
- * the evidence the mode demands, and says that the live state is not visible here.
- * A projection that guessed "active" would tell an operator the opposite of what
- * their next mutation will hear.
+ * which is in-process and keyed by the operator's MCP session. A default
+ * (`auto_prepare`) workspace is therefore answered in full, because that posture
+ * never reads the ledger, while an opt-in workspace is told what it demands and
+ * that the verdict is not knowable from here. Reporting `blocked` for the opt-in
+ * case would be a guess about another session's evidence.
  */
 export function createWorkflowGateProbe(
   workspaces: Pick<WorkspaceService, 'list'>,
@@ -635,7 +636,14 @@ export function createWorkflowGateProbe(
     const workspace = (await workspaces.list()).find((entry) => entry.id === workspaceId);
     if (workspace === undefined) return undefined;
     const gate = workspaceWorkflowGate(await readProjectProfile(path.join(workspace.rootPath, '.unified-mpc', 'project-profile.json')));
-    return explainMutationBlockers({ gate, harness: 'unknown' });
+    if (gate.mutate === DEFAULT_MUTATE_MODE) return explainMutationBlockers({ gate });
+    const notes = [
+      `This workspace requires prepared evidence for a path-named write (workflowGate.mutate: ${gate.mutate}). Whether your session holds it is in-process, per-session state, so this WebUI reports the requirement and no verdict — the runtime projection, or the refusal your mutation returns, is the authority.`,
+      gate.mutateOpaque === 'refuse'
+        ? 'This workspace also refuses mutations that name no path (workflowGate.mutateOpaque: refuse); that half of the phase is decided from the mutation, not from a preparation.'
+        : undefined,
+    ].filter((note): note is string => note !== undefined);
+    return { phase: 'mutate', mode: gate.mutate, evaluated: false, note: notes.join(' ') };
   };
 }
 

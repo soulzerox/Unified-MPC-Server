@@ -333,14 +333,12 @@ describe('workspace engineering harness enforcement', () => {
     // Nothing has bootstrapped this session, so the harness the projection would need
     // is not readable from here: the gate refuses in that state, and the projection
     // reports the same refusal with `evaluated: false` rather than claiming `active`.
+    // Only that refusal: the seam returns here, before it reads a preparation.
     await expect(registry.workflowGateProjection('workspace-1', ['src/app.ts'])).resolves.toMatchObject({
       mode: 'require_preparation',
       evaluated: false,
       blocked: true,
-      blockers: [
-        { code: 'harness_inactive' },
-        { code: 'preparation_missing', detail: 'src/app.ts' },
-      ],
+      blockers: [{ code: 'harness_inactive' }],
     });
 
     expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
@@ -373,9 +371,9 @@ describe('workspace engineering harness enforcement', () => {
     setAgentsMd('# Harness\nchanged\n');
     const stale = await registry.workflowGateProjection('workspace-1', ['src/app.ts']);
     expect(stale.blocked).toBe(true);
-    // Staleness first: it invalidates the preparation, so the path is demanded again
-    // only after the harness is rebuilt.
-    expect(stale.blockers.map((blocker) => blocker.code)).toEqual(['harness_stale', 'preparation_missing']);
+    // Staleness alone: the seam returns before the preparation check, so demanding
+    // the path here would name a step the gate has not reached.
+    expect(stale.blockers.map((blocker) => blocker.code)).toEqual(['harness_stale']);
     expect(writes).toEqual([]);
   });
 

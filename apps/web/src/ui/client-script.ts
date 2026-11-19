@@ -1367,9 +1367,11 @@ export function getClientScriptJs(): string {
         const block = document.createElement('div');
         block.className = 'project-goal-blockers';
         const heading = 'Mutate gate: ' + projection.mode;
-        const verdict = projection.blocked
+        const verdict = projection.blocked === true
           ? 'requires evidence for a path-named write'
-          : 'nothing required for a path-named write';
+          : projection.blocked === false
+            ? 'nothing required for a path-named write'
+            : 'the requirement is workspace-wide; whether your session satisfies it is not readable here';
         block.textContent = heading + ' — ' + verdict;
         if (typeof projection.note === 'string' && projection.note.length > 0) {
           const note = document.createElement('div');

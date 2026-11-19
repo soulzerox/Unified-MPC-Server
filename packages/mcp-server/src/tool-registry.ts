@@ -2245,12 +2245,13 @@ export class ToolRegistry {
    * This answers with the same decision the seam enforces, because it is the same
    * decision: `explainMutationBlockers` consumes exactly the facts
    * `validateHarnessMutation` consumes, in the order the seam reads them — the
-   * harness, its hash, and the workspace source identity that voids every
-   * preparation when it moves. What it cannot see is another session's evidence:
-   * the activation ledger is in-process and keyed by session, so a caller whose own
-   * ledger is empty is told `evaluated: false` rather than that the workspace has
-   * no harness. The opaque half of the phase (`mutateOpaque`) is decided from the
-   * mutation, not from a preparation, and is named in the note when it refuses.
+   * harness ledger, the workspace source identity that voids every preparation when
+   * it moves, and then its AGENTS.md hash. What it cannot see is another session's
+   * evidence: the activation ledger is in-process and keyed by session, so a caller
+   * whose own ledger is empty is told `evaluated: false` rather than that the
+   * workspace has no harness. The opaque half of the phase (`mutateOpaque`) is
+   * decided from the mutation, not from a preparation, and is named in the note when
+   * it refuses.
    */
   public async workflowGateProjection(
     workspaceId: string,
@@ -2267,6 +2268,14 @@ export class ToolRegistry {
     if (state === undefined) {
       return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'no_activation', requestedPaths });
     }
+    // The seam voids every preparation when the admitted workspace source moved, and
+    // it does so before it reads the harness hash. A projection that skipped this
+    // would report prepared paths the next mutation refuses — the disagreement this
+    // module exists to make impossible — so it reads the same identity first.
+    const source = await this.observeWorkspaceSourceIdentity(workspaceId);
+    if (!source.ok) {
+      return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'source_identity', requestedPaths });
+    }
     // Staleness is not a flag in the ledger: the seam decides it by re-reading the
     // harness and comparing hashes. A projection that skipped the read would report
     // `active` for a harness the next mutation refuses, so it pays the same read.
@@ -2275,14 +2284,6 @@ export class ToolRegistry {
       return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'agents_md', requestedPaths });
     }
     const stale = currentHash.value !== state.agentsMdHash;
-    // The seam also voids every preparation when the admitted workspace source moved,
-    // and it does so before it reads the ledger. A projection that skipped this would
-    // report prepared paths the next mutation refuses — the disagreement this module
-    // exists to make impossible — so it reads the same identity.
-    const source = await this.observeWorkspaceSourceIdentity(workspaceId);
-    if (!source.ok) {
-      return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'source_identity', requestedPaths });
-    }
     const sourceMoved = source.value !== undefined
       && classifyWorkspaceSourceEvidence(state.sourceIdentity, source.value) !== 'fresh';
     const preparedPaths = stale || sourceMoved

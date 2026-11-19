@@ -83,4 +83,18 @@ describe('renderWorkflowGatePosture', () => {
     expect(text(node)).toContain('prepares evidence on demand');
     expect(text(node)).toContain('per session');
   });
+
+  it('reports the requirement without inventing a verdict it cannot reach', () => {
+    const node = render({
+      phase: 'mutate',
+      mode: 'require_preparation',
+      evaluated: false,
+      note: 'This workspace requires prepared evidence for a path-named write',
+    });
+
+    expect(text(node)).toContain('requires prepared evidence');
+    expect(text(node)).toContain('not readable here');
+    expect(text(node)).not.toContain('nothing required for a path-named write');
+    expect(text(node)).not.toContain('requires evidence for a path-named write');
+  });
 });

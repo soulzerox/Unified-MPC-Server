@@ -100,8 +100,13 @@ export interface WebWorkflowGateProjection {
   readonly mode: string;
   /** False when the runtime could not read a fact the decision needs. */
   readonly evaluated: boolean;
-  readonly blocked: boolean;
-  readonly blockers: readonly {
+  /**
+   * The verdict, or absent when the answer depends on evidence this reader cannot
+   * see. Absent is not `false`: the WebUI has no harness ledger, so for an opt-in
+   * workspace the requirement is reported and the verdict is left to the runtime.
+   */
+  readonly blocked?: boolean;
+  readonly blockers?: readonly {
     readonly code: string;
     readonly detail?: string;
     readonly clearedBy: string;

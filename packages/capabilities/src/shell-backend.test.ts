@@ -803,13 +803,17 @@ describe('ShellCapabilityBackend unrestricted', () => {
     // check by both probes, which return different shapes. Relaxing one and not
     // the other would let a goal read another workspace's task through the door
     // that was left open, so both are asserted here.
-    await expect(backend.statusForGoalLiveness('workspace-1', taskId)).resolves.toMatchObject({ ok: true });
-    await expect(backend.taskLivenessForGoal('workspace-1', taskId)).resolves.toBe('live');
-    await expect(backend.statusForGoalLiveness('workspace-2', taskId))
-      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
-    await expect(backend.taskLivenessForGoal('workspace-2', taskId)).resolves.toBe('unknown');
-
-    await expect(backend.cancelForGoal('client-1', 'workspace-1', taskId)).resolves.toMatchObject({ ok: true });
+    try {
+      await expect(backend.statusForGoalLiveness('workspace-1', taskId)).resolves.toMatchObject({ ok: true });
+      await expect(backend.taskLivenessForGoal('workspace-1', taskId)).resolves.toBe('live');
+      await expect(backend.statusForGoalLiveness('workspace-2', taskId))
+        .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+      await expect(backend.taskLivenessForGoal('workspace-2', taskId)).resolves.toBe('unknown');
+    } finally {
+      // Cleanup, not an assertion: a failed probe must not leave its 30 s sleeper
+      // alive for the rest of the run, and must not be reported as a cancel fault.
+      await backend.cancelForGoal('client-1', 'workspace-1', taskId);
+    }
   }, 15_000);
 
   it('keeps an unverified termination pinned, because the work may still be running', async () => {

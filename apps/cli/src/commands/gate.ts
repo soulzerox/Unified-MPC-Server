@@ -24,13 +24,12 @@ import type { WorkspaceLifecycleCleanupEvaluation } from '@unified-mpc/workspace
  * needs no runtime, no database and no tool registry, and why the command layer
  * takes its three inputs as ports instead of reaching for a runtime.
  *
- * This slice stops at the decision: `apps/cli/src/index.ts` routes no `gate`
- * command yet. Both ports that were missing now exist — the #170 workspace
- * journal answers `goalDurableReferenceStates`, and the client-scoped
- * `createGoalWorktreeRemovalPreviewPort` in `packages/application` previews a
- * worktree without the owning session (open question 5) — so the remaining work
- * is wiring, not evidence. This is recorded in `docs/WORKFLOW_GATE.md`
- * ("Status after step 3a").
+ * This module is the decision only: `apps/cli/src/index.ts` routes `gate check`
+ * through `parseGateArgs`/`runCloseGate` with the three real ports — the #170
+ * journal projection for cleanup state, the client-scoped
+ * `createGoalWorktreeRemovalPreviewPort` in `packages/application` for removals,
+ * and `goalCompletionWorktreeBlockers` for completion. `docs/WORKFLOW_GATE.md`
+ * records that wiring as step `3b`.
  */
 
 /**
@@ -516,8 +515,8 @@ const GATE_USAGE = 'Usage: unified-mpc gate check --phase close --workspace <id>
  * Parses `gate check`. The phase is required rather than defaulted: this engine
  * grows one phase at a time and a missing phase must not silently pick one.
  *
- * Nothing routes this yet; the dispatch in `apps/cli/src/index.ts` lands with the
- * ports, not before.
+ * `apps/cli/src/index.ts` dispatches the parsed command; the receipt store lives
+ * under `<workspace>/.unified-mpc/gates` and a refusal still records its verdict.
  */
 export function parseGateArgs(args: readonly string[]): Result<GateCheckCommand> {
   if (args[0] !== 'check') return err(appError('INVALID_INPUT', GATE_USAGE));

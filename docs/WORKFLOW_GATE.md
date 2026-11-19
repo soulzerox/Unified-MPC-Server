@@ -444,7 +444,16 @@ workspace journal:
    refusal produced no verdict and settling it would claim a gate ran that never did.
    A `start`,
    `delegate` or `parallel_delegate` that failed records nothing and keeps its pin:
-   a cancelled start may have launched a swarm this host can no longer name. A codex process lives in the codex adapter's own
+   a cancelled start may have launched a swarm this host can no longer name. A
+   `task_create` that reported the capability service unavailable — `status:
+   'needs_setup'`, `available: false`, no task id — settles itself under
+   `task_create_settled`: no durable task exists for the call and nothing could ever
+   answer for it. The shape is required, not just the missing id, because an oversized
+   response is replaced by a `{ truncated: true }` envelope that also carries none. An
+   errored create keeps
+   its pin, because the launch path can fail after the worker was forked and still
+   answer `INTERNAL_ERROR`, and the error envelope cannot be told apart from a
+   failure that reserved nothing. A codex process lives in the codex adapter's own
    process manager and a swarm in its own runtime, so neither is ever in the CLI
    listing: their ids are recorded under provider `codex` and `swarm`, never
    `process`, which could only read them all as gone. A `git_worktree_spawn` call
@@ -475,7 +484,7 @@ workspace journal:
    in-flight work, so a launcher costs one row per kind instead of growing with every
    launch, and collects a closed call like any other evidence. A kind whose *newer* open
    row can end itself is never collapsed (`DURABLE_REFERENCE_OPERATION_KINDS`:
-   `git_worktree_spawn`, `agent_swarm_run`, `merge_verification_run`): collapsing would
+   `git_worktree_spawn`, `agent_swarm_run`, `merge_verification_run`, `task_create`): collapsing would
    let that newer row evict an older open row that no later call represents, and then
    close itself, leaving the kind with nothing open while the work it stood for still
    runs. The exemption is name-level, so it is broader than the hazard — an

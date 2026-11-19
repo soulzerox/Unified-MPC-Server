@@ -72,7 +72,8 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
  * nothing open. Two open rows of these kinds are two different references, not two
  * reports of one in-flight call: a `git_worktree_spawn` row stands for a worktree that may
  * still hold work, an `agent_swarm_run start` row for a swarm that still runs, and a
- * `merge_verification_run` row for an attempt that is still queued.
+ * `merge_verification_run` row for an attempt that is still queued, a `task_create` row for
+ * a durable task the goal still references.
  *
  * The exemption is name-level and therefore broader than the hazard. `agent_swarm_run`'s
  * `start` row cannot settle itself (only its read sub-actions can, under
@@ -96,7 +97,7 @@ export const DEFERRED_CLOSURE_OPERATION_KINDS: ReadonlySet<string> = new Set([
  * the same thing. The journal cannot derive the list itself: the rules live one layer up.
  */
 export const DURABLE_REFERENCE_OPERATION_KINDS: ReadonlySet<string> = new Set([
-  'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run',
+  'git_worktree_spawn', 'agent_swarm_run', 'merge_verification_run', 'task_create',
 ]);
 
 export type WorkspaceJournalPhase = 'started' | 'completed';

@@ -67,6 +67,25 @@ export const SWARM_READ_SETTLED_CLOSURE_CODE = 'swarm_read_settled';
  */
 export const WORKTREE_PREVIEW_SETTLED_CLOSURE_CODE = 'worktree_preview_settled';
 
+/**
+ * Why a `task_create` that reported the capability service unavailable ends its own
+ * deferral.
+ *
+ * The call answered the `needs_setup` shape (`status: 'needs_setup'`, `available:
+ * false`) with no task id, so no durable task exists for it and no probe could ever
+ * answer it. Left open, its row pins the goal `present` for good.
+ *
+ * The shape is matched, not merely the missing id: a launched task can answer without
+ * a `task_id` too — the result mapper replaces an oversized response with a
+ * `{ truncated: true }` envelope — and settling on absence alone would release a pin
+ * over live work.
+ *
+ * An errored create keeps its pin: the launch path can fail after the worker was
+ * forked and still answer `INTERNAL_ERROR`, so an error is not evidence that nothing
+ * runs.
+ */
+export const TASK_CREATE_SETTLED_CLOSURE_CODE = 'task_create_settled';
+
 export interface RecordedDeferredSettlement {
   readonly workspaceId: string;
   readonly closureCode: string;
@@ -209,6 +228,25 @@ const SETTLEMENT_RULES: ReadonlyMap<string, SettlementRule> = new Map<string, Se
     settles: (_input, response) => response.isError !== true
       && asRecord(response.structuredContent)?.status === 'completed',
   }]),
+  // A create that reported the capability service unavailable (`needs_setup`,
+  // `available: false`) started nothing, and its row records no handle to probe, so it
+  // settles its own call under `task_create_settled`. The shape is required, not just a
+  // missing `task_id`: an oversized response is replaced by a `{ truncated: true }`
+  // envelope that also carries no id, and settling on absence alone would drop the pin
+  // over a task that launched.
+  //
+  // An error does not settle it — the launch path can fail after the worker was forked
+  // and still answer `INTERNAL_ERROR`, so "errored" is not "nothing runs".
+  ['task_create', {
+    closureCode: TASK_CREATE_SETTLED_CLOSURE_CODE,
+    settles: (_input, response): boolean => {
+      if (response.isError === true) return false;
+      const structured = asRecord(response.structuredContent);
+      return structured?.status === 'needs_setup'
+        && structured.available === false
+        && boundedString(structured.task_id, 256) === undefined;
+    },
+  }],
 ]);
 
 /**

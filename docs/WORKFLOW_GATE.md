@@ -445,9 +445,12 @@ workspace journal:
    A `start`,
    `delegate` or `parallel_delegate` that failed records nothing and keeps its pin:
    a cancelled start may have launched a swarm this host can no longer name. A
-   `task_create` that answered without a task id settles itself under
-   `task_create_settled`: the capability service was unavailable, so no durable task
-   exists for the call and nothing could ever answer for it. An errored create keeps
+   `task_create` that reported the capability service unavailable — `status:
+   'needs_setup'`, `available: false`, no task id — settles itself under
+   `task_create_settled`: no durable task exists for the call and nothing could ever
+   answer for it. The shape is required, not just the missing id, because an oversized
+   response is replaced by a `{ truncated: true }` envelope that also carries none. An
+   errored create keeps
    its pin, because the launch path can fail after the worker was forked and still
    answer `INTERNAL_ERROR`, and the error envelope cannot be told apart from a
    failure that reserved nothing. A codex process lives in the codex adapter's own

@@ -243,15 +243,15 @@ describe('recordableDeferredSettlement', () => {
     })).toBeUndefined();
   });
 
-  it('settles a task_create that answered without a task id', (): void => {
-    // The capability service was unavailable, so the call reported `needs_setup` and
-    // started nothing: no handle was recorded and no probe could ever answer for it.
+  it('settles a task_create that reported the capability service unavailable', (): void => {
+    // `needs_setup` with `available: false` is the one shape that provably started
+    // nothing: no handle was recorded and no probe could ever answer for it.
     expect(recordableDeferredSettlement('task_create', input, {
-      ...done, structuredContent: { tool: 'task_create', status: 'needs_setup', available: false },
+      ...done, structuredContent: { tool: 'task_create', status: 'needs_setup', available: false, ready: false, executed: false },
     })).toEqual({ workspaceId: 'workspace-1', closureCode: TASK_CREATE_SETTLED_CLOSURE_CODE });
   });
 
-  it('leaves a created task and an errored create pinned', (): void => {
+  it('leaves a created task, an oversized answer and an errored create pinned', (): void => {
     // A create that handed back a task id is answered by the shell backend later. An
     // error is not evidence that nothing launched: the launch path can fail after the
     // worker was forked and still answer `INTERNAL_ERROR`.
@@ -260,6 +260,16 @@ describe('recordableDeferredSettlement', () => {
     })).toBeUndefined();
     expect(recordableDeferredSettlement('task_create', input, {
       isError: true, structuredContent: { error: { code: 'INTERNAL_ERROR' } },
+    })).toBeUndefined();
+    // A launched task whose response outgrew the output budget is replaced by the
+    // mapper's truncation envelope, which carries no task id either.
+    expect(recordableDeferredSettlement('task_create', input, {
+      ...done, structuredContent: { truncated: true, reason: 'tool_result_exceeds_output_budget' },
+    })).toBeUndefined();
+    // Any other answer without an id is not the unavailable shape: `disabled` and
+    // `unsupported` mean something else went wrong, so the pin stands.
+    expect(recordableDeferredSettlement('task_create', input, {
+      ...done, structuredContent: { tool: 'task_create', status: 'disabled', available: false },
     })).toBeUndefined();
   });
 });

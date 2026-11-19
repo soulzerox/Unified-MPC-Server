@@ -205,9 +205,16 @@ function compareText(left: string, right: string): number {
 
 /**
  * A decision receipt: what the gate decided and the fingerprint of the inputs it
- * decided from. The richer `GateReceipt` sketched in `docs/WORKFLOW_GATE.md` —
- * head and base revision, merge evidence, workflow identity — is a later phase,
- * which is why `headSha` is optional and not checked against a repository.
+ * decided from.
+ *
+ * It names no worktree head on purpose. The question this phase answers today is
+ * whether a goal workspace may be discarded, and that depends on cleanup state,
+ * removal previews and completion blockers — never on which commit a worktree
+ * holds, so a recorded `headSha` would be a field no decision reads and no run
+ * checks. The phases that decide about a revision carry it: `verify` and `review`
+ * name the head they ran over, and `integrate` reads the merge evidence. A base
+ * is still a routing input `close` will take when a later step adds it, and that
+ * is a base rather than a head, so it does not bring this field back.
  */
 export interface CloseGateReceipt {
   readonly kind: 'workflow-gate';
@@ -215,8 +222,6 @@ export interface CloseGateReceipt {
   readonly version: 1;
   readonly gateId: string;
   readonly createdAt: string;
-  /** `HEAD` the gate was asked about, when the caller knows it. */
-  readonly headSha?: string;
   readonly verdict: CloseGateVerdict;
 }
 
@@ -231,7 +236,6 @@ export async function writeCloseGateReceipt(options: {
   readonly verdict: CloseGateVerdict;
   readonly now?: () => Date;
   readonly gateId?: () => string;
-  readonly headSha?: string;
 }): Promise<Result<{ readonly path: string; readonly receipt: CloseGateReceipt }>> {
   const receipt: CloseGateReceipt = {
     kind: 'workflow-gate',
@@ -239,7 +243,6 @@ export async function writeCloseGateReceipt(options: {
     version: 1,
     gateId: (options.gateId ?? randomUUID)(),
     createdAt: (options.now ?? ((): Date => new Date()))().toISOString(),
-    ...(options.headSha === undefined ? {} : { headSha: options.headSha }),
     verdict: options.verdict,
   };
   const subject = safeSegment(receipt.verdict.goalId ?? receipt.verdict.workspaceId);
@@ -266,10 +269,8 @@ export async function readCloseGateReceipt(file: string): Promise<Result<CloseGa
     return err(appError('INVALID_INPUT', `Could not read ${file}: ${(cause as Error).message}`));
   }
   if (!isRecord(parsed)) return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
-  const headSha = parsed.headSha;
   if (parsed.kind !== 'workflow-gate' || parsed.phase !== 'close' || parsed.version !== 1
-    || typeof parsed.gateId !== 'string' || typeof parsed.createdAt !== 'string'
-    || (headSha !== undefined && typeof headSha !== 'string')) {
+    || typeof parsed.gateId !== 'string' || typeof parsed.createdAt !== 'string') {
     return err(appError('INVALID_INPUT', `${file} is not a close gate receipt`));
   }
   const verdict = parseCloseGateVerdict(parsed.verdict);
@@ -280,7 +281,6 @@ export async function readCloseGateReceipt(file: string): Promise<Result<CloseGa
     version: 1,
     gateId: parsed.gateId,
     createdAt: parsed.createdAt,
-    ...(headSha === undefined ? {} : { headSha }),
     verdict,
   });
 }

@@ -49,7 +49,6 @@ export interface RunCloseGateOptions {
   readonly json: boolean;
   readonly now?: () => Date;
   readonly gateId?: () => string;
-  readonly headSha?: string;
 }
 
 export interface RunCloseGateResult {
@@ -120,7 +119,6 @@ export async function runCloseGate(options: RunCloseGateOptions): Promise<Result
         verdict,
         ...(options.now === undefined ? {} : { now: options.now }),
         ...(options.gateId === undefined ? {} : { gateId: options.gateId }),
-        ...(options.headSha === undefined ? {} : { headSha: options.headSha }),
       });
       if (!written.ok) return written;
       receiptPath = written.value.path;

@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -584,6 +585,37 @@ describe('durable shell task parking (#145)', () => {
 
     const waited = await store.wait('waiting-one', 5, undefined, owner);
     expect(waited).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
+  });
+
+  it('stops a worker it spawned when the start fails after the fork', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-orphan-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const marker = path.join(root, 'worker-survived.txt');
+    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
+    await store.reserve({
+      taskId: 'orphan-check',
+      executable: process.execPath,
+      // Writes the marker only if its worker was still alive ~800ms after launch.
+      arguments: ['-e', `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 800)`],
+      cwd: root,
+      timeoutSeconds: 30,
+      maxOutputBytes: 1024,
+      includeStdout: true,
+      includeStderr: true,
+      owner,
+    });
+    // A directory where the launcher publishes the worker pid makes that write fail
+    // after the worker was spawned, which is the leak this pins.
+    await mkdir(path.join(tasksRoot, 'orphan-check', 'worker.pid'), { recursive: true });
+
+    const started = await store.startReserved('orphan-check', process.env);
+
+    expect(started).toMatchObject({ ok: false });
+    expect(await store.snapshot('orphan-check')).toMatchObject({ ok: true, value: { state: 'failed' } });
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('correlates a task with the goal generation that started it, and leaves it absent otherwise', async () => {

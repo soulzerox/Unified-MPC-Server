@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -241,11 +241,12 @@ export class DurableShellTaskStore {
     delete metadata.error;
     delete metadata.exit_code;
     const spec: DurableWorkerSpec = { ...specResult.value, startedAt, deadlineAt };
+    let worker: ChildProcess | undefined;
     try {
       await writeFile(specPath, JSON.stringify(spec), 'utf8');
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
       const workerPath = await this.ensureWorkerScript();
-      const worker = spawn(process.execPath, [workerPath, specPath], {
+      worker = spawn(process.execPath, [workerPath, specPath], {
         // The durable worker only coordinates the real child process; it does not need
         // the workspace as its own cwd. Keeping the worker outside the workspace avoids
         // a transient Windows directory lock after the child has already completed.
@@ -274,6 +275,20 @@ export class DurableShellTaskStore {
       worker.unref();
       return ok(await this.snapshotFromMetadata(metadata));
     } catch (error: unknown) {
+      // A failure after the fork leaves a worker this store can no longer name: the
+      // metadata below records `failed` and the pid is never published, so no status,
+      // cancel or sweep can find it, and that worker keeps the real child alive. Stop
+      // the tree before recording the failure — the worker also owns `task.json`, so
+      // writing it a live process may overwrite is a losing race anyway.
+      if (worker?.pid !== undefined) {
+        // `stopProcessTree` refuses a live pid it cannot tie to a known start time, so
+        // probe the worker we just forked and hand that identity over.
+        const pid = worker.pid;
+        const identity = await probeProcessIdentity(pid, this.platform).catch(() => undefined);
+        if (identity?.state === 'live') {
+          await stopProcessTree(pid, [], this.platform, new Map([[pid, identity.processStartedAt]])).catch(() => false);
+        }
+      }
       const message = error instanceof Error ? error.message : 'Durable task could not start';
       metadata.state = 'failed';
       metadata.exit_code = -1;

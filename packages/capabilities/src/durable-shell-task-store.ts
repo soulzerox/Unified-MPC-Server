@@ -350,6 +350,11 @@ export class DurableShellTaskStore {
    * Stop one process, optionally keeping a related pid alive long enough to reap it.
    * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid
    * is probed first and handed over; a pid already gone needs no signal.
+   *
+   * The start time bounds the POSIX group signal — that path never signals a pid whose
+   * identity changed. Windows goes through `taskkill /T`, which has no identity check,
+   * so a pid reused inside this window could be killed there; the pinned start time is
+   * still what decides whether the stop counts as verified.
    */
   private async stopTrackedPid(primaryPid: number, relatedPid?: number): Promise<boolean> {
     const identities = new Map<number, string>();
@@ -366,7 +371,10 @@ export class DurableShellTaskStore {
     if (terminationPid === undefined || !identities.has(terminationPid)) return !unverifiable;
     const relatedPids = [primaryPid, relatedPid]
       .filter((pid): pid is number => pid !== undefined && pid !== terminationPid && identities.has(pid));
-    return stopProcessTree(terminationPid, relatedPids, this.platform, identities);
+    // Still signal what was verified — a second look may reap more than it can prove —
+    // but an unprobed pid keeps the stop unclean even when this one is gone.
+    const stopped = await stopProcessTree(terminationPid, relatedPids, this.platform, identities);
+    return stopped && !unverifiable;
   }
 
   /**

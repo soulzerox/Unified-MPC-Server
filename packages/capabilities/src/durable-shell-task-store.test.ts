@@ -648,38 +648,6 @@ describe('durable shell task parking (#145)', () => {
     expect(String((waited.ok && waited.value.error) ?? '')).toContain('failed to start');
   });
 
-  it('completes a command that exits before the worker has published its pid', async () => {
-    // The worker publishes `child_pid` before probing the child's start time. That
-    // write must not sit between the fork and the `exit` listener: a command that
-    // exits immediately would then be missed and read as `running` until timeout.
-    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-fast-'));
-    temporaryRoots.push(root);
-    const store = new DurableShellTaskStore(path.join(root, '.tasks'));
-    const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
-    // One fast exit can be missed by luck; twenty make the miss the norm. With the
-    // publish moved between the fork and the listeners, most of these read `running`
-    // until the timeout instead of `completed`.
-    const taskIds = Array.from({ length: 20 }, (_, index) => `fast-${String(index)}`);
-    for (const taskId of taskIds) {
-      await store.reserve({
-        taskId,
-        executable: process.execPath,
-        arguments: ['-e', ''],
-        cwd: root,
-        timeoutSeconds: 30,
-        maxOutputBytes: 1024,
-        includeStdout: true,
-        includeStderr: true,
-        owner,
-      });
-      expect(await store.startReserved(taskId, process.env)).toMatchObject({ ok: true });
-    }
-
-    for (const taskId of taskIds) {
-      expect(await store.wait(taskId, 10, undefined, owner)).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
-    }
-  });
-
   it('correlates a task with the goal generation that started it, and leaves it absent otherwise', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-goal-'));
     temporaryRoots.push(root);

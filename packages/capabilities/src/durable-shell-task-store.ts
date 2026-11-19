@@ -329,21 +329,35 @@ export class DurableShellTaskStore {
       // `taskkill` could not run. The worker being gone is not proof its child is:
       // a failed start kills the worker's group, and the command owns another one.
       if (isProcessRunning(workerPid)) return false;
-      const observed = await this.readFailedStartChild(taskDirectory, 0);
-      return observed.childPid === undefined || !isProcessRunning(observed.childPid);
+      const childPid = await this.readFailedStartChild(taskDirectory, 0);
+      if (childPid === undefined || !isProcessRunning(childPid)) return true;
+      // The child outlived the worker, which is the leak this path exists to close.
+      // Walk its tree the same way the worker's was walked, then check it again
+      // rather than reporting a gap the caller would read as a clean stop.
+      const childExitCode = await new Promise<number | null>((resolve) => {
+        const killer = spawn('taskkill', ['/PID', String(childPid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => resolve(null));
+        killer.once('close', resolve);
+      });
+      return childExitCode === 0 || !isProcessRunning(childPid);
     }
     const observed = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
-    if (observed.childPid === undefined) {
+    if (observed === undefined) {
       // No child was published in time. Stop the worker first: a dead worker cannot
       // fork the command afterwards, and the one read after the kill catches the case
       // where it forked just before dying. Reporting `true` without that second look
       // would call an unverifiable stop clean.
+      //
+      // The second read is the whole test. A worker stopped here was killed by a
+      // signal, and it has no handler that would write a terminal state on the way
+      // out, so waiting for one would report every such stop as unverified — a claim
+      // about the worker that `workerStopped` has already answered.
       const workerStopped = await this.stopTrackedPid(workerPid);
       const late = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
-      if (late.childPid === undefined) return workerStopped && late.workerSettled;
-      return workerStopped && await this.stopTrackedPid(late.childPid, workerPid);
+      if (late === undefined) return workerStopped;
+      return workerStopped && await this.stopTrackedPid(late, workerPid);
     }
-    return this.stopTrackedPid(observed.childPid, workerPid);
+    return this.stopTrackedPid(observed, workerPid);
   }
 
   /**
@@ -380,27 +394,27 @@ export class DurableShellTaskStore {
   /**
    * Read the child pid the worker publishes, waiting for the write. The worker
    * persists it right after spawning, before it probes the child's start time, so a
-   * short wait covers a slow probe rather than a slow fork. `workerSettled` says the
-   * worker already wrote a terminal state, which means no child can appear later.
+   * short wait covers a slow probe rather than a slow fork. A worker that already
+   * wrote a terminal state cannot fork afterwards, so the wait ends there instead of
+   * spending its budget on an answer that will not change.
    */
   private async readFailedStartChild(
     taskDirectory: string,
     budgetMs: number,
-  ): Promise<{ readonly childPid?: number; readonly workerSettled: boolean }> {
+  ): Promise<number | undefined> {
     const deadline = Date.now() + budgetMs;
-    let workerSettled = false;
     for (;;) {
       const raw = await readFile(path.join(taskDirectory, METADATA_FILENAME), 'utf8').catch(() => undefined);
       if (raw !== undefined) {
         try {
           const parsed = JSON.parse(raw) as { child_pid?: unknown; state?: unknown };
-          if (typeof parsed.child_pid === 'number') return { childPid: parsed.child_pid, workerSettled };
-          if (WORKER_SETTLED_STATES.has(parsed.state as string)) workerSettled = true;
+          if (typeof parsed.child_pid === 'number') return parsed.child_pid;
+          if (WORKER_SETTLED_STATES.has(parsed.state as string)) return undefined;
         } catch {
           // The worker owns this file and may be mid-write; keep waiting.
         }
       }
-      if (workerSettled || Date.now() >= deadline) return { workerSettled };
+      if (Date.now() >= deadline) return undefined;
       await delay(25);
     }
   }

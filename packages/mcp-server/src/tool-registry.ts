@@ -70,6 +70,7 @@ import {
   workspaceWorkflowGate,
   type WorkspaceWorkflowGate,
 } from './mutate-gate.js';
+import { explainMutationBlockers, type BlockedWorkProjection } from './workflow-blockers.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -2220,6 +2221,44 @@ export class ToolRegistry {
    * profile that cannot be read or parsed resolves to the defaults, so a broken
    * file cannot tighten a gate the workspace never asked for.
    */
+  /**
+   * Read-only: what the `mutate` phase would do with a mutation right now.
+   *
+   * This answers with the same decision the seam enforces, because it is the same
+   * decision: `explainMutationBlockers` consumes exactly the facts
+   * `validateHarnessMutation` consumes. What it cannot see is another session's
+   * evidence — the activation ledger is in-process and keyed by session — so a
+   * caller whose own ledger is empty is told `evaluated: false` instead of being
+   * told the workspace has no harness.
+   */
+  public async workflowGateProjection(
+    workspaceId: string,
+    requestedPaths: readonly string[] = [],
+  ): Promise<BlockedWorkProjection> {
+    const gate = await this.resolveWorkflowGate(workspaceId);
+    // No harness service means the seam admits the mutation before reading a gate,
+    // so reporting a harness blocker here would describe a refusal that cannot happen.
+    if (this.services.extensions?.bootstrapMandatoryMcpServers === undefined) {
+      return explainMutationBlockers({ gate, harness: 'active' });
+    }
+    const context = this.harnessContext(workspaceId);
+    const state = this.harnessActivation.state(context);
+    if (state === undefined) return explainMutationBlockers({ gate, harness: 'unknown', requestedPaths });
+    // Staleness is not a flag in the ledger: the seam decides it by re-reading the
+    // harness and comparing hashes. A projection that skipped the read would report
+    // `active` for a harness the next mutation refuses, so it pays the same read.
+    const currentHash = await this.currentAgentsMdHash(workspaceId);
+    if (!currentHash.ok) return explainMutationBlockers({ gate, harness: 'unknown', requestedPaths });
+    const stale = currentHash.value !== state.agentsMdHash;
+    const preparedPaths = requestedPaths.filter((path) => this.harnessActivation.isPathPrepared(context, path));
+    return explainMutationBlockers({
+      gate,
+      harness: stale ? 'stale' : 'active',
+      requestedPaths,
+      preparedPaths: stale ? [] : preparedPaths,
+    });
+  }
+
   private async resolveWorkflowGate(workspaceId: string): Promise<WorkspaceWorkflowGate> {
     const defaults: WorkspaceWorkflowGate = { mutate: DEFAULT_MUTATE_MODE, mutateOpaque: DEFAULT_OPAQUE_MUTATE_POLICY };
     if (this.services.file?.readFile === undefined) return defaults;

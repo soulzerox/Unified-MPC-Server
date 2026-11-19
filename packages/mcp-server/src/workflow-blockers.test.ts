@@ -1,0 +1,59 @@
+import { describe, expect, it } from 'vitest';
+import { explainMutationBlockers } from './workflow-blockers.js';
+
+const optedIn = { mutate: 'require_preparation', mutateOpaque: 'allow' } as const;
+const byDefault = { mutate: 'auto_prepare', mutateOpaque: 'allow' } as const;
+
+describe('explainMutationBlockers', () => {
+  it('says a default workspace prepares evidence on demand instead of reporting a barrier it does not have', () => {
+    const projection = explainMutationBlockers({ gate: byDefault, harness: 'inactive' });
+
+    expect(projection).toMatchObject({ phase: 'mutate', mode: 'auto_prepare', evaluated: true, blocked: false });
+    expect(projection.blockers).toEqual([]);
+    expect(projection.note).toContain('prepares evidence on demand');
+  });
+
+  it('names the action that clears each blocker, in the order the gate raises them', () => {
+    const projection = explainMutationBlockers({
+      gate: optedIn,
+      harness: 'active',
+      requestedPaths: ['src/a.ts', 'src/b.ts'],
+      preparedPaths: ['src/a.ts'],
+    });
+
+    expect(projection).toMatchObject({ blocked: true, evaluated: true });
+    expect(projection.blockers).toEqual([{
+      code: 'preparation_missing',
+      detail: 'src/b.ts',
+      clearedBy: 'Run prepare_code_change for this path against the current workspace state',
+    }]);
+  });
+
+  it('reports staleness as its own blocker, because the fix is a different sequence', () => {
+    const projection = explainMutationBlockers({ gate: optedIn, harness: 'stale', requestedPaths: ['src/a.ts'], preparedPaths: ['src/a.ts'] });
+
+    expect(projection.blockers).toEqual([{
+      code: 'harness_stale',
+      clearedBy: 'The workspace harness changed: run workspace_bootstrap, then prepare_code_change again',
+    }]);
+  });
+
+  it('treats an unreadable harness as the refusal the gate would give, and says the answer is incomplete', () => {
+    const projection = explainMutationBlockers({ gate: optedIn, harness: 'unknown', requestedPaths: ['src/a.ts'] });
+
+    // The gate refuses in this state (an absent harness is `inactive`), so the
+    // projection reports that refusal rather than inventing "unblocked" — and it
+    // reports the missing preparation too, which is the next thing the same
+    // workspace will ask for once the harness is up.
+    expect(projection).toMatchObject({ blocked: true, evaluated: false });
+    expect(projection.blockers.map((blocker) => blocker.code)).toEqual(['harness_inactive', 'preparation_missing']);
+    expect(projection.note).toContain('could not read this workspace harness state');
+  });
+
+  it('does not turn an unreadable harness into a blocker for a workspace that never opted in', () => {
+    const projection = explainMutationBlockers({ gate: byDefault, harness: 'unknown' });
+
+    expect(projection).toMatchObject({ blocked: false, evaluated: false });
+    expect(projection.blockers).toEqual([]);
+  });
+});

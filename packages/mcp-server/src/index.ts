@@ -20,6 +20,8 @@ export * from './cross-client-host-approval.js';
 export * from './tool-registry.js';
 export * from './tool-delivery-contract.js';
 export * from './mutation-policy.js';
+export * from './mutate-gate.js';
+export * from './workflow-blockers.js';
 export * from './plugin-sdk.js';
 export * from './tool-schema-registry.js';
 export * from './upgrade-catalog.js';

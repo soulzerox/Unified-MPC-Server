@@ -29,6 +29,7 @@ import {
   type WebWorkspaceCleanupEvaluation,
   type WebWorkspaceSelectionSnapshot,
   type WebWorkspaceSummary,
+  type WorkflowGateProbe,
   type WorkspaceControlPort,
 } from '@unified-mpc/web';
 import {
@@ -68,8 +69,10 @@ import {
   workspaceLifecycleKind,
 } from '@unified-mpc/workspace';
 import { ThaiRagWorkspaceVerificationStore } from '@unified-mpc/thai-rag';
+import { explainMutationBlockers, workspaceWorkflowGate } from '@unified-mpc/mcp-server';
 import { EXTENSIONS_SETTINGS_KEY, IdeSyncService, ensureExtensionsSettingsMigrated, parseExtensionsSettings, type ManagedPolicyRepairReport } from '@unified-mpc/extensions';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { CliServerHandle } from '../index.js';
 import { reconcileProviderGenerations } from '../runtime/provider-generation-reconcile.js';
@@ -234,6 +237,8 @@ export async function runWeb(
       ?? createCanonicalStatusProbe(dataPath);
     const canonicalLifecycleProbe = serverOptions?.canonicalLifecycleProbe
       ?? createCanonicalLifecycleProbe(dataPath);
+    const workflowGateProbe = serverOptions?.workflowGateProbe
+      ?? createWorkflowGateProbe(workspaceService);
     const server = new ControlPlaneServer({
       ...serverOptions,
       port: options.port ?? 3000,
@@ -244,6 +249,7 @@ export async function runWeb(
         ?? createStorageDiagnosticsProbe(dataPath, database, settings, secretStore),
       canonicalStatusProbe,
       canonicalLifecycleProbe,
+      workflowGateProbe,
       workspaceControl: serverOptions?.workspaceControl ?? workspaceControl,
       goalControl: serverOptions?.goalControl ?? goalControl,
       goalRuntimeRead,
@@ -611,5 +617,33 @@ function bootstrapNonSecretSettings(settings: SqliteSettingsRepository): void {
     if (settings.get(key) !== null) continue;
     const value = process.env[envName]?.trim();
     if (value) settings.set(key, value);
+  }
+}
+
+/**
+ * The WebUI's honest half of the `mutate` gate (#142): it can read the workspace's
+ * posture — the profile is a file on disk — and it cannot read the harness ledger,
+ * which is in-process and keyed by session. So it reports the phase, its mode, and
+ * the evidence the mode demands, and says that the live state is not visible here.
+ * A projection that guessed "active" would tell an operator the opposite of what
+ * their next mutation will hear.
+ */
+export function createWorkflowGateProbe(workspaces: WorkspaceService): WorkflowGateProbe {
+  return async (workspaceId: string) => {
+    const workspace = (await workspaces.list()).find((entry) => entry.id === workspaceId);
+    if (workspace === undefined) return undefined;
+    const gate = workspaceWorkflowGate(await readProjectProfile(path.join(workspace.rootPath, '.unified-mpc', 'project-profile.json')));
+    return explainMutationBlockers({ gate, harness: 'unknown' });
+  };
+}
+
+async function readProjectProfile(filePath: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(filePath, 'utf8'));
+  } catch {
+    // A missing or unreadable profile is the default posture, exactly as the gate
+    // resolves it — never an error here, or the WebUI would show a broken card for
+    // the normal case of a workspace that never opted in.
+    return undefined;
   }
 }

@@ -344,14 +344,19 @@ export class DurableShellTaskStore {
     const observed = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
     if (observed === undefined) {
       // No child was published in time. Stop the worker first: a dead worker cannot
-      // fork the command afterwards, and the one read after the kill catches the case
-      // where it forked just before dying. Reporting `true` without that second look
-      // would call an unverifiable stop clean.
+      // fork afterwards, and the read after the kill catches a child whose pid landed
+      // just before the worker died.
       //
-      // The second read is the whole test. A worker stopped here was killed by a
-      // signal, and it has no handler that would write a terminal state on the way
-      // out, so waiting for one would report every such stop as unverified — a claim
-      // about the worker that `workerStopped` has already answered.
+      // What that read cannot see: a worker killed inside its first `child_pid` write
+      // leaves a detached child no read can find, and this path then reports a clean
+      // stop over it. Narrow — one write, only reachable when no pid appeared within
+      // the wait — and the alternative, never claiming a stop, would misreport every
+      // ordinary case where the worker is provably dead.
+      //
+      // The worker's terminal state is not the test: a stopped worker was killed by a
+      // signal and has no handler that would write one, so waiting for it would report
+      // every such stop as unverified — a claim about the worker that `workerStopped`
+      // has already answered.
       const workerStopped = await this.stopTrackedPid(workerPid);
       const late = await this.readFailedStartChild(taskDirectory, FAILED_START_CHILD_PID_WAIT_MS);
       if (late === undefined) return workerStopped;

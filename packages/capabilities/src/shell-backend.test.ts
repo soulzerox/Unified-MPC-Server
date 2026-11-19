@@ -818,8 +818,10 @@ describe('ShellCapabilityBackend unrestricted', () => {
       cleanup = await backend.cancelForGoal('client-1', 'workspace-1', taskId);
     }
     // `durableStore` is undefined here, so this result comes from the record held in
-    // memory — the branch nothing else in this suite reaches.
-    expect(cleanup).toMatchObject({ ok: true, value: { matched: true } });
+    // memory — the branch nothing else in this suite reaches. The state is pinned, not
+    // just `matched`: `matched` is also true for `termination_unverified`, which is
+    // exactly the outcome where the sleeper this cleanup exists to kill survives.
+    expect(cleanup).toMatchObject({ ok: true, value: { matched: true, state: 'cancelled' } });
   }, 15_000);
 
   it('keeps an unverified termination pinned, because the work may still be running', async () => {

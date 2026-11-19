@@ -18,6 +18,8 @@ export {
   type WebWorkspaceSelectionSnapshot,
   type WebWorkspaceCleanupEvaluation,
   type WorkspaceControlPort,
+  type WorkflowGateProbe,
+  type WebWorkflowGateProjection,
 } from './web-server.js';
 export { renderDashboardHtml } from './dashboard-html.js';
 export { CloudflareTunnelReconciler, type CloudflareTunnelReconcilerOptions, type CloudflareTunnelResult, type CloudflareTunnelSetup } from './cloudflare-client.js';

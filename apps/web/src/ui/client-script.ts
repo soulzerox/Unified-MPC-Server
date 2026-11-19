@@ -1362,6 +1362,39 @@ export function getClientScriptJs(): string {
         }
       }
 
+      function renderWorkflowGatePosture(projection) {
+        if (!projection || projection.phase !== 'mutate') return null;
+        const block = document.createElement('div');
+        block.className = 'project-goal-blockers';
+        const heading = 'Mutate gate: ' + projection.mode;
+        const verdict = projection.blocked === true
+          ? 'requires evidence for a path-named write'
+          : projection.blocked === false
+            ? 'nothing required for a path-named write'
+            : 'the requirement is workspace-wide; whether your session satisfies it is not readable here';
+        block.textContent = heading + ' — ' + verdict;
+        if (typeof projection.note === 'string' && projection.note.length > 0) {
+          const note = document.createElement('div');
+          note.className = 'project-goal-blockers';
+          note.textContent = projection.note;
+          block.appendChild(note);
+        }
+        if (projection.evaluated === false) {
+          const unseen = document.createElement('div');
+          unseen.className = 'project-goal-blockers';
+          unseen.textContent = 'Live harness state is per session and not readable from the WebUI; this is the workspace posture, not a verdict about your session.';
+          block.appendChild(unseen);
+        }
+        for (const blocker of Array.isArray(projection.blockers) ? projection.blockers : []) {
+          const line = document.createElement('div');
+          line.textContent = 'Blocker: ' + blocker.code
+            + (blocker.detail ? ' (' + blocker.detail + ')' : '')
+            + ' — ' + blocker.clearedBy;
+          block.appendChild(line);
+        }
+        return block;
+      }
+
       function renderWorkspaceGoalsPanel(workspace) {
         const panel = document.createElement('div');
         panel.className = 'project-goals-panel';
@@ -1380,11 +1413,15 @@ export function getClientScriptJs(): string {
         }
         if (!Array.isArray(state.goals) || state.goals.length === 0) {
           panel.textContent = 'No open goals';
-          return panel;
+        } else {
+          for (const goal of state.goals) {
+            panel.appendChild(renderGoalCard(workspace.id, goal, state.preferredGoalId));
+          }
         }
-        for (const goal of state.goals) {
-          panel.appendChild(renderGoalCard(workspace.id, goal, state.preferredGoalId));
-        }
+        // The gate posture answers "why is nothing moving here" even when there is
+        // no goal to attach the answer to, so it is appended after the placeholder.
+        const gate = renderWorkflowGatePosture(state.workflowGate);
+        if (gate !== null) panel.appendChild(gate);
         return panel;
       }
 
@@ -1539,6 +1576,7 @@ export function getClientScriptJs(): string {
           workspaceGoals.set(workspaceId, {
             goals: Array.isArray(data.goals) ? data.goals : [],
             preferredGoalId: data.preferredGoalId || null,
+            workflowGate: data.workflowGate || null,
             error: null,
           });
         } catch (err) {

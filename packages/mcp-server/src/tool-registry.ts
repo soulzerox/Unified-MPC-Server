@@ -70,6 +70,7 @@ import {
   workspaceWorkflowGate,
   type WorkspaceWorkflowGate,
 } from './mutate-gate.js';
+import { explainMutationBlockers, type BlockedWorkProjection } from './workflow-blockers.js';
 import {
   BUNDLED_PONYTAIL_REVIEW_SKILL_ID,
   BUNDLED_PONYTAIL_SKILL_ID,
@@ -2236,6 +2237,65 @@ export class ToolRegistry {
     } catch {
       return defaults;
     }
+  }
+
+  /**
+   * Read-only: what the `mutate` phase would do with a mutation right now.
+   *
+   * This answers with the same decision the seam enforces, because it is the same
+   * decision: `explainMutationBlockers` consumes exactly the facts
+   * `validateHarnessMutation` consumes, in the order the seam reads them — the
+   * harness ledger, the workspace source identity that voids every preparation when
+   * it moves, and then its AGENTS.md hash. What it cannot see is another session's
+   * evidence: the activation ledger is in-process and keyed by session, so a caller
+   * whose own ledger is empty is told `evaluated: false` rather than that the
+   * workspace has no harness. The opaque half of the phase (`mutateOpaque`) is
+   * decided from the mutation, not from a preparation, and is named in the note when
+   * it refuses.
+   */
+  public async workflowGateProjection(
+    workspaceId: string,
+    requestedPaths: readonly string[] = [],
+  ): Promise<BlockedWorkProjection> {
+    const gate = await this.resolveWorkflowGate(workspaceId);
+    // No harness service means the seam admits the mutation before reading a gate,
+    // so reporting a harness blocker here would describe a refusal that cannot happen.
+    if (this.services.extensions?.bootstrapMandatoryMcpServers === undefined) {
+      return explainMutationBlockers({ gate, harness: 'active' });
+    }
+    const context = this.harnessContext(workspaceId);
+    const state = this.harnessActivation.state(context);
+    if (state === undefined) {
+      return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'no_activation', requestedPaths });
+    }
+    // The seam voids every preparation when the admitted workspace source moved, and
+    // it does so before it reads the harness hash. A projection that skipped this
+    // would report prepared paths the next mutation refuses — the disagreement this
+    // module exists to make impossible — so it reads the same identity first.
+    const source = await this.observeWorkspaceSourceIdentity(workspaceId);
+    if (!source.ok) {
+      return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'source_identity', requestedPaths });
+    }
+    // Staleness is not a flag in the ledger: the seam decides it by re-reading the
+    // harness and comparing hashes. A projection that skipped the read would report
+    // `active` for a harness the next mutation refuses, so it pays the same read.
+    const currentHash = await this.currentAgentsMdHash(workspaceId);
+    if (!currentHash.ok) {
+      return explainMutationBlockers({ gate, harness: 'unknown', unreadable: 'agents_md', requestedPaths });
+    }
+    const stale = currentHash.value !== state.agentsMdHash;
+    const sourceMoved = source.value !== undefined
+      && classifyWorkspaceSourceEvidence(state.sourceIdentity, source.value) !== 'fresh';
+    const preparedPaths = stale || sourceMoved
+      ? []
+      : requestedPaths.filter((path) => this.harnessActivation.isPathPrepared(context, path));
+    return explainMutationBlockers({
+      gate,
+      harness: stale ? 'stale' : 'active',
+      requestedPaths,
+      preparedPaths,
+      ...(sourceMoved ? { sourceMoved } : {}),
+    });
   }
 
   public async setPonytailSessionSuppressed(workspaceId: string, goalId: string | undefined, suppressed: boolean): Promise<boolean> {

@@ -873,6 +873,69 @@ describe('ControlPlaneServer - Local Web Control Plane & Telemetry', () => {
     }
   });
 
+  it('carries the mutate gate posture with the goals, and reports a probe that cannot answer as absent rather than unblocked', async () => {
+    const workspaceControl = {
+      list: async (): Promise<readonly WebWorkspaceSummary[]> => [
+        { id: 'a', displayName: 'Project A', rootPath: '/projects/a', realRootPath: '/projects/a' },
+      ],
+      selection: async (): Promise<WebWorkspaceSelectionSnapshot> => ({ primaryWorkspaceId: 'a', activeWorkspaceIds: ['a'] }),
+    };
+    const goalControl = {
+      countOpen: async (): Promise<number> => 0,
+      preferred: async (): Promise<string | null> => null,
+      listOpen: async (): Promise<readonly WebGoalSummary[]> => [],
+      continue: async (): Promise<WebGoalSummary> => { throw new Error('not used'); },
+    };
+    const projection = {
+      phase: 'mutate' as const,
+      mode: 'require_preparation',
+      evaluated: false,
+      blocked: true,
+      blockers: [{ code: 'harness_inactive', clearedBy: 'Run workspace_bootstrap, then prepare_code_change for each path you will change' }],
+      note: 'The runtime could not read this workspace harness state',
+    };
+    let askWorkspace: string | undefined;
+    const answered = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      workspaceControl,
+      goalControl,
+      workflowGateProbe: async (workspaceId: string): Promise<typeof projection> => {
+        askWorkspace = workspaceId;
+        return projection;
+      },
+    });
+    await answered.listen();
+    try {
+      const res = await fetch(`http://127.0.0.1:${answered.port}/api/workspaces/a/goals`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ goals: [], preferredGoalId: null, workflowGate: projection });
+      expect(askWorkspace).toBe('a');
+    } finally {
+      await answered.close();
+    }
+
+    const failing = new ControlPlaneServer({
+      port: 0,
+      gateway,
+      capabilityToken,
+      workspaceControl,
+      goalControl,
+      workflowGateProbe: async (): Promise<never> => { throw new Error('profile store unavailable'); },
+    });
+    await failing.listen();
+    try {
+      const res = await fetch(`http://127.0.0.1:${failing.port}/api/workspaces/a/goals`);
+      expect(res.status).toBe(200);
+      // Absent, not `blocked: false`: a projection the server could not produce must
+      // never read as permission.
+      expect(await res.json()).toEqual({ goals: [], preferredGoalId: null });
+    } finally {
+      await failing.close();
+    }
+  });
+
   it('enforces hard gating: POST /api/chatgpt-web/connect returns 412 Precondition Failed when bridge is STOPPED', async () => {
     expect(gateway.status().state).toBe('STOPPED');
 

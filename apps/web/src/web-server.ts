@@ -94,6 +94,34 @@ export interface WorkspaceControlPort {
   remove(workspaceId: string): Promise<WebWorkspaceSelectionSnapshot | null>;
 }
 
+/** One workspace's `mutate` posture, supplied by the CLI which owns the profile read. */
+export interface WebWorkflowGateProjection {
+  readonly phase: 'mutate';
+  readonly mode: string;
+  /** False when the runtime could not read a fact the decision needs. */
+  readonly evaluated: boolean;
+  /**
+   * The verdict, or absent when the answer depends on evidence this reader cannot
+   * see. Absent is not `false`: the WebUI has no harness ledger, so for an opt-in
+   * workspace the requirement is reported and the verdict is left to the runtime.
+   */
+  readonly blocked?: boolean;
+  readonly blockers?: readonly {
+    readonly code: string;
+    readonly detail?: string;
+    readonly clearedBy: string;
+  }[];
+  readonly note?: string;
+}
+
+/**
+ * Read-only projection of the workflow gate's `mutate` phase for one workspace.
+ * The WebUI shows posture and rules, never a verdict about another session's
+ * evidence: harness activation is in-process and per session, so a web process
+ * cannot see it and must say so rather than guess.
+ */
+export type WorkflowGateProbe = (workspaceId: string) => Promise<WebWorkflowGateProjection | undefined>;
+
 export interface GoalControlPort {
   countOpen(workspaceId: string): Promise<number>;
   preferred(workspaceId: string): Promise<string | null>;
@@ -230,6 +258,7 @@ export interface ControlPlaneServerOptions {
   readonly mcpRuntimeDiagnosticsProbe?: McpRuntimeDiagnosticsProbe;
   readonly storageDiagnosticsProbe?: StorageDiagnosticsProbe;
   readonly canonicalStatusProbe?: CanonicalStatusProbe;
+  readonly workflowGateProbe?: WorkflowGateProbe;
   readonly canonicalLifecycleProbe?: CanonicalLifecycleProbe;
   /** Test-only override for persisted Gateway restore retry cadence. */
   readonly gatewayRestoreRetryBaseMs?: number;
@@ -336,6 +365,7 @@ export class ControlPlaneServer {
   private readonly mcpRuntimeDiagnosticsProbe: McpRuntimeDiagnosticsProbe;
   private readonly storageDiagnosticsProbe: StorageDiagnosticsProbe | undefined;
   private readonly canonicalStatusProbe: CanonicalStatusProbe | undefined;
+  private readonly workflowGateProbe: WorkflowGateProbe | undefined;
   private readonly canonicalLifecycleProbe: CanonicalLifecycleProbe | undefined;
   private readonly gatewayRestoreRetryBaseMs: number;
   private readonly gatewayRestoreRetryMaxMs: number;
@@ -395,6 +425,7 @@ export class ControlPlaneServer {
     this.mcpRuntimeDiagnosticsProbe = options.mcpRuntimeDiagnosticsProbe ?? probeMcpRuntimeDiagnostics;
     this.storageDiagnosticsProbe = options.storageDiagnosticsProbe;
     this.canonicalStatusProbe = options.canonicalStatusProbe;
+    this.workflowGateProbe = options.workflowGateProbe;
     this.canonicalLifecycleProbe = options.canonicalLifecycleProbe;
     this.gatewayRestoreRetryBaseMs = options.gatewayRestoreRetryBaseMs ?? 1_000;
     this.gatewayRestoreRetryMaxMs = options.gatewayRestoreRetryMaxMs ?? 30_000;
@@ -792,8 +823,16 @@ export class ControlPlaneServer {
       }
       const goals = this.goalControl === undefined ? [] : await this.goalControl.listOpen(workspaceId);
       const preferredGoalId = this.goalControl === undefined ? null : await this.goalControl.preferred(workspaceId);
+      // The gate posture travels with the goals because that is what an operator
+      // reads when asking why this workspace's work is not moving; a separate
+      // endpoint would be a second fetch for the same question.
+      const workflowGate = await this.readWorkflowGateProjection(workspaceId);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ goals, preferredGoalId }));
+      res.end(JSON.stringify({
+        goals,
+        preferredGoalId,
+        ...(workflowGate === undefined ? {} : { workflowGate }),
+      }));
       return;
     }
 
@@ -1619,6 +1658,19 @@ export class ControlPlaneServer {
   private async isRegisteredWorkspace(workspaceId: string): Promise<boolean> {
     const registered = await this.workspaceControl?.list() ?? [];
     return registered.some((workspace) => workspace.id === workspaceId);
+  }
+
+  /**
+   * A gate projection that cannot be produced is reported as absent, never as
+   * "unblocked": the WebUI renders nothing rather than a verdict it does not have.
+   */
+  private async readWorkflowGateProjection(workspaceId: string): Promise<WebWorkflowGateProjection | undefined> {
+    if (this.workflowGateProbe === undefined) return undefined;
+    try {
+      return await this.workflowGateProbe(workspaceId);
+    } catch {
+      return undefined;
+    }
   }
 
   private async readMultiplexedGoalRuntimeSnapshots(

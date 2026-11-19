@@ -1174,6 +1174,9 @@ describe('boot read resilience', () => {
     expect(workspaceGoals.get('ws-1')).toEqual({
       goals: [{ id: 'goal-1' }],
       preferredGoalId: 'goal-1',
+      // The goals body carries the mutate-gate posture when the server has one; this
+      // fixture does not, and the client must still record the read as complete.
+      workflowGate: null,
       error: null,
     });
     expect([...loadingWorkspaceGoals]).toEqual([]);

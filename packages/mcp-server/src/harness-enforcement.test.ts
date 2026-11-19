@@ -319,6 +319,64 @@ describe('workspace engineering harness enforcement', () => {
     expect(nativeRagCalls).toEqual(['pre_edit_context']);
   });
 
+  it('explains the mutate phase from the same decision it enforces, and reports a harness it cannot see as unreadable rather than active', async () => {
+    const { services, writes, setFileContent, setAgentsMd, setHead } = createHarnessServices();
+    const registry = new ToolRegistry(services, actor, { harnessActivationLedger: new HarnessActivationLedger(), activeWorkspaceScopeProvider });
+
+    // Default posture: the phase prepares on demand, so there is nothing to explain
+    // as a barrier and the projection says so instead of inventing one.
+    await expect(registry.workflowGateProjection('workspace-1')).resolves.toMatchObject({
+      phase: 'mutate', mode: 'auto_prepare', blocked: false, blockers: [],
+    });
+
+    setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));
+    // Nothing has bootstrapped this session, so the harness the projection would need
+    // is not readable from here: the gate refuses in that state, and the projection
+    // reports the same refusal with `evaluated: false` rather than claiming `active`.
+    // Only that refusal: the seam returns here, before it reads a preparation.
+    await expect(registry.workflowGateProjection('workspace-1', ['src/app.ts'])).resolves.toMatchObject({
+      mode: 'require_preparation',
+      evaluated: false,
+      blocked: true,
+      blockers: [{ code: 'harness_inactive' }],
+    });
+
+    expect((await registry.invoke('workspace_bootstrap', { workspaceId: 'workspace-1' })).isError).not.toBe(true);
+    await expect(registry.workflowGateProjection('workspace-1', ['src/app.ts'])).resolves.toMatchObject({
+      evaluated: true,
+      blocked: true,
+      blockers: [{ code: 'preparation_missing', detail: 'src/app.ts' }],
+    });
+
+    expect((await registry.invoke('prepare_code_change', {
+      workspaceId: 'workspace-1', filePath: 'src/app.ts', proposedSymbol: 'app',
+    })).isError).not.toBe(true);
+    await expect(registry.workflowGateProjection('workspace-1', ['src/app.ts'])).resolves.toMatchObject({
+      evaluated: true, blocked: false, blockers: [],
+    });
+
+    // The seam voids every preparation when the admitted source view moves. A
+    // projection that read only the ledger would keep reporting the path as
+    // prepared while the next mutation demands it again — the disagreement this
+    // module exists to prevent.
+    setHead('b'.repeat(40));
+    const moved = await registry.workflowGateProjection('workspace-1', ['src/app.ts']);
+    expect(moved.blocked).toBe(true);
+    expect(moved.blockers.map((blocker) => blocker.code)).toEqual(['preparation_missing']);
+    expect(moved.note).toContain('source moved');
+    setHead('a'.repeat(40));
+
+    // A harness that moved under the preparation is what the seam refuses next, and
+    // the projection reads the same hash to say so instead of reporting `active`.
+    setAgentsMd('# Harness\nchanged\n');
+    const stale = await registry.workflowGateProjection('workspace-1', ['src/app.ts']);
+    expect(stale.blocked).toBe(true);
+    // Staleness alone: the seam returns before the preparation check, so demanding
+    // the path here would name a step the gate has not reached.
+    expect(stale.blockers.map((blocker) => blocker.code)).toEqual(['harness_stale']);
+    expect(writes).toEqual([]);
+  });
+
   it('refuses the opt-in mutation when the harness changed after the path was prepared', async () => {
     const { services, writes, setAgentsMd, setFileContent } = createHarnessServices();
     setFileContent('.unified-mpc/project-profile.json', JSON.stringify({ workflowGate: { mutate: 'require_preparation' } }));

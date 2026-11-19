@@ -7,7 +7,7 @@ import { appError, canonicalManifestId, err, type GoalRecord, type WorkspaceAdmi
 import { GoalWorkspaceTruthReader } from '@unified-mpc/application';
 import { IdeSyncService, POLICY_BLOCK_END, POLICY_BLOCK_START } from '@unified-mpc/extensions';
 import { CURRENT_SCHEMA_MIGRATION_ID } from '@unified-mpc/storage';
-import { CanonicalManifestStore, CanonicalRefStore, ArtifactQuarantineStore, IndexJobLedger, ProviderGenerationLedger } from '@unified-mpc/workspace';
+import { CanonicalManifestStore, CanonicalRefStore, ArtifactQuarantineStore, IndexJobLedger, ProviderGenerationLedger, type Workspace } from '@unified-mpc/workspace';
 import { ControlPlaneServer } from '@unified-mpc/web';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -16,6 +16,7 @@ import {
   createGoalControl,
   createWebGoalRuntimeProjection,
   createWorkspaceControl,
+  createWorkflowGateProbe,
   resolveCanonicalLifecycleLimit,
   resolveCanonicalStatusLimit,
   runWeb,
@@ -960,5 +961,73 @@ describe('web CLI command', () => {
         await result.value.handle.close();
       }
     });
+  });
+});
+
+describe('createWorkflowGateProbe', () => {
+  function fixtureWorkspace(rootPath: string): Workspace {
+    return { id: 'ws-1', displayName: 'Fixture', rootPath, realRootPath: rootPath, createdAt: new Date(0).toISOString() };
+  }
+
+  async function fixtureRoot(profile?: unknown): Promise<string> {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-gate-probe-'));
+    if (profile !== undefined) {
+      await mkdir(path.join(root, '.unified-mpc'), { recursive: true });
+      await writeFile(path.join(root, '.unified-mpc', 'project-profile.json'), JSON.stringify(profile), 'utf8');
+    }
+    return root;
+  }
+
+  it('answers a default workspace in full, because that posture never reads the ledger', async () => {
+    const probe = createWorkflowGateProbe({ list: async () => [fixtureWorkspace(await fixtureRoot())] });
+
+    await expect(probe('ws-1')).resolves.toMatchObject({
+      phase: 'mutate',
+      mode: 'auto_prepare',
+      evaluated: true,
+      blocked: false,
+      blockers: [],
+    });
+  });
+
+  it('names the requirement without guessing the session that has to satisfy it', async () => {
+    const probe = createWorkflowGateProbe({
+      list: async () => [fixtureWorkspace(await fixtureRoot({ workflowGate: { mutate: 'require_preparation' } }))],
+    });
+
+    const projection = await probe('ws-1');
+
+    expect(projection).toMatchObject({ phase: 'mutate', mode: 'require_preparation', evaluated: false });
+    // No verdict and no blocker: this process owns no harness ledger, so either would
+    // be a claim about another session's evidence.
+    expect(projection?.blocked).toBeUndefined();
+    expect(projection?.blockers).toBeUndefined();
+    expect(projection?.note).toContain('require_preparation');
+  });
+
+  it('names the opaque half when the workspace refuses it too', async () => {
+    const probe = createWorkflowGateProbe({
+      list: async () => [fixtureWorkspace(await fixtureRoot({ workflowGate: { mutate: 'require_preparation', mutateOpaque: 'refuse' } }))],
+    });
+
+    await expect(probe('ws-1')).resolves.toMatchObject({
+      mode: 'require_preparation',
+      note: expect.stringContaining('mutateOpaque: refuse'),
+    });
+  });
+
+  it('has no projection for a workspace it does not know, because absence is not permission', async () => {
+    const probe = createWorkflowGateProbe({ list: async () => [fixtureWorkspace(await fixtureRoot())] });
+
+    await expect(probe('ws-unknown')).resolves.toBeUndefined();
+  });
+
+  it('falls back to the default posture when the profile is unreadable JSON', async () => {
+    const root = await fixtureRoot();
+    await mkdir(path.join(root, '.unified-mpc'), { recursive: true });
+    await writeFile(path.join(root, '.unified-mpc', 'project-profile.json'), '{ not json', 'utf8');
+    const probe = createWorkflowGateProbe({ list: async () => [fixtureWorkspace(root)] });
+
+    await expect(probe('ws-1')).resolves.toMatchObject({ mode: 'auto_prepare', blocked: false });
   });
 });

@@ -535,6 +535,11 @@ export class DurableShellTaskStore {
 
     const before = await this.reconcile(metadataResult.value);
     if (isTerminal(before.state)) {
+      // A terminal record can still name a live process — a start that failed after
+      // the fork records `failed` — so goal cleanup delegates to `cancel`, which
+      // finishes that stop without changing the outcome.
+      const settled = await this.cancel(taskId, storedOwner);
+      if (!settled.ok) return settled;
       return ok({ matched: true, state: 'already_terminal', detail: before.state });
     }
     const cancelled = await this.cancel(taskId, storedOwner);
@@ -562,7 +567,7 @@ export class DurableShellTaskStore {
       return err(appError('PERMISSION_DENIED', 'Task is not owned by this client session and workspace'));
     }
     let metadata = await this.reconcile(metadataResult.value);
-    if (isTerminal(metadata.state)) return ok(await this.snapshotFromMetadata(metadata));
+    if (isTerminal(metadata.state)) return ok(await this.settleTerminalCancel(metadata));
     if (metadata.state === 'waiting_resource') {
       // A queued task owns no process, so cancellation is a pure state change.
       metadata.state = 'cancelled';
@@ -573,37 +578,12 @@ export class DurableShellTaskStore {
       return ok(await this.snapshotFromMetadata(metadata));
     }
     metadata = await this.hydrateProcessIdentities(metadata);
-    const workerProbe = metadata.worker_pid === undefined
-      ? { state: 'gone' as const }
-      : await probeProcessIdentity(metadata.worker_pid, this.platform);
-    const childProbe = metadata.child_pid === undefined
-      ? { state: 'gone' as const }
-      : await probeProcessIdentity(metadata.child_pid, this.platform);
-    const workerRunning = isTrackedProcessLive(workerProbe, metadata.worker_started_at);
-    const childRunning = isTrackedProcessLive(childProbe, metadata.child_started_at);
-    // POSIX workers and their children own separate detached process groups.
-    // Stop the real child first and keep the worker alive to reap it, flush
-    // output and exit. The termination verifier still requires both PIDs gone.
-    // Windows taskkill /T instead needs the worker root to traverse its child.
-    const terminationPid = this.platform !== 'win32' && childRunning
-      ? metadata.child_pid
-      : workerRunning ? metadata.worker_pid : (childRunning ? metadata.child_pid : undefined);
-    if (terminationPid === undefined) {
+    const termination = await this.terminateTrackedProcesses(metadata);
+    if (termination !== 'stopped') {
       metadata.state = 'termination_unverified';
-      metadata.error = 'Durable task process PID is unavailable; process termination could not be verified';
-      delete metadata.finished_at;
-      await this.writeMetadata(metadata);
-      return ok(await this.snapshotFromMetadata(metadata));
-    }
-    const relatedPids = [metadata.worker_pid, metadata.child_pid]
-      .filter((pid): pid is number => pid !== undefined && pid !== terminationPid);
-    const identities = new Map<number, string>();
-    if (metadata.worker_pid !== undefined && metadata.worker_started_at !== undefined) identities.set(metadata.worker_pid, metadata.worker_started_at);
-    if (metadata.child_pid !== undefined && metadata.child_started_at !== undefined) identities.set(metadata.child_pid, metadata.child_started_at);
-    const stopped = await stopProcessTree(terminationPid, relatedPids, this.platform, identities);
-    if (!stopped) {
-      metadata.state = 'termination_unverified';
-      metadata.error = 'Durable task process termination could not be verified';
+      metadata.error = termination === 'no_process'
+        ? 'Durable task process PID is unavailable; process termination could not be verified'
+        : 'Durable task process termination could not be verified';
       delete metadata.finished_at;
       await this.writeMetadata(metadata);
       return ok(await this.snapshotFromMetadata(metadata));
@@ -614,6 +594,67 @@ export class DurableShellTaskStore {
     metadata.finished_at = new Date().toISOString();
     await this.writeMetadata(metadata);
     return ok(await this.snapshotFromMetadata(metadata));
+  }
+
+  /**
+   * A terminal record can still name live processes: a start that failed after the
+   * fork records `failed`, and the pid it could not stop is the only handle to that
+   * tree. Returning the snapshot here would make that pid a note nobody acts on, so
+   * a cancel finishes the stop the failed start could not.
+   *
+   * The task's outcome does not change — it already happened — so the state is kept
+   * and only the pids this cancel proved gone are dropped, with the record saying
+   * what it did. A process it could not prove gone is reported rather than cleared.
+   */
+  private async settleTerminalCancel(metadata: DurableTaskMetadata): Promise<Record<string, unknown>> {
+    if (metadata.worker_pid === undefined && metadata.child_pid === undefined) return this.snapshotFromMetadata(metadata);
+    const hydrated = await this.hydrateProcessIdentities(metadata);
+    const termination = await this.terminateTrackedProcesses(hydrated);
+    if (termination === 'no_process') return this.snapshotFromMetadata(hydrated);
+    if (termination === 'stopped') {
+      delete hydrated.worker_pid;
+      delete hydrated.worker_started_at;
+      delete hydrated.child_pid;
+      delete hydrated.child_started_at;
+      hydrated.error = appendTerminationNote(hydrated.error,
+        'the process this record named before it reached its final state was stopped by a later cancel');
+    } else {
+      hydrated.error = appendTerminationNote(hydrated.error,
+        'the process this record named before it reached its final state could not be stopped and may still be running');
+    }
+    await this.writeMetadata(hydrated);
+    return this.snapshotFromMetadata(hydrated);
+  }
+
+  /**
+   * Stop the processes a record names, child first on POSIX: the worker and the
+   * command it forked own separate detached groups, and stopping the command first
+   * lets the worker reap it, flush output and exit. Windows `taskkill /T` instead
+   * needs the worker root to traverse its child.
+   *
+   * `no_process` means nothing this record names is still the process it named: the
+   * pids are absent, gone, or reused by something else. `unverified` is the case
+   * where a signal was sent but the stop could not be proven.
+   */
+  private async terminateTrackedProcesses(metadata: DurableTaskMetadata): Promise<'stopped' | 'unverified' | 'no_process'> {
+    const workerProbe = metadata.worker_pid === undefined
+      ? { state: 'gone' as const }
+      : await probeProcessIdentity(metadata.worker_pid, this.platform);
+    const childProbe = metadata.child_pid === undefined
+      ? { state: 'gone' as const }
+      : await probeProcessIdentity(metadata.child_pid, this.platform);
+    const workerRunning = isTrackedProcessLive(workerProbe, metadata.worker_started_at);
+    const childRunning = isTrackedProcessLive(childProbe, metadata.child_started_at);
+    const terminationPid = this.platform !== 'win32' && childRunning
+      ? metadata.child_pid
+      : workerRunning ? metadata.worker_pid : (childRunning ? metadata.child_pid : undefined);
+    if (terminationPid === undefined) return 'no_process';
+    const relatedPids = [metadata.worker_pid, metadata.child_pid]
+      .filter((pid): pid is number => pid !== undefined && pid !== terminationPid);
+    const identities = new Map<number, string>();
+    if (metadata.worker_pid !== undefined && metadata.worker_started_at !== undefined) identities.set(metadata.worker_pid, metadata.worker_started_at);
+    if (metadata.child_pid !== undefined && metadata.child_started_at !== undefined) identities.set(metadata.child_pid, metadata.child_started_at);
+    return await stopProcessTree(terminationPid, relatedPids, this.platform, identities) ? 'stopped' : 'unverified';
   }
 
   public async has(taskId: string): Promise<boolean> {
@@ -1015,6 +1056,11 @@ function describeTrackedProbe(kind: string, probe: PortableProcessProbe): string
   if (probe.state === 'unverifiable') return `Durable task ${kind} liveness is unverifiable (${probe.reason})`;
   if (probe.state === 'live') return `Durable task ${kind} process identity could not be verified`;
   return `Durable task ${kind} process identity is no longer live`;
+}
+
+/** Amends a record's error with what a later cancel did, so the note stays one field. */
+function appendTerminationNote(error: string | undefined, note: string): string {
+  return error === undefined || error.length === 0 ? note : `${error}; ${note}`;
 }
 
 function identityCapturePending(startedAt: string): boolean {

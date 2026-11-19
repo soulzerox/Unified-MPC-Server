@@ -782,6 +782,36 @@ describe('ShellCapabilityBackend unrestricted', () => {
     await expect(backend.taskLivenessForGoal('workspace-1', 'task-that-never-existed')).resolves.toBe('unknown');
   }, 30_000);
 
+  it('answers both goal probes with one ownership rule over a task held in memory', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-goal-probes-'));
+    temporaryRoots.push(root);
+    const backend = new ShellCapabilityBackend({ allowedRoots: [root] });
+    const started = await backend.execute({
+      operation: 'run',
+      executable: process.execPath,
+      arguments: ['-e', 'setTimeout(() => {}, 30000)'],
+      cwd: root,
+      execution: 'background',
+      userConfirmed: true,
+      metadata: { [CAPABILITY_TASK_OWNER_METADATA_KEY]: { clientId: 'client-1', sessionId: 'session-a', workspaceId: 'workspace-1' } },
+    });
+    expect(started).toMatchObject({ ok: true, value: { task_id: expect.any(String) } });
+    if (!started.ok) return;
+    const taskId = String((started.value as { task_id: string }).task_id);
+
+    // A task this host still holds in memory is read through the same workspace
+    // check by both probes, which return different shapes. Relaxing one and not
+    // the other would let a goal read another workspace's task through the door
+    // that was left open, so both are asserted here.
+    await expect(backend.statusForGoalLiveness('workspace-1', taskId)).resolves.toMatchObject({ ok: true });
+    await expect(backend.taskLivenessForGoal('workspace-1', taskId)).resolves.toBe('live');
+    await expect(backend.statusForGoalLiveness('workspace-2', taskId))
+      .resolves.toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    await expect(backend.taskLivenessForGoal('workspace-2', taskId)).resolves.toBe('unknown');
+
+    await expect(backend.cancelForGoal('client-1', 'workspace-1', taskId)).resolves.toMatchObject({ ok: true });
+  }, 15_000);
+
   it('keeps an unverified termination pinned, because the work may still be running', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-shell-unverified-'));
     temporaryRoots.push(root);

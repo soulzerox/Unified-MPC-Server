@@ -587,17 +587,19 @@ describe('durable shell task parking (#145)', () => {
     expect(waited).toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
   });
 
-  it('stops a worker it spawned when the start fails after the fork', async () => {
+  it('stops the child a failed start already forked', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-orphan-'));
     temporaryRoots.push(root);
     const tasksRoot = path.join(root, '.tasks');
     const store = new DurableShellTaskStore(tasksRoot);
-    const marker = path.join(root, 'worker-survived.txt');
+    const marker = path.join(root, 'child-survived.txt');
     const owner = { clientId: 'client-a', sessionId: 'session-a', workspaceId: 'workspace-a' };
     await store.reserve({
       taskId: 'orphan-check',
       executable: process.execPath,
-      // Writes the marker only if its worker was still alive ~800ms after launch.
+      // The worker forks this command into its own detached group, so the marker
+      // is written only if that child outlived the failed start — the worker is
+      // not what leaks here.
       arguments: ['-e', `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'alive'), 800)`],
       cwd: root,
       timeoutSeconds: 30,

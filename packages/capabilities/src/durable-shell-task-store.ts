@@ -100,6 +100,10 @@ const WORKER_STARTED_FILENAME = 'worker.started';
 const METADATA_READ_RETRIES = 4;
 const PROCESS_EXIT_RECONCILE_DELAY_MS = 75;
 const PROCESS_HANDLE_RELEASE_GRACE_MS = 150;
+// A failed start kills the child the worker already forked. The worker persists
+// that pid immediately after spawning, so this only covers a slow `ps` probe
+// inside the worker, not a task that legitimately has no child.
+const FAILED_START_CHILD_PID_WAIT_MS = 2_000;
 // Host process identity probes start a second PowerShell/`ps` process. Under
 // a busy desktop test run that probe can be delayed even though the durable
 // worker is healthy. Keep the startup window finite (so a genuinely
@@ -280,22 +284,78 @@ export class DurableShellTaskStore {
       // cancel or sweep can find it, and that worker keeps the real child alive. Stop
       // the tree before recording the failure — the worker also owns `task.json`, so
       // writing it a live process may overwrite is a losing race anyway.
-      if (worker?.pid !== undefined) {
-        // `stopProcessTree` refuses a live pid it cannot tie to a known start time, so
-        // probe the worker we just forked and hand that identity over.
-        const pid = worker.pid;
-        const identity = await probeProcessIdentity(pid, this.platform).catch(() => undefined);
-        if (identity?.state === 'live') {
-          await stopProcessTree(pid, [], this.platform, new Map([[pid, identity.processStartedAt]])).catch(() => false);
-        }
-      }
+      const stopped = worker?.pid === undefined
+        ? true
+        : await this.stopFailedStart(worker.pid, taskDirectory).catch(() => false);
       const message = error instanceof Error ? error.message : 'Durable task could not start';
       metadata.state = 'failed';
       metadata.exit_code = -1;
-      metadata.error = `Durable task could not start: ${message}`;
+      metadata.error = stopped
+        ? `Durable task could not start: ${message}`
+        : `Durable task could not start: ${message}; the worker it forked could not be stopped and may still be running`;
       metadata.finished_at = new Date().toISOString();
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8').catch(() => undefined);
       return err(appError('INTERNAL_ERROR', 'Durable task could not start', true));
+    }
+  }
+
+  /**
+   * Stop the worker a failed start forked, and the real child it already started.
+   *
+   * The worker is spawned detached and spawns the command into a second detached
+   * process group, so signalling the worker's group alone leaves the command
+   * running with nothing naming it. `cancel` stops the child first for the same
+   * reason; a failed start has no metadata to read it from, so the child is taken
+   * from the `task.json` the worker publishes as soon as it has a pid. Windows
+   * needs neither: `taskkill /T` walks the tree from the worker.
+   *
+   * Returns whether the processes are gone. A `false` is reported in the task's
+   * error rather than swallowed, because the alternative is a live orphan nobody
+   * can find.
+   */
+  private async stopFailedStart(workerPid: number, taskDirectory: string): Promise<boolean> {
+    if (this.platform === 'win32') {
+      const exitCode = await new Promise<number | null>((resolve) => {
+        const killer = spawn('taskkill', ['/PID', String(workerPid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => resolve(null));
+        killer.once('close', resolve);
+      });
+      return exitCode === 0 || !isProcessRunning(workerPid);
+    }
+    const childPid = await this.readFailedStartChildPid(taskDirectory);
+    const identities = new Map<number, string>();
+    for (const pid of [workerPid, childPid]) {
+      if (pid === undefined) continue;
+      const identity = await probeProcessIdentity(pid, this.platform).catch(() => undefined);
+      if (identity?.state === 'live') identities.set(pid, identity.processStartedAt);
+    }
+    const terminationPid = childPid !== undefined && identities.has(childPid)
+      ? childPid
+      : identities.has(workerPid) ? workerPid : undefined;
+    if (terminationPid === undefined) return true;
+    const relatedPids = [workerPid, childPid].filter((pid): pid is number => pid !== undefined && pid !== terminationPid);
+    return stopProcessTree(terminationPid, relatedPids, this.platform, identities);
+  }
+
+  /**
+   * Read the child pid the worker publishes, waiting briefly for the write. The
+   * worker persists it right after spawning, so a short wait is enough; a task
+   * whose child never appeared has nothing to stop.
+   */
+  private async readFailedStartChildPid(taskDirectory: string): Promise<number | undefined> {
+    const deadline = Date.now() + FAILED_START_CHILD_PID_WAIT_MS;
+    for (;;) {
+      const raw = await readFile(path.join(taskDirectory, METADATA_FILENAME), 'utf8').catch(() => undefined);
+      if (raw !== undefined) {
+        try {
+          const parsed = JSON.parse(raw) as { child_pid?: unknown };
+          if (typeof parsed.child_pid === 'number') return parsed.child_pid;
+        } catch {
+          // The worker owns this file and may be mid-write; keep waiting.
+        }
+      }
+      if (Date.now() >= deadline) return undefined;
+      await delay(25);
     }
   }
 

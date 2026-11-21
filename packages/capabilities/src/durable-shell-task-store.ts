@@ -1311,13 +1311,18 @@ function processRunning(pid) {
 
 async function processStartedAt(pid) {
   try {
-    const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
-      encoding: 'utf8',
-      timeout: 1750,
-      maxBuffer: 16384,
-      env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
-    });
+    const result = process.platform === 'win32'
+      ? await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        '$p = Get-Process -Id ' + String(pid) + ' -ErrorAction SilentlyContinue; if ($null -eq $p) { \'missing\' } else { $p.StartTime.ToUniversalTime().ToString(\'o\') }',
+      ], { encoding: 'utf8', timeout: 1750, maxBuffer: 16384, windowsHide: true })
+      : await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
+        encoding: 'utf8',
+        timeout: 1750,
+        maxBuffer: 16384,
+        env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
+      });
     const value = String(result.stdout || '').trim();
+    if (value === 'missing') return null;
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
   } catch {

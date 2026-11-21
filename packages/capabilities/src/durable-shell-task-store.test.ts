@@ -758,6 +758,62 @@ describe('durable shell task parking (#145)', () => {
     }
   });
 
+  it('reports a pid whose identity probe cannot be read as unproven', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-unreadable-probe-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    // An unparseable `ps` is the only way to reach the probe-failure branch: the pid is
+    // provably live, and only its identity is unknown, which is not proof of a stop.
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(path.join(fakeBin, 'ps'), '#!/bin/sh\necho "not-a-valid-ps-row"\n', { mode: 0o755 });
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'unreadable-probe';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start',
+        worker_pid: sleeper.pid,
+        worker_started_at: startedAt,
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed', worker_pid: sleeper.pid } });
+      expect(cancelled.ok && String(cancelled.value.error)).toContain('may still be running');
+      expect(isProcessAlive(sleeper.pid)).toBe(true);
+
+      // The unproven outcome was the unreadable probe, not the pid: with the real `ps`
+      // back, the same record and the same live process settle on the next cancel.
+      process.env.PATH = realPath;
+      const settled = await store.cancel(taskId);
+
+      expect(settled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      const settledError = settled.ok ? String(settled.value.error) : '';
+      expect(settledError).toContain('stopped by a later cancel');
+      expect(settledError).not.toContain('may still be running');
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
   it('answers an already-terminal goal task from what the cancel did', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-goal-label-'));
     temporaryRoots.push(root);

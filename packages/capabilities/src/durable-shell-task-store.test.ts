@@ -620,6 +620,151 @@ describe('durable shell task parking (#145)', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it('stops the worker when a failed start never published its child', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-no-child-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    try {
+      const taskDirectory = path.join(tasksRoot, 'no-child-published');
+      await mkdir(taskDirectory, { recursive: true });
+      // A settled record with no `child_pid` is the shape the wait gives up on: the
+      // worker cannot fork after a terminal write, so there is no child to read.
+      await writeFile(path.join(taskDirectory, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: 'no-child-published',
+        state: 'failed',
+      }), 'utf8');
+
+      const stopped = await stopFailedStartOf(store)(sleeper.pid, taskDirectory);
+
+      expect(stopped).toBe(true);
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
+  it('reports a failed start stopped when taskkill walks the worker tree', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-stop-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    // The platform is what this pins: the Windows branch kills through `taskkill` and
+    // trusts its exit status, so the fake stands in for the only part Linux lacks.
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const sleeperExited = new Promise<void>((resolve) => sleeper.once('exit', () => resolve()));
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    // Recording the pid pins which tree `taskkill` was handed. It does not by itself
+    // prove this branch ran — a win32 store also reaches `taskkill` through
+    // `stopProcessTree` — so the fallback test below is the one that discriminates.
+    const taskkillLog = path.join(root, 'taskkill.log');
+    await writeFile(
+      path.join(fakeBin, 'taskkill'),
+      `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nkill -9 "$2" 2>/dev/null\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const stopped = await stopFailedStartOf(store)(sleeper.pid, path.join(tasksRoot, 'win32-stop'));
+
+      expect(stopped).toBe(true);
+      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(String(sleeper.pid));
+      // A zombie keeps answering `kill(pid, 0)`, so the exit event is the proof here.
+      await sleeperExited;
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
+  it('does not claim a failed start stopped when taskkill fails and the worker lives', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-unproven-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    const taskkillLog = path.join(root, 'taskkill.log');
+    await writeFile(path.join(fakeBin, 'taskkill'), `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nexit 1\n`, { mode: 0o755 });
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const stopped = await stopFailedStartOf(store)(sleeper.pid, path.join(tasksRoot, 'win32-unproven'));
+
+      // The worker is still there, so the failed start must not read as a clean stop.
+      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(String(sleeper.pid));
+      expect(stopped).toBe(false);
+      expect(isProcessAlive(sleeper.pid)).toBe(true);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
+  it('kills the published child after taskkill fails on a worker that is already gone', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-child-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    const childExited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    const childStartedAt = await readProcessStartedAt(child.pid);
+    const exited = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    const workerPid = await new Promise<number>((resolve) => exited.once('exit', () => resolve(exited.pid as number)));
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    const taskkillLog = path.join(root, 'taskkill.log');
+    // Only the child's tree is killable here: the worker pid is dead, which is what
+    // sends the fallback to the `task.json` the worker published before it died. The
+    // log pins that the fallback walked both trees instead of signalling them itself.
+    await writeFile(
+      path.join(fakeBin, 'taskkill'),
+      `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\n`
+        + `if [ "$2" = "${String(child.pid)}" ]; then kill -9 "$2" 2>/dev/null; exit 0; fi\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskDirectory = path.join(tasksRoot, 'win32-child');
+      await mkdir(taskDirectory, { recursive: true });
+      await writeFile(path.join(taskDirectory, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: 'win32-child',
+        state: 'running',
+        child_pid: child.pid,
+      }), 'utf8');
+
+      const stopped = await stopFailedStartOf(store)(workerPid, taskDirectory);
+
+      expect(stopped).toBe(true);
+      expect((await readFile(taskkillLog, 'utf8')).trim().split('\n')).toEqual([String(workerPid), String(child.pid)]);
+      // The fake kills the child but never reaps it, so its exit event is the proof.
+      await childExited;
+      expect(isProcessAlive(child.pid)).toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(child.pid, childStartedAt);
+    }
+  });
+
   it('stops a process a terminal record still names, instead of leaving the pid as a note', async () => {
     if (process.platform === 'win32') return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-late-cancel-'));
@@ -767,8 +912,9 @@ describe('durable shell task parking (#145)', () => {
     const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
     sleeper.unref();
     const startedAt = await readProcessStartedAt(sleeper.pid);
-    // An unparseable `ps` is the only way to reach the probe-failure branch: the pid is
-    // provably live, and only its identity is unknown, which is not proof of a stop.
+    // A fake `ps` reaches the probe-failure branch with the pid provably live. An
+    // unparseable row is one way; a non-1 exit status and a timeout land on the same
+    // `unverifiable` clause. Only the identity is unknown, which is not proof of a stop.
     const fakeBin = path.join(root, 'bin');
     await mkdir(fakeBin, { recursive: true });
     await writeFile(path.join(fakeBin, 'ps'), '#!/bin/sh\necho "not-a-valid-ps-row"\n', { mode: 0o755 });
@@ -1119,4 +1265,14 @@ async function killFixture(pid: number | undefined, expectedStartedAt: string): 
   } catch {
     // Gone between the probe and the signal.
   }
+}
+
+/**
+ * Reaches the private failed-start stop so the branch can be driven without racing a
+ * real fork: a `start` that fails after the fork is the only other caller, and the
+ * child it published is the one thing a test cannot make deterministic.
+ */
+function stopFailedStartOf(store: DurableShellTaskStore): (workerPid: number, taskDirectory: string) => Promise<boolean> {
+  const internal = store as unknown as { stopFailedStart(workerPid: number, taskDirectory: string): Promise<boolean> };
+  return internal.stopFailedStart.bind(store);
 }

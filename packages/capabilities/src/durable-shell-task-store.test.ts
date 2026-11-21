@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -655,12 +655,14 @@ describe('durable shell task parking (#145)', () => {
       // The outcome is history and stays; the pid that is no longer live is not evidence.
       expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
       expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
+      // The fixture's own pending claim is the failed start's wording, not the one this
+      // path appends: a proven stop supersedes every sentence that says it may still
+      // be running, so none of them may survive.
+      expect(cancelled.ok && String(cancelled.value.error)).not.toContain('may still be running');
       expect(isProcessAlive(sleeper.pid)).toBe(false);
     } finally {
       // A failing assertion must not leave the fixture running for a minute.
-      if (sleeper.pid !== undefined && await readProcessStartedAt(sleeper.pid).then((current) => current === startedAt, () => false)) {
-        process.kill(sleeper.pid, 'SIGKILL');
-      }
+      await killFixture(sleeper.pid, startedAt);
     }
   });
 
@@ -700,10 +702,91 @@ describe('durable shell task parking (#145)', () => {
     } finally {
       // The fixture is the test's own process and nothing else may share it, so the
       // captured identity is what authorizes the kill, exactly as for a task pid.
-      if (bystander.pid !== undefined && await readProcessStartedAt(bystander.pid).then((startedAt) => startedAt === bystanderStartedAt, () => false)) {
-        process.kill(bystander.pid, 'SIGKILL');
-      }
+      await killFixture(bystander.pid, bystanderStartedAt);
     }
+  });
+
+  it('reports a live pid it cannot identify as unproven instead of settled', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-unidentified-pid-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    try {
+      const taskId = 'unidentified-pid';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start',
+        worker_pid: sleeper.pid,
+        // No `worker_started_at`: the pid is live but the record cannot prove it names
+        // the process the failed start left behind, so the stop is unproven, not absent.
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed', worker_pid: sleeper.pid } });
+      expect(cancelled.ok && String(cancelled.value.error)).toContain('may still be running');
+      expect(isProcessAlive(sleeper.pid)).toBe(true);
+
+      // A later cancel that proves the stop supersedes the pending sentence: the
+      // record must not claim both that the process may still be running and that it
+      // was stopped.
+      const recordPath = path.join(tasksRoot, taskId, 'task.json');
+      const record = JSON.parse(await readFile(recordPath, 'utf8'));
+      await writeFile(recordPath, JSON.stringify({ ...record, worker_started_at: startedAt }), 'utf8');
+      const settled = await store.cancel(taskId);
+
+      expect(settled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      const settledError = settled.ok ? String(settled.value.error) : '';
+      expect(settledError).toContain('stopped by a later cancel');
+      expect(settledError).not.toContain('may still be running');
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
+  it('answers an already-terminal goal task from what the cancel did', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-goal-label-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot);
+    const taskId = 'terminal-goal-label';
+    await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+    await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      // A terminal record with nothing left to stop: the label must still be read from
+      // the cancel, not guessed, because the same path cancels a record that moved.
+      state: 'failed',
+      started_at: new Date(Date.now() - 1_000).toISOString(),
+      finished_at: new Date(Date.now() - 500).toISOString(),
+      include_stdout: false,
+      include_stderr: false,
+      max_output_bytes: 1024,
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+      error: 'Durable task could not start',
+      owner_client_id: 'client-1',
+      owner_session_id: 'session-1',
+      owner_workspace_id: 'workspace-1',
+    }), 'utf8');
+
+    await expect(store.cancelForGoal(taskId, 'client-1', 'workspace-1')).resolves.toEqual({
+      ok: true,
+      value: { matched: true, state: 'already_terminal', detail: 'failed' },
+    });
   });
 
   it('reports a command it could not spawn as a failed task, not as a dead worker', async () => {
@@ -964,4 +1047,20 @@ async function readProcessStartedAt(pid: number | undefined): Promise<string> {
   const probe = parsePosixProcessProbe(stdout);
   if (probe.state !== 'live') throw new Error(`fixture process identity is ${probe.state}`);
   return probe.processStartedAt;
+}
+
+/**
+ * Kills a fixture only while it is still the process the test spawned, and never lets
+ * the cleanup replace the assertion failure it exists to preserve: a fixture that
+ * exited between the probe and the signal throws `ESRCH`, and that is the good case.
+ */
+async function killFixture(pid: number | undefined, expectedStartedAt: string): Promise<void> {
+  if (pid === undefined) return;
+  const stillOurs = await readProcessStartedAt(pid).then((current) => current === expectedStartedAt, () => false);
+  if (!stillOurs) return;
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // Gone between the probe and the signal.
+  }
 }

@@ -612,13 +612,17 @@ export class DurableShellTaskStore {
       delete hydrated.worker_started_at;
       delete hydrated.child_pid;
       delete hydrated.child_started_at;
-      hydrated.error = appendTerminationNote(hydrated.error,
-        'the process this record named before it reached its final state was stopped by a later cancel');
+      // A retry that succeeded supersedes the pending claim, wherever it came from: a
+      // record must not say both that its process may still be running and that it was
+      // stopped.
+      const prior = stripPendingStopClaims(hydrated.error);
+      hydrated.error = appendTerminationNote(prior, SETTLED_TERMINAL_STOP_NOTE);
     } else {
       // The stop can be retried, and a retry must not grow the field it reports in:
       // the sentence is the state, so it is written once.
-      const note = 'the process this record named before it reached its final state could not be stopped and may still be running';
-      if (hydrated.error?.includes(note) !== true) hydrated.error = appendTerminationNote(hydrated.error, note);
+      if (hydrated.error?.includes(PENDING_TERMINAL_STOP_NOTE) !== true) {
+        hydrated.error = appendTerminationNote(hydrated.error, PENDING_TERMINAL_STOP_NOTE);
+      }
     }
     await this.writeMetadata(hydrated);
     return this.snapshotFromMetadata(hydrated);
@@ -648,11 +652,15 @@ export class DurableShellTaskStore {
       ? metadata.child_pid
       : workerRunning ? metadata.worker_pid : (childRunning ? metadata.child_pid : undefined);
     if (terminationPid === undefined) {
-      // A pid whose identity could not be read is not a pid this record has been
-      // shown not to name: say the stop is unproven, never that there is nothing to
-      // stop, or a live process would be reported as settled.
-      const unreadable = workerProbe.state === 'unverifiable' || childProbe.state === 'unverifiable';
-      return unreadable ? 'unverified' : 'no_process';
+      // A pid this record cannot identify is not a pid it has been shown not to name:
+      // an unreadable probe, or a live pid with no recorded start time, means the stop
+      // is unproven. A live pid with a *different* recorded start time is the reused-pid
+      // case and stays `no_process`, because the number provably names another process.
+      const unproven = (metadata.worker_pid !== undefined
+        && (workerProbe.state === 'unverifiable' || (workerProbe.state === 'live' && metadata.worker_started_at === undefined)))
+        || (metadata.child_pid !== undefined
+          && (childProbe.state === 'unverifiable' || (childProbe.state === 'live' && metadata.child_started_at === undefined)));
+      return unproven ? 'unverified' : 'no_process';
     }
     const relatedPids = [metadata.worker_pid, metadata.child_pid]
       .filter((pid): pid is number => pid !== undefined && pid !== terminationPid);
@@ -1063,9 +1071,32 @@ function describeTrackedProbe(kind: string, probe: PortableProcessProbe): string
   return `Durable task ${kind} process identity is no longer live`;
 }
 
+/** What a terminal record says when a cancel could not prove the stop. */
+const PENDING_TERMINAL_STOP_NOTE = 'the process this record named before it reached its final state could not be stopped and may still be running';
+
+/** The claim every pending sentence ends with, whichever path wrote it. */
+const PENDING_STOP_CLAIM = 'may still be running';
+
+/** What it says once a later cancel proved the stop, replacing the pending sentence. */
+const SETTLED_TERMINAL_STOP_NOTE = 'the process this record named before it reached its final state was stopped by a later cancel';
+
 /** Amends a record's error with what a later cancel did, so the note stays one field. */
 function appendTerminationNote(error: string | undefined, note: string): string {
   return error === undefined || error.length === 0 ? note : `${error}; ${note}`;
+}
+
+/**
+ * Removes every sentence that claims a process may still be running, leaving the rest
+ * of the `; `-joined note intact.
+ *
+ * The sentence is matched by what it claims, not by which code wrote it: a failed start
+ * has its own wording for the same claim ("the worker it forked could not be stopped and
+ * may still be running"), and a proven stop supersedes that one too.
+ */
+function stripPendingStopClaims(error: string | undefined): string | undefined {
+  if (error === undefined) return undefined;
+  const remaining = error.split('; ').filter((part) => !part.endsWith(PENDING_STOP_CLAIM)).join('; ');
+  return remaining.length === 0 ? undefined : remaining;
 }
 
 function identityCapturePending(startedAt: string): boolean {

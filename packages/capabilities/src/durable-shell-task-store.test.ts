@@ -934,6 +934,68 @@ describe('durable shell task parking (#145)', () => {
     }
   });
 
+  it('stops a Windows task whose record carries both pids, verifying the tree it walks', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-both-pids-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const worker = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    worker.unref();
+    child.unref();
+    const workerExited = new Promise<void>((resolve) => worker.once('exit', () => resolve()));
+    const childExited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    const workerStartedAt = await readProcessStartedAt(worker.pid);
+    const childStartedAt = await readProcessStartedAt(child.pid);
+    const identity = '2026-11-22T00:00:00.000Z';
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(path.join(fakeBin, 'powershell'), `#!/bin/sh\necho "${identity}"\n`, { mode: 0o755 });
+    const taskkillLog = path.join(root, 'taskkill.log');
+    // `taskkill /T` walks the tree from the root, so the fake kills the child with it.
+    await writeFile(
+      path.join(fakeBin, 'taskkill'),
+      `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nkill -9 "$2" 2>/dev/null\n`
+        + `if [ "$2" = "${String(worker.pid)}" ]; then kill -9 "${String(child.pid)}" 2>/dev/null; fi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'win32-both-pids';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'running',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        worker_pid: worker.pid,
+        worker_started_at: identity,
+        child_pid: child.pid,
+        child_started_at: identity,
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      // Both pids carry an identity, so the child is a related pid the tree walk verifies
+      // instead of a live process with no recorded start time, which blocks the stop.
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'cancelled' } });
+      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(String(worker.pid));
+      await Promise.all([workerExited, childExited]);
+      expect(isProcessAlive(worker.pid)).toBe(false);
+      expect(isProcessAlive(child.pid)).toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(worker.pid, workerStartedAt);
+      await killFixture(child.pid, childStartedAt);
+    }
+  });
+
   it('stops a process a terminal record still names, instead of leaving the pid as a note', async () => {
     if (process.platform === 'win32') return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-late-cancel-'));

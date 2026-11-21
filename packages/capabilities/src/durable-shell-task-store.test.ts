@@ -880,6 +880,60 @@ describe('durable shell task parking (#145)', () => {
     }
   });
 
+  it('never calls a Windows task stopped when the identity probe itself failed', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-probe-failed-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    // PowerShell exits 1 when the script failed, which is not the same answer as `ps`
+    // exiting 1 for "no such process". Reading it as `gone` would report a live pid
+    // nobody could see as a proven stop.
+    await writeFile(path.join(fakeBin, 'powershell'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const taskkillLog = path.join(root, 'taskkill.log');
+    await writeFile(path.join(fakeBin, 'taskkill'), `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nexit 0\n`, { mode: 0o755 });
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'win32-probe-failed';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        // Deliberately without the pending sentence: the only way this record can end up
+        // carrying it is a cancel that could not read the identity.
+        error: 'Durable task could not start: publish failed',
+        worker_pid: sleeper.pid,
+        worker_started_at: startedAt,
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      // `no_process` would be the same claim the pre-fix code made from a probe that
+      // never ran; an unreadable identity has to leave the pid and the warning in place.
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      expect(cancelled.ok && cancelled.value.worker_pid).toBe(sleeper.pid);
+      expect(cancelled.ok && String(cancelled.value.error)).toContain('may still be running');
+      expect(existsSync(taskkillLog)).toBe(false);
+      expect(isProcessAlive(sleeper.pid)).toBe(true);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
   it('stops a process a terminal record still names, instead of leaving the pid as a note', async () => {
     if (process.platform === 'win32') return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-late-cancel-'));

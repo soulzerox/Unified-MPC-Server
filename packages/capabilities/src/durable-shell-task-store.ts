@@ -373,14 +373,9 @@ export class DurableShellTaskStore {
 
   /**
    * Stop one process, optionally keeping a related pid alive long enough to reap it.
-   * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid
-   * is probed first and handed over; a pid already gone needs no signal.
-   *
-   * The start time bounds both paths: the POSIX group signal is refused a pid whose
-   * identity changed, and Windows reads the same identity through `Get-Process` before
-   * it hands the pid to `taskkill /T`. What stays unproven on Windows is the window
-   * between that probe and `taskkill` itself — `taskkill` cannot be told the start time
-   * it must match, so a pid reused inside those milliseconds could still be killed.
+   * POSIX only: every caller is inside the non-`win32` branch of `stopFailedStart`.
+   * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid is
+   * probed first and handed over; a pid already gone needs no signal.
    */
   private async stopTrackedPid(primaryPid: number, relatedPid?: number): Promise<boolean> {
     const identities = new Map<number, string>();
@@ -639,6 +634,10 @@ export class DurableShellTaskStore {
    * pids are absent, gone, or reused by something else. `unverified` is the case
    * where the stop could not be proven — a signal was sent and did not settle, or a
    * pid exists whose identity could not be read.
+   *
+   * On Windows the same probe gates `taskkill /T`, which cannot be told the start time
+   * it must match: a pid reused between the probe and the kill could still be killed,
+   * and that millisecond window is the one gap this path cannot close.
    */
   private async terminateTrackedProcesses(metadata: DurableTaskMetadata): Promise<'stopped' | 'unverified' | 'no_process'> {
     const workerProbe = metadata.worker_pid === undefined
@@ -1039,14 +1038,15 @@ async function probeProcessIdentity(pid: number, platform: NodeJS.Platform = pro
  * cancel read as `no_process`: the start time never matched because it was never read,
  * so the stop this module exists to prove was never attempted.
  *
- * `Get-Process` is asked for the same identity the POSIX probe reads, and a process
- * that is already gone answers `missing` inside the script so the exit status stays 0
- * and a real failure cannot be mistaken for a stop. `powershell` itself being absent is
- * the one case that keeps the old answer, because this path must not turn a host
- * without PowerShell into a permanently unverifiable one.
+ * `Get-Process` is asked for the same identity the POSIX probe reads. An absent pid
+ * raises a *non-terminating* error that a `try/catch` never sees, so the `$null` test
+ * is what detects it; `SilentlyContinue` keeps that error off stderr and leaves the
+ * `missing` answer a normal exit-0 response. `powershell` itself being absent is the
+ * one case that keeps the old answer, because this path must not turn a host without
+ * PowerShell into a permanently unverifiable one.
  */
 async function probeWindowsProcessIdentity(pid: number): Promise<PortableProcessProbe> {
-  const script = `try { (Get-Process -Id ${String(pid)}).StartTime.ToUniversalTime().ToString('o') } catch { 'missing' }`;
+  const script = `$p = Get-Process -Id ${String(pid)} -ErrorAction SilentlyContinue; if ($null -eq $p) { 'missing' } else { $p.StartTime.ToUniversalTime().ToString('o') }`;
   try {
     const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
       encoding: 'utf8',
@@ -1056,7 +1056,10 @@ async function probeWindowsProcessIdentity(pid: number): Promise<PortableProcess
     });
     return parseWindowsProcessProbe(stdout);
   } catch (error: unknown) {
-    if (isProcessProbeNotFound(error)) return { state: 'gone' };
+    // `ps` exits 1 for "no such process"; `powershell -Command` exits 1 when the script
+    // itself failed, and a failed probe is not a stopped process. Only a missing binary
+    // keeps the `gone` answer, so a live pid nobody could read stays unverifiable.
+    if (isProcessProbeBinaryMissing(error)) return { state: 'gone' };
     return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
   }
 }
@@ -1146,6 +1149,11 @@ function isProcessProbeNotFound(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const code: unknown = (error as NodeJS.ErrnoException).code;
   return code === 1 || code === 'ESRCH' || code === 'ENOENT';
+}
+
+function isProcessProbeBinaryMissing(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 function isProcessProbeTimeout(error: unknown): boolean {

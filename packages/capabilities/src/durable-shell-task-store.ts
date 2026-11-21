@@ -373,13 +373,9 @@ export class DurableShellTaskStore {
 
   /**
    * Stop one process, optionally keeping a related pid alive long enough to reap it.
-   * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid
-   * is probed first and handed over; a pid already gone needs no signal.
-   *
-   * The start time bounds the POSIX group signal — that path never signals a pid whose
-   * identity changed. Windows goes through `taskkill /T`, which has no identity check,
-   * so a pid reused inside this window could be killed there; the pinned start time is
-   * still what decides whether the stop counts as verified.
+   * POSIX only: every caller is inside the non-`win32` branch of `stopFailedStart`.
+   * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid is
+   * probed first and handed over; a pid already gone needs no signal.
    */
   private async stopTrackedPid(primaryPid: number, relatedPid?: number): Promise<boolean> {
     const identities = new Map<number, string>();
@@ -638,6 +634,10 @@ export class DurableShellTaskStore {
    * pids are absent, gone, or reused by something else. `unverified` is the case
    * where the stop could not be proven — a signal was sent and did not settle, or a
    * pid exists whose identity could not be read.
+   *
+   * On Windows the same probe gates `taskkill /T`, which cannot be told the start time
+   * it must match: a pid reused between the probe and the kill could still be killed,
+   * and that millisecond window is the one gap this path cannot close.
    */
   private async terminateTrackedProcesses(metadata: DurableTaskMetadata): Promise<'stopped' | 'unverified' | 'no_process'> {
     const workerProbe = metadata.worker_pid === undefined
@@ -1005,9 +1005,9 @@ type PortableProcessProbe =
   | { readonly state: 'gone' }
   | { readonly state: 'unverifiable'; readonly reason: string };
 
-async function probeProcessIdentity(pid: number, _platform?: NodeJS.Platform): Promise<PortableProcessProbe> {
-  void _platform;
+async function probeProcessIdentity(pid: number, platform: NodeJS.Platform = process.platform): Promise<PortableProcessProbe> {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2_147_483_647) return { state: 'unverifiable', reason: 'invalid_pid' };
+  if (platform === 'win32') return await probeWindowsProcessIdentity(pid);
   try {
     try {
       process.kill(pid, 0);
@@ -1031,6 +1031,47 @@ async function probeProcessIdentity(pid: number, _platform?: NodeJS.Platform): P
     if (isProcessProbeNotFound(error)) return { state: 'gone' };
     return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
   }
+}
+
+/**
+ * Windows has no `ps`, and a probe that always answered `gone` made every Windows
+ * cancel read as `no_process`: the start time never matched because it was never read,
+ * so the stop this module exists to prove was never attempted.
+ *
+ * `Get-Process` is asked for the same identity the POSIX probe reads. An absent pid
+ * raises a *non-terminating* error that a `try/catch` never sees, so the `$null` test
+ * is what detects it; `SilentlyContinue` keeps that error off stderr and leaves the
+ * `missing` answer a normal exit-0 response. `powershell` itself being absent is the
+ * one case that keeps the old answer, because this path must not turn a host without
+ * PowerShell into a permanently unverifiable one.
+ */
+async function probeWindowsProcessIdentity(pid: number): Promise<PortableProcessProbe> {
+  const script = `$p = Get-Process -Id ${String(pid)} -ErrorAction SilentlyContinue; if ($null -eq $p) { 'missing' } else { $p.StartTime.ToUniversalTime().ToString('o') }`;
+  try {
+    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 3_500,
+      maxBuffer: 16 * 1024,
+      windowsHide: true,
+    });
+    return parseWindowsProcessProbe(stdout);
+  } catch (error: unknown) {
+    // `ps` exits 1 for "no such process"; `powershell -Command` exits 1 when the script
+    // itself failed, and a failed probe is not a stopped process. Only a missing binary
+    // keeps the `gone` answer, so a live pid nobody could read stays unverifiable.
+    if (isProcessProbeBinaryMissing(error)) return { state: 'gone' };
+    return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
+  }
+}
+
+export function parseWindowsProcessProbe(value: string): PortableProcessProbe {
+  const trimmed = value.trim();
+  if (trimmed === 'missing') return { state: 'gone' };
+  if (trimmed.length === 0) return { state: 'unverifiable', reason: 'invalid_probe_response' };
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed)
+    ? { state: 'live', processStartedAt: new Date(parsed).toISOString() }
+    : { state: 'unverifiable', reason: 'invalid_start_time' };
 }
 
 export function parsePosixProcessProbe(value: string): PortableProcessProbe {
@@ -1108,6 +1149,11 @@ function isProcessProbeNotFound(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const code: unknown = (error as NodeJS.ErrnoException).code;
   return code === 1 || code === 'ESRCH' || code === 'ENOENT';
+}
+
+function isProcessProbeBinaryMissing(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 function isProcessProbeTimeout(error: unknown): boolean {
@@ -1265,13 +1311,18 @@ function processRunning(pid) {
 
 async function processStartedAt(pid) {
   try {
-    const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
-      encoding: 'utf8',
-      timeout: 1750,
-      maxBuffer: 16384,
-      env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
-    });
+    const result = process.platform === 'win32'
+      ? await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        '$p = Get-Process -Id ' + String(pid) + ' -ErrorAction SilentlyContinue; if ($null -eq $p) { \'missing\' } else { $p.StartTime.ToUniversalTime().ToString(\'o\') }',
+      ], { encoding: 'utf8', timeout: 1750, maxBuffer: 16384, windowsHide: true })
+      : await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
+        encoding: 'utf8',
+        timeout: 1750,
+        maxBuffer: 16384,
+        env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
+      });
     const value = String(result.stdout || '').trim();
+    if (value === 'missing') return null;
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
   } catch {

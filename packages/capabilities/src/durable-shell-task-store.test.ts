@@ -953,11 +953,12 @@ describe('durable shell task parking (#145)', () => {
     await mkdir(fakeBin, { recursive: true });
     await writeFile(path.join(fakeBin, 'powershell'), `#!/bin/sh\necho "${identity}"\n`, { mode: 0o755 });
     const taskkillLog = path.join(root, 'taskkill.log');
-    // `taskkill /T` walks the tree from the root, so the fake kills the child with it.
+    // `taskkill /T` walks the tree from the root, so the fake kills the child only when
+    // it is given the worker and the `/T` flag: a dropped flag has to fail the test.
     await writeFile(
       path.join(fakeBin, 'taskkill'),
-      `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nkill -9 "$2" 2>/dev/null\n`
-        + `if [ "$2" = "${String(worker.pid)}" ]; then kill -9 "${String(child.pid)}" 2>/dev/null; fi\nexit 0\n`,
+      `#!/bin/sh\necho "$2 $3" >> ${JSON.stringify(taskkillLog)}\nkill -9 "$2" 2>/dev/null\n`
+        + `if [ "$2" = "${String(worker.pid)}" ] && [ "$3" = "/T" ]; then kill -9 "${String(child.pid)}" 2>/dev/null; fi\nexit 0\n`,
       { mode: 0o755 },
     );
     const realPath = process.env.PATH;
@@ -985,7 +986,7 @@ describe('durable shell task parking (#145)', () => {
       // Both pids carry an identity, so the child is a related pid the tree walk verifies
       // instead of a live process with no recorded start time, which blocks the stop.
       expect(cancelled).toMatchObject({ ok: true, value: { state: 'cancelled' } });
-      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(String(worker.pid));
+      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(`${String(worker.pid)} /T`);
       await Promise.all([workerExited, childExited]);
       expect(isProcessAlive(worker.pid)).toBe(false);
       expect(isProcessAlive(child.pid)).toBe(false);

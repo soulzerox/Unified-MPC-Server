@@ -612,10 +612,10 @@ export class DurableShellTaskStore {
       delete hydrated.worker_started_at;
       delete hydrated.child_pid;
       delete hydrated.child_started_at;
-      // A retry that succeeded supersedes the sentence a failed attempt wrote: a
-      // record must not claim both that its process may still be running and that it
-      // was stopped.
-      const prior = stripTerminationNote(hydrated.error, PENDING_TERMINAL_STOP_NOTE);
+      // A retry that succeeded supersedes the pending claim, wherever it came from: a
+      // record must not say both that its process may still be running and that it was
+      // stopped.
+      const prior = stripPendingStopClaims(hydrated.error);
       hydrated.error = appendTerminationNote(prior, SETTLED_TERMINAL_STOP_NOTE);
     } else {
       // The stop can be retried, and a retry must not grow the field it reports in:
@@ -1074,6 +1074,9 @@ function describeTrackedProbe(kind: string, probe: PortableProcessProbe): string
 /** What a terminal record says when a cancel could not prove the stop. */
 const PENDING_TERMINAL_STOP_NOTE = 'the process this record named before it reached its final state could not be stopped and may still be running';
 
+/** The claim every pending sentence ends with, whichever path wrote it. */
+const PENDING_STOP_CLAIM = 'may still be running';
+
 /** What it says once a later cancel proved the stop, replacing the pending sentence. */
 const SETTLED_TERMINAL_STOP_NOTE = 'the process this record named before it reached its final state was stopped by a later cancel';
 
@@ -1082,10 +1085,17 @@ function appendTerminationNote(error: string | undefined, note: string): string 
   return error === undefined || error.length === 0 ? note : `${error}; ${note}`;
 }
 
-/** Removes one sentence from the `; `-joined note, leaving every other sentence intact. */
-function stripTerminationNote(error: string | undefined, note: string): string | undefined {
+/**
+ * Removes every sentence that claims a process may still be running, leaving the rest
+ * of the `; `-joined note intact.
+ *
+ * The sentence is matched by what it claims, not by which code wrote it: a failed start
+ * has its own wording for the same claim ("the worker it forked could not be stopped and
+ * may still be running"), and a proven stop supersedes that one too.
+ */
+function stripPendingStopClaims(error: string | undefined): string | undefined {
   if (error === undefined) return undefined;
-  const remaining = error.split('; ').filter((part) => part !== note).join('; ');
+  const remaining = error.split('; ').filter((part) => !part.endsWith(PENDING_STOP_CLAIM)).join('; ');
   return remaining.length === 0 ? undefined : remaining;
 }
 

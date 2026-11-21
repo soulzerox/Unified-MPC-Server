@@ -655,6 +655,10 @@ describe('durable shell task parking (#145)', () => {
       // The outcome is history and stays; the pid that is no longer live is not evidence.
       expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
       expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
+      // The fixture's own pending claim is the failed start's wording, not the one this
+      // path appends: a proven stop supersedes every sentence that says it may still
+      // be running, so none of them may survive.
+      expect(cancelled.ok && String(cancelled.value.error)).not.toContain('may still be running');
       expect(isProcessAlive(sleeper.pid)).toBe(false);
     } finally {
       // A failing assertion must not leave the fixture running for a minute.

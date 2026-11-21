@@ -376,10 +376,11 @@ export class DurableShellTaskStore {
    * `stopProcessTree` refuses a pid it cannot tie to a start time, so every live pid
    * is probed first and handed over; a pid already gone needs no signal.
    *
-   * The start time bounds the POSIX group signal — that path never signals a pid whose
-   * identity changed. Windows goes through `taskkill /T`, which has no identity check,
-   * so a pid reused inside this window could be killed there; the pinned start time is
-   * still what decides whether the stop counts as verified.
+   * The start time bounds both paths: the POSIX group signal is refused a pid whose
+   * identity changed, and Windows reads the same identity through `Get-Process` before
+   * it hands the pid to `taskkill /T`. What stays unproven on Windows is the window
+   * between that probe and `taskkill` itself — `taskkill` cannot be told the start time
+   * it must match, so a pid reused inside those milliseconds could still be killed.
    */
   private async stopTrackedPid(primaryPid: number, relatedPid?: number): Promise<boolean> {
     const identities = new Map<number, string>();
@@ -1005,9 +1006,9 @@ type PortableProcessProbe =
   | { readonly state: 'gone' }
   | { readonly state: 'unverifiable'; readonly reason: string };
 
-async function probeProcessIdentity(pid: number, _platform?: NodeJS.Platform): Promise<PortableProcessProbe> {
-  void _platform;
+async function probeProcessIdentity(pid: number, platform: NodeJS.Platform = process.platform): Promise<PortableProcessProbe> {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2_147_483_647) return { state: 'unverifiable', reason: 'invalid_pid' };
+  if (platform === 'win32') return await probeWindowsProcessIdentity(pid);
   try {
     try {
       process.kill(pid, 0);
@@ -1031,6 +1032,43 @@ async function probeProcessIdentity(pid: number, _platform?: NodeJS.Platform): P
     if (isProcessProbeNotFound(error)) return { state: 'gone' };
     return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
   }
+}
+
+/**
+ * Windows has no `ps`, and a probe that always answered `gone` made every Windows
+ * cancel read as `no_process`: the start time never matched because it was never read,
+ * so the stop this module exists to prove was never attempted.
+ *
+ * `Get-Process` is asked for the same identity the POSIX probe reads, and a process
+ * that is already gone answers `missing` inside the script so the exit status stays 0
+ * and a real failure cannot be mistaken for a stop. `powershell` itself being absent is
+ * the one case that keeps the old answer, because this path must not turn a host
+ * without PowerShell into a permanently unverifiable one.
+ */
+async function probeWindowsProcessIdentity(pid: number): Promise<PortableProcessProbe> {
+  const script = `try { (Get-Process -Id ${String(pid)}).StartTime.ToUniversalTime().ToString('o') } catch { 'missing' }`;
+  try {
+    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 3_500,
+      maxBuffer: 16 * 1024,
+      windowsHide: true,
+    });
+    return parseWindowsProcessProbe(stdout);
+  } catch (error: unknown) {
+    if (isProcessProbeNotFound(error)) return { state: 'gone' };
+    return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
+  }
+}
+
+export function parseWindowsProcessProbe(value: string): PortableProcessProbe {
+  const trimmed = value.trim();
+  if (trimmed === 'missing') return { state: 'gone' };
+  if (trimmed.length === 0) return { state: 'unverifiable', reason: 'invalid_probe_response' };
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed)
+    ? { state: 'live', processStartedAt: new Date(parsed).toISOString() }
+    : { state: 'unverifiable', reason: 'invalid_start_time' };
 }
 
 export function parsePosixProcessProbe(value: string): PortableProcessProbe {

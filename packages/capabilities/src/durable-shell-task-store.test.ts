@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ShellCapabilityBackend } from './shell-backend.js';
-import { DurableShellTaskStore, parsePosixProcessProbe } from './durable-shell-task-store.js';
+import { DurableShellTaskStore, parsePosixProcessProbe, parseWindowsProcessProbe } from './durable-shell-task-store.js';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -28,6 +28,18 @@ describe('durable shell background tasks', () => {
       processStartedAt: expect.any(String),
     });
     expect(parsePosixProcessProbe('not-a-valid-ps-row')).toEqual({ state: 'unverifiable', reason: 'invalid_probe_response' });
+  });
+
+  it('reads a Windows identity probe, and a missing process as gone', () => {
+    // The script answers `missing` inside PowerShell so a gone process keeps exit 0;
+    // a non-zero exit is a real probe failure and must not be read as a stop.
+    expect(parseWindowsProcessProbe('missing')).toEqual({ state: 'gone' });
+    expect(parseWindowsProcessProbe('2026-11-22T00:00:00.1234567Z')).toEqual({
+      state: 'live',
+      processStartedAt: '2026-11-22T00:00:00.123Z',
+    });
+    expect(parseWindowsProcessProbe('not-a-time')).toEqual({ state: 'unverifiable', reason: 'invalid_start_time' });
+    expect(parseWindowsProcessProbe('   ')).toEqual({ state: 'unverifiable', reason: 'invalid_probe_response' });
   });
 
   it.each([
@@ -762,6 +774,109 @@ describe('durable shell task parking (#145)', () => {
     } finally {
       process.env.PATH = realPath;
       await killFixture(child.pid, childStartedAt);
+    }
+  });
+
+  it('stops a Windows task whose recorded identity is the live process, through taskkill', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-match-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const sleeperExited = new Promise<void>((resolve) => sleeper.once('exit', () => resolve()));
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const identity = '2026-11-22T00:00:00.000Z';
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(path.join(fakeBin, 'powershell'), `#!/bin/sh\necho "${identity}"\n`, { mode: 0o755 });
+    const taskkillLog = path.join(root, 'taskkill.log');
+    await writeFile(
+      path.join(fakeBin, 'taskkill'),
+      `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nkill -9 "$2" 2>/dev/null\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'win32-identity-match';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start: publish failed; the worker it forked could not be stopped and may still be running',
+        worker_pid: sleeper.pid,
+        worker_started_at: identity,
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      // Before the Windows probe existed this cancel read `no_process`: the identity
+      // never matched because it was never read, so the stop was never attempted.
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
+      expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
+      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(String(sleeper.pid));
+      await sleeperExited;
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
+  it('never signals a Windows task whose recorded identity names another process', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-mismatch-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(path.join(fakeBin, 'powershell'), '#!/bin/sh\necho "2026-11-22T00:00:00.000Z"\n', { mode: 0o755 });
+    const taskkillLog = path.join(root, 'taskkill.log');
+    await writeFile(path.join(fakeBin, 'taskkill'), `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nexit 0\n`, { mode: 0o755 });
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'win32-identity-mismatch';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start: publish failed; the worker it forked could not be stopped and may still be running',
+        worker_pid: sleeper.pid,
+        // The number now names a different process than the one this record pinned.
+        worker_started_at: '2026-01-01T00:00:00.000Z',
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      expect(cancelled.ok && String(cancelled.value.error)).not.toContain('stopped by a later cancel');
+      expect(existsSync(taskkillLog)).toBe(false);
+      expect(isProcessAlive(sleeper.pid)).toBe(true);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
     }
   });
 

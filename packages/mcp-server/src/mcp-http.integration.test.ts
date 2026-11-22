@@ -388,6 +388,14 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
         },
       });
       expect(expired.status).toBe(404);
+      expect(await expired.json()).toMatchObject({
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Session not found',
+          data: { reason: 'session_not_found', reinitialize: true },
+        },
+      });
       expect(evictionReasons).toContain('idle_ttl');
     } finally {
       await client.close().catch(() => undefined);

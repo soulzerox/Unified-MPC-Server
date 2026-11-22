@@ -203,10 +203,19 @@ async function writeFetchResponse(response: ServerResponse, result: Response): P
   if (!clientDisconnected && !response.destroyed && !response.writableEnded) response.end();
 }
 
+/**
+ * A dead transport session is not a broken server (#174): the machine-readable
+ * `data` block lets a host tell "my session died, re-initialize" apart from a
+ * transport or authorization failure.
+ */
 function sessionNotFoundResponse(): Response {
   return Response.json({
     jsonrpc: '2.0',
-    error: { code: -32001, message: 'Session not found' },
+    error: {
+      code: -32001,
+      message: 'Session not found',
+      data: { reason: 'session_not_found', reinitialize: true },
+    },
     id: null,
   }, { status: 404 });
 }

@@ -549,9 +549,60 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
     }
   });
 
-  it('only a clean eviction is revivable, never a protocol_error', () => {
+  it('only an eviction the client did not ask for is revivable', () => {
     expect(LEGACY_SESSION_EVICTION_REASONS.filter(isRevivableEviction))
-      .toEqual(['idle_ttl', 'lru_capacity', 'client_delete', 'transport_close', 'backend_shutdown']);
+      .toEqual(['idle_ttl', 'lru_capacity', 'transport_close', 'backend_shutdown']);
+  });
+
+  it('never revives a session the client deleted, even inside the revive window', async () => {
+    let now = 0;
+    const evictionReasons: string[] = [];
+    const deleteHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+      },
+      actor: { clientId: 'delete-not-revivable-test', clientName: 'delete-not-revivable-test' },
+      legacySessionTtlMs: 100,
+      legacySessionReviveWindowMs: 10_000,
+      legacySessionNow: () => now,
+      legacySessionEvictionObserver: (event) => { evictionReasons.push(event.reason); },
+    });
+    const client = new Client({ name: 'delete-not-revivable-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(deleteHandle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const sessionId = transport.sessionId!;
+      const headers = (): Record<string, string> => ({
+        ...(transport.protocolVersion === undefined ? {} : { 'mcp-protocol-version': transport.protocolVersion }),
+        'mcp-session-id': sessionId,
+      });
+
+      const deleted = await fetch(deleteHandle.endpoint, { method: 'DELETE', headers: headers() });
+      expect(deleted.status).toBe(200);
+      expect(evictionReasons).toContain('client_delete');
+
+      // Well inside both the session TTL and the revive window: only the
+      // deliberate close can explain the 404.
+      now = 50;
+      const revived = await fetch(deleteHandle.endpoint, {
+        method: 'POST',
+        headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...headers() },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 92, method: 'tools/list', params: {} }),
+      });
+      expect(revived.status).toBe(404);
+      expect(await revived.json()).toMatchObject({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Session not found', data: { reason: 'session_not_found', reinitialize: true } },
+      });
+    } finally {
+      await client.close().catch(() => undefined);
+      await deleteHandle.close();
+    }
   });
 
   it('releases an aborted standalone SSE stream so the same session can reconnect', async () => {

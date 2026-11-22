@@ -46,11 +46,12 @@ export const DEFAULT_LEGACY_SESSION_REVIVE_WINDOW_MS = 10 * 60_000;
 const DEFAULT_MAX_REVIVABLE_SESSIONS = 64;
 
 /**
- * A corrupt session must never be silently replaced, so only a clean eviction
- * leaves a revivable id behind (#174 phase 3).
+ * Only an eviction the client did not ask for leaves a revivable id behind
+ * (#174 phase 3): a corrupt session must never be silently replaced, and a
+ * deliberate `DELETE` must stay closed instead of answering a later request.
  */
 export function isRevivableEviction(reason: LegacySessionEvictionReason): boolean {
-  return reason !== 'protocol_error';
+  return reason !== 'protocol_error' && reason !== 'client_delete';
 }
 
 export interface UnifiedBuildProvenance {

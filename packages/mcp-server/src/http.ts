@@ -27,6 +27,7 @@ import { createOriginPolicy, type OriginPolicy } from './origin-policy.js';
 import { BoundedRetentionMap } from './bounded-retention-map.js';
 import { APP_NAME, APP_VERSION } from '@unified-mpc/shared';
 import type { McpRuntimeDiagnosticsProvider } from './runtime-diagnostics.js';
+import type { McpApplicationServices, McpSessionRecoverySnapshot } from './tools/tool-types.js';
 
 export const MAX_MCP_HTTP_BODY_BYTES = 1_048_576;
 export const UNIFIED_MPC_MCP_IDENTITY_PATH = '/_unified-mpc/identity';
@@ -248,6 +249,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   const endpointFallbackSessionId = randomUUID();
   const factory = (request?: Request): McpServer => createMcpServer({
     ...options,
+    services: sessionRecoveryServices,
     ...(options.buildProvenance === undefined ? {} : { implementationVersion: options.buildProvenance.buildVersion }),
     runBudgetGuard,
     incrementalVerifier,
@@ -268,6 +270,12 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   const pendingSessionCloses = new Set<Promise<void>>();
   const explicitCloseReasons = new Map<string, LegacySessionEvictionReason>();
   let closed = false;
+
+  const lastEviction: { current: McpSessionRecoverySnapshot['lastEviction'] } = { current: null };
+  const sessionRecoveryServices: McpApplicationServices = {
+    ...options.services,
+    sessionRecovery: (): McpSessionRecoverySnapshot => ({ liveSessions: sessions.size, lastEviction: lastEviction.current }),
+  };
 
   const disposeLegacySession = async (session: LegacySession): Promise<void> => {
     if (closingSessions.has(session)) return;
@@ -290,6 +298,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     reason: LegacySessionEvictionReason,
   ): Promise<void> => {
     if (closingSessions.has(session)) return Promise.resolve();
+    lastEviction.current = { sessionId, reason, at: new Date((options.legacySessionNow ?? Date.now)()).toISOString() };
     try {
       options.legacySessionEvictionObserver?.({ sessionId, reason });
     } catch (error: unknown) {
@@ -322,6 +331,7 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     const requestScope = createProtocolHttpRequestScope(protocolSessionId);
     const server = createMcpServer({
       ...options,
+      services: sessionRecoveryServices,
       ...(options.buildProvenance === undefined ? {} : { implementationVersion: options.buildProvenance.buildVersion }),
       runBudgetGuard,
       incrementalVerifier,

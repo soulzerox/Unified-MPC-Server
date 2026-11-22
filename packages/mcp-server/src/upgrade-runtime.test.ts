@@ -9,7 +9,7 @@ import { UpgradeRuntimeService } from './upgrade-runtime.js';
 import { UpgradeRuntimeStateStore } from './upgrade-runtime-state-store.js';
 import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
 import { ToolRegistry } from './tool-registry.js';
-import type { McpApplicationServices } from './tools/tool-types.js';
+import type { McpApplicationServices, McpSessionRecoverySnapshot } from './tools/tool-types.js';
 
 const actor: FileActor = { clientId: 'test', clientName: 'test' };
 const fullBypassAuthorization = {
@@ -37,6 +37,26 @@ describe('upgrade runtime', () => {
       value: {
         reconnect: 'enabled-at-transport-boundary',
         staleContinuation: 'unverified',
+        liveSessions: null,
+        lastEviction: null,
+      },
+    });
+  });
+
+  it('reports live transport sessions and the last eviction from injected runtime state', async () => {
+    const runtime = new UpgradeRuntimeService({
+      sessionRecovery: (): McpSessionRecoverySnapshot => ({
+        liveSessions: 2,
+        lastEviction: { sessionId: 'session-1', reason: 'idle_ttl', at: '2026-11-22T00:00:00.000Z' },
+      }),
+    }, actor);
+    const result = await runtime.execute('recovery_status', {});
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        liveSessions: 2,
+        lastEviction: { sessionId: 'session-1', reason: 'idle_ttl', at: '2026-11-22T00:00:00.000Z' },
       },
     });
   });

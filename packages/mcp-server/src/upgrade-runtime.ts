@@ -498,8 +498,19 @@ export class UpgradeRuntimeService {
         return ok({ ...this.contextEconomy.snapshot(), policy: { automaticDiscovery: 'filtered-and-progressive', explicitAccess: 'full-and-unrestricted-by-economy', ledger: 'bounded-in-memory' } });
       case 'execution_plan':
         return ok({ ...planFor(readString(input, 'prompt') ?? readString(input, 'query') ?? ''), reason: 'deterministic rule plan; telemetry can refine cost estimates' });
-      case 'recovery_status':
-        return ok({ reconnect: 'enabled-at-transport-boundary', safeReadRetry: true, destructiveRetry: false, staleContinuation: 'unverified', indexRecovery: 'rebuildable', workerIsolation: true });
+      case 'recovery_status': {
+        const recovery = this.services.sessionRecovery?.();
+        return ok({
+          reconnect: 'enabled-at-transport-boundary',
+          safeReadRetry: true,
+          destructiveRetry: false,
+          staleContinuation: 'unverified',
+          indexRecovery: 'rebuildable',
+          workerIsolation: true,
+          liveSessions: recovery?.liveSessions ?? null,
+          lastEviction: recovery?.lastEviction ?? null,
+        });
+      }
       case 'tool_schema_list': {
         const detail = readString(input, 'detail');
         if (detail !== undefined && detail !== 'summary' && detail !== 'full') {

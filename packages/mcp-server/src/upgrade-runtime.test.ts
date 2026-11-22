@@ -34,8 +34,10 @@ describe('upgrade runtime', () => {
 
     // #174: the `reconnect` string is a static description of the transport
     // boundary, not evidence that a resumed turn can reach the tool surface.
-    // Pinning it as a constant is what made the issue invisible, so only the
-    // counts that can disagree with it are asserted here.
+    // Pinning it as a constant is what made the issue invisible, so it is not
+    // asserted here. `staleContinuation` is deliberately pinned: the claim this
+    // test guards is that no rollover evidence exists yet, and the counts below
+    // are what a host reads instead of either string.
     expect(result).toMatchObject({
       ok: true,
       value: {

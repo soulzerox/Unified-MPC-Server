@@ -1,4 +1,5 @@
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { DEFAULT_NEGOTIATED_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 import { ok } from '@unified-mpc/domain';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ActivityTracker } from './activity-tracker.js';
@@ -546,6 +547,68 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
       await client.close().catch(() => undefined);
       await deleteClient.close().catch(() => undefined);
       await reviveHandle.close();
+    }
+  });
+
+  it('answers a DELETE for a stale id without reviving or spending it', async () => {
+    let now = 0;
+    const staleDeleteHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+      },
+      actor: { clientId: 'stale-delete-test', clientName: 'stale-delete-test' },
+      legacySessionTtlMs: 100,
+      legacySessionReviveWindowMs: 10_000,
+      legacySessionNow: () => now,
+    });
+    // No SDK client here: a connected transport keeps its own SSE stream open,
+    // and that stream would revive (and spend) the stale id behind the test's
+    // back. A raw `initialize` gives a legacy session with no background traffic.
+    try {
+      const initResponse = await fetch(staleDeleteHandle.endpoint, {
+        method: 'POST',
+        headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 90,
+          method: 'initialize',
+          params: { protocolVersion: DEFAULT_NEGOTIATED_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'stale-delete-client', version: '0.1.0' } },
+        }),
+      });
+      expect(initResponse.status).toBe(200);
+      const sessionId = initResponse.headers.get('mcp-session-id');
+      expect(sessionId).toEqual(expect.any(String));
+      await initResponse.text();
+      const headers = (): Record<string, string> => ({
+        'mcp-protocol-version': DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
+        'mcp-session-id': sessionId!,
+      });
+      await fetch(staleDeleteHandle.endpoint, {
+        method: 'POST',
+        headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...headers() },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+      });
+
+      now = 251; // past the session TTL, inside the revive window
+      const staleDelete = await fetch(staleDeleteHandle.endpoint, { method: 'DELETE', headers: headers() });
+      expect(staleDelete.status).toBe(404);
+      expect(await staleDelete.json()).toMatchObject({ error: { data: { reason: 'session_not_found' } } });
+
+      // The refused DELETE must not have spent the id: the host's next request
+      // still revives it.
+      const revived = await fetch(staleDeleteHandle.endpoint, {
+        method: 'POST',
+        headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...headers() },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 93, method: 'tools/list', params: {} }),
+      });
+      expect(revived.status).toBe(200);
+      expect(revived.headers.get('mcp-session-id')).not.toBe(sessionId);
+    } finally {
+      await staleDeleteHandle.close();
     }
   });
 

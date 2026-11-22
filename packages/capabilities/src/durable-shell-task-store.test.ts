@@ -1715,8 +1715,7 @@ describe('durable worker identity capture (#876)', () => {
       // to signal this child: it is killed by the pid the worker published. That pid is read
       // again here because a failing wait never reached the assignment above, and a leaked
       // fixture would keep running for the rest of its own timeout.
-      const published = childPid ?? await readFile(metadataPath, 'utf8')
-        .then((raw) => (JSON.parse(raw) as { child_pid?: number }).child_pid, () => undefined);
+      const published = childPid ?? await readPublishedChildPid(metadataPath);
       if (published !== undefined) {
         try {
           process.kill(published, 'SIGKILL');
@@ -1729,6 +1728,20 @@ describe('durable worker identity capture (#876)', () => {
     }
   }, 30_000);
 });
+
+/**
+ * The worker persists `child_pid` before it probes the start time, so a wait that failed
+ * still leaves a pid to clean up. A read that lands on a half-written or absent file has
+ * published nothing to kill, and must not replace the failure the test is reporting.
+ */
+async function readPublishedChildPid(metadataPath: string): Promise<number | undefined> {
+  try {
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as { child_pid?: number };
+    return metadata.child_pid;
+  } catch {
+    return undefined;
+  }
+}
 
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;

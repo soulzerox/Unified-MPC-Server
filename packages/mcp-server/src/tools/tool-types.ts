@@ -143,6 +143,8 @@ export interface McpSessionRecoverySnapshot {
     readonly reason: string;
     readonly at: string;
   } | null;
+  /** How long an evicted session id stays revivable, in ms (#174 phase 3). */
+  readonly reviveWindowMs: number;
 }
 
 export interface ThaiRagProviderPort {

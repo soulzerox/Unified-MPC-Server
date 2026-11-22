@@ -509,6 +509,7 @@ export class UpgradeRuntimeService {
           workerIsolation: true,
           liveSessions: recovery?.liveSessions ?? null,
           lastEviction: recovery?.lastEviction ?? null,
+          reviveWindowMs: recovery?.reviveWindowMs ?? null,
         });
       }
       case 'tool_schema_list': {

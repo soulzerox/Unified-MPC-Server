@@ -1047,21 +1047,28 @@ async function probeProcessIdentity(pid: number, platform: NodeJS.Platform = pro
  */
 async function probeWindowsProcessIdentity(pid: number): Promise<PortableProcessProbe> {
   const script = `$p = Get-Process -Id ${String(pid)} -ErrorAction SilentlyContinue; if ($null -eq $p) { 'missing' } else { $p.StartTime.ToUniversalTime().ToString('o') }`;
-  try {
-    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf8',
-      timeout: 3_500,
-      maxBuffer: 16 * 1024,
-      windowsHide: true,
-    });
-    return parseWindowsProcessProbe(stdout);
-  } catch (error: unknown) {
-    // `ps` exits 1 for "no such process"; `powershell -Command` exits 1 when the script
-    // itself failed, and a failed probe is not a stopped process. Only a missing binary
-    // keeps the `gone` answer, so a live pid nobody could read stays unverifiable.
-    if (isProcessProbeBinaryMissing(error)) return { state: 'gone' };
-    return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
-  }
+  const probe = async (): Promise<PortableProcessProbe> => {
+    try {
+      const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+        encoding: 'utf8',
+        timeout: 3_500,
+        maxBuffer: 16 * 1024,
+        windowsHide: true,
+      });
+      return parseWindowsProcessProbe(stdout);
+    } catch (error: unknown) {
+      // `ps` exits 1 for "no such process"; `powershell -Command` exits 1 when the script
+      // itself failed, and a failed probe is not a stopped process. Only a missing binary
+      // keeps the `gone` answer, so a live pid nobody could read stays unverifiable.
+      if (isProcessProbeBinaryMissing(error)) return { state: 'gone' };
+      return { state: 'unverifiable', reason: isProcessProbeTimeout(error) ? 'probe_timeout' : 'probe_failed' };
+    }
+  };
+  const first = await probe();
+  // The identity is captured once per launch, so a single cold-start failure pins a
+  // healthy task as unverifiable for good. One retry covers that; a timeout is not
+  // retried, because it has already spent the full budget.
+  return first.state === 'unverifiable' && first.reason === 'probe_failed' ? await probe() : first;
 }
 
 export function parseWindowsProcessProbe(value: string): PortableProcessProbe {
@@ -1310,24 +1317,34 @@ function processRunning(pid) {
 }
 
 async function processStartedAt(pid) {
-  try {
-    const result = process.platform === 'win32'
-      ? await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-        '$p = Get-Process -Id ' + String(pid) + ' -ErrorAction SilentlyContinue; if ($null -eq $p) { \'missing\' } else { $p.StartTime.ToUniversalTime().ToString(\'o\') }',
-      ], { encoding: 'utf8', timeout: 1750, maxBuffer: 16384, windowsHide: true })
-      : await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
-        encoding: 'utf8',
-        timeout: 1750,
-        maxBuffer: 16384,
-        env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
-      });
-    const value = String(result.stdout || '').trim();
-    if (value === 'missing') return null;
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
-  } catch {
-    return null;
+  // A launch that loses the race with a cold PowerShell start would record no identity
+  // at all, and nothing re-probes, so the task could never prove a later stop. One
+  // retry covers the transient failure; an absent process is not retried.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await readProcessStartedAt(pid);
+    } catch {
+      if (attempt === 1) return null;
+    }
   }
+  return null;
+}
+
+async function readProcessStartedAt(pid) {
+  const result = process.platform === 'win32'
+    ? await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      '$p = Get-Process -Id ' + String(pid) + ' -ErrorAction SilentlyContinue; if ($null -eq $p) { \'missing\' } else { $p.StartTime.ToUniversalTime().ToString(\'o\') }',
+    ], { encoding: 'utf8', timeout: 1750, maxBuffer: 16384, windowsHide: true })
+    : await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      timeout: 1750,
+      maxBuffer: 16384,
+      env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), LC_ALL: 'C', LANG: 'C' },
+    });
+  const value = String(result.stdout || '').trim();
+  if (value === 'missing') return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
 async function stopTree(pid) {

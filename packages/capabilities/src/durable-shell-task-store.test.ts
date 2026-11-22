@@ -997,6 +997,68 @@ describe('durable shell task parking (#145)', () => {
     }
   });
 
+  it('retries a Windows identity probe that failed once instead of pinning the task', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-win32-probe-retry-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'win32' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const sleeperExited = new Promise<void>((resolve) => sleeper.once('exit', () => resolve()));
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    const identity = '2026-11-22T00:00:00.000Z';
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    const counter = path.join(root, 'powershell.count');
+    // One cold-start failure, then a normal answer: the identity is captured once per
+    // launch, so without a retry this record stays unverifiable for good.
+    await writeFile(
+      path.join(fakeBin, 'powershell'),
+      `#!/bin/sh\nn=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)\necho $((n+1)) > ${JSON.stringify(counter)}\n`
+        + `if [ "$n" = "0" ]; then exit 1; fi\necho "${identity}"\n`,
+      { mode: 0o755 },
+    );
+    const taskkillLog = path.join(root, 'taskkill.log');
+    await writeFile(
+      path.join(fakeBin, 'taskkill'),
+      `#!/bin/sh\necho "$2" >> ${JSON.stringify(taskkillLog)}\nkill -9 "$2" 2>/dev/null\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'win32-probe-retry';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'failed',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        finished_at: new Date(Date.now() - 500).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        error: 'Durable task could not start: publish failed',
+        worker_pid: sleeper.pid,
+        worker_started_at: identity,
+      }), 'utf8');
+
+      const cancelled = await store.cancel(taskId);
+
+      expect(cancelled).toMatchObject({ ok: true, value: { state: 'failed' } });
+      expect(cancelled.ok && cancelled.value.worker_pid).toBeUndefined();
+      expect(cancelled.ok && String(cancelled.value.error)).toContain('stopped by a later cancel');
+      expect((await readFile(taskkillLog, 'utf8')).trim()).toBe(String(sleeper.pid));
+      await sleeperExited;
+      expect(isProcessAlive(sleeper.pid)).toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
   it('stops a process a terminal record still names, instead of leaving the pid as a note', async () => {
     if (process.platform === 'win32') return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-late-cancel-'));

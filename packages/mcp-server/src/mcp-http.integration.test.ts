@@ -5,7 +5,7 @@ import { ActivityTracker } from './activity-tracker.js';
 import { hashHarnessText } from './harness-runtime.js';
 import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
-import { DEFAULT_LEGACY_SESSION_TTL_MS, LEGACY_SESSION_EVICTION_REASONS, UNIFIED_MPC_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
+import { DEFAULT_LEGACY_SESSION_TTL_MS, LEGACY_SESSION_EVICTION_REASONS, UNIFIED_MPC_MCP_IDENTITY_PATH, isRevivableEviction, startMcpHttp, type McpHttpServerHandle } from './http.js';
 
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
 const TEST_BUILD_PROVENANCE = {
@@ -362,6 +362,8 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
       },
       actor: { clientId: 'retention-refresh-test', clientName: 'retention-refresh-test' },
       legacySessionTtlMs: 100,
+      // Revival disabled: this case is about retention, not the revive window (#174 phase 3).
+      legacySessionReviveWindowMs: 0,
       legacySessionNow: () => now,
       legacySessionEvictionObserver: (event) => { evictionReasons.push(event.reason); },
     });
@@ -417,6 +419,8 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
       actor: { clientId: 'retention-http-test', clientName: 'retention-http-test' },
       maxLegacySessions: 1,
       legacySessionTtlMs: 100,
+      // Eviction accounting only: revival has its own case below.
+      legacySessionReviveWindowMs: 0,
       legacySessionNow: () => now,
       legacySessionEvictionObserver: (event) => { evictionReasons.push(event.reason); },
     });
@@ -467,6 +471,87 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
       await secondClient.close().catch(() => undefined);
       await retentionHandle.close();
     }
+  });
+
+  it('revives an evicted session id once inside the revive window, never for DELETE', async () => {
+    let now = 0;
+    const reviveHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+      },
+      actor: { clientId: 'revive-window-test', clientName: 'revive-window-test' },
+      legacySessionTtlMs: 100,
+      legacySessionReviveWindowMs: 10_000,
+      legacySessionNow: () => now,
+    });
+    const client = new Client({ name: 'revive-window-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(reviveHandle.endpoint);
+    const deleteClient = new Client({ name: 'revive-delete-client', version: '0.1.0' });
+    const deleteTransport = new StreamableHTTPClientTransport(reviveHandle.endpoint);
+
+    try {
+      await client.connect(transport);
+      await deleteClient.connect(deleteTransport);
+      const deadSessionId = transport.sessionId!;
+      const protocolVersion = transport.protocolVersion;
+      const headers = (sessionId: string): Record<string, string> => ({
+        ...(protocolVersion === undefined ? {} : { 'mcp-protocol-version': protocolVersion }),
+        'mcp-session-id': sessionId,
+      });
+      const toolsList = async (sessionId: string): Promise<Response> => fetch(reviveHandle.endpoint, {
+        method: 'POST',
+        headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...headers(sessionId) },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 91, method: 'tools/list', params: {} }),
+      });
+      // The legacy transport answers over SSE; read it to completion so the
+      // response is a served `tools/list`, not a header echo on a dead stream.
+      const servedToolsList = async (response: Response): Promise<Record<string, unknown>> => {
+        const text = await response.text();
+        const payloads = text.split('\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+        return payloads.at(-1) ?? {};
+      };
+
+      now = 251; // past the session TTL, inside the revive window
+      const revived = await toolsList(deadSessionId);
+      expect(revived.status).toBe(200);
+      const revivedSessionId = revived.headers.get('mcp-session-id');
+      expect(revivedSessionId).toEqual(expect.any(String));
+      expect(revivedSessionId).not.toBe(deadSessionId);
+      expect(await servedToolsList(revived)).toMatchObject({ id: 91, result: { tools: expect.any(Array) } });
+
+      // The revived id is a real session, not a header echo.
+      const onRevived = await toolsList(revivedSessionId!);
+      expect(onRevived.status).toBe(200);
+      expect(await servedToolsList(onRevived)).toMatchObject({ id: 91, result: { tools: expect.any(Array) } });
+
+      // One revive per id: the spent id now gets the explicit re-init hint.
+      const spent = await toolsList(deadSessionId);
+      expect(spent.status).toBe(404);
+      expect(await spent.json()).toMatchObject({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Session not found', data: { reason: 'session_not_found', reinitialize: true } },
+      });
+
+      // DELETE is never revived: a deliberate close must stay closed.
+      const deleteSessionId = deleteTransport.sessionId!;
+      now = 400;
+      const deleted = await fetch(reviveHandle.endpoint, { method: 'DELETE', headers: headers(deleteSessionId) });
+      expect(deleted.status).toBe(404);
+      expect(await deleted.json()).toMatchObject({ error: { data: { reason: 'session_not_found', reinitialize: true } } });
+    } finally {
+      await client.close().catch(() => undefined);
+      await deleteClient.close().catch(() => undefined);
+      await reviveHandle.close();
+    }
+  });
+
+  it('only a clean eviction is revivable, never a protocol_error', () => {
+    expect(LEGACY_SESSION_EVICTION_REASONS.filter(isRevivableEviction))
+      .toEqual(['idle_ttl', 'lru_capacity', 'client_delete', 'transport_close', 'backend_shutdown']);
   });
 
   it('releases an aborted standalone SSE stream so the same session can reconnect', async () => {

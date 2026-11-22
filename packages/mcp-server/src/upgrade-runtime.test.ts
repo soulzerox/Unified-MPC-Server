@@ -48,6 +48,7 @@ describe('upgrade runtime', () => {
       sessionRecovery: (): McpSessionRecoverySnapshot => ({
         liveSessions: 2,
         lastEviction: { sessionId: 'session-1', reason: 'idle_ttl', at: '2026-11-22T00:00:00.000Z' },
+        reviveWindowMs: 600_000,
       }),
     }, actor);
     const result = await runtime.execute('recovery_status', {});
@@ -57,6 +58,7 @@ describe('upgrade runtime', () => {
       value: {
         liveSessions: 2,
         lastEviction: { sessionId: 'session-1', reason: 'idle_ttl', at: '2026-11-22T00:00:00.000Z' },
+        reviveWindowMs: 600_000,
       },
     });
   });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import {
   createMcpHandler,
+  DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
   hostHeaderValidationResponse,
   isLegacyRequest,
   localhostAllowedHostnames,
@@ -40,6 +41,17 @@ export interface LegacySessionEvictionEvent {
   readonly reason: LegacySessionEvictionReason;
 }
 const DEFAULT_MAX_LEGACY_SESSIONS = 64;
+/** How long an evicted session id may still be revived into a fresh transport session (#174 phase 3). */
+export const DEFAULT_LEGACY_SESSION_REVIVE_WINDOW_MS = 10 * 60_000;
+const DEFAULT_MAX_REVIVABLE_SESSIONS = 64;
+
+/**
+ * A corrupt session must never be silently replaced, so only a clean eviction
+ * leaves a revivable id behind (#174 phase 3).
+ */
+export function isRevivableEviction(reason: LegacySessionEvictionReason): boolean {
+  return reason !== 'protocol_error';
+}
 
 export interface UnifiedBuildProvenance {
   readonly version: string;
@@ -73,6 +85,8 @@ export interface McpHttpServerOptions extends McpServerOptions {
   readonly allowedOriginsProvider?: () => readonly string[] | undefined;
   readonly legacySessionTtlMs?: number;
   readonly maxLegacySessions?: number;
+  /** TTL of the evicted-id revive window, in ms; `0` (or a negative value) disables revival. */
+  readonly legacySessionReviveWindowMs?: number;
   readonly legacySessionNow?: () => number;
   readonly legacySessionEvictionObserver?: (event: LegacySessionEvictionEvent) => void;
 }
@@ -230,6 +244,47 @@ async function readJsonRpcRequest(request: Request): Promise<JSONRPCMessage | un
   }
 }
 
+/**
+ * A revived session is empty on purpose, so the host's own request would be
+ * rejected as "Server not initialized". Mint the session with a synthetic
+ * `initialize` first, then replay the request on it (#174 phase 3).
+ */
+function createReviveInitializeRequest(request: Request): Request {
+  return new Request(request.url, {
+    method: 'POST',
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: `revive-${randomUUID()}`,
+      method: 'initialize',
+      params: {
+        protocolVersion: request.headers.get('mcp-protocol-version') ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'unified-mpc-revive', version: APP_VERSION },
+      },
+    }),
+  });
+}
+
+/** A host that re-runs `initialize` on a stale id initializes the revived session itself. */
+async function isInitializePost(request: Request): Promise<boolean> {
+  if (request.method !== 'POST') return false;
+  try {
+    const message: unknown = await request.clone().json();
+    return isJSONRPCRequest(message) && message.method === 'initialize';
+  } catch {
+    return false;
+  }
+}
+
+/** Replays the host's request under the id the revived transport just minted. */
+async function withSessionId(request: Request, sessionId: string): Promise<Request> {
+  const headers = new Headers(request.headers);
+  headers.set('mcp-session-id', sessionId);
+  const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.arrayBuffer();
+  return new Request(request.url, { method: request.method, headers, ...(body === undefined ? {} : { body }) });
+}
+
 async function transformModernJsonResponse(
   protocol: ModernTasksProtocol,
   requestMessage: JSONRPCMessage,
@@ -270,11 +325,23 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   });
   const modernHandler = createMcpHandler((context) => factory(context.requestInfo), { legacy: 'reject', onerror: writeDiagnostic });
   const sessionTtlMs = options.legacySessionTtlMs ?? DEFAULT_LEGACY_SESSION_TTL_MS;
+  const reviveWindowMs = options.legacySessionReviveWindowMs ?? DEFAULT_LEGACY_SESSION_REVIVE_WINDOW_MS;
   const sessions = new BoundedRetentionMap<string, LegacySession>({
     ttlMs: sessionTtlMs,
     maxEntries: options.maxLegacySessions ?? DEFAULT_MAX_LEGACY_SESSIONS,
     ...(options.legacySessionNow === undefined ? {} : { now: options.legacySessionNow }),
   });
+  /**
+   * Attribution for a revival: the dead id maps to the request scope it owned, so
+   * a revived session inherits that scope instead of inventing a new one.
+   */
+  const revivableSessions = reviveWindowMs > 0
+    ? new BoundedRetentionMap<string, { readonly scopeSessionId: string }>({
+      ttlMs: reviveWindowMs,
+      maxEntries: DEFAULT_MAX_REVIVABLE_SESSIONS,
+      ...(options.legacySessionNow === undefined ? {} : { now: options.legacySessionNow }),
+    })
+    : undefined;
   const closingSessions = new WeakSet<LegacySession>();
   const pendingSessionCloses = new Set<Promise<void>>();
   const explicitCloseReasons = new Map<string, LegacySessionEvictionReason>();
@@ -283,7 +350,11 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   const lastEviction: { current: McpSessionRecoverySnapshot['lastEviction'] } = { current: null };
   const sessionRecoveryServices: McpApplicationServices = {
     ...options.services,
-    sessionRecovery: (): McpSessionRecoverySnapshot => ({ liveSessions: sessions.size, lastEviction: lastEviction.current }),
+    sessionRecovery: (): McpSessionRecoverySnapshot => ({
+      liveSessions: sessions.size,
+      lastEviction: lastEviction.current,
+      reviveWindowMs,
+    }),
   };
 
   const disposeLegacySession = async (session: LegacySession): Promise<void> => {
@@ -308,6 +379,8 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   ): Promise<void> => {
     if (closingSessions.has(session)) return Promise.resolve();
     lastEviction.current = { sessionId, reason, at: new Date((options.legacySessionNow ?? Date.now)()).toISOString() };
+    // A corrupt session must never be silently replaced, so `protocol_error` is not revivable.
+    if (isRevivableEviction(reason)) revivableSessions?.set(sessionId, { scopeSessionId: session.scopeSessionId });
     try {
       options.legacySessionEvictionObserver?.({ sessionId, reason });
     } catch (error: unknown) {
@@ -333,11 +406,14 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
     await trackSessionEviction(sessionId, session, reason);
   };
 
-  const createLegacySession = async (request: Request): Promise<Response> => {
+  const createLegacySession = async (request: Request, revivedScopeSessionId?: string): Promise<Response> => {
     if (closed) return sessionNotFoundResponse();
 
     const protocolSessionId = randomUUID();
-    const requestScope = createProtocolHttpRequestScope(protocolSessionId);
+    const baseScope = createProtocolHttpRequestScope(protocolSessionId);
+    // A revival keeps the dead session's scope (and its ledger identity) while the
+    // transport state starts empty, which is the whole point of a revive.
+    const requestScope = revivedScopeSessionId === undefined ? baseScope : { ...baseScope, sessionId: revivedScopeSessionId };
     const server = createMcpServer({
       ...options,
       services: sessionRecoveryServices,
@@ -374,7 +450,21 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
 
     try {
       await server.connect(transport);
-      const result = await transport.handleRequest(request);
+      if (revivedScopeSessionId !== undefined && !(await isInitializePost(request))) {
+        // The revived transport starts uninitialized, so initialize it before the
+        // host's own request is replayed on the new session id.
+        const initializeResponse = await transport.handleRequest(createReviveInitializeRequest(request));
+        await initializeResponse.text();
+        if (!initializeResponse.ok || registeredSessionId === undefined) {
+          if (registeredSessionId !== undefined && registeredSession !== undefined && sessions.peek(registeredSessionId) === registeredSession) {
+            sessions.delete(registeredSessionId);
+          }
+          await server.close().catch(() => undefined);
+          return sessionNotFoundResponse();
+        }
+      }
+      const servedRequest = registeredSessionId === undefined ? request : await withSessionId(request, registeredSessionId);
+      const result = await transport.handleRequest(servedRequest);
       if (registeredSessionId === undefined) await server.close();
       else await Promise.allSettled([...pendingSessionCloses]);
       return result;
@@ -389,6 +479,17 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       }
       throw error;
     }
+  };
+
+  /**
+   * One revive per evicted id: `take` consumes the entry, so a second request with
+   * the same stale id falls through to the explicit `404` and the re-init hint.
+   */
+  const reviveLegacySession = async (request: Request, sessionId: string): Promise<Response | undefined> => {
+    if (closed || request.method === 'DELETE') return undefined;
+    const revivable = revivableSessions?.take(sessionId);
+    if (revivable === undefined) return undefined;
+    return createLegacySession(request, revivable.scopeSessionId);
   };
 
   return {
@@ -415,9 +516,9 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
       const lookup = sessions.getWithEviction(sessionId);
       if (lookup.state === 'evicted') {
         await trackSessionEviction(lookup.eviction.key, lookup.eviction.value, 'idle_ttl');
-        return sessionNotFoundResponse();
+        return (await reviveLegacySession(request, sessionId)) ?? sessionNotFoundResponse();
       }
-      if (lookup.state === 'missing') return sessionNotFoundResponse();
+      if (lookup.state === 'missing') return (await reviveLegacySession(request, sessionId)) ?? sessionNotFoundResponse();
       const session = lookup.value;
 
       if (request.method === 'DELETE') explicitCloseReasons.set(sessionId, 'client_delete');

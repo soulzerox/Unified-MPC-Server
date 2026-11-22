@@ -135,6 +135,16 @@ export interface McpRuntimeTiming {
   readonly mcpPollWaitSeconds: number;
 }
 
+/** Live transport-session evidence for `recovery_status` (#174). */
+export interface McpSessionRecoverySnapshot {
+  readonly liveSessions: number;
+  readonly lastEviction: {
+    readonly sessionId: string;
+    readonly reason: string;
+    readonly at: string;
+  } | null;
+}
+
 export interface ThaiRagProviderPort {
   health(signal?: AbortSignal): Promise<Result<{
     readonly providerId: 'thai-rag';
@@ -290,6 +300,8 @@ export interface McpApplicationServices {
   readonly runtimeTiming?: () => McpRuntimeTiming;
   /** Lightweight process/runtime cardinalities for diagnostics only; must stay bounded and side-effect free. */
   readonly runtimeDiagnostics?: () => { readonly toolAvailabilitySubscriptions: number };
+  /** Live session cardinality and last eviction; bounded and side-effect free (#174). */
+  readonly sessionRecovery?: () => McpSessionRecoverySnapshot;
   /** Test-only deterministic override for Windows Sandbox discovery; production runtimes leave this undefined. */
   readonly sandboxRuntimeOptions?: { readonly platform?: NodeJS.Platform; readonly sandboxExecutable?: string };
   /** Test-only deterministic override for native event-log queries; production runtimes leave this undefined. */

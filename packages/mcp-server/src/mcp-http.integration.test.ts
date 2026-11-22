@@ -437,6 +437,13 @@ describe('MCP localhost HTTP transport', { timeout: 30_000 }, () => {
       expect(evicted.status).toBe(404);
       expect(evictionReasons).toContain('lru_capacity');
 
+      const recovery = await secondClient.callTool({ name: 'recovery_status', arguments: {} });
+      expect(recovery.isError).not.toBe(true);
+      expect(recovery.structuredContent).toMatchObject({
+        liveSessions: 1,
+        lastEviction: { sessionId: firstSessionId, reason: 'lru_capacity', at: new Date(0).toISOString() },
+      });
+
       now = 101;
       const expired = await fetch(retentionHandle.endpoint, {
         method: 'GET',

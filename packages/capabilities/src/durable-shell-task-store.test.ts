@@ -1059,6 +1059,131 @@ describe('durable shell task parking (#145)', () => {
     }
   });
 
+  it('reuses a live probe answer for a status read instead of starting a probe per read', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-probe-cache-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'linux' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    // Captured before PATH changes, so the fake answers exactly what a real probe would.
+    const { stdout: realRow } = await promisify(execFile)('ps', ['-p', String(sleeper.pid), '-o', 'lstart=', '-o', 'stat='], {
+      encoding: 'utf8',
+      env: { ...(process.env.PATH === undefined ? {} : { PATH: process.env.PATH }), LC_ALL: 'C', LANG: 'C' },
+    });
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    const counter = path.join(root, 'ps.count');
+    // The fake answers once and fails afterwards: a second probe reads as unverifiable
+    // and pins the task, so only a reused answer keeps it running.
+    await writeFile(
+      path.join(fakeBin, 'ps'),
+      `#!/bin/sh\nn=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)\necho $((n+1)) > ${JSON.stringify(counter)}\n`
+        // Exit 3, not 1: `ps` exits 1 for "no such process" and that answer is `gone`.
+        + `if [ "$n" != "0" ]; then exit 3; fi\ncat <<'ROW'\n${realRow}ROW\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      const taskId = 'probe-cache';
+      await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+      await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+        version: 1,
+        task_id: taskId,
+        state: 'running',
+        started_at: new Date(Date.now() - 1_000).toISOString(),
+        include_stdout: false,
+        include_stderr: false,
+        max_output_bytes: 1024,
+        deadline_at: new Date(Date.now() + 60_000).toISOString(),
+        worker_pid: sleeper.pid,
+        worker_started_at: startedAt,
+      }), 'utf8');
+
+      const first = await store.snapshot(taskId);
+      const second = await store.snapshot(taskId);
+
+      expect(first.ok && first.value.state).toBe('running');
+      expect(second.ok && second.value.state).toBe('running');
+      expect((await readFile(counter, 'utf8')).trim()).toBe('1');
+
+      // The cache is a bound, not a permanent pin: past the TTL the probe runs again.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const third = await store.snapshot(taskId);
+
+      expect(third.ok && third.value.state).toBe('termination_unverified');
+      expect((await readFile(counter, 'utf8')).trim()).toBe('2');
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
+  it('does not replay a cached identity for a record that expects a different start time', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-probe-cache-pid-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'linux' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    sleeper.unref();
+    const startedAt = await readProcessStartedAt(sleeper.pid);
+    // `ps` prints local time, so the identity each row stands for is parsed the same way
+    // the probe parses it: a hand-written ISO string would only match in one timezone.
+    const identityOf = (row: string): string => {
+      const probe = parsePosixProcessProbe(`${row} S`);
+      if (probe.state !== 'live') throw new Error(`row is not a live identity: ${row}`);
+      return probe.processStartedAt;
+    };
+    const first = identityOf('2026-11-22 00:00:00');
+    const second = identityOf('2026-11-22 00:00:05');
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    const counter = path.join(root, 'ps.count');
+    // Answers `first` once, then `second`: the same pid with two identities, which is what
+    // a recycled pid looks like to a cache keyed by pid alone.
+    await writeFile(
+      path.join(fakeBin, 'ps'),
+      `#!/bin/sh\nn=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)\necho $((n+1)) > ${JSON.stringify(counter)}\n`
+        + `if [ "$n" = "0" ]; then echo "2026-11-22 00:00:00 S"; else echo "2026-11-22 00:00:05 S"; fi\n`,
+      { mode: 0o755 },
+    );
+    const realPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${realPath ?? ''}`;
+    try {
+      for (const [taskId, identity] of [['cache-first', first], ['cache-second', second]] as const) {
+        await mkdir(path.join(tasksRoot, taskId), { recursive: true });
+        await writeFile(path.join(tasksRoot, taskId, 'task.json'), JSON.stringify({
+          version: 1,
+          task_id: taskId,
+          state: 'running',
+          started_at: new Date(Date.now() - 1_000).toISOString(),
+          include_stdout: false,
+          include_stderr: false,
+          max_output_bytes: 1024,
+          deadline_at: new Date(Date.now() + 60_000).toISOString(),
+          worker_pid: sleeper.pid,
+          worker_started_at: identity,
+        }), 'utf8');
+      }
+
+      const firstRead = await store.snapshot('cache-first');
+      // A pid-only cache would serve `first` here, read it as another process and pin a
+      // healthy task `termination_unverified`; the record's own identity has to miss.
+      const secondRead = await store.snapshot('cache-second');
+
+      expect(firstRead.ok && firstRead.value.state).toBe('running');
+      expect(secondRead.ok && secondRead.value.state).toBe('running');
+      expect((await readFile(counter, 'utf8')).trim()).toBe('2');
+    } finally {
+      process.env.PATH = realPath;
+      await killFixture(sleeper.pid, startedAt);
+    }
+  });
+
   it('stops a process a terminal record still names, instead of leaving the pid as a note', async () => {
     if (process.platform === 'win32') return;
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-late-cancel-'));

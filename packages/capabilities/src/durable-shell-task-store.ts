@@ -115,6 +115,14 @@ const WORKER_SETTLED_STATES: ReadonlySet<string> = new Set([
 // unverifiable long-lived process still fails closed) but wide enough not to
 // turn normal short-lived tasks into false `termination_unverified` results.
 const PROCESS_IDENTITY_CAPTURE_GRACE_MS = 10_000;
+/**
+ * A `snapshot` reconciles, and `list`, `wait`, `tasks_status` and `activeTaskCount` all
+ * reach `snapshot`, so a status read used to start one `powershell` per running win32
+ * task (roughly 0.3-1 s each, serialised). A live answer is the only answer that repeats,
+ * so only it is cached, and only for this long.
+ */
+const PROCESS_PROBE_CACHE_TTL_MS = 500;
+const PROCESS_PROBE_CACHE_LIMIT = 64;
 const execFileAsync = promisify(execFile);
 
 export interface DurableShellTaskStoreOptions {
@@ -127,6 +135,7 @@ export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
 
 export class DurableShellTaskStore {
   private readonly maxConcurrentTasks: number;
+  private readonly liveProbes = new Map<number, { readonly startedAt: string; readonly at: number }>();
   private readonly platform: NodeJS.Platform;
   private readonly externalReconciler: DurableShellTaskExternalReconciler | undefined;
 
@@ -674,6 +683,36 @@ export class DurableShellTaskStore {
     return (await this.readMetadata(taskId)).ok;
   }
 
+  /**
+   * The cache answers only the record it was filled for: a hit is served only when the
+   * cached start time is the one this record expects, so a pid recycled inside the TTL
+   * misses and probes fresh instead of reading as a different process. A hit can still
+   * report a dead pid live for at most the TTL, and every stop path
+   * (`terminateTrackedProcesses`, `stopProcessTree`) probes for itself, so no cached
+   * answer is ever used to decide whether to signal a pid.
+   */
+  private async probeForReconcile(pid: number, expectedStartedAt: string | undefined): Promise<PortableProcessProbe> {
+    const cached = this.liveProbes.get(pid);
+    if (cached !== undefined
+      && cached.startedAt === expectedStartedAt
+      && Date.now() - cached.at < PROCESS_PROBE_CACHE_TTL_MS) {
+      return { state: 'live', processStartedAt: cached.startedAt };
+    }
+    this.liveProbes.delete(pid);
+    const probe = await probeProcessIdentity(pid, this.platform);
+    // Stamped after the probe, so the TTL bounds the age of the answer and not the time
+    // since the probe started: a win32 `powershell` start is a large part of that budget.
+    if (probe.state === 'live') {
+      this.liveProbes.set(pid, { startedAt: probe.processStartedAt, at: Date.now() });
+      while (this.liveProbes.size > PROCESS_PROBE_CACHE_LIMIT) {
+        const oldest = this.liveProbes.keys().next().value;
+        if (oldest === undefined) break;
+        this.liveProbes.delete(oldest);
+      }
+    }
+    return probe;
+  }
+
   private async activeTaskCount(): Promise<number> {
     const tasks = await this.list();
     return tasks.filter((task) => task.state === 'running' || task.state === 'termination_unverified').length;
@@ -683,7 +722,7 @@ export class DurableShellTaskStore {
     if (metadata.state !== 'running' && metadata.state !== 'termination_unverified') return metadata;
     const workerPid = metadata.worker_pid;
     if (workerPid !== undefined) {
-      const workerProbe = await probeProcessIdentity(workerPid, this.platform);
+      const workerProbe = await this.probeForReconcile(workerPid, metadata.worker_started_at);
       if (isTrackedProcessLive(workerProbe, metadata.worker_started_at)) return metadata;
       if (identityCapturePendingForProbe(workerProbe, metadata.worker_started_at, metadata.started_at)) return metadata;
       if (isUnverifiableTrackedProbe(workerProbe, metadata.worker_started_at)) {
@@ -699,7 +738,7 @@ export class DurableShellTaskStore {
     if (refreshed.ok && isTerminal(refreshed.value.state)) return refreshed.value;
     const current = refreshed.ok ? refreshed.value : metadata;
     if (current.worker_pid !== undefined) {
-      const refreshedWorkerProbe = await probeProcessIdentity(current.worker_pid, this.platform);
+      const refreshedWorkerProbe = await this.probeForReconcile(current.worker_pid, current.worker_started_at);
       if (isTrackedProcessLive(refreshedWorkerProbe, current.worker_started_at)) return current;
       if (identityCapturePendingForProbe(refreshedWorkerProbe, current.worker_started_at, current.started_at)) return current;
       if (isUnverifiableTrackedProbe(refreshedWorkerProbe, current.worker_started_at)) {
@@ -711,7 +750,7 @@ export class DurableShellTaskStore {
       }
     }
     if (current.child_pid !== undefined) {
-      const refreshedChildProbe = await probeProcessIdentity(current.child_pid, this.platform);
+      const refreshedChildProbe = await this.probeForReconcile(current.child_pid, current.child_started_at);
       if (isTrackedProcessLive(refreshedChildProbe, current.child_started_at)) {
         current.state = 'termination_unverified';
         current.error = current.error ?? 'Durable task worker exited while its child process is still running';

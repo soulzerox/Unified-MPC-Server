@@ -501,6 +501,9 @@ export class UpgradeRuntimeService {
       case 'recovery_status': {
         const recovery = this.services.sessionRecovery?.();
         return ok({
+          // #174: this string describes the transport boundary only. The counts
+          // below are the evidence; a host that sees `liveSessions: 0` with a
+          // recent `lastEviction` must not read `reconnect` as "you are fine".
           reconnect: 'enabled-at-transport-boundary',
           safeReadRetry: true,
           destructiveRetry: false,

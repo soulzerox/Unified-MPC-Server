@@ -32,13 +32,17 @@ describe('upgrade runtime', () => {
     const runtime = new UpgradeRuntimeService({}, actor);
     const result = await runtime.execute('recovery_status', {});
 
+    // #174: the `reconnect` string is a static description of the transport
+    // boundary, not evidence that a resumed turn can reach the tool surface.
+    // Pinning it as a constant is what made the issue invisible, so only the
+    // counts that can disagree with it are asserted here.
     expect(result).toMatchObject({
       ok: true,
       value: {
-        reconnect: 'enabled-at-transport-boundary',
         staleContinuation: 'unverified',
         liveSessions: null,
         lastEviction: null,
+        reviveWindowMs: null,
       },
     });
   });

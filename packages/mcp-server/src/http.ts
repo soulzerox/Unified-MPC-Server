@@ -380,7 +380,9 @@ function createSessionfulMcpHandler(options: McpHttpServerOptions): McpHttpHandl
   ): Promise<void> => {
     if (closingSessions.has(session)) return Promise.resolve();
     lastEviction.current = { sessionId, reason, at: new Date((options.legacySessionNow ?? Date.now)()).toISOString() };
-    // A corrupt session must never be silently replaced, so `protocol_error` is not revivable.
+    // Only an eviction the client did not ask for leaves a revivable id behind:
+    // `isRevivableEviction` owns the rule (no `protocol_error`, no `DELETE`), so
+    // keep the two sites in step by changing the helper, not this comment.
     if (isRevivableEviction(reason)) revivableSessions?.set(sessionId, { scopeSessionId: session.scopeSessionId });
     try {
       options.legacySessionEvictionObserver?.({ sessionId, reason });

@@ -1314,7 +1314,8 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-const DURABLE_WORKER_SOURCE = String.raw`import { execFile, spawn } from 'node:child_process';
+/** Exported so a test can spawn this exact worker and drive a branch the host cannot reach. */
+export const DURABLE_WORKER_SOURCE = String.raw`import { execFile, spawn } from 'node:child_process';
 import { readFile, writeFile, open, unlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
 

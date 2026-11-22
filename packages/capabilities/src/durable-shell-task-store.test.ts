@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ShellCapabilityBackend } from './shell-backend.js';
-import { DurableShellTaskStore, parsePosixProcessProbe, parseWindowsProcessProbe } from './durable-shell-task-store.js';
+import { DurableShellTaskStore, DURABLE_WORKER_SOURCE, parsePosixProcessProbe, parseWindowsProcessProbe } from './durable-shell-task-store.js';
 import { CAPABILITY_TASK_OWNER_METADATA_KEY } from './task-ownership.js';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -1643,6 +1643,87 @@ describe('durable task recovery identity (#170)', () => {
       await store.cancel('recoverable-task', firstSession);
     }
   }, 15_000);
+});
+
+describe('durable worker identity capture (#876)', () => {
+  it('captures the child identity through the worker\'s Windows probe branch', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-worker-identity-'));
+    temporaryRoots.push(root);
+    const identity = '2026-11-22T00:00:00.000Z';
+    const fakeBin = path.join(root, 'bin');
+    await mkdir(fakeBin, { recursive: true });
+    // Only `powershell` exists on this PATH. A worker that fell through to the POSIX
+    // `ps` branch would find no probe at all, so a captured identity can only have come
+    // from the win32 branch — deleting that branch leaves the task with no identity.
+    await writeFile(path.join(fakeBin, 'powershell'), `#!/bin/sh\necho "${identity}"\n`, { mode: 0o755 });
+
+    const workerPath = path.join(root, 'worker.mjs');
+    await writeFile(workerPath, DURABLE_WORKER_SOURCE, 'utf8');
+    // The worker branches on the real `process.platform`, which no option can reach, so
+    // the property is redefined before the module loads.
+    const harnessPath = path.join(root, 'harness.mjs');
+    await writeFile(harnessPath, [
+      "Object.defineProperty(process, 'platform', { value: 'win32' });",
+      'await import(process.env.DURABLE_WORKER_PATH);',
+      '',
+    ].join('\n'), 'utf8');
+
+    const metadataPath = path.join(root, 'task.json');
+    await writeFile(metadataPath, JSON.stringify({
+      version: 1,
+      task_id: 'worker-identity',
+      state: 'running',
+      started_at: new Date(Date.now() - 1_000).toISOString(),
+      include_stdout: false,
+      include_stderr: false,
+      max_output_bytes: 1024,
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+    }), 'utf8');
+    const specPath = path.join(root, 'spec.json');
+    await writeFile(specPath, JSON.stringify({
+      metadataPath,
+      stdoutPath: path.join(root, 'stdout.log'),
+      stderrPath: path.join(root, 'stderr.log'),
+      maxOutputBytes: 1024,
+      executable: process.execPath,
+      arguments: ['-e', 'setTimeout(() => {}, 30000)'],
+      cwd: root,
+      timeoutMs: 60_000,
+    }), 'utf8');
+
+    const harness = spawn(process.execPath, [harnessPath, specPath], {
+      cwd: root,
+      stdio: 'ignore',
+      env: { ...process.env, PATH: fakeBin, DURABLE_WORKER_PATH: workerPath },
+    });
+    const harnessExited = new Promise<void>((resolve) => harness.once('exit', () => resolve()));
+    let childPid: number | undefined;
+    try {
+      await waitUntil(async () => {
+        const raw = await readFile(metadataPath, 'utf8').catch(() => '');
+        const metadata = raw ? JSON.parse(raw) as { child_started_at?: string } : {};
+        return metadata.child_started_at !== undefined;
+      }, 15_000);
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as { child_pid?: number; child_started_at?: string };
+      childPid = metadata.child_pid;
+      // The exact identity the fake PowerShell printed, normalised the way the probe parses it.
+      expect(metadata.child_started_at).toBe(identity);
+      expect(childPid).toBeGreaterThan(0);
+    } finally {
+      // The recorded identity is the fake one, so the real-start-time helper would decline
+      // to signal this child: it is killed by the pid the worker published.
+      if (childPid !== undefined) {
+        try {
+          process.kill(childPid, 'SIGKILL');
+        } catch {
+          // Gone already.
+        }
+      }
+      harness.kill('SIGKILL');
+      await harnessExited;
+    }
+  }, 30_000);
 });
 
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {

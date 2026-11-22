@@ -129,6 +129,8 @@ export interface DurableShellTaskStoreOptions {
   readonly maxConcurrentTasks?: number;
   readonly platform?: NodeJS.Platform;
   readonly externalReconciler?: DurableShellTaskExternalReconciler;
+  /** Clock for the probe cache, so a test can age an entry instead of sleeping past the TTL. */
+  readonly now?: () => number;
 }
 
 export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
@@ -136,6 +138,7 @@ export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
 export class DurableShellTaskStore {
   private readonly maxConcurrentTasks: number;
   private readonly liveProbes = new Map<number, { readonly startedAt: string; readonly at: number }>();
+  private readonly now: () => number;
   private readonly platform: NodeJS.Platform;
   private readonly externalReconciler: DurableShellTaskExternalReconciler | undefined;
 
@@ -143,6 +146,7 @@ export class DurableShellTaskStore {
     this.maxConcurrentTasks = normalizeMaxConcurrentTasks(options.maxConcurrentTasks);
     this.platform = options.platform ?? process.platform;
     this.externalReconciler = options.externalReconciler;
+    this.now = options.now ?? Date.now;
   }
 
   public async launch(request: DurableShellLaunchRequest): Promise<Result<Record<string, unknown>>> {
@@ -684,18 +688,22 @@ export class DurableShellTaskStore {
   }
 
   /**
-   * The cache answers only the record it was filled for: a hit is served only when the
-   * cached start time is the one this record expects, so a pid recycled inside the TTL
-   * misses and probes fresh instead of reading as a different process. A hit can still
-   * report a dead pid live for at most the TTL, and every stop path
-   * (`terminateTrackedProcesses`, `stopProcessTree`) probes for itself, so no cached
-   * answer is ever used to decide whether to signal a pid.
+   * A hit is served only when the cached start time is the one this record expects, so a
+   * record that expects a different start time — including one that adopted a recycled pid
+   * — misses and probes fresh instead of reading another process's identity.
+   *
+   * What the TTL alone bounds: the record that *filled* the entry still expects the same
+   * start time, so if its process dies and the pid is recycled the hit still answers
+   * `live` until the entry ages out, which is up to the TTL after the probe answered (the
+   * stamp is taken on return, so a slow probe is not part of it). Every stop path
+   * (`terminateTrackedProcesses`, `stopProcessTree`) probes for itself, so no cached answer
+   * is ever used to decide whether to signal a pid.
    */
   private async probeForReconcile(pid: number, expectedStartedAt: string | undefined): Promise<PortableProcessProbe> {
     const cached = this.liveProbes.get(pid);
     if (cached !== undefined
       && cached.startedAt === expectedStartedAt
-      && Date.now() - cached.at < PROCESS_PROBE_CACHE_TTL_MS) {
+      && this.now() - cached.at < PROCESS_PROBE_CACHE_TTL_MS) {
       return { state: 'live', processStartedAt: cached.startedAt };
     }
     this.liveProbes.delete(pid);
@@ -703,7 +711,7 @@ export class DurableShellTaskStore {
     // Stamped after the probe, so the TTL bounds the age of the answer and not the time
     // since the probe started: a win32 `powershell` start is a large part of that budget.
     if (probe.state === 'live') {
-      this.liveProbes.set(pid, { startedAt: probe.processStartedAt, at: Date.now() });
+      this.liveProbes.set(pid, { startedAt: probe.processStartedAt, at: this.now() });
       while (this.liveProbes.size > PROCESS_PROBE_CACHE_LIMIT) {
         const oldest = this.liveProbes.keys().next().value;
         if (oldest === undefined) break;

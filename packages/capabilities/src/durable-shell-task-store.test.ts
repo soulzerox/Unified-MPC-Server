@@ -1010,12 +1010,13 @@ describe('durable shell task parking (#145)', () => {
     const identity = '2026-11-22T00:00:00.000Z';
     const fakeBin = path.join(root, 'bin');
     await mkdir(fakeBin, { recursive: true });
-    const counter = path.join(root, 'powershell.count');
-    // One cold-start failure, then a normal answer: the identity is captured once per
-    // launch, so without a retry this record stays unverifiable for good.
+    // One cold-start failure per pid, then a normal answer: the identity is captured once
+    // per launch, so without a retry this record stays unverifiable for good. The counter
+    // is per pid, so a probe of some other process cannot spend the worker's failure.
     await writeFile(
       path.join(fakeBin, 'powershell'),
-      `#!/bin/sh\nn=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)\necho $((n+1)) > ${JSON.stringify(counter)}\n`
+      `#!/bin/sh\npid=$(printf '%s' "$*" | sed -n 's/.*Get-Process -Id \\([0-9][0-9]*\\).*/\\1/p')\n`
+        + `c=${JSON.stringify(root)}/powershell.$pid.count\nn=$(cat "$c" 2>/dev/null || echo 0)\necho $((n+1)) > "$c"\n`
         + `if [ "$n" = "0" ]; then exit 1; fi\necho "${identity}"\n`,
       { mode: 0o755 },
     );
@@ -1064,7 +1065,10 @@ describe('durable shell task parking (#145)', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-probe-cache-'));
     temporaryRoots.push(root);
     const tasksRoot = path.join(root, '.tasks');
-    const store = new DurableShellTaskStore(tasksRoot, { platform: 'linux' });
+    // The clock is injected so neither assertion races a loaded runner: the first pair is
+    // one instant, and the expiry is the same entry aged past the TTL.
+    let clock = 1_000;
+    const store = new DurableShellTaskStore(tasksRoot, { platform: 'linux', now: (): number => clock });
     const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
     sleeper.unref();
     const startedAt = await readProcessStartedAt(sleeper.pid);
@@ -1110,8 +1114,9 @@ describe('durable shell task parking (#145)', () => {
       expect(second.ok && second.value.state).toBe('running');
       expect((await readFile(counter, 'utf8')).trim()).toBe('1');
 
-      // The cache is a bound, not a permanent pin: past the TTL the probe runs again.
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      // The cache is a bound, not a permanent pin: aged past the TTL the entry is dropped
+      // and the probe runs again.
+      clock += 501;
       const third = await store.snapshot(taskId);
 
       expect(third.ok && third.value.state).toBe('termination_unverified');

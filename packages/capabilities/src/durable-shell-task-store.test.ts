@@ -1712,10 +1712,14 @@ describe('durable worker identity capture (#876)', () => {
       expect(childPid).toBeGreaterThan(0);
     } finally {
       // The recorded identity is the fake one, so the real-start-time helper would decline
-      // to signal this child: it is killed by the pid the worker published.
-      if (childPid !== undefined) {
+      // to signal this child: it is killed by the pid the worker published. That pid is read
+      // again here because a failing wait never reached the assignment above, and a leaked
+      // fixture would keep running for the rest of its own timeout.
+      const published = childPid ?? await readFile(metadataPath, 'utf8')
+        .then((raw) => (JSON.parse(raw) as { child_pid?: number }).child_pid, () => undefined);
+      if (published !== undefined) {
         try {
-          process.kill(childPid, 'SIGKILL');
+          process.kill(published, 'SIGKILL');
         } catch {
           // Gone already.
         }

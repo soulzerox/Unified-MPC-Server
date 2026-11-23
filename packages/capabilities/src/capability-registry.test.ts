@@ -241,6 +241,47 @@ describe('capability registry', () => {
     expect(registry.health('base')?.state).toBe('COLD');
   });
 
+  it('leaves a resident always capability alone when a dependent boot fails', async () => {
+    let now = 0;
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (manifest): void => {
+        if (manifest.id === 'resident') throw new Error('boom');
+      },
+    });
+    // `activation: 'always'` boots at registration: ACTIVE with no lease is its
+    // resting state, so a failed boot elsewhere must not hand it to the sweep.
+    await registry.register({ id: 'base', provides: ['base'], activation: 'always', idleTtlMs: 5_000 });
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
+
+    expect((await registry.register({ id: 'resident', provides: ['t'], requires: ['base'], activation: 'always' })).ok)
+      .toBe(false);
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
+
+    now += 5_000;
+    registry.sweep();
+    expect(registry.health('base')?.state).toBe('ACTIVE');
+  });
+
+  it('leaves a resident always capability alone when a dependent acquire fails', async () => {
+    let now = 0;
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (manifest): void => {
+        if (manifest.id === 'dependent') throw new Error('boom');
+      },
+    });
+    await registry.register({ id: 'base', provides: ['base'], activation: 'always', idleTtlMs: 5_000 });
+    await registry.register({ id: 'dependent', provides: ['t'], requires: ['base'] });
+
+    expect((await registry.acquire('dependent')).ok).toBe(false);
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
+
+    now += 5_000;
+    registry.sweep();
+    expect(registry.health('base')?.state).toBe('ACTIVE');
+  });
+
   it('unregisters a capability whose always boot failed so registration can retry', async () => {
     let failing = true;
     const registry = new CapabilityRegistry({

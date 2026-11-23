@@ -75,7 +75,9 @@ reclamation, and `activation: 'burst'` documents intent even before phase 2 can
 enforce it.
 
 `costClass` and `shutdownTimeoutMs` are recorded now because changing the
-manifest later is a `version` bump; enforcing them is phase 3's job.
+manifest later is a `version` bump. Enforcing `shutdownTimeoutMs` is phase 2's
+job, because it only matters once something can be killed; `costClass` is
+advisory until phase 3 has a pressure signal to weigh it against.
 
 `costClass` is deliberately not called `resourceClass`: that name already means
 the admission class of a *request* (`goal_process`, `delegated_agent`,
@@ -95,13 +97,15 @@ WARM_IDLE  -> ACTIVE        (acquire while still warm)
 WARM_IDLE  -> STOPPING      (idleTtlMs elapsed, or phase-3 pressure)
 STOPPING   -> COLD          (stop completed)
 STOPPING   -> FAILED        (stop error)
-FAILED     -> COLD          (recycle; only from durable state)
+FAILED     -> COLD          (recycle by re-reading the capability's own
+                             durable artifacts; the registry itself is never
+                             persisted)
 ```
 
 Rules that must hold, and are cheap to test:
 
-- A transition not in the table is refused, not coerced. `STOPPING` is terminal
-  except for `COLD` and `FAILED`.
+- A transition not in the table is refused, not coerced. `STOPPING` leaves only
+  for `COLD` or `FAILED`.
 - `acquire` returns a lease only from `ACTIVE`, `WARM_IDLE`, or `COLD` (which
   starts it). It never resurrects `STOPPING` or `FAILED`.
 - `leaseCount` never goes negative; releasing a lease twice is an error, not a

@@ -179,6 +179,26 @@ describe('capability registry', () => {
     expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
   });
 
+  it('returns a started dependency to the idle path when a boot fails', async () => {
+    let now = 0;
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (manifest): void => {
+        if (manifest.id === 'resident') throw new Error('boom');
+      },
+    });
+    await registry.register({ id: 'base', provides: ['base'], idleTtlMs: 5_000 });
+
+    expect((await registry.register({ id: 'resident', provides: ['t'], requires: ['base'], activation: 'always' })).ok)
+      .toBe(false);
+    expect(registry.health('resident')).toBeUndefined();
+    expect(registry.health('base')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
+
+    now += 5_000;
+    registry.sweep();
+    expect(registry.health('base')?.state).toBe('COLD');
+  });
+
   it('unregisters a capability whose always boot failed so registration can retry', async () => {
     let failing = true;
     const registry = new CapabilityRegistry({

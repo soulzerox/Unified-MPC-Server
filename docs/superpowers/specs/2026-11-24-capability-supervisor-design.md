@@ -29,9 +29,10 @@ Two things already exist and must be reused, not re-implemented:
 - Two small additions to that package are required and named in the surface
   section: `onExit(processId, listener)` so an unrequested exit is observable
   without polling, and `timeoutMs: 0` to disable the wall-clock cap for a
-  resident worker. Without the second, `ProcessManager` would kill every worker
-  after its one-hour default (hard ceiling four hours) and the design's own exit
-  notification would report that as `worker-exited` → `FAILED`.
+  resident worker. Without the second, `ProcessManager` would kill a resident
+  worker after its one-hour default (hard ceiling four hours) and the design's
+  own exit notification would report that as `worker-exited` → `FAILED`. Only
+  `recyclable: true` ids get the zero; every other activation keeps the cap.
 - `ProcessMemoryPressureProbe` (`packages/workspace/src/resource-pressure.ts`)
   already samples available memory with a cached, injectable clock. Phase 2 does
   not import it: `ResourceAdmission` already owns the production consumer (it
@@ -102,6 +103,8 @@ export interface CapabilityLifecyclePort {
   /**
    * Targeted stop; marks a pending stop when a lease is still held. Async
    * because an unleased id reaches `COLD` only after the `stop` hook returns.
+   * A `recyclable: false` id is refused without an error: residency is a promise
+   * the registry already enforces, so `shutdown()` skips it from `snapshot()`.
    */
   reclaim(id: string): Promise<Result<void>>;
   /**
@@ -111,7 +114,8 @@ export interface CapabilityLifecyclePort {
    * cannot keep a dead process in the registry. The count is left as it is —
    * the holder still releases normally, `releaseIdle` is a no-op outside
    * `ACTIVE`, and `acquire` refuses `FAILED` — so leases drain without the
-   * record ever claiming a worker it no longer has.
+   * record ever claiming a worker it no longer has. What a lease does forbid is
+   * a *stop*: pressure and shutdown never take `STOPPING` while a lease is held.
    */
   fail(id: string, reason: string): Result<void>;
 }
@@ -246,9 +250,18 @@ phase, not of the supervisor; a seventh work item lands in
    still positive the registry — the only module holding the count — completes
    the same stop from `releaseLease`. That removes the need for a lease-release
    subscription: a waiter polls `health(id)`, which already reports the state the
-   registry wrote. Making the private `stop` awaitable changes the public
-   `sweep()` signature to `Promise<void>`, so its existing test call sites are
-   updated to `await` it in the same PR;
+   registry wrote. A `recyclable: false` id is refused with `ok(undefined)` and no
+   transition, matching the `!recyclable` guard the private `stop` already
+   applies; `shutdown()` skips those ids before calling `reclaim` at all.
+   `releaseLease` and the public `release(): Result<void>` stay synchronous and
+   therefore cannot await the hook: the release marks the pending stop, starts the
+   hook without awaiting it, and the transition to `COLD` is written when that
+   promise settles. A rejecting hook is caught by that continuation and writes
+   `STOPPING -> FAILED` with `stop-unverified`, so the release path never produces
+   an unhandled rejection and the releaser still observes the outcome through
+   `health(id)`. Making the private `stop` awaitable changes the public `sweep()`
+   signature to `Promise<void>`, so its existing test call sites are updated to
+   `await` it in the same PR;
 4. a `burst` default of `idleTtlMs = 0` in `normalizeCapabilityManifest`, so
    `activation: 'burst'` stops on its last release instead of going `WARM_IDLE`
    for the default 60 s. No per-tick TTL override is needed once `reclaim` is
@@ -294,13 +307,25 @@ Two additions belong to the process package instead, and neither is optional:
   supervisor subscribes per started id and drops that subscription *before* it
   orders a stop, so the manager's own kill can never be reported as an
   unrequested exit, and the two `FAILED` edges above have a real caller with no
-  polling loop introduced.
+  polling loop introduced. Subscribing from `onCreated` closes the window the
+  resolved `start()` result would leave open, so the process package gains
+  exactly one method and no `onCreated` callback has to be added.
 - `ManagedProcessStart.timeoutMs` accepts `0` meaning "no wall-clock cap", and a
-  zero skips the manager's timer. The supervisor always passes `0` and owns
-  worker lifetime itself: a resident worker must not be killed by a fixed hour,
-  and the bound that replaces it is an explicit one — the manifest's
-  `shutdownTimeoutMs`, the crash-loop refusal, and `reclaim`. A nonzero value
-  keeps today's meaning, so no existing caller changes.
+  zero skips the manager's timer. The supervisor passes `0` only for a
+  `recyclable: true` capability and leaves the manager's default cap in place for
+  every other activation, so the wall-clock backstop still applies to a worker
+  whose lease a caller leaks. For a resident id the cap is deliberately gone — a
+  resident worker must not be killed by a fixed hour — and phase 2 ships no
+  replacement bound for one whose lease is never released: `shutdownTimeoutMs`
+  only bounds a stop that was already ordered, the crash-loop refusal only
+  refuses a new start, and `reclaim` needs a driver phase 2 does not ship. Such a
+  leak is observable rather than silent, because `health(id)` keeps reporting a
+  live worker that still occupies one of `ProcessManager`'s slots, and it cannot
+  spread past one worker per id since the registry starts only from `COLD`; the
+  deadline that ends it belongs to phase 3's driver together with a lease
+  deadline. This is stated rather than papered over: unbounded lifetime is the
+  accepted cost of not killing a resident worker mid-use. A nonzero value keeps
+  today's meaning, so no existing caller changes.
 
 Items 1–5 add surface and change no transition. Item 6 is the exception and is
 listed here for exactly that reason: it adds the two `FAILED` edges below, which
@@ -343,7 +368,10 @@ resolves, so a death inside the start window would otherwise be dropped and the
 registry would write `ACTIVE` over a dead worker. The supervisor records the
 pending exit per id and its `start` hook then returns `err`, which is the same
 `STARTING -> FAILED` path a failed spawn already takes; nothing new is added to
-the transition table. Both halves of the stop guard are required — the
+the transition table. The flag lives only for that one `start` call: it is set by
+the exit listener, which can fire from `onCreated` before `start()` resolves, and
+is cleared before the hook returns, so a later start of the same id can never
+inherit an earlier death. Both halves of the stop guard are required — the
 subscription is dropped before the supervisor calls `ProcessManager.stop()`, and
 the guard holds even if a fake or a future manager delivers the notification
 first, so no ordering between the two decides whether a clean stop is written as
@@ -515,12 +543,20 @@ fake clock and a constant pressure:
 7. `stop` that exceeds `shutdownTimeoutMs` abandons the await, reports
    `stop-unverified`, never `COLD`, and leaves `ProcessManager`'s
    `termination_unverified` state visible instead of claiming a kill;
-8. `shutdown()` stops idle capabilities first, waits for a leased capability's
-   pending `reclaim` to complete on its last release, and returns inside the
-   global deadline even when one capability ignores its grace period;
-9. spawn bounds: the supervisor passes `timeoutMs: 0`, a spawn that settles after
-   the registry's `startupTimeoutMs` is stopped instead of stored, and a worker
-   that outlives several hours is not reported as `timed_out`.
+8. `shutdown()` reclaims the `WARM_IDLE` ids and then the unleased `ACTIVE` ones
+   through the one registry call, waits for a leased capability's pending
+   `reclaim` to complete on its last release, and returns inside the global
+   deadline even when one capability ignores its grace period; both deadline
+   outcomes are asserted separately — a `STOPPING` id whose termination could not
+   be verified is `FAILED` with `stop-unverified`, and a leased id that never
+   reached `STOPPING` keeps `ACTIVE` with no transition, no `stopUnverified` and
+   no invented kill, which is what distinguishes "never shorten a lease" from
+   "report an unverified kill";
+9. spawn bounds: the supervisor passes `timeoutMs: 0` for a `recyclable: true`
+   capability and the manager's default cap for every other activation, a spawn
+   that settles after the registry's `startupTimeoutMs` is stopped instead of
+   stored, and a resident worker that outlives several hours is not reported as
+   `timed_out`.
 
 Integration test in `packages/capabilities` with the real `ProcessManager` and a
 `node -e` child that prints one line and exits: start, log, stop, and a start

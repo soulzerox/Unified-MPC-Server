@@ -268,6 +268,9 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.durableTaskReconciliation = options.durableTaskReconciliation;
     this.durableStore = options.taskStateDirectory === undefined ? undefined : new DurableShellTaskStore(path.resolve(options.taskStateDirectory), {
       ...(options.durableTaskReconciliation === undefined ? {} : { externalReconciler: options.durableTaskReconciliation.reconcile }),
+      // The store's own reconcile must not write `failed` for the exit an
+      // in-flight cancel caused; the cancel writes `cancelled` instead.
+      cancelInFlight: (taskId): boolean => this.heavyCancelling.has(taskId),
     });
     this.autoWaitSeconds = clampNumber(options.autoWaitSeconds ?? DEFAULT_AUTO_WAIT_SECONDS, 0, DEFAULT_TIMEOUT_SECONDS);
     this.maxSynchronousWaitSeconds = clampNumber(options.maxSynchronousWaitSeconds ?? DEFAULT_MAX_SYNCHRONOUS_WAIT_SECONDS, 0.01, 90);

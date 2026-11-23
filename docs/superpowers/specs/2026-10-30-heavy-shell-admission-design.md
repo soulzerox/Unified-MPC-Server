@@ -79,6 +79,7 @@ A declared run writes the durable task record first and spawns second:
 
 - Queue full: reject the run with `RESOURCE_PRESSURE` and an explicit queue-full detail **before** writing a task record, so callers never hold a `task_id` for work that was never accepted.
 - Worker spawn failure after admission: settle the queue row as `failed` and release the lease in the same turn; never leak a slot.
+- A cancel racing an admission grant is the one place the spawn-failure rule wins over "a cancel owns the verdict": `startHeavyTask` and `retireHeavyTask` settle the row `failed` directly and do not consult the cancel claim, so a parked task cancelled while its grant arrives records `failed` rather than `cancelled`. The row it would have started is already cancelled and no process is left behind, so only the recorded outcome differs; changing that needs the start path to consult the claim, which is future scope rather than a defect in the settle path.
 - `termination_unverified`: **hold** the admission lease. The process may still be alive, so starting another heavy job would overlap it. The queue row stays `running` and the slot stays visibly held in `heavy_job_queue_status` until the store's worker-identity reconciliation proves the process is gone; only then is the row settled `failed` and the lease released. A permanently unverifiable process is an operator decision, never a silent release.
 - Aborted request signal while queued: cancel the queue row, mark `cancelled`; a signal that arrives after admission follows the existing running-task cancellation path.
 

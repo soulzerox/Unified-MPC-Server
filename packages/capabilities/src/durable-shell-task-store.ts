@@ -131,6 +131,13 @@ export interface DurableShellTaskStoreOptions {
   readonly externalReconciler?: DurableShellTaskExternalReconciler;
   /** Clock for the probe cache, so a test can age an entry instead of sleeping past the TTL. */
   readonly now?: () => number;
+  /**
+   * Whether a cancel currently owns this task's verdict. Reconcile must not
+   * write `failed` for a worker that exited because of that cancel: the cancel
+   * itself is about to write `cancelled`, and a `failed` row read back first
+   * would settle the task as a failure the caller never asked for.
+   */
+  readonly cancelInFlight?: (taskId: string) => boolean;
 }
 
 export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
@@ -141,12 +148,14 @@ export class DurableShellTaskStore {
   private readonly now: () => number;
   private readonly platform: NodeJS.Platform;
   private readonly externalReconciler: DurableShellTaskExternalReconciler | undefined;
+  private readonly cancelInFlight: (taskId: string) => boolean;
 
   public constructor(private readonly rootDirectory: string, options: DurableShellTaskStoreOptions = {}) {
     this.maxConcurrentTasks = normalizeMaxConcurrentTasks(options.maxConcurrentTasks);
     this.platform = options.platform ?? process.platform;
     this.externalReconciler = options.externalReconciler;
     this.now = options.now ?? Date.now;
+    this.cancelInFlight = options.cancelInFlight ?? ((): boolean => false);
   }
 
   public async launch(request: DurableShellLaunchRequest): Promise<Result<Record<string, unknown>>> {
@@ -814,6 +823,10 @@ export class DurableShellTaskStore {
       }
     }
     if (current.state === 'termination_unverified') return current;
+    // A cancel owns the verdict: the worker exited because of it, so the row it
+    // is about to write says `cancelled`. Writing `failed` here would be read
+    // back first and report a failure the caller never asked for.
+    if (this.cancelInFlight(current.task_id)) return current;
     current.state = 'failed';
     current.exit_code = current.exit_code ?? -1;
     current.error = current.error ?? 'Durable task worker exited before recording a final state';

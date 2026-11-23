@@ -247,12 +247,15 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly heavySettling = new Set<string>();
   private readonly heavySettleFailures = new Map<string, number>();
   /**
-   * Task ids whose cancel is in flight. The watcher settles on a snapshot, and a
-   * cancelled worker can write `failed` for the exit the cancel caused before the
-   * cancel writes `cancelled`; without this set the watcher would spend the slot
-   * as a failure and the later cancel settle would be a no-op.
+   * Task ids whose cancel is in flight, counted. The watcher settles on a
+   * snapshot, and a cancelled worker can write `failed` for the exit the cancel
+   * caused before the cancel writes `cancelled`; without this claim the watcher
+   * would spend the slot as a failure and the later cancel settle would be a
+   * no-op. Counted because a goal cancellation and an explicit MCP cancel can
+   * overlap on one id: the first finisher must not clear a claim the second
+   * still relies on.
    */
-  private readonly heavyCancelling = new Set<string>();
+  private readonly heavyCancelling = new Map<string, number>();
 
   public constructor(options: ShellCapabilityOptions) {
     if (options.allowedRoots.length === 0) throw new Error('At least one local capability root is required');
@@ -299,7 +302,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
         // Claim the verdict before the first await: the watcher may read a
         // `failed` snapshot for the exit this cancel causes, and that must not
         // spend the slot as a failure.
-        if (taskId !== undefined) this.heavyCancelling.add(taskId);
+        if (taskId !== undefined) this.claimHeavyCancelVerdict(taskId);
         try {
           if (taskId !== undefined) {
             // Serialize against an in-flight admission start so a cancel can
@@ -325,7 +328,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
             ? ok(this.decorateTaskResult(cancelled.value, taskId))
             : cancelled;
         } finally {
-          if (taskId !== undefined) this.heavyCancelling.delete(taskId);
+          if (taskId !== undefined) this.releaseHeavyCancelVerdict(taskId);
         }
       }
       case 'resume':
@@ -401,7 +404,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     if (this.durableStore !== undefined) {
       // Same claim as the `cancel` operation: the watcher must not settle a
       // `failed` snapshot for the exit this cancel is causing.
-      this.heavyCancelling.add(taskId);
+      this.claimHeavyCancelVerdict(taskId);
       try {
         const starting = this.heavyStarting.get(taskId);
         if (starting !== undefined) await starting;
@@ -417,7 +420,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
         }
         return cancelled;
       } finally {
-        this.heavyCancelling.delete(taskId);
+        this.releaseHeavyCancelVerdict(taskId);
       }
     }
     return ok({ matched: false, state: 'not_found' });
@@ -980,6 +983,17 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     }, this.heavyAdmissionWatchIntervalMs);
     timer.unref?.();
     this.heavyWatches.set(taskId, timer);
+  }
+
+  /** Take one claim on this task's verdict; the last release hands it back. */
+  private claimHeavyCancelVerdict(taskId: string): void {
+    this.heavyCancelling.set(taskId, (this.heavyCancelling.get(taskId) ?? 0) + 1);
+  }
+
+  private releaseHeavyCancelVerdict(taskId: string): void {
+    const claims = (this.heavyCancelling.get(taskId) ?? 1) - 1;
+    if (claims > 0) this.heavyCancelling.set(taskId, claims);
+    else this.heavyCancelling.delete(taskId);
   }
 
   private async settleHeavyTask(taskId: string): Promise<void> {

@@ -57,7 +57,9 @@ One record per capability, validated at registration, immutable afterwards:
 id                  stable string, unique in the registry
 version             integer, bumped on any contract change
 provides            non-empty string[] of capability tokens this worker answers
-requires            string[] of ids/tokens that must be resolvable first
+requires            string[] of ids that must be resolvable in this registry
+externalRequires    string[] of tokens this registry does not own and never
+                    starts (for example 'host-cdp')
 runtimeKind         'in-process' | 'native-worker' | 'external-process'
 activation          'always' | 'on-demand' | 'burst'
 costClass           'small' | 'medium' | 'large'   (advisory, for phase 3)
@@ -112,6 +114,10 @@ Rules that must hold, and are cheap to test:
   decrement.
 - While `leaseCount > 0` the capability cannot enter `STOPPING`, including when
   its TTL has expired. Pressure may shorten the TTL, never the leases.
+- A capability with `recyclable: false` never leaves `ACTIVE` or `WARM_IDLE` for
+  `STOPPING`: releasing its last lease only decrements the count, and `idleTtlMs`
+  is ignored for it, because the manifest promised it stays for the process
+  lifetime.
 - Every transition emits exactly one event carrying `id`, `from`, `to` and a
   reason, so `health`/`recovery_status` can report the last transition instead
   of a constant.
@@ -132,10 +138,13 @@ fence exists so a *capability* cannot outlive the generation that leased it.
 
 ## Dependency resolution
 
-`requires` is resolved against the same registry at registration and at acquire:
+`requires` is resolved against the same registry at registration and at acquire,
+and `externalRequires` is the only place a token outside the registry may be
+named:
 
-- an unknown requirement fails registration, unless it is declared external
-  (a token provided by a capability outside this registry, such as `host-cdp`);
+- an id in `requires` that is not registered fails registration;
+- a token in `externalRequires` is recorded and never started, so it cannot make
+  the registry believe it owns a capability the host provides;
 - a cycle fails registration with the cycle named;
 - resolving a request starts only the capabilities on its `requires` path, never
   unrelated ones.
@@ -160,7 +169,12 @@ Unit tests in `packages/capabilities`, against a fake clock, no child processes:
 7. a stale-generation acquire and a stale-generation release are both refused
    when `generationFenced` is true;
 8. each transition produces exactly one event with a reason, and the last event
-   is what a health read reports.
+   is what a health read reports;
+9. a `recyclable: false` capability stays `ACTIVE`/`WARM_IDLE` after its last
+   release and after its TTL would have elapsed, and still refuses an acquire
+   from `STOPPING`/`FAILED`;
+10. an `externalRequires` token registers without a matching manifest and is
+    never started, while an unregistered id in `requires` fails registration.
 
 ## Non-goals
 

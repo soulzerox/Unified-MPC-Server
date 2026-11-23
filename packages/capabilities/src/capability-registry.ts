@@ -251,8 +251,13 @@ export class CapabilityRegistry {
     this.transition(record, 'COLD', 'registered');
 
     if (manifest.activation === 'always') {
-      const started = await this.start(record, 'boot');
-      if (!started.ok) return started;
+      const started = await this.startWithDependencies(record, 'boot');
+      if (!started.ok) {
+        // A failed boot must not leave a half-registered id behind: a retry
+        // would get CONFLICT for a capability that never became usable.
+        this.records.delete(manifest.id);
+        return started;
+      }
     }
 
     return ok(manifest);
@@ -297,7 +302,15 @@ export class CapabilityRegistry {
     const chain = this.dependencyChain(record);
 
     const started = await this.startWithDependencies(record, 'acquire');
-    if (!started.ok) return started;
+    if (!started.ok) {
+      // A dependency that started before the failure is `ACTIVE` with no lease
+      // and the sweep only visits `WARM_IDLE`, so hand each one back to the idle
+      // path here instead of leaving it resident for the process lifetime.
+      for (const dependency of chain) {
+        if (dependency.state === 'ACTIVE' && dependency.leaseCount === 0) this.releaseIdle(dependency);
+      }
+      return started;
+    }
 
     if (record.state === 'WARM_IDLE') this.transition(record, 'ACTIVE', 'acquired while warm');
 
@@ -395,6 +408,7 @@ export class CapabilityRegistry {
   }
 
   private takeLease(record: CapabilityRecord): void {
+    if (record.state === 'WARM_IDLE') this.transition(record, 'ACTIVE', 'leased');
     record.leaseCount += 1;
     record.idleSince = 0;
   }
@@ -430,17 +444,25 @@ export class CapabilityRegistry {
     }
 
     this.transition(record, 'STARTING', reason);
-    const startedAt = this.now();
     const pending = (async (): Promise<Result<void>> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), record.manifest.startupTimeoutMs);
+        timer.unref();      });
       try {
-        await this.options.start?.(record.manifest);
+        const outcome = await Promise.race([
+          Promise.resolve(this.options.start?.(record.manifest)).then((): 'started' => 'started'),
+          timedOut,
+        ]);
+        if (outcome === 'timeout') {
+          this.transition(record, 'FAILED', 'startup timed out');
+          return err(appError('PROCESS_TIMEOUT', `capability ${record.manifest.id} did not start in time`, true));
+        }
       } catch (error) {
         this.transition(record, 'FAILED', `startup failed: ${error instanceof Error ? error.message : String(error)}`);
         return err(appError('INTERNAL_ERROR', `capability ${record.manifest.id} failed to start`, true));
-      }
-      if (this.now() - startedAt > record.manifest.startupTimeoutMs) {
-        this.transition(record, 'FAILED', 'startup timed out');
-        return err(appError('PROCESS_TIMEOUT', `capability ${record.manifest.id} did not start in time`, true));
+      } finally {
+        clearTimeout(timer);
       }
       this.transition(record, 'ACTIVE', 'started');
       return ok(undefined);

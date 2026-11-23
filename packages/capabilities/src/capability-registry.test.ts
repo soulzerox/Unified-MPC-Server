@@ -133,17 +133,80 @@ describe('capability registry', () => {
   });
 
   it('fails a start that outlives its startup timeout', async () => {
+    const registry = new CapabilityRegistry({
+      start: (): Promise<void> => new Promise<void>(() => undefined),
+    });
+    await registry.register({ id: 'a', provides: ['t'], startupTimeoutMs: 25 });
+
+    const result = await registry.acquire('a');
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? undefined : result.error.code).toBe('PROCESS_TIMEOUT');
+    expect(registry.health('a')?.state).toBe('FAILED');
+  });
+
+  it('returns a started dependency to the idle path when the acquire that needed it fails', async () => {
     let now = 0;
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (): void => {
-        now += 10_001;
+      start: (manifest): void => {
+        if (manifest.id === 'top') throw new Error('boom');
       },
     });
-    await registry.register({ id: 'a', provides: ['t'], startupTimeoutMs: 10_000 });
+    await registry.register({ id: 'base', provides: ['base'], idleTtlMs: 5_000 });
+    await registry.register({ id: 'top', provides: ['top'], requires: ['base'] });
 
-    expect((await registry.acquire('a')).ok).toBe(false);
-    expect(registry.health('a')?.state).toBe('FAILED');
+    expect((await registry.acquire('top')).ok).toBe(false);
+    expect(registry.health('base')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
+
+    now += 5_000;
+    registry.sweep();
+    expect(registry.health('base')?.state).toBe('COLD');
+  });
+
+  it('re-acquiring a warm dependency path wakes the dependency back to ACTIVE', async () => {
+    const registry = new CapabilityRegistry();
+    await registry.register({ id: 'base', provides: ['base'] });
+    await registry.register({ id: 'top', provides: ['top'], requires: ['base'] });
+
+    const first = await registry.acquire('top');
+    if (!first.ok) throw new Error('expected a lease');
+    first.value.release();
+    expect(registry.health('base')?.state).toBe('WARM_IDLE');
+
+    const second = await registry.acquire('top');
+    expect(second.ok).toBe(true);
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
+  });
+
+  it('unregisters a capability whose always boot failed so registration can retry', async () => {
+    let failing = true;
+    const registry = new CapabilityRegistry({
+      start: (): void => {
+        if (failing) throw new Error('boom');
+      },
+    });
+
+    expect((await registry.register({ id: 'resident', provides: ['t'], activation: 'always' })).ok).toBe(false);
+    expect(registry.health('resident')).toBeUndefined();
+
+    failing = false;
+    expect((await registry.register({ id: 'resident', provides: ['t'], activation: 'always' })).ok).toBe(true);
+    expect(registry.health('resident')?.state).toBe('ACTIVE');
+  });
+
+  it('starts the requires path of an always capability at registration', async () => {
+    const started: string[] = [];
+    const registry = new CapabilityRegistry({
+      start: (manifest): void => {
+        started.push(manifest.id);
+      },
+    });
+    await registry.register({ id: 'base', provides: ['base'] });
+    await registry.register({ id: 'resident', provides: ['t'], requires: ['base'], activation: 'always' });
+
+    expect(started).toEqual(['base', 'resident']);
+    expect(registry.health('base')?.state).toBe('ACTIVE');
   });
 
   it('refuses a double release and leaves leaseCount unchanged', async () => {
@@ -275,6 +338,7 @@ describe('capability registry', () => {
 
     expect(lease.ok).toBe(true);
     expect(started).toEqual(['a']);
+    expect(registry.manifest('a')?.externalRequires).toEqual(['host-cdp']);
     expect(registry.health('host-cdp')).toBeUndefined();
   });
 

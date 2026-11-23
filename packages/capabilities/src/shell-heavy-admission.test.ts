@@ -647,6 +647,29 @@ describe('declared heavy shell admission (#145)', () => {
     }
   }, 30000);
 
+  it('wires the store cancel claim to the counted backend claim', async () => {
+    const fake = new FakeAdmission();
+    const { backend } = await backendWith(fake);
+    const internals = backend as unknown as {
+      claimHeavyCancelVerdict(taskId: string): void;
+      releaseHeavyCancelVerdict(taskId: string): void;
+      readonly durableStore: { cancelInFlight(taskId: string): boolean };
+    };
+    const taskId = 'task-cancel-wiring';
+
+    // The wiring the store reconcile consults is this exact predicate: an
+    // always-false one, or one keyed on another map, would never report a claim
+    // and the #957 failure mode would come back silently.
+    expect(internals.durableStore.cancelInFlight(taskId)).toBe(false);
+    internals.claimHeavyCancelVerdict(taskId);
+    internals.claimHeavyCancelVerdict(taskId);
+    expect(internals.durableStore.cancelInFlight(taskId)).toBe(true);
+    internals.releaseHeavyCancelVerdict(taskId);
+    expect(internals.durableStore.cancelInFlight(taskId)).toBe(true);
+    internals.releaseHeavyCancelVerdict(taskId);
+    expect(internals.durableStore.cancelInFlight(taskId)).toBe(false);
+  }, 15000);
+
   it('settles exactly once even though the watcher may tick again', async () => {
     const fake = new FakeAdmission();
     fake.autoAdmit = true;

@@ -206,6 +206,38 @@ describe('capability registry', () => {
     expect(history.map((entry) => entry.to)).toEqual(['STARTING', 'ACTIVE', 'WARM_IDLE']);
   });
 
+  it('keeps the newest transition when the cap is zero or fractional', async () => {
+    for (const maxTransitions of [0, -1, 3.5]) {
+      const registry = new CapabilityRegistry({ maxTransitions });
+      await registry.register({ id: 'a', provides: ['t'] });
+      await registry.acquire('a');
+
+      expect(registry.transitions('a').length).toBeGreaterThan(0);
+      expect(registry.health('a')?.lastTransition?.to).toBe('ACTIVE');
+    }
+  });
+
+  it('does not start a capability below a dependency that is already failed', async () => {
+    const starts: string[] = [];
+    const registry = new CapabilityRegistry({
+      start: (manifest): void => {
+        starts.push(manifest.id);
+        if (manifest.id === 'middle') throw new Error('boom');
+      },
+    });
+    await registry.register({ id: 'leaf', provides: ['leaf'] });
+    await registry.register({ id: 'middle', provides: ['middle'], requires: ['leaf'] });
+    await registry.register({ id: 'top', provides: ['top'], requires: ['middle'] });
+    expect((await registry.acquire('middle')).ok).toBe(false);
+    starts.length = 0;
+    const leafBefore = registry.health('leaf')?.state;
+
+    expect((await registry.acquire('top')).ok).toBe(false);
+
+    expect(starts).toEqual([]);
+    expect(registry.health('leaf')?.state).toBe(leafBefore);
+  });
+
   it('re-acquiring a warm dependency path wakes the dependency back to ACTIVE', async () => {
     const registry = new CapabilityRegistry();
     await registry.register({ id: 'base', provides: ['base'] });
@@ -239,6 +271,47 @@ describe('capability registry', () => {
     now += 5_000;
     registry.sweep();
     expect(registry.health('base')?.state).toBe('COLD');
+  });
+
+  it('leaves a resident always capability alone when a dependent boot fails', async () => {
+    let now = 0;
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (manifest): void => {
+        if (manifest.id === 'resident') throw new Error('boom');
+      },
+    });
+    // `activation: 'always'` boots at registration: ACTIVE with no lease is its
+    // resting state, so a failed boot elsewhere must not hand it to the sweep.
+    await registry.register({ id: 'base', provides: ['base'], activation: 'always', idleTtlMs: 5_000 });
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
+
+    expect((await registry.register({ id: 'resident', provides: ['t'], requires: ['base'], activation: 'always' })).ok)
+      .toBe(false);
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
+
+    now += 5_000;
+    registry.sweep();
+    expect(registry.health('base')?.state).toBe('ACTIVE');
+  });
+
+  it('leaves a resident always capability alone when a dependent acquire fails', async () => {
+    let now = 0;
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (manifest): void => {
+        if (manifest.id === 'dependent') throw new Error('boom');
+      },
+    });
+    await registry.register({ id: 'base', provides: ['base'], activation: 'always', idleTtlMs: 5_000 });
+    await registry.register({ id: 'dependent', provides: ['t'], requires: ['base'] });
+
+    expect((await registry.acquire('dependent')).ok).toBe(false);
+    expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
+
+    now += 5_000;
+    registry.sweep();
+    expect(registry.health('base')?.state).toBe('ACTIVE');
   });
 
   it('unregisters a capability whose always boot failed so registration can retry', async () => {

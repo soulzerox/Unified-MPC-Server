@@ -258,14 +258,20 @@ export class CapabilityRegistry {
     this.transition(record, 'COLD', 'registered');
 
     if (manifest.activation === 'always') {
-      const started = await this.startWithDependencies(record, 'boot');
+      // Judge the whole chain before walking it: a boot that would be refused
+      // one level down must not have started anything below that level first.
+      const chainVerdict = this.chainVerdict(this.dependencyChain(record));
+      if (!chainVerdict.ok) {
+        this.records.delete(manifest.id);
+        return chainVerdict;
+      }
+      const bootStarted: CapabilityRecord[] = [];
+      const started = await this.startWithDependencies(record, 'boot', bootStarted);
       if (!started.ok) {
         // A failed boot must not leave a half-registered id behind (a retry
-        // would get CONFLICT), and a dependency that started before the failure
-        // is `ACTIVE` with no lease that the sweep would ever reclaim.
-        for (const dependency of this.dependencyChain(record)) {
-          if (dependency.state === 'ACTIVE' && dependency.leaseCount === 0) this.releaseIdle(dependency);
-        }
+        // would get CONFLICT), and a dependency this boot started is `ACTIVE`
+        // with no lease that the sweep would ever reclaim.
+        this.releaseStarted(bootStarted);
         this.records.delete(manifest.id);
         return started;
       }
@@ -314,15 +320,19 @@ export class CapabilityRegistry {
     if (!verdict.ok) return verdict;
 
     const chain = this.dependencyChain(record);
+    // A dependency of a dependency can be FAILED or EVICTED, so the whole
+    // chain is judged here: refusing only for the target would still walk the
+    // chain far enough to spawn a COLD capability below the broken one.
+    const chainVerdict = this.chainVerdict(chain);
+    if (!chainVerdict.ok) return chainVerdict;
 
-    const started = await this.startWithDependencies(record, 'acquire');
+    const acquireStarted: CapabilityRecord[] = [];
+    const started = await this.startWithDependencies(record, 'acquire', acquireStarted);
     if (!started.ok) {
-      // A dependency that started before the failure is `ACTIVE` with no lease
-      // and the sweep only visits `WARM_IDLE`, so hand each one back to the idle
-      // path here instead of leaving it resident for the process lifetime.
-      for (const dependency of chain) {
-        if (dependency.state === 'ACTIVE' && dependency.leaseCount === 0) this.releaseIdle(dependency);
-      }
+      // A dependency this acquire started is `ACTIVE` with no lease and the
+      // sweep only visits `WARM_IDLE`, so hand each one back to the idle path
+      // here instead of leaving it resident for the process lifetime.
+      this.releaseStarted(acquireStarted);
       return started;
     }
 
@@ -437,22 +447,44 @@ export class CapabilityRegistry {
    * dependencies before dependants. Registration refused longer cycles, so the
    * walk terminates.
    */
-  private async startWithDependencies(record: CapabilityRecord, reason: string): Promise<Result<void>> {
+  private async startWithDependencies(
+    record: CapabilityRecord,
+    reason: string,
+    started: CapabilityRecord[] = [],
+  ): Promise<Result<void>> {
     for (const dependency of record.manifest.requires) {
       const dependencyRecord = this.records.get(dependency);
       if (dependencyRecord === undefined) {
         return invalid(`capability ${record.manifest.id} requires unregistered capability ${dependency}`);
       }
-      const started = await this.startWithDependencies(dependencyRecord, 'dependency');
-      if (!started.ok) return started;
+      const walked = await this.startWithDependencies(dependencyRecord, 'dependency', started);
+      if (!walked.ok) return walked;
     }
-    return this.start(record, reason);
+    // `COLD` is the only state this call can have changed by starting: a record
+    // that was already `ACTIVE`, `WARM_IDLE` or `STARTING` belongs to somebody
+    // else, and the failure cleanup must not hand it back.
+    const wasCold = record.state === 'COLD';
+    const result = await this.start(record, reason);
+    if (result.ok && wasCold) started.push(record);
+    return result;
+  }
+
+  /**
+   * Hands the records a failed start actually started back to the idle path.
+   * A record another caller already leased keeps running, and one that was
+   * resident before the failure is not in the list at all.
+   */
+  private releaseStarted(started: readonly CapabilityRecord[]): void {
+    for (const record of started) {
+      if (record.state === 'ACTIVE' && record.leaseCount === 0) this.releaseIdle(record);
+    }
   }
 
   /**
    * The shared refusal: only `COLD` can start, only `ACTIVE`/`WARM_IDLE` need no
-   * start and `STARTING` is already on its way. `acquire()` asks this before it
-   * walks `requires`, so a doomed acquire spawns nothing at all.
+   * start and `STARTING` is already on its way. `acquire()` and an `always` boot
+   * ask this for the whole `requires` chain before walking it, so a doomed
+   * start spawns nothing at all.
    */
   private startVerdict(record: CapabilityRecord): Result<void> {
     if (
@@ -464,6 +496,15 @@ export class CapabilityRegistry {
       return ok(undefined);
     }
     return conflict(`capability ${record.manifest.id} cannot start from ${record.state}`);
+  }
+
+  /** `startVerdict` over every dependency, so nothing below a doomed record runs. */
+  private chainVerdict(chain: readonly CapabilityRecord[]): Result<void> {
+    for (const record of chain) {
+      const verdict = this.startVerdict(record);
+      if (!verdict.ok) return verdict;
+    }
+    return ok(undefined);
   }
 
   /** `COLD -> STARTING -> ACTIVE`, or `STARTING -> FAILED` on an error or timeout. */
@@ -535,8 +576,20 @@ export class CapabilityRegistry {
     }
     record.state = to;
     record.transitions.push({ id: record.manifest.id, from, to, reason, at: this.now() });
-    const cap = this.options.maxTransitions ?? DEFAULT_MAX_TRANSITIONS;
+    const cap = this.transitionCap();
     if (record.transitions.length > cap) record.transitions.splice(0, record.transitions.length - cap);
+  }
+
+  /**
+   * `maxTransitions` is clamped rather than trusted: a non-positive or
+   * fractional value would empty the history (dropping the `lastTransition`
+   * `health()` promises) or truncate the splice count to zero, silently
+   * disabling the cap.
+   */
+  private transitionCap(): number {
+    const configured = this.options.maxTransitions ?? DEFAULT_MAX_TRANSITIONS;
+    if (!Number.isFinite(configured)) return DEFAULT_MAX_TRANSITIONS;
+    return Math.max(1, Math.floor(configured));
   }
 
   private now(): number {

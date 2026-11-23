@@ -13,9 +13,11 @@ awaitable callback: nothing spawns, nothing is killed, nothing measures a
 process.
 
 Phase 2 adds **one module, `CapabilitySupervisor`**, that performs the process
-work behind the registry's `start`/`stop` hooks. It does not own state. The
-registry stays the only authority for `state`, `leaseCount` and generations, so
-every lifecycle rule is still testable with a fake clock and no child processes.
+work behind the registry's `start`/`stop` hooks. It owns no lifecycle state: it
+reads and reports through a narrow `CapabilityLifecyclePort` the registry
+implements. The registry stays the only authority for `state`, `leaseCount` and
+generations, so every lifecycle rule is still testable with a fake clock and no
+child processes.
 
 Two things already exist and must be reused, not re-implemented:
 
@@ -43,20 +45,27 @@ design:
 
 ```text
 caller ── acquire/release ──▶ CapabilityRegistry   (state, leases, fence)
-                                   │ start(manifest) / stop(manifest)
-                                   ▼
-                            CapabilitySupervisor    (spawn, kill, restart bound)
-                                   │
-                                   ▼
-                              ProcessManager        (existing)
+   │                                │  ▲
+   │                                │  │ CapabilityLifecyclePort
+   │                    start/stop  │  │ (snapshot, health, reclaim, fail)
+   │                                ▼  │
+   │                        CapabilitySupervisor   (spawn, kill, restart bound)
+   │                                │
+   │                                ▼
+   │                          ProcessManager        (existing)
+   │
+   └── evictionPlan(tier, registry.snapshot()) ──▶ registry.reclaim(id)
 ```
 
 - The registry decides *when* a transition happens; the supervisor only makes
-  the transition true. A spawn failure is reported back as a failed start and
-  the registry writes `FAILED`.
-- The supervisor never calls `acquire`/`release` and never invents a capability
-  id it was not registered for.
-- A supervisor crash cannot corrupt lifecycle state, because it holds none.
+  the transition true and reports the outcome back through
+  `CapabilityLifecyclePort`, which the registry implements. A spawn failure is
+  reported as a failed start and the registry writes `FAILED`.
+- The port is deliberately narrow: `snapshot`, `health`, `reclaim` and `fail`.
+  The supervisor never calls `acquire`/`release`, never supplies a generation and
+  never invents a capability id it was not registered for.
+- A supervisor crash cannot corrupt lifecycle state, because it holds none: only
+  its own per-worker health counters, which the registry can rebuild from a probe.
 
 ## Interface
 
@@ -64,21 +73,38 @@ caller ── acquire/release ──▶ CapabilityRegistry   (state, leases, fen
 export interface CapabilityWorkerSpec {
   readonly executable: string;
   readonly args: readonly string[];
-  /** Absolute, already resolved through `resolveWorkerCwd`. */
+  /** Path as requested; `register` resolves it through `resolveWorkerCwd`. */
   readonly cwd: string;
 }
 
 /**
  * The one enforcement point for `cwd`. The supervisor has no default and
- * refuses to start without it, so "inside a registered workspace" is checked
+ * refuses to register without it, so "inside a registered workspace" is checked
  * by the module that owns workspace roots, not assumed from a comment.
  */
 export type ResolveWorkerCwd = (requested: string) => Promise<Result<string>>;
+
+/**
+ * The supervisor's whole view of the lifecycle. Implemented by
+ * `CapabilityRegistry`; injected so the supervisor holds no reference to the
+ * class and a fake port can drive every test.
+ */
+export interface CapabilityLifecyclePort {
+  /** One entry per registered capability, including its own TTL. */
+  snapshot(): readonly EvictionCandidate[];
+  health(id: string): CapabilityHealth | undefined;
+  /** Targeted stop; marks a pending stop when a lease is still held. */
+  reclaim(id: string): Result<void>;
+  /** The only write a worker exit needs: `ACTIVE|WARM_IDLE -> FAILED`. */
+  fail(id: string, reason: string): Result<void>;
+}
 
 export interface CapabilitySupervisorOptions {
   readonly now?: () => number;
   /** Required: the only place a spec's `cwd` becomes trusted. */
   readonly resolveWorkerCwd: ResolveWorkerCwd;
+  /** Required: the supervisor cannot report an exit or order a stop without it. */
+  readonly lifecycle: CapabilityLifecyclePort;
   readonly processManager?: ProcessManager;
   /** Failure window for crash-loop bounding. */
   readonly crashWindowMs?: number;
@@ -87,15 +113,26 @@ export interface CapabilitySupervisorOptions {
 
 /**
  * One registry fact `evictionPlan` needs, passed in rather than read: the
- * supervisor has no registry handle, so the caller supplies the snapshot it
- * already owns.
+ * selection stays a pure function, so the caller supplies what its port
+ * already exposes.
  */
 export interface EvictionCandidate {
   readonly id: string;
   readonly state: CapabilityState;
   readonly leaseCount: number;
   readonly idleSince: number;
+  /** The manifest TTL the clamp compares against. */
+  readonly idleTtlMs: number;
   readonly recyclable: boolean;
+}
+
+/** What a diagnosis needs; the ring buffer stays in `ProcessManager`. */
+export interface CapabilityWorkerHealth {
+  readonly id: string;
+  readonly processId?: string;
+  readonly restarts: number;
+  readonly crashLoop: boolean;
+  readonly lastFailure?: 'start-failed' | 'worker-exited' | 'stop-unverified';
 }
 
 export class CapabilitySupervisor {
@@ -116,19 +153,23 @@ export class CapabilitySupervisor {
   public evictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
   /** Counts a diagnosis needs; no per-request allocation. */
   public health(): readonly CapabilityWorkerHealth[];
-  /** Bounded graceful stop of everything this supervisor started. */
+  /** Bounded graceful stop of everything this supervisor started, via the port. */
   public shutdown(): Promise<void>;
 }
 ```
 
 `evictionPlan` is deliberately read-only, and its snapshot argument is what
-keeps that honest: `WARM_IDLE` membership, lease counts and `idleSince` are
-registry-only facts, so the caller passes `registry.snapshot()` in and the
-function stays a pure selection over its input. The governor passes the returned
+keeps that honest: `WARM_IDLE` membership, lease counts, `idleSince` and
+`idleTtlMs` are registry-only facts, so the caller passes
+`registry.snapshot()` in and the function stays a pure selection over its input
+plus its injected clock. The elevated clamp lives here, not in the registry: the
+plan lists an id only when `now() - idleSince >= min(idleTtlMs, 5_000)`, which is
+a comparison the snapshot can actually answer. The governor passes the returned
 ids to `registry.reclaim(id)`, so the stop is written by the module that owns the
-transition. The earlier shape (the supervisor calling back into the registry)
-would re-enter a transition while the registry was deciding one, which the
-one-way seam below forbids.
+transition. The earlier shape (the supervisor calling back into the registry to
+change state) would re-enter a transition while the registry was deciding one,
+which the one-way seam below forbids; `reclaim` and `fail` are the two narrow
+exceptions and both are registry-validated transitions, not state writes.
 
 ```ts
 /** Structural, local to this package: no cross-package type import. */
@@ -155,7 +196,7 @@ reject: the tier is a local union and the caller maps a probe sample onto it.
   supervisor does not re-implement ceilings, and an admission-refused start never
   reaches it.
 
-## Registry change required by phase 2
+## Surface required by phase 2
 
 Six pieces of registry surface do not exist at head and are part of this
 phase, not of the supervisor:
@@ -179,20 +220,34 @@ phase, not of the supervisor:
    holding the count — completes the same stop from `releaseLease`. That removes
    the need for a lease-release subscription: a waiter polls `health(id)`, which
    already reports the state the registry wrote;
-4. a way for `reclaim` and `sweep` to ignore the manifest TTL for one tick
-   without editing an immutable manifest, and a `burst` default of
-   `idleTtlMs = 0` in `normalizeCapabilityManifest`, so `activation: 'burst'`
-   stops on its last release instead of going `WARM_IDLE` for the default 60 s;
+4. a `burst` default of `idleTtlMs = 0` in `normalizeCapabilityManifest`, so
+   `activation: 'burst'` stops on its last release instead of going `WARM_IDLE`
+   for the default 60 s. No per-tick TTL override is needed once `reclaim` is
+   targeted: `reclaim(id)` stops an id regardless of its TTL, and the elevated
+   clamp is applied by `evictionPlan` before any id is passed to it;
 5. a read-only `snapshot(): readonly EvictionCandidate[]` that returns one entry
-   per registered capability. `health(id)` is per-id and `CapabilityHealth`
-   carries no `idleSince`, so without this the governor cannot build the input
-   `evictionPlan` needs and the plan would have to read registry internals.
+   per registered capability. `health(id)` is per-id, `CapabilityHealth` carries
+   neither `idleSince` nor `idleTtlMs`, and the elevated clamp needs both, so
+   without this the governor cannot build the input `evictionPlan` needs.
    `EvictionCandidate` is that type: `id`, `state`, `leaseCount`, `idleSince`,
-   `recyclable`;
+   `idleTtlMs`, `recyclable`;
 6. a public `fail(id, reason)` for the worker-exit edge below. The registry owns
-   every transition and the supervisor holds no registry handle, so an
+   every transition and the supervisor holds no lifecycle state, so an
    unrequested worker exit can only be written by the module that owns the
    transition, on the supervisor's report.
+
+Items 3, 5 and 6 plus the existing `health(id)` are exactly what
+`CapabilityLifecyclePort` declares, so the registry implements that interface
+directly and the supervisor depends on no class.
+
+One addition belongs to the process package instead, and it is not optional:
+`ProcessManager` already sees the child exit internally (`child.once('close')`
+in `handleClose`) but publishes nothing, and `status()`/`list()` are pull-only,
+so an unrequested exit is invisible without a timer. Phase 2 therefore adds
+`onExit(processId, listener): () => void` — one notification per process, fired
+from `handleClose`, returning an unsubscribe. The supervisor subscribes per
+started id and unsubscribes on `stop`, so the two `FAILED` edges above have a
+real caller and no polling loop is introduced.
 
 None of them changes the transition rules; they only let the supervisor drive
 the existing ones.
@@ -205,8 +260,11 @@ WARM_IDLE  -> ACTIVE | STOPPING
 ```
 
 A real worker can exit on its own. Phase 2 adds exactly two edges, both with a
-reason that names the exit and both written through the new `fail(id, reason)`
-from registry change 6, because a transition never happens outside the registry:
+reason that names the exit and both written through `fail(id, reason)` from
+registry change 6. The trigger is a subscription, not a poll: the supervisor
+keeps the `processId` it started and subscribes with the one small
+`@unified-mpc/process` addition below, then calls
+`port.fail(id, 'worker-exited')` from the listener:
 
 ```text
 ACTIVE     -> FAILED   (reason 'worker-exited')
@@ -234,17 +292,18 @@ mode a supervisor exists to prevent, so the bound is configuration with a defaul
 
 Ownership is explicit: **phase 2 never restarts on its own**. There is no timer in
 the supervisor and no retry inside `start`. A restart is the caller's next
-`acquire`, which is `FAILED -> COLD` (recycle) then `COLD -> STARTING -> ACTIVE`
-through the registry, so the fence and the lease rules keep applying. The bound
-exists to refuse that path once the window is exhausted.
+attempt: `registry.recycle(id)` (`FAILED -> COLD`) followed by `acquire`, so the
+fence and the lease rules keep applying; `acquire` alone still refuses `FAILED`,
+exactly as phase 1 pinned it. The bound exists to refuse that path once the
+window is exhausted.
 
 ## Pressure policy
 
 | pressure | warm-idle TTL | `evictionPlan` | new large starts |
 | --- | --- | --- | --- |
 | `normal` | manifest `idleTtlMs` | none | allowed |
-| `elevated` | clamp to `min(idleTtlMs, 5_000)` | `WARM_IDLE` only, oldest first | allowed |
-| `critical` | `0` | every unleased `WARM_IDLE` immediately | refused by admission |
+| `elevated` | clamp to `min(idleTtlMs, 5_000)` | `WARM_IDLE`, unleased, `now - idleSince >=` the clamped TTL, oldest first | allowed |
+| `critical` | `0` | every unleased `WARM_IDLE` immediately, TTL ignored | refused by admission |
 
 Rules that keep this honest:
 
@@ -267,9 +326,9 @@ Responsibility split: `ProcessMemoryPressureProbe` owns the thresholds and the
 sample, the caller maps a sample onto `PressureTier`, and the supervisor owns only
 the response. **There is no governor loop in the tree today** — nothing calls
 `sweep()` outside a test. Phase 2 therefore ships `evictionPlan` as a pure
-function and does not add a timer; wiring a driver (goal runtime heartbeat or
-workspace session tick) is phase 3. Phase 2 ships the pure function and the
-`reclaim` it hands ids to, so that driver is a wiring change, not new surface.
+function, the `reclaim` it hands ids to, and no timer; wiring a driver (goal
+runtime heartbeat or workspace session tick) is phase 3, so that driver is a
+wiring change, not new surface.
 
 ## Burst concurrency
 
@@ -290,11 +349,15 @@ in memory.
   state instead of waiting for a promise that may never settle.
 - `termination_unverified` maps to `FAILED` with reason `stop-unverified`, and
   is reported by `health()`; it is never reported as `COLD`.
-- `shutdown()` stops `WARM_IDLE` first, then asks `registry.reclaim(id)` for the
-  remaining capabilities; a leased one completes its pending stop when
-  `releaseLease` writes it (registry change 3), so the wait is a `health(id)`
-  poll against one global deadline. A capability that misses the deadline is
-  killed and recorded as failed — shutdown completes either way.
+- `shutdown()` reads `port.snapshot()`, stops `WARM_IDLE` first, then asks
+  `port.reclaim(id)` for the remaining ids; a leased one completes its pending
+  stop when `releaseLease` writes it (registry change 3), so the wait is a
+  `port.health(id)` poll against one global deadline. For an id that misses the
+  deadline the supervisor stops waiting, records `stop-unverified` via
+  `port.fail(id, 'stop-unverified')` and returns: `ProcessManager` has already
+  attempted its own SIGTERM/SIGKILL escalation inside
+  `ProcessTreeTerminator`, and the supervisor has no second kill primitive, so
+  the honest outcome is "kill attempted, may be unverified", not "killed".
 
 ## Model lifecycle stays separate
 
@@ -317,20 +380,23 @@ fake clock and a constant pressure:
    `err` case is the regression the old `Promise<void>` option could not express,
    because it coerced the value to `ACTIVE`;
 3. a worker exit while `ACTIVE` and while `WARM_IDLE` moves the capability to
-   `FAILED` with reason `worker-exited` through `fail(id, reason)` — the registry
-   change above, pinned before the supervisor code exists;
-4. `evictionPlan('elevated', snapshot)` lists `WARM_IDLE` ids only, oldest first,
-   leaves leased capabilities out, and never lists `recyclable: false`, with the
-   snapshot supplied by a fake registry so the function is proven pure;
-5. `evictionPlan('critical', snapshot)` lists every unleased `WARM_IDLE`, and a
-   refused start under critical pressure is admission's `RESOURCE_PRESSURE`, not
-   a registry failure;
+   `FAILED` with reason `worker-exited` through `fail(id, reason)`, driven by the
+   fake manager's `onExit` notification, and the subscription is released by a
+   later `stop`;
+4. `evictionPlan('elevated', snapshot)` lists only unleased `WARM_IDLE` ids whose
+   `now - idleSince` reached `min(idleTtlMs, 5_000)`, oldest first, and never
+   lists `recyclable: false`, with the snapshot supplied by a fake port so the
+   function is proven pure;
+5. `evictionPlan('critical', snapshot)` lists every unleased `WARM_IDLE` whatever
+   its TTL; the `RESOURCE_PRESSURE` refusal it relies on is asserted in
+   `packages/workspace` next to `ResourceAdmission`, not here, because
+   `capabilities` must not import that package;
 6. crash-loop bounding: after `maxCrashRestarts` failures inside the window the
    supervisor reports `crashLoop: true` from `health()` and its `start` refuses
    without spawning; the registry keeps `FAILED` and writes no invented reason;
-7. `stop` that exceeds `shutdownTimeoutMs` is killed and reported
-   `stop-unverified`, never `COLD`, including when `ProcessManager.stop()` never
-   settles because nothing verified termination;
+7. `stop` that exceeds `shutdownTimeoutMs` abandons the await, reports
+   `stop-unverified`, never `COLD`, and leaves `ProcessManager`'s
+   `termination_unverified` state visible instead of claiming a kill;
 8. `shutdown()` stops idle capabilities first, waits for a leased capability's
    pending `reclaim` to complete on its last release, and returns inside the
    global deadline even when one capability ignores its grace period.
@@ -354,11 +420,14 @@ TTL, leases and the fence. Nothing in phase 2 changes how those are tested.
 
 ## Open questions
 
-- Does the elevated TTL clamp belong in the supervisor or in #13's governor
-  policy? The supervisor enforces whatever TTL it is given, so moving the clamp
-  later is a one-line change at the seam.
-- Should a `FAILED -> COLD` recycle be automatic on the next acquire, or require
-  an explicit `recycle(id)`? Automatic is simpler and is what the tests assume.
+- Should the elevated TTL clamp move from `evictionPlan` into #13's governor
+  policy? It is decided here on purpose: the clamp is a comparison over
+  `idleTtlMs` and `idleSince`, so the pure plan is the only place that can apply
+  it without a new registry parameter. Moving it later means the governor selects
+  ids itself and passes them to `reclaim`.
+- Should a `FAILED -> COLD` recycle stay an explicit `recycle(id)`? Phase 1 pins
+  it that way and `acquire` refuses `FAILED`, so phase 2 keeps it explicit; an
+  automatic recycle would be a separate registry change with its own test.
 - When a worker is spawned, should its stdout/stderr stream into the supervisor's
   `health()` or stay only in `ProcessManager`'s ring buffer? The ring buffer
   already bounds the memory; the supervisor should read it lazily by

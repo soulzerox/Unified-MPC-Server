@@ -509,6 +509,56 @@ describe('declared heavy shell admission (#145)', () => {
       .toEqual([{ operationId: `shell:${taskId}`, outcome: 'cancelled' }]);
   }, 15000);
 
+  it('holds the cancel claim for the whole in-flight cancel and releases it after', async () => {
+    const fake = new FakeAdmission();
+    fake.autoAdmit = true;
+    const { root, backend } = await backendWith(fake);
+    const claims = backend as unknown as { readonly heavyCancelling: Map<string, number> };
+
+    const run = await backend.execute({
+      operation: 'run', executable: process.execPath, arguments: ['-e', 'setTimeout(() => {}, 30000)'], cwd: root,
+      execution: 'background', timeout_seconds: 40, userConfirmed: true, admission_class: 'verification_heavy',
+    });
+    expect(run.ok).toBe(true);
+    const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+
+    // The operation claims before its first await, so the claim is already held
+    // when the call returns its promise: the watcher cannot spend the slot in
+    // the gap between the kill this cancel causes and the `cancelled` write.
+    const pending = backend.execute({ operation: 'cancel', task_id: taskId, userConfirmed: true });
+    expect(claims.heavyCancelling.get(taskId)).toBe(1);
+
+    const cancelled = await pending;
+    expect(cancelled).toMatchObject({ ok: true, value: { state: 'cancelled' } });
+    // The release is in `finally`: a completed cancel hands the verdict back.
+    expect(claims.heavyCancelling.has(taskId)).toBe(false);
+    await expect.poll(() => fake.settled, { timeout: 5000 })
+      .toEqual([{ operationId: `shell:${taskId}`, outcome: 'cancelled' }]);
+  }, 15000);
+
+  it('releases the cancel claim when the durable cancel throws', async () => {
+    const fake = new FakeAdmission();
+    fake.autoAdmit = true;
+    const { backend } = await backendWith(fake);
+    const internals = backend as unknown as {
+      readonly heavyCancelling: Map<string, number>;
+      durableStore: { cancel(taskId: string, owner?: unknown): Promise<unknown> };
+    };
+    const original = internals.durableStore.cancel;
+    internals.durableStore.cancel = async (): Promise<never> => {
+      throw new Error('store unavailable');
+    };
+    try {
+      // The task is not in memory, so the durable store owns the cancel and its
+      // throw is what the `finally` release has to survive.
+      await expect(backend.execute({ operation: 'cancel', task_id: 'not-in-memory', userConfirmed: true }))
+        .rejects.toThrow('store unavailable');
+      expect(internals.heavyCancelling.has('not-in-memory')).toBe(false);
+    } finally {
+      internals.durableStore.cancel = original;
+    }
+  }, 15000);
+
   it('does not let the watcher spend the slot while a cancel owns the verdict', async () => {
     const fake = new FakeAdmission();
     fake.autoAdmit = true;

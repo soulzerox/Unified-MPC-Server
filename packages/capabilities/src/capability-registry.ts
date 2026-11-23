@@ -253,8 +253,12 @@ export class CapabilityRegistry {
     if (manifest.activation === 'always') {
       const started = await this.startWithDependencies(record, 'boot');
       if (!started.ok) {
-        // A failed boot must not leave a half-registered id behind: a retry
-        // would get CONFLICT for a capability that never became usable.
+        // A failed boot must not leave a half-registered id behind (a retry
+        // would get CONFLICT), and a dependency that started before the failure
+        // is `ACTIVE` with no lease that the sweep would ever reclaim.
+        for (const dependency of this.dependencyChain(record)) {
+          if (dependency.state === 'ACTIVE' && dependency.leaseCount === 0) this.releaseIdle(dependency);
+        }
         this.records.delete(manifest.id);
         return started;
       }

@@ -142,8 +142,12 @@ Unit tests in `packages/capabilities`, against a fake clock, no child processes:
 
 1. manifest validation rejects: empty `provides`, duplicate `id`, unknown
    requirement, dependency cycle, negative TTL/timeouts;
-2. the full happy path `COLD -> STARTING -> ACTIVE -> WARM_IDLE -> ACTIVE ->
-   STOPPING -> COLD` with lease counts asserted at each step;
+2. the happy path for a manifest with `idleTtlMs > 0`:
+   `COLD -> STARTING -> ACTIVE -> WARM_IDLE -> ACTIVE`, then
+   `WARM_IDLE -> STOPPING -> COLD` once the TTL elapses with no lease held,
+   asserting `leaseCount` at each step (the `idleTtlMs: 0` variant is item 6,
+   because a manifest is immutable after registration and one capability can
+   never traverse both edges);
 3. `acquire` on `STOPPING` and on `FAILED` is refused;
 4. double release is refused and leaves `leaseCount` unchanged;
 5. TTL expiry while a lease is held does not stop the capability; the stop

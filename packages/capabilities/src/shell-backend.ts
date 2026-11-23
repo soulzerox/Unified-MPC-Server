@@ -246,6 +246,13 @@ export class ShellCapabilityBackend implements CapabilityBackend {
   private readonly heavyReservations = new Map<string, { readonly promise: Promise<void>; resolve: () => void }>();
   private readonly heavySettling = new Set<string>();
   private readonly heavySettleFailures = new Map<string, number>();
+  /**
+   * Task ids whose cancel is in flight. The watcher settles on a snapshot, and a
+   * cancelled worker can write `failed` for the exit the cancel caused before the
+   * cancel writes `cancelled`; without this set the watcher would spend the slot
+   * as a failure and the later cancel settle would be a no-op.
+   */
+  private readonly heavyCancelling = new Set<string>();
 
   public constructor(options: ShellCapabilityOptions) {
     if (options.allowedRoots.length === 0) throw new Error('At least one local capability root is required');
@@ -289,29 +296,37 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       case 'cancel': {
         if (!isApplicationAuthorized(authorization, parsed.value.userConfirmed)) return err(appError('PERMISSION_REQUIRED', 'Cancelling a task requires explicit user confirmation'));
         const taskId = parsed.value.taskId;
-        if (taskId !== undefined) {
-          // Serialize against an in-flight admission start so a cancel can
-          // never be overwritten by a later "running" write.
-          const starting = this.heavyStarting.get(taskId);
-          if (starting !== undefined) await starting;
-        }
-        const cancelled = await this.cancel(parsed.value.taskId, false, parsed.value.owner);
-        if (taskId !== undefined) {
-          // A declared heavy task that is already terminal must release its slot
-          // now: waiting for the next poll would keep a cancelled build holding it.
-          const cancelledState = cancelled.ok && isRecord(cancelled.value) ? cancelled.value.state : undefined;
-          const outcome = heavyLeaseOutcome(cancelledState);
-          if (outcome !== undefined) {
-            // Queued work has no lease yet; its durable row is removed here so a
-            // later wake can never spawn a task the caller cancelled.
-            this.heavyAdmission?.cancel(shellOperationId(taskId));
-            this.abandonHeavyReservation(taskId);
-            if (this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
+        // Claim the verdict before the first await: the watcher may read a
+        // `failed` snapshot for the exit this cancel causes, and that must not
+        // spend the slot as a failure.
+        if (taskId !== undefined) this.heavyCancelling.add(taskId);
+        try {
+          if (taskId !== undefined) {
+            // Serialize against an in-flight admission start so a cancel can
+            // never be overwritten by a later "running" write.
+            const starting = this.heavyStarting.get(taskId);
+            if (starting !== undefined) await starting;
           }
+          const cancelled = await this.cancel(parsed.value.taskId, false, parsed.value.owner);
+          if (taskId !== undefined) {
+            // A declared heavy task that is already terminal must release its slot
+            // now: waiting for the next poll would keep a cancelled build holding it.
+            const cancelledState = cancelled.ok && isRecord(cancelled.value) ? cancelled.value.state : undefined;
+            const outcome = heavyLeaseOutcome(cancelledState);
+            if (outcome !== undefined) {
+              // Queued work has no lease yet; its durable row is removed here so a
+              // later wake can never spawn a task the caller cancelled.
+              this.heavyAdmission?.cancel(shellOperationId(taskId));
+              this.abandonHeavyReservation(taskId);
+              if (this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
+            }
+          }
+          return cancelled.ok && isRecord(cancelled.value) && taskId !== undefined
+            ? ok(this.decorateTaskResult(cancelled.value, taskId))
+            : cancelled;
+        } finally {
+          if (taskId !== undefined) this.heavyCancelling.delete(taskId);
         }
-        return cancelled.ok && isRecord(cancelled.value) && taskId !== undefined
-          ? ok(this.decorateTaskResult(cancelled.value, taskId))
-          : cancelled;
       }
       case 'resume':
       case 'approve':
@@ -384,19 +399,26 @@ export class ShellCapabilityBackend implements CapabilityBackend {
       return ok({ matched: true, state: 'termination_unverified', detail: record.state });
     }
     if (this.durableStore !== undefined) {
-      const starting = this.heavyStarting.get(taskId);
-      if (starting !== undefined) await starting;
-      const cancelled = await this.durableStore.cancelForGoal(taskId, ownerClientId, workspaceId);
-      if (cancelled.ok) {
-        // A queued declared task owns no process; retire its queue row too.
-        this.heavyAdmission?.cancel(shellOperationId(taskId));
-        this.abandonHeavyReservation(taskId);
-        const outcome = cancelled.value.state === 'cancelled'
-          ? 'cancelled' as const
-          : cancelled.value.state === 'already_terminal' ? heavyLeaseOutcome(cancelled.value.detail) : undefined;
-        if (outcome !== undefined && this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
+      // Same claim as the `cancel` operation: the watcher must not settle a
+      // `failed` snapshot for the exit this cancel is causing.
+      this.heavyCancelling.add(taskId);
+      try {
+        const starting = this.heavyStarting.get(taskId);
+        if (starting !== undefined) await starting;
+        const cancelled = await this.durableStore.cancelForGoal(taskId, ownerClientId, workspaceId);
+        if (cancelled.ok) {
+          // A queued declared task owns no process; retire its queue row too.
+          this.heavyAdmission?.cancel(shellOperationId(taskId));
+          this.abandonHeavyReservation(taskId);
+          const outcome = cancelled.value.state === 'cancelled'
+            ? 'cancelled' as const
+            : cancelled.value.state === 'already_terminal' ? heavyLeaseOutcome(cancelled.value.detail) : undefined;
+          if (outcome !== undefined && this.heavyLeases.has(taskId)) this.settleHeavyTaskOnce(taskId, outcome);
+        }
+        return cancelled;
+      } finally {
+        this.heavyCancelling.delete(taskId);
       }
-      return cancelled;
     }
     return ok({ matched: false, state: 'not_found' });
   }
@@ -965,12 +987,17 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     if (this.heavySettling.has(taskId)) return;
     this.heavySettling.add(taskId);
     try {
+      // A cancel owns the verdict: the snapshot it will read may say `failed`
+      // for the exit the cancel caused, and settling that would spend the slot
+      // as a failure before the cancel can settle it as `cancelled`.
+      if (this.heavyCancelling.has(taskId)) return;
       const store = this.durableStore;
       if (store === undefined) {
         this.settleHeavyTaskOnce(taskId, 'failed');
         return;
       }
       const snapshot = await store.snapshot(taskId);
+      if (this.heavyCancelling.has(taskId)) return;
       if (!snapshot.ok) {
         const failures = (this.heavySettleFailures.get(taskId) ?? 0) + 1;
         this.heavySettleFailures.set(taskId, failures);

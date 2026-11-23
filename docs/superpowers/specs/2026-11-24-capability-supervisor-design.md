@@ -99,11 +99,16 @@ export interface CapabilityLifecyclePort {
   /** One entry per registered capability, including its own TTL. */
   snapshot(): readonly EvictionCandidate[];
   health(id: string): CapabilityHealth | undefined;
-  /** Targeted stop; marks a pending stop when a lease is still held. */
-  reclaim(id: string): Result<void>;
+  /**
+   * Targeted stop; marks a pending stop when a lease is still held. Async
+   * because an unleased id reaches `COLD` only after the `stop` hook returns.
+   */
+  reclaim(id: string): Promise<Result<void>>;
   /**
    * The only writes a death needs: `ACTIVE|WARM_IDLE -> FAILED` for an
-   * unrequested exit, `STOPPING -> FAILED` for `stop-unverified`.
+   * unrequested exit, `STOPPING -> FAILED` for `stop-unverified`. Nothing else
+   * is a valid `fail` target — in particular a leased `ACTIVE` id is never
+   * failed, because a lease may not be shortened.
    */
   fail(id: string, reason: string): Result<void>;
 }
@@ -141,6 +146,8 @@ export interface CapabilityWorkerHealth {
   readonly processId?: string;
   readonly restarts: number;
   readonly crashLoop: boolean;
+  /** A kill was attempted and could not be verified within its deadline. */
+  readonly stopUnverified?: boolean;
   readonly lastFailure?: 'start-failed' | 'worker-exited' | 'stop-unverified';
 }
 
@@ -217,18 +224,23 @@ phase, not of the supervisor:
    `(manifest) => Promise<Result<void>> | Result<void>` and a returned `err`
    writes `FAILED` with the error's message, exactly like a thrown error does
    today. This is a breaking change to one internal option, taken before the
-   supervisor exists so there is no caller to migrate;
+   supervisor exists; the only callers are the 17 `start` callbacks in
+   `capability-registry.test.ts`, which the same PR rewrites to return
+   `ok(undefined)` for the type check to keep passing;
 2. a `stop` hook beside `start`, so `STOPPING -> COLD` can await verified
    termination before the transition is written (today `stop()` is private and
    completes the cycle in one synchronous tick);
-3. a public `reclaim(id)` targeted stop that the governor can ask for with the
-   ids `evictionPlan()` returned, since `sweep()` only applies each manifest's
-   own `idleTtlMs`. `reclaim` **marks a pending stop**: on an
-   `ACTIVE`/`WARM_IDLE` capability with no lease it takes the `STOPPING` edge at
-   once, and when `leaseCount` is still positive the registry — the only module
-   holding the count — completes the same stop from `releaseLease`. That removes
-   the need for a lease-release subscription: a waiter polls `health(id)`, which
-   already reports the state the registry wrote;
+3. a public async `reclaim(id)` targeted stop that the governor can ask for with
+   the ids `evictionPlan()` returned, since `sweep()` only applies each
+   manifest's own `idleTtlMs`. `reclaim` **marks a pending stop**: on an
+   `ACTIVE`/`WARM_IDLE` capability with no lease it takes the `STOPPING` edge,
+   awaits the new `stop` hook and only then writes `COLD`; when `leaseCount` is
+   still positive the registry — the only module holding the count — completes
+   the same stop from `releaseLease`. That removes the need for a lease-release
+   subscription: a waiter polls `health(id)`, which already reports the state the
+   registry wrote. Making the private `stop` awaitable changes the public
+   `sweep()` signature to `Promise<void>`, so its existing test call sites are
+   updated to `await` it in the same PR;
 4. a `burst` default of `idleTtlMs = 0` in `normalizeCapabilityManifest`, so
    `activation: 'burst'` stops on its last release instead of going `WARM_IDLE`
    for the default 60 s. No per-tick TTL override is needed once `reclaim` is
@@ -297,13 +309,21 @@ are.
 `onExit` fires from `handleClose`, which also runs for a kill the manager was
 asked to perform, so the listener is a reporter with a guard rather than a
 transition: it reads `port.health(id)` and writes `fail(id, 'worker-exited')`
-only while the state is still `ACTIVE` or `WARM_IDLE`. Any other state means a
-stop is already in flight (`STOPPING`, `FAILED`, `COLD`) and that exit is
-expected, so it is ignored and never counted toward the crash-loop bound. Both
-halves are required — the subscription is dropped before the supervisor calls
-`ProcessManager.stop()`, and the guard holds even if a fake or a future manager
-delivers the notification first, so no ordering between the two decides whether
-a clean stop is written as a crash.
+only while the state is still `ACTIVE` or `WARM_IDLE`. A stop already in
+flight (`STOPPING`, `FAILED`, `COLD`) means the exit is expected, so it is
+ignored and never counted toward the crash-loop bound.
+
+`STARTING` is the one state that needs its own handling rather than
+"ignore": the registry writes `ACTIVE` only after the supervisor's `start` hook
+resolves, so a death inside the start window would otherwise be dropped and the
+registry would write `ACTIVE` over a dead worker. The supervisor records the
+pending exit per id and its `start` hook then returns `err`, which is the same
+`STARTING -> FAILED` path a failed spawn already takes; nothing new is added to
+the transition table. Both halves of the stop guard are required — the
+subscription is dropped before the supervisor calls `ProcessManager.stop()`, and
+the guard holds even if a fake or a future manager delivers the notification
+first, so no ordering between the two decides whether a clean stop is written as
+a crash.
 
 The alternative — treating a dead worker as `STOPPING -> COLD` — would let an
 unrequested exit look like a clean shutdown and hide it from `health()`.
@@ -323,8 +343,11 @@ conflict for `FAILED`, and the supervisor's own `health()` reports the count and
 mode a supervisor exists to prevent, so the bound is configuration with a default
 (5 failures in 60 s) rather than caller policy.
 
-Ownership is explicit: **phase 2 never restarts on its own**. There is no timer in
-the supervisor and no retry inside `start`. A restart is the caller's next
+Ownership is explicit: **phase 2 never restarts on its own**. There is no periodic
+restart timer in the supervisor and no retry inside `start`; the only deadlines it
+schedules are the spawn, stop and shutdown bounds described below and in
+"Shutdown", which bound an attempt instead of starting a new one. A restart is the
+caller's next
 attempt: `registry.recycle(id)` (`FAILED -> COLD`) followed by `acquire`, so the
 fence and the lease rules keep applying; `acquire` alone still refuses `FAILED`,
 exactly as phase 1 pinned it. The bound exists to refuse that path once the
@@ -367,7 +390,8 @@ Responsibility split: `ProcessMemoryPressureProbe` owns the thresholds and the
 sample, the caller maps a sample onto `PressureTier`, and the supervisor owns only
 the response. **There is no governor loop in the tree today** — nothing calls
 `sweep()` outside a test. Phase 2 therefore ships `evictionPlan` as a pure
-function, the `reclaim` it hands ids to, and no timer; wiring a driver (goal
+function, the `reclaim` it hands ids to, and no polling loop of its own; wiring a
+driver (goal
 runtime heartbeat or workspace session tick) is phase 3, so that driver is a
 wiring change, not new surface.
 
@@ -397,15 +421,21 @@ would hide a real crash and needs a reason the registry does not have.
   state instead of waiting for a promise that may never settle.
 - `termination_unverified` maps to `FAILED` with reason `stop-unverified`, and
   is reported by `health()`; it is never reported as `COLD`.
-- `shutdown()` reads `port.snapshot()`, stops `WARM_IDLE` first, then asks
+- `shutdown()` reads `port.snapshot()`, stops `WARM_IDLE` first, then awaits
   `port.reclaim(id)` for the remaining ids; a leased one completes its pending
   stop when `releaseLease` writes it (registry change 3), so the wait is a
-  `port.health(id)` poll against one global deadline. For an id that misses the
-  deadline the supervisor stops waiting, records `stop-unverified` via
-  `port.fail(id, 'stop-unverified')` and returns: `ProcessManager` has already
-  attempted its own SIGTERM/SIGKILL escalation inside
-  `ProcessTreeTerminator`, and the supervisor has no second kill primitive, so
-  the honest outcome is "kill attempted, may be unverified", not "killed".
+  `port.health(id)` poll against one global deadline. The deadline bounds three
+  different outcomes, and they must not be conflated:
+  - an id that reached `STOPPING` and whose termination could not be verified is
+    written `FAILED` with `stop-unverified` through `port.fail`;
+  - an id killed during its own stop window but still leased stays `ACTIVE`:
+    leases are never shortened, so the supervisor writes no transition and
+    reports `stopUnverified: true` from `health()` while the lease holder keeps
+    the capability it is using;
+  - `ProcessManager` already attempted its own SIGTERM/SIGKILL escalation inside
+    `ProcessTreeTerminator`, and the supervisor has no second kill primitive, so
+    the honest outcome for a missed deadline is "kill attempted, may be
+    unverified", not "killed".
 
 ## Model lifecycle stays separate
 
@@ -429,7 +459,10 @@ fake clock and a constant pressure:
    because it coerced the value to `ACTIVE`;
 3. a worker exit while `ACTIVE` and while `WARM_IDLE` moves the capability to
    `FAILED` with reason `worker-exited` through `fail(id, reason)`, driven by the
-   fake manager's `onExit` notification; a fake manager that delivers `onExit`
+   fake manager's `onExit` notification; a death delivered inside the `STARTING`
+   window instead makes the supervisor's `start` hook return `err`, so the
+   registry writes `FAILED` on its existing `STARTING -> FAILED` path and never
+   writes `ACTIVE` over a dead worker; a fake manager that delivers `onExit`
    for the kill the supervisor itself ordered writes no `FAILED` and raises no
    crash count, because the guard is the contract and not the ordering; the
    subscription is released by that `stop`;

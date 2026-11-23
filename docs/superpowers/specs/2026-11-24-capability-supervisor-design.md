@@ -22,15 +22,21 @@ child processes.
 Two things already exist and must be reused, not re-implemented:
 
 - `ProcessManager` (`packages/process/src/process-manager.ts`) already spawns a
-  process without a shell, enforces a timeout, keeps bounded per-process logs,
-  cancels through an `AbortSignal`, and terminates the tree with verification
-  through `ProcessTreeTerminator`. `packages/capabilities` already depends on
-  `@unified-mpc/process`.
+  process without a shell, enforces a wall-clock timeout, keeps bounded
+  per-process logs, cancels through an `AbortSignal`, and terminates the tree
+  with verification through `ProcessTreeTerminator`. `packages/capabilities`
+  already depends on `@unified-mpc/process`.
+- Two small additions to that package are required and named in the surface
+  section: `onExit(processId, listener)` so an unrequested exit is observable
+  without polling, and `timeoutMs: 0` to disable the wall-clock cap for a
+  resident worker. Without the second, `ProcessManager` would kill every worker
+  after its one-hour default (hard ceiling four hours) and the design's own exit
+  notification would report that as `worker-exited` → `FAILED`.
 - `ProcessMemoryPressureProbe` (`packages/workspace/src/resource-pressure.ts`)
-  already samples available memory with a cached, injectable clock. It is **not**
-  reused in this phase and not imported: phase 2 ships only the pure mapping, and
-  the phase-3 driver is the first consumer of the sample (see the pressure
-  section).
+  already samples available memory with a cached, injectable clock. Phase 2 does
+  not import it: `ResourceAdmission` already owns the production consumer (it
+  builds the probe and rejects with `RESOURCE_PRESSURE`/`memory_pressure`), and
+  this phase only adds the pure tier → plan mapping on top of that signal.
 
 Phase numbering note: the registry module docstring calls pressure reclamation
 "phase 3". This spec keeps phase 2 = process work and phase 3 = pressure
@@ -240,17 +246,25 @@ Items 3, 5 and 6 plus the existing `health(id)` are exactly what
 `CapabilityLifecyclePort` declares, so the registry implements that interface
 directly and the supervisor depends on no class.
 
-One addition belongs to the process package instead, and it is not optional:
-`ProcessManager` already sees the child exit internally (`child.once('close')`
-in `handleClose`) but publishes nothing, and `status()`/`list()` are pull-only,
-so an unrequested exit is invisible without a timer. Phase 2 therefore adds
-`onExit(processId, listener): () => void` — one notification per process, fired
-from `handleClose`, returning an unsubscribe. The supervisor subscribes per
-started id and unsubscribes on `stop`, so the two `FAILED` edges above have a
-real caller and no polling loop is introduced.
+Two additions belong to the process package instead, and neither is optional:
 
-None of them changes the transition rules; they only let the supervisor drive
-the existing ones.
+- `onExit(processId, listener): () => void` — one notification per process,
+  fired from `handleClose`, returning an unsubscribe. `ProcessManager` already
+  sees the child exit internally but publishes nothing, and `status()`/`list()`
+  are pull-only, so an unrequested exit is invisible without a timer. The
+  supervisor subscribes per started id and unsubscribes on `stop`, so the two
+  `FAILED` edges above have a real caller and no polling loop is introduced.
+- `ManagedProcessStart.timeoutMs` accepts `0` meaning "no wall-clock cap", and a
+  zero skips the manager's timer. The supervisor always passes `0` and owns
+  worker lifetime itself: a resident worker must not be killed by a fixed hour,
+  and the bound that replaces it is an explicit one — the manifest's
+  `shutdownTimeoutMs`, the crash-loop refusal, and `reclaim`. A nonzero value
+  keeps today's meaning, so no existing caller changes.
+
+Items 1–5 add surface and change no transition. Item 6 is the exception and is
+listed here for exactly that reason: it adds the two `FAILED` edges below, which
+phase 1's table does not contain, so the phase-2 PR needs the guard tests for
+those two edges and nothing else in the table moves.
 
 Phase 1's table has no edge out of a running state on worker death:
 
@@ -276,8 +290,9 @@ still refuses `FAILED`, and the phase-1 tests for every other edge stay as they
 are. The alternative — treating a dead worker as `STOPPING -> COLD` — would let
 an unrequested exit look like a clean shutdown and hide it from `health()`.
 
-`FAILED -> COLD` recycle is driven by the supervisor re-reading the capability's
-own durable artifacts; the registry is never persisted, matching phase 1.
+`FAILED -> COLD` recycle stays caller-owned: `registry.recycle(id)` never
+re-reads durable artifacts itself, and the supervisor does not read them either,
+because the registry is never persisted (matching phase 1).
 
 ## Crash-loop bounding
 
@@ -296,6 +311,14 @@ attempt: `registry.recycle(id)` (`FAILED -> COLD`) followed by `acquire`, so the
 fence and the lease rules keep applying; `acquire` alone still refuses `FAILED`,
 exactly as phase 1 pinned it. The bound exists to refuse that path once the
 window is exhausted.
+
+The supervisor does own its spawn deadline, because the registry's
+`startupTimeoutMs` race only abandons the hook and never aborts it. `start` races
+`ProcessManager.start` against `manifest.startupTimeoutMs`; if the spawn settles
+after the registry already wrote `FAILED`, the supervisor does not store an
+orphaned `processId` — it stops that process immediately with
+`ProcessManager.stop()` and reports the late failure through `health()`. No
+unleased worker outlives the attempt that started it.
 
 ## Pressure policy
 
@@ -337,6 +360,13 @@ while a burst capability is `STOPPING` is refused with a retryable conflict. A
 queue here would need fairness, backpressure and its own lease to be correct;
 none of that exists, and a busy host should shed burst work rather than stack it
 in memory.
+
+A burst worker still exits only through the stop hook: phase 1's "exits after its
+work" is honoured by the registry taking the stop edge on the last release (the
+`idleTtlMs = 0` default above), not by the child deciding it is done. A child
+that exits on its own is `worker-exited` → `FAILED` and counts toward the
+crash-loop bound for every activation, including `burst`; treating it as success
+would hide a real crash and needs a reason the registry does not have.
 
 ## Shutdown
 
@@ -399,7 +429,10 @@ fake clock and a constant pressure:
    `termination_unverified` state visible instead of claiming a kill;
 8. `shutdown()` stops idle capabilities first, waits for a leased capability's
    pending `reclaim` to complete on its last release, and returns inside the
-   global deadline even when one capability ignores its grace period.
+   global deadline even when one capability ignores its grace period;
+9. spawn bounds: the supervisor passes `timeoutMs: 0`, a spawn that settles after
+   the registry's `startupTimeoutMs` is stopped instead of stored, and a worker
+   that outlives several hours is not reported as `timed_out`.
 
 Integration test in `packages/capabilities` with the real `ProcessManager` and a
 `node -e` child that prints one line and exits: start, log, stop, and a start

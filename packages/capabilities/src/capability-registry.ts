@@ -258,6 +258,13 @@ export class CapabilityRegistry {
     this.transition(record, 'COLD', 'registered');
 
     if (manifest.activation === 'always') {
+      // Judge the whole chain before walking it: a boot that would be refused
+      // one level down must not have started anything below that level first.
+      const chainVerdict = this.chainVerdict(this.dependencyChain(record));
+      if (!chainVerdict.ok) {
+        this.records.delete(manifest.id);
+        return chainVerdict;
+      }
       const bootStarted: CapabilityRecord[] = [];
       const started = await this.startWithDependencies(record, 'boot', bootStarted);
       if (!started.ok) {
@@ -313,6 +320,11 @@ export class CapabilityRegistry {
     if (!verdict.ok) return verdict;
 
     const chain = this.dependencyChain(record);
+    // A dependency of a dependency can be FAILED or EVICTED, so the whole
+    // chain is judged here: refusing only for the target would still walk the
+    // chain far enough to spawn a COLD capability below the broken one.
+    const chainVerdict = this.chainVerdict(chain);
+    if (!chainVerdict.ok) return chainVerdict;
 
     const acquireStarted: CapabilityRecord[] = [];
     const started = await this.startWithDependencies(record, 'acquire', acquireStarted);
@@ -470,8 +482,9 @@ export class CapabilityRegistry {
 
   /**
    * The shared refusal: only `COLD` can start, only `ACTIVE`/`WARM_IDLE` need no
-   * start and `STARTING` is already on its way. `acquire()` asks this before it
-   * walks `requires`, so a doomed acquire spawns nothing at all.
+   * start and `STARTING` is already on its way. `acquire()` and an `always` boot
+   * ask this for the whole `requires` chain before walking it, so a doomed
+   * start spawns nothing at all.
    */
   private startVerdict(record: CapabilityRecord): Result<void> {
     if (
@@ -483,6 +496,15 @@ export class CapabilityRegistry {
       return ok(undefined);
     }
     return conflict(`capability ${record.manifest.id} cannot start from ${record.state}`);
+  }
+
+  /** `startVerdict` over every dependency, so nothing below a doomed record runs. */
+  private chainVerdict(chain: readonly CapabilityRecord[]): Result<void> {
+    for (const record of chain) {
+      const verdict = this.startVerdict(record);
+      if (!verdict.ok) return verdict;
+    }
+    return ok(undefined);
   }
 
   /** `COLD -> STARTING -> ACTIVE`, or `STARTING -> FAILED` on an error or timeout. */
@@ -554,8 +576,20 @@ export class CapabilityRegistry {
     }
     record.state = to;
     record.transitions.push({ id: record.manifest.id, from, to, reason, at: this.now() });
-    const cap = this.options.maxTransitions ?? DEFAULT_MAX_TRANSITIONS;
+    const cap = this.transitionCap();
     if (record.transitions.length > cap) record.transitions.splice(0, record.transitions.length - cap);
+  }
+
+  /**
+   * `maxTransitions` is clamped rather than trusted: a non-positive or
+   * fractional value would empty the history (dropping the `lastTransition`
+   * `health()` promises) or truncate the splice count to zero, silently
+   * disabling the cap.
+   */
+  private transitionCap(): number {
+    const configured = this.options.maxTransitions ?? DEFAULT_MAX_TRANSITIONS;
+    if (!Number.isFinite(configured)) return DEFAULT_MAX_TRANSITIONS;
+    return Math.max(1, Math.floor(configured));
   }
 
   private now(): number {

@@ -4,32 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 TMP_ROOT=""
-hidden_root=""
-source_hidden=false
-
-restore_hidden_source() {
-  if [[ -n "$hidden_root" && -d "$hidden_root/apps" ]]; then
-    mv -- "$hidden_root/apps" "$REPO_ROOT/apps"
-  fi
-  if [[ -n "$hidden_root" && -d "$hidden_root/packages" ]]; then
-    mv -- "$hidden_root/packages" "$REPO_ROOT/packages"
-  fi
-  source_hidden=false
-}
+source_snapshot=""
 
 restore_source() {
-  # A signal can land between the two moves below, so restore per directory
-  # rather than assuming the pair is all-or-nothing.
-  if [[ "$source_hidden" == "true" ]]; then
-    restore_hidden_source
+  if [[ -n "$source_snapshot" ]]; then
+    git -C "$REPO_ROOT" worktree remove --force "$source_snapshot" >/dev/null 2>&1 || true
   fi
   if [[ -n "$TMP_ROOT" ]]; then
     rm -rf -- "$TMP_ROOT"
   fi
 }
 # Installed before the temp root is chosen: choosing it can refuse, and a
-# refusal must not leave a directory behind.
+# refusal must not leave a directory behind. The traps only remove this run's
+# own temp root; the checkout is never mutated (#967).
 trap restore_source EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Mirrors `is_disposable_runtime_root` in validate-runtime-root.sh. The
 # materializer validates its stage root, so a temp parent under one of those
@@ -81,8 +71,6 @@ if [[ -z "$TMP_ROOT" ]]; then
   printf 'no temp directory on the checkout filesystem outside the managed runtime prefixes (%s); the hard-link regression cannot be exercised\n' "${temp_parents[*]}" >&2
   exit 1
 fi
-hidden_root="$TMP_ROOT/source-hidden"
-
 export UNIFIED_MPC_RUNTIME_DIR="$TMP_ROOT/runtime"
 export UNIFIED_MPC_MATERIALIZE_STATE_DIR="$TMP_ROOT/materializations"
 export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$SCRIPT_DIR/validate-runtime-root.sh"
@@ -90,11 +78,33 @@ export UNIFIED_MPC_VALIDATE_RUNTIME_ROOT="$SCRIPT_DIR/validate-runtime-root.sh"
 commit="$(git -C "$REPO_ROOT" rev-parse --verify HEAD)"
 deployment_id="portable-${commit:0:12}"
 
-bash "$SCRIPT_DIR/materialize-runtime-release.sh" "$deployment_id" "$REPO_ROOT" >"$TMP_ROOT/materialize.log"
+# #967: materialize from a throwaway source instead of hiding the live
+# `apps/` and `packages/`. The regression is the same — the release must keep
+# working after its source is gone — but the deletion lands on a copy, so a
+# concurrent build or `verify:local` in this checkout is no longer broken and a
+# killed run cannot leave the checkout gutted.
+#
+# A plain copy cannot stand in for the source: the materializer requires its
+# source root to be a Git worktree root, and a copied `.git` file still resolves
+# to the original worktree. A detached linked worktree satisfies that rule
+# without registering anything new in the caller's checkout.
+source_snapshot="$TMP_ROOT/source"
+git -C "$REPO_ROOT" worktree add --detach --quiet "$source_snapshot" "$commit"
+# The worktree has tracked files only; the build outputs and dependency trees
+# it needs are ignored paths, so copy those across.
+while IFS= read -r -d '' ignored; do
+  case "$ignored" in
+    .unified-mpc|.unified-mpc/) continue ;;
+  esac
+  mkdir -p -- "$(dirname -- "$source_snapshot/$ignored")"
+  cp -a --reflink=auto -- "$REPO_ROOT/$ignored" "$source_snapshot/$ignored"
+done < <(git -C "$REPO_ROOT" ls-files -o -i --exclude-standard --directory -z)
+
+bash "$SCRIPT_DIR/materialize-runtime-release.sh" "$deployment_id" "$source_snapshot" >"$TMP_ROOT/materialize.log"
 release="$UNIFIED_MPC_RUNTIME_DIR/releases/$deployment_id"
 
 grep -Fxq published "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/status"
-grep -Fxq "$REPO_ROOT" "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/source_path"
+grep -Fxq "$source_snapshot" "$UNIFIED_MPC_MATERIALIZE_STATE_DIR/$deployment_id/source_path"
 test -f "$release/runtime-release.json"
 test -f "$release/apps/cli/dist/bin/mcp-http.js"
 test -f "$release/apps/cli/dist/index.js"
@@ -179,16 +189,12 @@ release_commit="$(node --input-type=commonjs -e '
 ' "$release/runtime-release.json")"
 [[ "$release_commit" == "$commit" ]]
 
-mkdir -p "$hidden_root"
-# Set the flag before the first move so a signal between the two moves still
-# restores the directory that already moved.
-source_hidden=true
-mv -- "$REPO_ROOT/apps" "$hidden_root/apps"
-mv -- "$REPO_ROOT/packages" "$hidden_root/packages"
+# The source is gone before the release is exercised: this is the part the old
+# `mv` dance proved, now done without touching the checkout.
+git -C "$REPO_ROOT" worktree remove --force "$source_snapshot" 2>/dev/null || rm -rf -- "$source_snapshot"
+[[ ! -d "$source_snapshot" ]]
 
 node "$SCRIPT_DIR/smoke-materialized-runtime.mjs" "$release"
-
-restore_hidden_source
 
 [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]]
 printf 'runtime release portability regression: passed\n'

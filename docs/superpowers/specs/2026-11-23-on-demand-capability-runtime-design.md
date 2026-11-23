@@ -40,8 +40,11 @@ processes.
 - `docs/superpowers/specs/2026-10-30-heavy-*.md` already define admission and
   queueing for heavy shell work. Those designs admit *requests*; they do not
   describe resident capability processes.
-- There is no capability registry, no lease counter and no supervisor anywhere
-  in `packages/`.
+- There is no capability registry, no capability lease counter and no capability
+  supervisor anywhere in `packages/`. Lease-like machinery does exist for other
+  purposes — admission leases with generations in `tool-registry.ts`, managed
+  resource bindings in `packages/storage` — and this document does not reuse or
+  replace them.
 
 So phase 1 is greenfield, and the cheapest honest deliverable is a manifest
 type plus an in-process registry with the transition rules pinned by tests.
@@ -57,7 +60,7 @@ provides            non-empty string[] of capability tokens this worker answers
 requires            string[] of ids/tokens that must be resolvable first
 runtimeKind         'in-process' | 'native-worker' | 'external-process'
 activation          'always' | 'on-demand' | 'burst'
-resourceClass       'small' | 'medium' | 'large'   (advisory, for phase 3)
+costClass           'small' | 'medium' | 'large'   (advisory, for phase 3)
 idleTtlMs           warm-idle lifetime; 0 means stop immediately on last release
 startupTimeoutMs    bound on STARTING -> ACTIVE
 shutdownTimeoutMs   graceful bound before a forced kill (phase 2 uses it)
@@ -71,8 +74,13 @@ supervisor: an `in-process` capability still gets lease accounting and warm-idle
 reclamation, and `activation: 'burst'` documents intent even before phase 2 can
 enforce it.
 
-`resourceClass` and `shutdownTimeoutMs` are recorded now because changing the
+`costClass` and `shutdownTimeoutMs` are recorded now because changing the
 manifest later is a `version` bump; enforcing them is phase 3's job.
+
+`costClass` is deliberately not called `resourceClass`: that name already means
+the admission class of a *request* (`goal_process`, `delegated_agent`,
+`rag_indexing`) in the existing admission code, and the manifest describes a
+resident capability instead. Two vocabularies, two names.
 
 ## Lifecycle
 
@@ -149,7 +157,7 @@ Unit tests in `packages/capabilities`, against a fake clock, no child processes:
 ## Non-goals
 
 - Spawning, supervising, restarting or killing processes (phase 2).
-- Reading RSS or any pressure signal; `resourceClass` is advisory (phase 3).
+- Reading RSS or any pressure signal; `costClass` is advisory (phase 3).
 - Sandboxing, cgroups, worker recycling policy, or WASI (see #135).
 - Persisting the registry across restarts. Registration is code-driven at boot;
   only *leases* would need persistence, and nothing leases across a restart yet.

@@ -106,9 +106,12 @@ export interface CapabilityLifecyclePort {
   reclaim(id: string): Promise<Result<void>>;
   /**
    * The only writes a death needs: `ACTIVE|WARM_IDLE -> FAILED` for an
-   * unrequested exit, `STOPPING -> FAILED` for `stop-unverified`. Nothing else
-   * is a valid `fail` target — in particular a leased `ACTIVE` id is never
-   * failed, because a lease may not be shortened.
+   * unrequested exit, `STOPPING -> FAILED` for `stop-unverified`. Those edges do
+   * not consult `leaseCount`: a running worker is normally leased, and a lease
+   * cannot keep a dead process in the registry. The count is left as it is —
+   * the holder still releases normally, `releaseIdle` is a no-op outside
+   * `ACTIVE`, and `acquire` refuses `FAILED` — so leases drain without the
+   * record ever claiming a worker it no longer has.
    */
   fail(id: string, reason: string): Result<void>;
 }
@@ -160,7 +163,11 @@ export class CapabilitySupervisor {
   public async register(manifest: CapabilityManifest, spec?: CapabilityWorkerSpec): Promise<Result<void>>;
   /** Called by the registry in place of its phase-1 `start` callback. */
   public start(manifest: CapabilityManifest): Promise<Result<void>>;
-  /** Called by the registry before STOPPING -> COLD. Honours shutdownTimeoutMs. */
+  /**
+   * Called by the registry before STOPPING -> COLD. Waits at most
+   * `shutdownTimeoutMs` for a verified kill; the SIGTERM→SIGKILL escalation
+   * itself is fixed inside `ProcessTreeTerminator`, not driven by this value.
+   */
   public stop(manifest: CapabilityManifest): Promise<Result<void>>;
   /**
    * Which ids a `WARM_IDLE` reclaim at this pressure may stop, oldest first.
@@ -215,7 +222,8 @@ reject: the tier is a local union and the caller maps a probe sample onto it.
 ## Surface required by phase 2
 
 Six pieces of registry surface do not exist at head and are part of this
-phase, not of the supervisor:
+phase, not of the supervisor; a seventh work item lands in
+`packages/workspace`:
 
 1. a `start` option that can report failure. Today it is
    `(manifest) => Promise<void> | void` and `start()` coerces the awaited value
@@ -255,7 +263,18 @@ phase, not of the supervisor:
 6. a public `fail(id, reason)` for the worker-exit edge below. The registry owns
    every transition and the supervisor holds no lifecycle state, so an
    unrequested worker exit can only be written by the module that owns the
-   transition, on the supervisor's report.
+   transition, on the supervisor's report;
+7. one piece in `packages/workspace`, not in the registry: a `resolveWorkerCwd`
+   implementation. `packages/capabilities` may not import
+   `@unified-mpc/workspace`, and nothing at head resolves a worker `cwd` — that
+   package exposes containment predicates (`isWithin`, `isHostPathWithin`) and
+   `WorkspacePathGuard.resolveForWrite(workspace, relativePath)`, which needs a
+   `Workspace` object and returns a different shape. This phase adds one thin
+   function there, `resolveWorkspaceWorkerCwd(roots, requested)` returning
+   `Result<string>` over the containment predicate, and the application layer
+   passes it into the supervisor options. Without it the single enforcement
+   point the trust section promises has no owner, and a second containment check
+   inside `packages/capabilities` would be exactly the duplicate it forbids.
 
 Items 3, 5 and 6 plus the existing `health(id)` are exactly what
 `CapabilityLifecyclePort` declares, so the registry implements that interface
@@ -264,7 +283,12 @@ directly and the supervisor depends on no class.
 Two additions belong to the process package instead, and neither is optional:
 
 - `onExit(processId, listener): () => void` — one notification per process,
-  fired from `handleClose`, returning an unsubscribe. `ProcessManager` already
+  fired from `handleClose`, returning an unsubscribe. Subscribe must **replay
+  immediately when the record is already terminal** (`exited`, `failed`,
+  `stopped`, `timed_out`, `termination_unverified`): the supervisor subscribes
+  from `start()`'s `onCreated` callback, and an exit between the spawn and the
+  subscribe would otherwise never be reported — with `timeoutMs: 0` there is no
+  wall-clock fallback left to surface it. `ProcessManager` already
   sees the child exit internally but publishes nothing, and `status()`/`list()`
   are pull-only, so an unrequested exit is invisible without a timer. The
   supervisor subscribes per started id and drops that subscription *before* it
@@ -421,21 +445,30 @@ would hide a real crash and needs a reason the registry does not have.
   state instead of waiting for a promise that may never settle.
 - `termination_unverified` maps to `FAILED` with reason `stop-unverified`, and
   is reported by `health()`; it is never reported as `COLD`.
-- `shutdown()` reads `port.snapshot()`, stops `WARM_IDLE` first, then awaits
-  `port.reclaim(id)` for the remaining ids; a leased one completes its pending
-  stop when `releaseLease` writes it (registry change 3), so the wait is a
-  `port.health(id)` poll against one global deadline. The deadline bounds three
-  different outcomes, and they must not be conflated:
+- `shutdown()` reads `port.snapshot()` and asks `port.reclaim(id)` for every
+  `WARM_IDLE` and every unleased `ACTIVE` id: one pass over the warm ids, then
+  the rest. **Both passes are the same registry call.** The port has no stop
+  operation, `CapabilityRegistry.stop()` is private, and the supervisor has no
+  kill primitive of its own, so a supervisor that killed a warm worker directly
+  would leave the registry advertising a worker that no longer exists — and the
+  `onExit` guard above would then report that ordered kill as `worker-exited`.
+  `ProcessManager.stop()` therefore stays confined to the stop hook the registry
+  invokes.
+- A leased id never reaches `STOPPING` (`reclaim` only marks a pending stop, and
+  `stop` refuses `leaseCount > 0`), so shutdown cannot wait on a kill for it: the
+  pending stop completes from `releaseLease` (registry change 3) and the wait is a
+  `port.health(id)` poll against one global deadline. The deadline bounds two
+  outcomes, and they must not be conflated:
   - an id that reached `STOPPING` and whose termination could not be verified is
     written `FAILED` with `stop-unverified` through `port.fail`;
-  - an id killed during its own stop window but still leased stays `ACTIVE`:
-    leases are never shortened, so the supervisor writes no transition and
-    reports `stopUnverified: true` from `health()` while the lease holder keeps
-    the capability it is using;
-  - `ProcessManager` already attempted its own SIGTERM/SIGKILL escalation inside
-    `ProcessTreeTerminator`, and the supervisor has no second kill primitive, so
-    the honest outcome for a missed deadline is "kill attempted, may be
-    unverified", not "killed".
+  - an id that never reached `STOPPING` is still `ACTIVE` and leased: no kill was
+    attempted, so the supervisor writes no transition and reports no
+    `stopUnverified` — it returns with that id visible through `health()`.
+    Claiming a stop nobody attempted is a lie the next `acquire` pays for.
+- In every missed-deadline case the honest outcome is "kill attempted, may be
+  unverified", not "killed": `ProcessManager` has already attempted its own
+  SIGTERM/SIGKILL escalation inside `ProcessTreeTerminator`, and the supervisor
+  has no second kill primitive.
 
 ## Model lifecycle stays separate
 
@@ -465,7 +498,9 @@ fake clock and a constant pressure:
    writes `ACTIVE` over a dead worker; a fake manager that delivers `onExit`
    for the kill the supervisor itself ordered writes no `FAILED` and raises no
    crash count, because the guard is the contract and not the ordering; the
-   subscription is released by that `stop`;
+   subscription is released by that `stop`; and an `onExit` subscription made
+   after the record is already terminal notifies immediately, so an exit between
+   spawn and subscribe is still reported with no timer to fall back on;
 4. `evictionPlan('elevated', snapshot)` lists only unleased `WARM_IDLE` ids whose
    `now - idleSince` reached `min(idleTtlMs, 5_000)`, oldest first, and never
    lists `recyclable: false`, with the snapshot supplied by a fake port so the

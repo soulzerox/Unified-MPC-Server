@@ -181,6 +181,44 @@ describe('durable shell background tasks', () => {
     });
   });
 
+  it('leaves the verdict to an in-flight cancel instead of writing failed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-cancel-'));
+    temporaryRoots.push(root);
+    const taskId = 'cancel-owned-task';
+    const taskDir = path.join(root, taskId);
+    await mkdir(taskDir, { recursive: true });
+    const now = new Date();
+    await writeFile(path.join(taskDir, 'task.json'), JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'running',
+      started_at: new Date(now.getTime() - 1_000).toISOString(),
+      include_stdout: true,
+      include_stderr: true,
+      max_output_bytes: 1024,
+      deadline_at: new Date(now.getTime() + 60_000).toISOString(),
+      external_reconciliation: { kind: 'fixture', key: 'missing' },
+    }), 'utf8');
+    let cancelling = true;
+    const store = new DurableShellTaskStore(root, {
+      externalReconciler: async (): Promise<undefined> => undefined,
+      cancelInFlight: (id): boolean => cancelling && id === taskId,
+    });
+
+    // The worker is gone, but the cancel that killed it owns the verdict: no
+    // `failed` row may land before the cancel's own `cancelled` write.
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({ ok: true, value: { state: 'running' } });
+    const written = JSON.parse(await readFile(path.join(taskDir, 'task.json'), 'utf8')) as { state: string };
+    expect(written.state).toBe('running');
+
+    // Once the cancel hands the verdict back, the historical fallback applies.
+    cancelling = false;
+    await expect(store.snapshot(taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: 'failed', exit_code: -1, error: 'Durable task worker exited before recording a final state' },
+    });
+  });
+
   it.skipIf(process.platform === 'win32')('cancels the detached child group before retiring its durable worker', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-durable-groups-'));
     temporaryRoots.push(root);

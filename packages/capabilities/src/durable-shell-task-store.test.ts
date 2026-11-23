@@ -1739,9 +1739,11 @@ describe('durable worker identity capture (#876)', () => {
     let childPid: number | undefined;
     try {
       await waitUntil(async () => {
-        const raw = await readFile(metadataPath, 'utf8').catch(() => '');
-        const metadata = raw ? JSON.parse(raw) as { child_started_at?: string } : {};
-        return metadata.child_started_at !== undefined;
+        // The worker writes the metadata file while this polls it, so a read can land on a
+        // torn write. That is not the condition under test: keep polling instead of throwing
+        // a parse error out of the wait.
+        const metadata = await readPublishedMetadata(metadataPath);
+        return metadata?.child_started_at !== undefined;
       }, 15_000);
       const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as { child_pid?: number; child_started_at?: string };
       childPid = metadata.child_pid;
@@ -1768,17 +1770,27 @@ describe('durable worker identity capture (#876)', () => {
 });
 
 /**
+ * The worker rewrites the metadata file while a test polls it, so a read can land on a
+ * half-written or absent file. Such a read has published nothing yet, which is not the
+ * condition under test.
+ */
+async function readPublishedMetadata(
+  metadataPath: string,
+): Promise<{ child_pid?: number; child_started_at?: string } | undefined> {
+  try {
+    return JSON.parse(await readFile(metadataPath, 'utf8')) as { child_pid?: number; child_started_at?: string };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The worker persists `child_pid` before it probes the start time, so a wait that failed
  * still leaves a pid to clean up. A read that lands on a half-written or absent file has
  * published nothing to kill, and must not replace the failure the test is reporting.
  */
 async function readPublishedChildPid(metadataPath: string): Promise<number | undefined> {
-  try {
-    const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as { child_pid?: number };
-    return metadata.child_pid;
-  } catch {
-    return undefined;
-  }
+  return (await readPublishedMetadata(metadataPath))?.child_pid;
 }
 
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {

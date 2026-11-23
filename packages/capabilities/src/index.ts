@@ -90,6 +90,20 @@ export { LinuxOfficeCapabilityBackend, type LinuxOfficeBackendOptions, type Linu
 export { SystemInfoCapabilityBackend, type SystemInfoSnapshot } from './system-info-backend.js';
 export { EventLogCapabilityBackend, type EventLogBackendOptions, type EventLogPortableRunner } from './event-log-backend.js';
 export {
+  CapabilityRegistry,
+  normalizeCapabilityManifest,
+  type CapabilityActivation,
+  type CapabilityCostClass,
+  type CapabilityHealth,
+  type CapabilityLease,
+  type CapabilityManifest,
+  type CapabilityManifestInput,
+  type CapabilityRegistryOptions,
+  type CapabilityRuntimeKind,
+  type CapabilityState,
+  type CapabilityTransition,
+} from './capability-registry.js';
+export {
   capabilityDescriptors,
   type CapabilityAvailability,
   type CapabilityDescriptor,

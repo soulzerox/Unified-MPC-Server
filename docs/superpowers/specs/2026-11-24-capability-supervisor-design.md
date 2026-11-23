@@ -101,7 +101,10 @@ export interface CapabilityLifecyclePort {
   health(id: string): CapabilityHealth | undefined;
   /** Targeted stop; marks a pending stop when a lease is still held. */
   reclaim(id: string): Result<void>;
-  /** The only write a worker exit needs: `ACTIVE|WARM_IDLE -> FAILED`. */
+  /**
+   * The only writes a death needs: `ACTIVE|WARM_IDLE -> FAILED` for an
+   * unrequested exit, `STOPPING -> FAILED` for `stop-unverified`.
+   */
   fail(id: string, reason: string): Result<void>;
 }
 
@@ -252,8 +255,10 @@ Two additions belong to the process package instead, and neither is optional:
   fired from `handleClose`, returning an unsubscribe. `ProcessManager` already
   sees the child exit internally but publishes nothing, and `status()`/`list()`
   are pull-only, so an unrequested exit is invisible without a timer. The
-  supervisor subscribes per started id and unsubscribes on `stop`, so the two
-  `FAILED` edges above have a real caller and no polling loop is introduced.
+  supervisor subscribes per started id and drops that subscription *before* it
+  orders a stop, so the manager's own kill can never be reported as an
+  unrequested exit, and the two `FAILED` edges above have a real caller with no
+  polling loop introduced.
 - `ManagedProcessStart.timeoutMs` accepts `0` meaning "no wall-clock cap", and a
   zero skips the manager's timer. The supervisor always passes `0` and owns
   worker lifetime itself: a resident worker must not be killed by a fixed hour,
@@ -287,8 +292,21 @@ WARM_IDLE  -> FAILED   (reason 'worker-exited')
 
 Nothing else changes: `FAILED -> COLD` already exists for recycling, `acquire`
 still refuses `FAILED`, and the phase-1 tests for every other edge stay as they
-are. The alternative — treating a dead worker as `STOPPING -> COLD` — would let
-an unrequested exit look like a clean shutdown and hide it from `health()`.
+are.
+
+`onExit` fires from `handleClose`, which also runs for a kill the manager was
+asked to perform, so the listener is a reporter with a guard rather than a
+transition: it reads `port.health(id)` and writes `fail(id, 'worker-exited')`
+only while the state is still `ACTIVE` or `WARM_IDLE`. Any other state means a
+stop is already in flight (`STOPPING`, `FAILED`, `COLD`) and that exit is
+expected, so it is ignored and never counted toward the crash-loop bound. Both
+halves are required — the subscription is dropped before the supervisor calls
+`ProcessManager.stop()`, and the guard holds even if a fake or a future manager
+delivers the notification first, so no ordering between the two decides whether
+a clean stop is written as a crash.
+
+The alternative — treating a dead worker as `STOPPING -> COLD` — would let an
+unrequested exit look like a clean shutdown and hide it from `health()`.
 
 `FAILED -> COLD` recycle stays caller-owned: `registry.recycle(id)` never
 re-reads durable artifacts itself, and the supervisor does not read them either,
@@ -411,8 +429,10 @@ fake clock and a constant pressure:
    because it coerced the value to `ACTIVE`;
 3. a worker exit while `ACTIVE` and while `WARM_IDLE` moves the capability to
    `FAILED` with reason `worker-exited` through `fail(id, reason)`, driven by the
-   fake manager's `onExit` notification, and the subscription is released by a
-   later `stop`;
+   fake manager's `onExit` notification; a fake manager that delivers `onExit`
+   for the kill the supervisor itself ordered writes no `FAILED` and raises no
+   crash count, because the guard is the contract and not the ordering; the
+   subscription is released by that `stop`;
 4. `evictionPlan('elevated', snapshot)` lists only unleased `WARM_IDLE` ids whose
    `now - idleSince` reached `min(idleTtlMs, 5_000)`, oldest first, and never
    lists `recyclable: false`, with the snapshot supplied by a fake port so the

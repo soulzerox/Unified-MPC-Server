@@ -25,8 +25,10 @@ Two things already exist and must be reused, not re-implemented:
   through `ProcessTreeTerminator`. `packages/capabilities` already depends on
   `@unified-mpc/process`.
 - `ProcessMemoryPressureProbe` (`packages/workspace/src/resource-pressure.ts`)
-  already samples available memory with a cached, injectable clock. It stays in
-  `workspace`; nothing in this phase imports it (see the pressure section).
+  already samples available memory with a cached, injectable clock. It is **not**
+  reused in this phase and not imported: phase 2 ships only the pure mapping, and
+  the phase-3 driver is the first consumer of the sample (see the pressure
+  section).
 
 Phase numbering note: the registry module docstring calls pressure reclamation
 "phase 3". This spec keeps phase 2 = process work and phase 3 = pressure
@@ -83,18 +85,35 @@ export interface CapabilitySupervisorOptions {
   readonly maxCrashRestarts?: number;
 }
 
+/**
+ * One registry fact `evictionPlan` needs, passed in rather than read: the
+ * supervisor has no registry handle, so the caller supplies the snapshot it
+ * already owns.
+ */
+export interface EvictionCandidate {
+  readonly id: string;
+  readonly state: CapabilityState;
+  readonly leaseCount: number;
+  readonly idleSince: number;
+  readonly recyclable: boolean;
+}
+
 export class CapabilitySupervisor {
-  /** Declares how a non-in-process capability is spawned. One spec per id. */
-  public register(manifest: CapabilityManifest, spec?: CapabilityWorkerSpec): Result<void>;
+  /**
+   * Declares how a non-in-process capability is spawned. One spec per id.
+   * Async because it awaits `resolveWorkerCwd` once and stores the resolved
+   * path, so no spec exists with an untrusted `cwd`.
+   */
+  public async register(manifest: CapabilityManifest, spec?: CapabilityWorkerSpec): Promise<Result<void>>;
   /** Called by the registry in place of its phase-1 `start` callback. */
   public start(manifest: CapabilityManifest): Promise<Result<void>>;
   /** Called by the registry before STOPPING -> COLD. Honours shutdownTimeoutMs. */
   public stop(manifest: CapabilityManifest): Promise<Result<void>>;
   /**
    * Which ids a `WARM_IDLE` reclaim at this pressure may stop, oldest first.
-   * Pure: it starts nothing, stops nothing and holds no timer.
+   * Pure: it starts nothing, stops nothing, holds no timer and reads no state.
    */
-  public evictionPlan(state: PressureTier): readonly string[];
+  public evictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
   /** Counts a diagnosis needs; no per-request allocation. */
   public health(): readonly CapabilityWorkerHealth[];
   /** Bounded graceful stop of everything this supervisor started. */
@@ -102,8 +121,11 @@ export class CapabilitySupervisor {
 }
 ```
 
-`evictionPlan` is deliberately read-only. The governor passes its ids to
-`registry.reclaim(id)`, so the stop is written by the module that owns the
+`evictionPlan` is deliberately read-only, and its snapshot argument is what
+keeps that honest: `WARM_IDLE` membership, lease counts and `idleSince` are
+registry-only facts, so the caller passes `registry.snapshot()` in and the
+function stays a pure selection over its input. The governor passes the returned
+ids to `registry.reclaim(id)`, so the stop is written by the module that owns the
 transition. The earlier shape (the supervisor calling back into the registry)
 would re-enter a transition while the registry was deciding one, which the
 one-way seam below forbids.
@@ -126,15 +148,16 @@ reject: the tier is a local union and the caller maps a probe sample onto it.
   the pair to `ProcessManager`, which spawns without a shell, and `register`
   refuses an empty executable, an empty argv element, or a relative executable.
 - `cwd` is the one input that could escape a workspace, so it has exactly one
-  enforcement point, `resolveWorkerCwd`, with no default. `register` stores only
-  a resolved absolute path; `start` refuses if resolution fails.
+  enforcement point, `resolveWorkerCwd`, with no default. `register` is async and
+  awaits it once, storing the resolved absolute path; a rejected resolution fails
+  the registration, so no registered spec ever holds an unresolved `cwd`.
 - Memory/CPU admission stays with `ResourceAdmission` before `acquire`; the
   supervisor does not re-implement ceilings, and an admission-refused start never
   reaches it.
 
 ## Registry change required by phase 2
 
-Four pieces of registry surface do not exist at head and are part of this
+Six pieces of registry surface do not exist at head and are part of this
 phase, not of the supervisor:
 
 1. a `start` option that can report failure. Today it is
@@ -150,9 +173,26 @@ phase, not of the supervisor:
    completes the cycle in one synchronous tick);
 3. a public `reclaim(id)` targeted stop that the governor can ask for with the
    ids `evictionPlan()` returned, since `sweep()` only applies each manifest's
-   own `idleTtlMs`;
-4. a way for `reclaim` and `sweep` to ignore that TTL for one tick without
-   editing an immutable manifest.
+   own `idleTtlMs`. `reclaim` **marks a pending stop**: on an
+   `ACTIVE`/`WARM_IDLE` capability with no lease it takes the `STOPPING` edge at
+   once, and when `leaseCount` is still positive the registry — the only module
+   holding the count — completes the same stop from `releaseLease`. That removes
+   the need for a lease-release subscription: a waiter polls `health(id)`, which
+   already reports the state the registry wrote;
+4. a way for `reclaim` and `sweep` to ignore the manifest TTL for one tick
+   without editing an immutable manifest, and a `burst` default of
+   `idleTtlMs = 0` in `normalizeCapabilityManifest`, so `activation: 'burst'`
+   stops on its last release instead of going `WARM_IDLE` for the default 60 s;
+5. a read-only `snapshot(): readonly EvictionCandidate[]` that returns one entry
+   per registered capability. `health(id)` is per-id and `CapabilityHealth`
+   carries no `idleSince`, so without this the governor cannot build the input
+   `evictionPlan` needs and the plan would have to read registry internals.
+   `EvictionCandidate` is that type: `id`, `state`, `leaseCount`, `idleSince`,
+   `recyclable`;
+6. a public `fail(id, reason)` for the worker-exit edge below. The registry owns
+   every transition and the supervisor holds no registry handle, so an
+   unrequested worker exit can only be written by the module that owns the
+   transition, on the supervisor's report.
 
 None of them changes the transition rules; they only let the supervisor drive
 the existing ones.
@@ -165,7 +205,8 @@ WARM_IDLE  -> ACTIVE | STOPPING
 ```
 
 A real worker can exit on its own. Phase 2 adds exactly two edges, both with a
-reason that names the exit:
+reason that names the exit and both written through the new `fail(id, reason)`
+from registry change 6, because a transition never happens outside the registry:
 
 ```text
 ACTIVE     -> FAILED   (reason 'worker-exited')
@@ -216,15 +257,19 @@ Rules that keep this honest:
   already does it. The registry is not given a second refusal path, because a
   refusal here would have to move a `COLD` capability straight to `FAILED` and
   strand it after a transient spike.
-- `burst` capabilities already stop on their last release (`idleTtlMs: 0`), so
-  pressure has nothing to add for them.
+- `burst` capabilities stop on their last release once phase 2 defaults
+  `idleTtlMs` to `0` for that activation (registry change 4); today the default
+  is 60 s for every activation, so the value alone does not stop them. No
+  registered manifest uses `activation: 'burst'` yet, so this default costs no
+  existing behaviour.
 
 Responsibility split: `ProcessMemoryPressureProbe` owns the thresholds and the
 sample, the caller maps a sample onto `PressureTier`, and the supervisor owns only
 the response. **There is no governor loop in the tree today** — nothing calls
 `sweep()` outside a test. Phase 2 therefore ships `evictionPlan` as a pure
 function and does not add a timer; wiring a driver (goal runtime heartbeat or
-workspace session tick) is phase 3, together with `registry.reclaim`.
+workspace session tick) is phase 3. Phase 2 ships the pure function and the
+`reclaim` it hands ids to, so that driver is a wiring change, not new surface.
 
 ## Burst concurrency
 
@@ -237,15 +282,19 @@ in memory.
 ## Shutdown
 
 - `stop` asks `ProcessManager` to terminate the tree and awaits verified
-  termination. `ProcessManager.stop()` has **no deadline of its own** and returns
-  `ok` even when it ends in `termination_unverified`, so the supervisor races the
-  call against `manifest.shutdownTimeoutMs` and reads `status(processId)` to learn
-  the real state instead of trusting the returned `ok`.
+  termination. `ProcessManager.stop()` has **no deadline of its own**: after a
+  signal it awaits `waitForVerifiedTermination()`, which only settles once some
+  caller verifies, so the await can block indefinitely rather than return a
+  useful error. The supervisor therefore races the call against
+  `manifest.shutdownTimeoutMs` and reads `status(processId)` to learn the real
+  state instead of waiting for a promise that may never settle.
 - `termination_unverified` maps to `FAILED` with reason `stop-unverified`, and
   is reported by `health()`; it is never reported as `COLD`.
-- `shutdown()` stops `WARM_IDLE` first, then every leased capability once its
-  leases release, bounded by one global deadline. A capability that misses the
-  deadline is killed and recorded as failed — shutdown completes either way.
+- `shutdown()` stops `WARM_IDLE` first, then asks `registry.reclaim(id)` for the
+  remaining capabilities; a leased one completes its pending stop when
+  `releaseLease` writes it (registry change 3), so the wait is a `health(id)`
+  poll against one global deadline. A capability that misses the deadline is
+  killed and recorded as failed — shutdown completes either way.
 
 ## Model lifecycle stays separate
 
@@ -268,21 +317,23 @@ fake clock and a constant pressure:
    `err` case is the regression the old `Promise<void>` option could not express,
    because it coerced the value to `ACTIVE`;
 3. a worker exit while `ACTIVE` and while `WARM_IDLE` moves the capability to
-   `FAILED` with reason `worker-exited` — the registry change above, pinned
-   before the supervisor code exists;
-4. `evictionPlan('elevated')` lists `WARM_IDLE` ids only, oldest first, leaves
-   leased capabilities out, and never lists `recyclable: false`;
-5. `evictionPlan('critical')` lists every unleased `WARM_IDLE`, and a refused
-   start under critical pressure is admission's `RESOURCE_PRESSURE`, not a
-   registry failure;
+   `FAILED` with reason `worker-exited` through `fail(id, reason)` — the registry
+   change above, pinned before the supervisor code exists;
+4. `evictionPlan('elevated', snapshot)` lists `WARM_IDLE` ids only, oldest first,
+   leaves leased capabilities out, and never lists `recyclable: false`, with the
+   snapshot supplied by a fake registry so the function is proven pure;
+5. `evictionPlan('critical', snapshot)` lists every unleased `WARM_IDLE`, and a
+   refused start under critical pressure is admission's `RESOURCE_PRESSURE`, not
+   a registry failure;
 6. crash-loop bounding: after `maxCrashRestarts` failures inside the window the
    supervisor reports `crashLoop: true` from `health()` and its `start` refuses
    without spawning; the registry keeps `FAILED` and writes no invented reason;
 7. `stop` that exceeds `shutdownTimeoutMs` is killed and reported
-   `stop-unverified`, never `COLD`, even though `ProcessManager.stop()` returned
-   `ok` with `termination_unverified`;
-8. `shutdown()` stops idle capabilities first and returns inside the global
-   deadline even when one capability ignores its grace period.
+   `stop-unverified`, never `COLD`, including when `ProcessManager.stop()` never
+   settles because nothing verified termination;
+8. `shutdown()` stops idle capabilities first, waits for a leased capability's
+   pending `reclaim` to complete on its last release, and returns inside the
+   global deadline even when one capability ignores its grace period.
 
 Integration test in `packages/capabilities` with the real `ProcessManager` and a
 `node -e` child that prints one line and exits: start, log, stop, and a start

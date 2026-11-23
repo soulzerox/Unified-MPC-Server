@@ -116,11 +116,18 @@ export interface CapabilityRegistryOptions {
    * `startupTimeoutMs`. Phase 2 replaces it with a real supervisor.
    */
   readonly start?: (manifest: CapabilityManifest) => Promise<void> | void;
+  /**
+   * How many transitions one capability keeps. A warm capability appends two
+   * entries per acquire/release, so an unbounded history grows with uptime; the
+   * newest entries are the ones `health()` and a diagnosis need.
+   */
+  readonly maxTransitions?: number;
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const DEFAULT_IDLE_TTL_MS = 60_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_TRANSITIONS = 64;
 
 const ALLOWED_TRANSITIONS: Readonly<Record<CapabilityState, readonly CapabilityState[]>> = {
   REGISTERED: ['COLD'],
@@ -284,7 +291,7 @@ export class CapabilityRegistry {
     };
   }
 
-  /** Every transition this capability has made, in order. */
+  /** The transitions this capability still remembers, oldest first. */
   public transitions(id: string): readonly CapabilityTransition[] {
     return this.records.get(id)?.transitions ?? [];
   }
@@ -302,6 +309,9 @@ export class CapabilityRegistry {
     // a refused acquire must not raise the fence against the caller that holds it.
     const fence = this.checkGeneration(record, options.generation);
     if (!fence.ok) return fence;
+
+    const verdict = this.startVerdict(record);
+    if (!verdict.ok) return verdict;
 
     const chain = this.dependencyChain(record);
 
@@ -439,13 +449,29 @@ export class CapabilityRegistry {
     return this.start(record, reason);
   }
 
+  /**
+   * The shared refusal: only `COLD` can start, only `ACTIVE`/`WARM_IDLE` need no
+   * start and `STARTING` is already on its way. `acquire()` asks this before it
+   * walks `requires`, so a doomed acquire spawns nothing at all.
+   */
+  private startVerdict(record: CapabilityRecord): Result<void> {
+    if (
+      record.state === 'COLD' ||
+      record.state === 'ACTIVE' ||
+      record.state === 'WARM_IDLE' ||
+      record.state === 'STARTING'
+    ) {
+      return ok(undefined);
+    }
+    return conflict(`capability ${record.manifest.id} cannot start from ${record.state}`);
+  }
+
   /** `COLD -> STARTING -> ACTIVE`, or `STARTING -> FAILED` on an error or timeout. */
   private async start(record: CapabilityRecord, reason: string): Promise<Result<void>> {
     if (record.state === 'ACTIVE' || record.state === 'WARM_IDLE') return ok(undefined);
     if (record.state === 'STARTING') return record.starting ?? ok(undefined);
-    if (record.state !== 'COLD') {
-      return conflict(`capability ${record.manifest.id} cannot start from ${record.state}`);
-    }
+    const verdict = this.startVerdict(record);
+    if (!verdict.ok) return verdict;
 
     this.transition(record, 'STARTING', reason);
     const pending = (async (): Promise<Result<void>> => {
@@ -509,6 +535,8 @@ export class CapabilityRegistry {
     }
     record.state = to;
     record.transitions.push({ id: record.manifest.id, from, to, reason, at: this.now() });
+    const cap = this.options.maxTransitions ?? DEFAULT_MAX_TRANSITIONS;
+    if (record.transitions.length > cap) record.transitions.splice(0, record.transitions.length - cap);
   }
 
   private now(): number {

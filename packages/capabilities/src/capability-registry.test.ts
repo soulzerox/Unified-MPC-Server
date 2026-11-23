@@ -164,6 +164,48 @@ describe('capability registry', () => {
     expect(registry.health('base')?.state).toBe('COLD');
   });
 
+  it('refuses a FAILED capability without starting its dependency path', async () => {
+    let now = 0;
+    const starts: string[] = [];
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (manifest): void => {
+        starts.push(manifest.id);
+        if (manifest.id === 'top') throw new Error('boom');
+      },
+    });
+    await registry.register({ id: 'base', provides: ['base'], idleTtlMs: 1_000 });
+    await registry.register({ id: 'top', provides: ['top'], requires: ['base'] });
+
+    expect((await registry.acquire('top')).ok).toBe(false);
+    now += 1_000;
+    registry.sweep();
+    // The dependency is cold again, so a second attempt that walked `requires`
+    // would show up as a real start.
+    expect(registry.health('base')?.state).toBe('COLD');
+    starts.length = 0;
+
+    const refused = await registry.acquire('top');
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? undefined : refused.error.code).toBe('CONFLICT');
+    expect(starts).toEqual([]);
+    expect(registry.health('base')?.state).toBe('COLD');
+  });
+
+  it('keeps only the newest transitions when the history is capped', async () => {
+    const registry = new CapabilityRegistry({ maxTransitions: 3 });
+    await registry.register({ id: 'a', provides: ['t'] });
+    const lease = await registry.acquire('a');
+    if (!lease.ok) throw new Error('expected a lease');
+    lease.value.release();
+
+    const history = registry.transitions('a');
+
+    expect(history).toHaveLength(3);
+    expect(history.map((entry) => entry.to)).toEqual(['STARTING', 'ACTIVE', 'WARM_IDLE']);
+  });
+
   it('re-acquiring a warm dependency path wakes the dependency back to ACTIVE', async () => {
     const registry = new CapabilityRegistry();
     await registry.register({ id: 'base', provides: ['base'] });

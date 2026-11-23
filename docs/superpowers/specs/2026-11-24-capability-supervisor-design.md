@@ -62,7 +62,10 @@ export interface CapabilityWorkerSpec {
 
 export interface CapabilitySupervisorOptions {
   readonly now?: () => number;
-  /** Existing probe, or a governor-provided equivalent. */
+  /**
+   * Existing probe, or a governor-provided equivalent. `ProcessMemoryPressureProbe`
+   * samples a record, so the caller wires `() => probe.sample().state`.
+   */
   readonly pressure?: () => ResourcePressureState;
   readonly processManager?: ProcessManager;
   /** Failure window for crash-loop bounding. */
@@ -97,6 +100,20 @@ dependency direction legal (`workspace` does not depend on `capabilities`) and
 lets a test pass a constant.
 
 ## Registry change required by phase 2
+
+Three pieces of registry surface do not exist at head and are part of this
+phase, not of the supervisor:
+
+1. a `stop` hook beside the existing `start` option, so `STOPPING -> COLD` can
+   await verified termination before the transition is written (today `stop()`
+   is private and completes the cycle in one synchronous tick);
+2. a public targeted stop that the supervisor can ask for under pressure, since
+   `sweep()` only applies each manifest's own `idleTtlMs`;
+3. a way to override that TTL for one tick without editing an immutable
+   manifest, which is what the pressure table below needs.
+
+None of them changes the transition rules; they only let the supervisor drive
+the existing ones.
 
 Phase 1's table has no edge out of a running state on worker death:
 

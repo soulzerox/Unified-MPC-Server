@@ -525,7 +525,9 @@ describe('declared heavy shell admission (#145)', () => {
     });
     const internals = backend as unknown as {
       readonly heavyLeases: Map<string, unknown>;
-      readonly heavyCancelling: Set<string>;
+      readonly heavyCancelling: Map<string, number>;
+      claimHeavyCancelVerdict(taskId: string): void;
+      releaseHeavyCancelVerdict(taskId: string): void;
       settleHeavyTask(taskId: string): Promise<void>;
     };
     const store = (backend as unknown as {
@@ -567,15 +569,19 @@ describe('declared heavy shell admission (#145)', () => {
       await writeFile(recordPath, JSON.stringify(failed), 'utf8');
 
       // While the cancel owns the verdict the watcher must not spend the slot,
-      // even though the snapshot it reads is already terminal.
-      internals.heavyCancelling.add(taskId);
+      // even though the snapshot it reads is already terminal. Two overlapping
+      // cancels are counted, so the first finisher cannot hand the verdict back.
+      internals.claimHeavyCancelVerdict(taskId);
+      internals.claimHeavyCancelVerdict(taskId);
       expect(await store.snapshot(taskId)).toMatchObject({ ok: true, value: { state: 'failed' } });
+      await internals.settleHeavyTask(taskId);
+      internals.releaseHeavyCancelVerdict(taskId);
       await internals.settleHeavyTask(taskId);
       expect(fake.settled).toEqual([]);
 
-      // Once the cancel window closes without a settle, the watcher resumes and
+      // Once the last cancel closes without a settle, the watcher resumes and
       // the same snapshot is spent as the failure it is.
-      internals.heavyCancelling.delete(taskId);
+      internals.releaseHeavyCancelVerdict(taskId);
       await expect.poll(async () => {
         await internals.settleHeavyTask(taskId);
         return fake.settled;

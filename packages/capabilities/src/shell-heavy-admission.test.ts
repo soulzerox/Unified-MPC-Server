@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -508,6 +508,88 @@ describe('declared heavy shell admission (#145)', () => {
     await expect.poll(() => fake.settled, { timeout: 5000 })
       .toEqual([{ operationId: `shell:${taskId}`, outcome: 'cancelled' }]);
   }, 15000);
+
+  it('does not let the watcher spend the slot while a cancel owns the verdict', async () => {
+    const fake = new FakeAdmission();
+    fake.autoAdmit = true;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-heavy-cancel-race-'));
+    temporaryRoots.push(root);
+    const tasksRoot = path.join(root, '.tasks');
+    // A long tick keeps the timer out of the way: this test drives the settle path
+    // itself, so the ordering it asserts is not a timing race.
+    const backend = new ShellCapabilityBackend({
+      allowedRoots: [root],
+      taskStateDirectory: tasksRoot,
+      heavyAdmissionWatchIntervalMs: 60000,
+      heavyAdmission: fake,
+    });
+    const internals = backend as unknown as {
+      readonly heavyLeases: Map<string, unknown>;
+      readonly heavyCancelling: Set<string>;
+      settleHeavyTask(taskId: string): Promise<void>;
+    };
+    const store = (backend as unknown as {
+      readonly durableStore: { snapshot(taskId: string): Promise<{ ok: boolean; value: { state: string } }> };
+    }).durableStore;
+    const killed: number[] = [];
+    try {
+      const run = await backend.execute({
+        operation: 'run',
+        executable: process.execPath,
+        arguments: ['-e', 'setTimeout(() => {}, 30000)'],
+        cwd: root,
+        execution: 'background',
+        timeout_seconds: 40,
+        userConfirmed: true,
+        admission_class: 'verification_heavy',
+      });
+      expect(run.ok).toBe(true);
+      const taskId = String((run as { value: Record<string, unknown> }).value.task_id);
+      await expect.poll(() => internals.heavyLeases.has(taskId), { timeout: 10000 }).toBe(true);
+
+      const record = JSON.parse(await readFile(path.join(tasksRoot, taskId, 'task.json'), 'utf8')) as {
+        worker_pid?: number;
+        child_pid?: number;
+      };
+      // Kill the tree and write the terminal row a dying worker leaves behind:
+      // this is the `failed` snapshot a cancel has not yet overwritten.
+      for (const pid of [record.worker_pid, record.child_pid]) {
+        if (pid === undefined) continue;
+        try {
+          process.kill(pid, 'SIGKILL');
+          killed.push(pid);
+        } catch {
+          // Already gone: the row written below still stands.
+        }
+      }
+      const recordPath = path.join(tasksRoot, taskId, 'task.json');
+      const failed = { ...JSON.parse(await readFile(recordPath, 'utf8')) as Record<string, unknown>, state: 'failed' };
+      await writeFile(recordPath, JSON.stringify(failed), 'utf8');
+
+      // While the cancel owns the verdict the watcher must not spend the slot,
+      // even though the snapshot it reads is already terminal.
+      internals.heavyCancelling.add(taskId);
+      expect(await store.snapshot(taskId)).toMatchObject({ ok: true, value: { state: 'failed' } });
+      await internals.settleHeavyTask(taskId);
+      expect(fake.settled).toEqual([]);
+
+      // Once the cancel window closes without a settle, the watcher resumes and
+      // the same snapshot is spent as the failure it is.
+      internals.heavyCancelling.delete(taskId);
+      await expect.poll(async () => {
+        await internals.settleHeavyTask(taskId);
+        return fake.settled;
+      }, { timeout: 15000 }).toEqual([{ operationId: `shell:${taskId}`, outcome: 'failed' }]);
+    } finally {
+      for (const pid of killed) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // The fixture is already gone.
+        }
+      }
+    }
+  }, 30000);
 
   it('settles exactly once even though the watcher may tick again', async () => {
     const fake = new FakeAdmission();

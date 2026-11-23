@@ -206,14 +206,19 @@ describe('capability registry', () => {
     expect(history.map((entry) => entry.to)).toEqual(['STARTING', 'ACTIVE', 'WARM_IDLE']);
   });
 
-  it('keeps the newest transition when the cap is zero or fractional', async () => {
-    for (const maxTransitions of [0, -1, 3.5]) {
+  it('clamps a zero, negative or fractional cap to a whole positive count', async () => {
+    // Four transitions happen (COLD, STARTING, ACTIVE, WARM_IDLE), so a cap of 1
+    // and of 3 both bind: an unclamped `0`/`-1` empties the history and `3.5`
+    // truncates the splice count to zero, leaving all four.
+    for (const [maxTransitions, kept] of [[0, 1], [-1, 1], [3.5, 3]] as const) {
       const registry = new CapabilityRegistry({ maxTransitions });
       await registry.register({ id: 'a', provides: ['t'] });
-      await registry.acquire('a');
+      const lease = await registry.acquire('a');
+      if (!lease.ok) throw new Error('expected a lease');
+      lease.value.release();
 
-      expect(registry.transitions('a').length).toBeGreaterThan(0);
-      expect(registry.health('a')?.lastTransition?.to).toBe('ACTIVE');
+      expect(registry.transitions('a')).toHaveLength(kept);
+      expect(registry.health('a')?.lastTransition?.to).toBe('WARM_IDLE');
     }
   });
 
@@ -225,17 +230,19 @@ describe('capability registry', () => {
         if (manifest.id === 'middle') throw new Error('boom');
       },
     });
-    await registry.register({ id: 'leaf', provides: ['leaf'] });
+    // `idleTtlMs: 0` sends `leaf` back to COLD when the failed acquire hands it
+    // to the idle path, so a start below `middle` would be visible in `starts`.
+    await registry.register({ id: 'leaf', provides: ['leaf'], idleTtlMs: 0 });
     await registry.register({ id: 'middle', provides: ['middle'], requires: ['leaf'] });
     await registry.register({ id: 'top', provides: ['top'], requires: ['middle'] });
     expect((await registry.acquire('middle')).ok).toBe(false);
+    expect(registry.health('leaf')?.state).toBe('COLD');
     starts.length = 0;
-    const leafBefore = registry.health('leaf')?.state;
 
     expect((await registry.acquire('top')).ok).toBe(false);
 
     expect(starts).toEqual([]);
-    expect(registry.health('leaf')?.state).toBe(leafBefore);
+    expect(registry.health('leaf')?.state).toBe('COLD');
   });
 
   it('re-acquiring a warm dependency path wakes the dependency back to ACTIVE', async () => {

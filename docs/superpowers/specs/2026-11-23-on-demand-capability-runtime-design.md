@@ -73,8 +73,17 @@ healthProbe         optional id of a registered probe
 
 `runtimeKind` and `activation` are the fields that make phase 1 useful without a
 supervisor: an `in-process` capability still gets lease accounting and warm-idle
-reclamation, and `activation: 'burst'` documents intent even before phase 2 can
-enforce it.
+reclamation.
+
+`activation` means exactly this, in phase 1:
+
+- `always` — the registry starts it at boot, so it reaches `ACTIVE` without an
+  `acquire`. Pair it with `recyclable: false`, or a zero `idleTtlMs` will stop it
+  again the first time a lease is released.
+- `on-demand` — nothing starts it until an `acquire`.
+- `burst` — same start rule as `on-demand` in phase 1; the value only tells
+  phase 2 that the capability should exit after its work instead of entering
+  `WARM_IDLE`.
 
 `costClass` and `shutdownTimeoutMs` are recorded now because changing the
 manifest later is a `version` bump. Enforcing `shutdownTimeoutMs` is phase 2's
@@ -90,7 +99,8 @@ resident capability instead. Two vocabularies, two names.
 
 ```text
 REGISTERED -> COLD
-COLD       -> STARTING      (acquire, activation allows it)
+COLD       -> STARTING      (boot when activation is 'always'; acquire
+                             otherwise)
 STARTING   -> ACTIVE        (startup succeeded inside startupTimeoutMs)
 STARTING   -> FAILED        (startup error or timeout)
 ACTIVE     -> WARM_IDLE     (last lease released, idleTtlMs > 0)
@@ -129,12 +139,18 @@ generation on every `acquire`. The registry keeps the highest generation it has
 seen per capability and refuses:
 
 - an acquire for a generation lower than the highest seen (stale caller);
-- a publish/release from a lease whose generation is no longer current, so a
-  worker that finished after a rollover cannot write into the new generation.
+- a **publish** from a lease whose generation is no longer current, so a worker
+  that finished after a rollover cannot write into the new generation.
+
+The fence stops writes, never accounting. A `release` from a stale lease still
+decrements `leaseCount`: refusing it would pin the count above zero forever, and
+the rule that `leaseCount > 0` blocks `STOPPING` would then make reclamation
+unreachable. So a stale lease may end, it may not publish.
 
 Phase 1 keeps the fence in the registry only. It is deliberately not a lock: the
 durable goal lease in `ToolRegistry` remains the authority for mutation, and this
-fence exists so a *capability* cannot outlive the generation that leased it.
+fence exists so a *capability* cannot write on behalf of the generation that
+leased it.
 
 ## Dependency resolution
 
@@ -166,13 +182,14 @@ Unit tests in `packages/capabilities`, against a fake clock, no child processes:
 5. TTL expiry while a lease is held does not stop the capability; the stop
    happens on the release that reaches zero;
 6. `idleTtlMs: 0` stops on the last release without an idle window;
-7. a stale-generation acquire and a stale-generation release are both refused
-   when `generationFenced` is true;
+7. a stale-generation acquire and a stale-generation publish are both refused
+   when `generationFenced` is true, while a stale-generation release still
+   decrements `leaseCount` and can therefore reach `STOPPING`;
 8. each transition produces exactly one event with a reason, and the last event
    is what a health read reports;
 9. a `recyclable: false` capability stays `ACTIVE`/`WARM_IDLE` after its last
-   release and after its TTL would have elapsed, and still refuses an acquire
-   from `STOPPING`/`FAILED`;
+   release and after its TTL would have elapsed, and refuses an acquire from
+   `FAILED`;
 10. an `externalRequires` token registers without a matching manifest and is
     never started, while an unregistered id in `requires` fails registration.
 

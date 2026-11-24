@@ -37,9 +37,10 @@ export const RELEASE_COMMANDS = [
   ['corepack', ['pnpm', 'build']],
   [process.execPath, ['scripts/smoke-mcp-http-runtime.mjs']],
   // Boot the artifact the release actually ships: materialize a portable
-  // release from this tree, then prove it starts and restarts with the source
-  // `apps/` and `packages/` hidden. The script restores them on exit, and it
-  // must run after `build` because it materializes from built output.
+  // release from a detached snapshot worktree of the commit under test, then
+  // prove it starts and restarts after that snapshot is removed. The checkout
+  // the gate runs in is never mutated, and this must run after `build` because
+  // it materializes from built output.
   ['bash', ['scripts/materialize-runtime-release.test.sh']],
   [process.execPath, ['scripts/test-config-mutation-lock.mjs']],
   ['npx', ['vitest', 'run', 'tests/']],

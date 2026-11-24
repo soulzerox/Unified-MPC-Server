@@ -8,11 +8,20 @@ source_snapshot=""
 
 restore_source() {
   if [[ -n "$source_snapshot" ]]; then
-    git -C "$REPO_ROOT" worktree remove --force "$source_snapshot" >/dev/null 2>&1 || true
+    remove_snapshot_worktree
   fi
   if [[ -n "$TMP_ROOT" ]]; then
     rm -rf -- "$TMP_ROOT"
   fi
+}
+# A killed materializer can leave its snapshot worktree locked, and a failed
+# `worktree remove` would otherwise leave `$GIT_COMMON_DIR/worktrees/source*`
+# pointing at a path this run deletes — a registration every later gate run has
+# to carry. Force past the lock and prune whatever the removal left behind.
+remove_snapshot_worktree() {
+  git -C "$REPO_ROOT" worktree remove --force --force "$source_snapshot" >/dev/null 2>&1 ||
+    rm -rf -- "$source_snapshot"
+  git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
 }
 # Installed before the temp root is chosen: choosing it can refuse, and a
 # refusal must not leave a directory behind. The traps only remove this run's
@@ -90,6 +99,10 @@ deployment_id="portable-${commit:0:12}"
 # without registering anything new in the caller's checkout.
 source_snapshot="$TMP_ROOT/source"
 git -C "$REPO_ROOT" worktree add --detach --quiet "$source_snapshot" "$commit"
+# The materializer records `source_path` after `readlink -f`, so canonicalize
+# here: a symlinked component of `$TMP_ROOT` would otherwise fail the state
+# assertion below after a fully successful materialization.
+source_snapshot="$(readlink -f -- "$source_snapshot")"
 # The worktree has tracked files only; the build outputs and dependency trees
 # it needs are ignored paths, so copy those across.
 while IFS= read -r -d '' ignored; do
@@ -191,7 +204,7 @@ release_commit="$(node --input-type=commonjs -e '
 
 # The source is gone before the release is exercised: this is the part the old
 # `mv` dance proved, now done without touching the checkout.
-git -C "$REPO_ROOT" worktree remove --force "$source_snapshot" 2>/dev/null || rm -rf -- "$source_snapshot"
+remove_snapshot_worktree
 [[ ! -d "$source_snapshot" ]]
 
 node "$SCRIPT_DIR/smoke-materialized-runtime.mjs" "$release"

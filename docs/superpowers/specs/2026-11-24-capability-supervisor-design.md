@@ -33,8 +33,9 @@ Two things already exist and must be reused, not re-implemented:
   worker after its one-hour default (hard ceiling four hours) and the design's
   own exit notification would report that as `worker-exited` → `FAILED`. Only
   `recyclable: false` ids — the ones the manifest pins for the process lifetime,
-  which phase 1 refuses to stop at all — get the zero; every `recyclable: true`
-  activation keeps the cap.
+  which phase 1 refuses to stop at all — get the zero; every other activation
+  keeps the cap, unless its worker spec states its own `timeoutMs` (the
+  amendment below).
 - `ProcessMemoryPressureProbe` (`packages/workspace/src/resource-pressure.ts`)
   already samples available memory with a cached, injectable clock. Phase 2 does
   not import it: `ResourceAdmission` already owns the production consumer (it
@@ -45,6 +46,30 @@ Phase numbering note: the registry module docstring calls pressure reclamation
 "phase 3". This spec keeps phase 2 = process work and phase 3 = pressure
 reclamation, and the implementing PR for phase 2 updates those docstring lines
 instead of leaving two numbering schemes in the tree.
+
+### Amendment: a spec may state its own wall-clock cap (#990)
+
+`CapabilityWorkerSpec.timeoutMs` is optional, and a spec that states it wins over
+the value the supervisor derives from `manifest.recyclable`. The default is
+unchanged — `recyclable: false` still gets `0`, every other manifest still gets
+`ProcessManager`'s cap — so the wall-clock backstop keeps applying to a
+`recyclable: true` id whose lease a caller leaks.
+
+The spec that states a value is the supervised Thai-RAG provider, which is
+recyclable *and* long-serving. The cap did not bound a leak there, because the
+provider pins its lease for the host's lifetime (phase 3's driver can never see
+it as `WARM_IDLE`), so the only thing the hour did was SIGKILL a healthy worker
+mid-call; `canRecycleDeadWorker` + `registry.recycle` then turned it into one
+failed call and a cold start every hour. Stating `0` restores the lifetime that
+worker had before #989, where the `StdioClientTransport` child carried no
+wall-clock cap at all.
+
+The cost is stated rather than hidden: for an id whose spec states `0` there is
+no timed kill, so `shutdown()` at the process boundary is the end of its life,
+`health(id)` is the only report that it is still up, and the registry starts
+only from `COLD` — a recycled one is replaced at most once per id instead of
+accumulating. A `recyclable: true` id that relies on the default keeps the
+backstop, and a future worker with a bounded lease should not state `0`.
 
 ## Seam
 
@@ -367,10 +392,13 @@ Two additions belong to the process package instead, and neither is optional:
   resolved `start()` result would leave open, so the process package gains
   exactly one method and no `onCreated` callback has to be added.
 - `ManagedProcessStart.timeoutMs` accepts `0` meaning "no wall-clock cap", and a
-  zero skips the manager's timer. The supervisor passes `0` only for a
+  zero skips the manager's timer. The supervisor passes `0` for a
   `recyclable: false` capability — the resident id, which phase 1 pins for the
   process lifetime and never stops — and leaves the manager's default cap in
-  place for every `recyclable: true` activation, so the wall-clock backstop still
+  place for every `recyclable: true` activation, unless that activation's spec
+  states its own `timeoutMs`, which wins over the derived default (#990); the
+  Thai-RAG provider runtime states `0`, and the amendment under "Decision" gives
+  the reason and the bounds it leaves. So the wall-clock backstop still
   applies to a worker whose lease a caller leaks. For a resident id the cap is
   deliberately gone — a resident worker must not be killed by a fixed hour, and a
   one-hour `timed_out` would reach the new `onExit` and be reported as
@@ -639,9 +667,10 @@ fake clock and a constant pressure:
    never reached `STOPPING` keeps `ACTIVE` with no transition, no `stopUnverified`
    and no invented kill, which is what distinguishes "never shorten a lease" from
    "report an unverified kill";
-9. spawn bounds: the supervisor passes `timeoutMs: 0` for a `recyclable: false`
-   capability and the manager's default cap for every `recyclable: true`
-   activation, a spawn that settles after the registry's `startupTimeoutMs` is
+9. spawn bounds: the supervisor passes the spec's `timeoutMs` when it states
+   one, otherwise `0` for a `recyclable: false` capability and the manager's
+   default cap for every `recyclable: true` activation, a spawn that settles
+   after the registry's `startupTimeoutMs` is
    stopped instead of stored, and a resident worker that outlives several hours
    is not reported as `timed_out` (and therefore never reported as
    `worker-exited` by the `onExit` subscription).

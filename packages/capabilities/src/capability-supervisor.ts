@@ -122,7 +122,6 @@ interface WorkerRecord {
   processId?: string | undefined;
   starts: number;
   readonly crashTimes: number[];
-  crashLoop: boolean;
   stopUnverified: boolean;
   lastFailure?: WorkerFailure | undefined;
   /** A death delivered inside the `STARTING` window; the `start` hook reports it. */
@@ -183,6 +182,9 @@ function isBlank(value: string): boolean {
 export class CapabilitySupervisor {
   private readonly records = new Map<string, WorkerRecord>();
 
+  /** Ids whose `register` is awaiting `resolveWorkerCwd`, so two can never both win. */
+  private readonly registering = new Set<string>();
+
   private readonly now: () => number;
 
   private readonly crashWindowMs: number;
@@ -213,7 +215,7 @@ export class CapabilitySupervisor {
    * spec exists with an untrusted `cwd`.
    */
   public async register(manifest: CapabilityManifest, spec?: CapabilityWorkerSpec): Promise<Result<void>> {
-    if (this.records.has(manifest.id)) {
+    if (this.records.has(manifest.id) || this.registering.has(manifest.id)) {
       return conflict(`capability ${manifest.id} already has a worker registration`);
     }
     if (manifest.runtimeKind === 'in-process') {
@@ -233,14 +235,21 @@ export class CapabilitySupervisor {
       return invalid(`capability ${manifest.id} has a blank argument`);
     }
 
-    const resolvedCwd = await this.resolveWorkerCwd(spec.cwd);
-    if (!resolvedCwd.ok) return resolvedCwd;
+    // Reserve the id across the await: checking before it and storing after would
+    // let two concurrent registrations both return `ok` and the second overwrite.
+    this.registering.add(manifest.id);
+    try {
+      const resolvedCwd = await this.resolveWorkerCwd(spec.cwd);
+      if (!resolvedCwd.ok) return resolvedCwd;
 
-    this.records.set(manifest.id, {
-      ...this.newRecord(manifest),
-      spec: { executable: spec.executable, args: [...spec.args], cwd: resolvedCwd.value },
-    });
-    return ok(undefined);
+      this.records.set(manifest.id, {
+        ...this.newRecord(manifest),
+        spec: { executable: spec.executable, args: [...spec.args], cwd: resolvedCwd.value },
+      });
+      return ok(undefined);
+    } finally {
+      this.registering.delete(manifest.id);
+    }
   }
 
   /** Called by the registry in place of its phase-1 `start` callback. */
@@ -248,10 +257,13 @@ export class CapabilitySupervisor {
     const record = this.records.get(manifest.id);
     if (record === undefined) return invalid(`capability ${manifest.id} has no worker registration`);
     if (record.spec === undefined) return ok(undefined);
-    if (record.crashLoop) {
+    // The bound is a window, not a verdict: once the oldest failure falls out of
+    // it the capability may start again without a new supervisor or a reset call.
+    const failures = this.failuresInWindow(record);
+    if (failures >= this.maxCrashRestarts) {
       return conflict(
-        `capability ${manifest.id} is in a crash loop (${record.crashTimes.length} failures inside ${this.crashWindowMs}ms); recycle it before starting again`,
-        { reason: 'crash_loop', failures: record.crashTimes.length },
+        `capability ${manifest.id} is in a crash loop (${failures} failures inside ${this.crashWindowMs}ms); wait for the window to pass before starting again`,
+        { reason: 'crash_loop', failures },
       );
     }
 
@@ -359,7 +371,7 @@ export class CapabilitySupervisor {
       id: record.manifest.id,
       ...(record.processId === undefined ? {} : { processId: record.processId }),
       restarts: Math.max(0, record.starts - 1),
-      crashLoop: record.crashLoop,
+      crashLoop: this.failuresInWindow(record) >= this.maxCrashRestarts,
       ...(record.stopUnverified ? { stopUnverified: true } : {}),
       ...(record.lastFailure === undefined ? {} : { lastFailure: record.lastFailure }),
     }));
@@ -374,6 +386,10 @@ export class CapabilitySupervisor {
     // advertising a worker that no longer exists.
     const ordered = [...snapshot.filter((candidate) => candidate.state === 'WARM_IDLE'),
       ...snapshot.filter((candidate) => candidate.state === 'ACTIVE')];
+    // An id somebody else already put in STOPPING is watched too: its terminal
+    // write is still owed, and this deadline is the only one the sweep owns.
+    const watch = [...ordered.map((candidate) => candidate.id),
+      ...snapshot.filter((candidate) => candidate.state === 'STOPPING').map((candidate) => candidate.id)];
 
     for (const candidate of ordered) {
       const remaining = deadline - this.now();
@@ -383,13 +399,12 @@ export class CapabilitySupervisor {
       await raceDeadline(this.lifecycle.reclaim(candidate.id), remaining);
     }
 
-    const watch = ordered.map((candidate) => candidate.id);
     const maxPolls = Math.max(1, Math.ceil(this.shutdownDeadlineMs / SHUTDOWN_POLL_MS));
     for (let poll = 0; poll < maxPolls; poll += 1) {
       if (this.now() >= deadline) break;
       const stopping = watch.filter((id) => this.lifecycle.health(id)?.state === 'STOPPING');
       if (stopping.length === 0) return;
-      await delay(SHUTDOWN_POLL_MS);
+      await delay(Math.min(SHUTDOWN_POLL_MS, Math.max(1, deadline - this.now())));
     }
 
     for (const id of watch) {
@@ -410,7 +425,6 @@ export class CapabilitySupervisor {
       manifest,
       starts: 0,
       crashTimes: [],
-      crashLoop: false,
       stopUnverified: false,
       pendingDeath: false,
     };
@@ -459,6 +473,11 @@ export class CapabilitySupervisor {
       record.crashTimes.shift();
     }
     record.lastFailure = failure;
-    record.crashLoop = record.crashTimes.length >= this.maxCrashRestarts;
+  }
+
+  /** Failures still inside `crashWindowMs`; the only crash-loop counter there is. */
+  private failuresInWindow(record: WorkerRecord): number {
+    const at = this.now();
+    return record.crashTimes.filter((time) => at - time <= this.crashWindowMs).length;
   }
 }

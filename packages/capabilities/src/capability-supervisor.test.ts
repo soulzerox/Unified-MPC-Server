@@ -99,6 +99,11 @@ class FakeProcesses implements CapabilityProcessPort {
 
   public unsubscribes = 0;
 
+  /** Simulates a manager that delivers the notification before the unsubscribe lands. */
+  public notifyAfterUnsubscribe = false;
+
+  public lastListener: (() => void) | undefined;
+
   private readonly exitListeners = new Map<string, () => void>();
 
   private nextProcess = 0;
@@ -141,10 +146,15 @@ class FakeProcesses implements CapabilityProcessPort {
 
   public onExit(processId: string, listener: () => void): () => void {
     this.exitListeners.set(processId, listener);
+    this.lastListener = listener;
     return () => {
       this.unsubscribes += 1;
-      this.exitListeners.delete(processId);
+      if (!this.notifyAfterUnsubscribe) this.exitListeners.delete(processId);
     };
+  }
+
+  public fireLastListener(): void {
+    this.lastListener?.();
   }
 
   public fireExit(processId: string): void {
@@ -334,10 +344,14 @@ describe('capability supervisor worker exit', () => {
     await supervisor.start(manifest());
     lifecycle.set('worker', 'ACTIVE');
 
+    // The manager here delivers the exit even though the subscription was
+    // already dropped, so the state guard — not the ordering — is what the test
+    // proves: an exit for a stop in flight writes no FAILED and counts no crash.
+    processes.notifyAfterUnsubscribe = true;
     processes.configure({
-      stop: async (processId) => {
+      stop: async () => {
         lifecycle.set('worker', 'STOPPING');
-        processes.fireExit(processId);
+        processes.fireLastListener();
         return ok(undefined);
       },
       state: () => 'stopped',
@@ -407,6 +421,41 @@ describe('capability supervisor crash loop', () => {
     expect(refused.ok ? '' : refused.error.details?.['reason']).toBe('crash_loop');
     expect(processes.specs).toHaveLength(2);
     expect(supervisor.health()[0]?.crashLoop).toBe(true);
+  });
+
+  it('lets the capability start again once the oldest failure leaves the window', async () => {
+    let now = 1_000;
+    const { supervisor, lifecycle, processes } = build({ maxCrashRestarts: 2, now: (): number => now });
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+    processes.configure({ start: async () => err(appError('INTERNAL_ERROR', 'nope')) });
+
+    await supervisor.start(manifest());
+    await supervisor.start(manifest());
+    expect((await supervisor.start(manifest())).ok).toBe(false);
+
+    now += 60_001;
+    processes.configure({ start: async () => ok(managedProcess('proc-after-window', 'running')) });
+    expect(supervisor.health()[0]?.crashLoop).toBe(false);
+    expect((await supervisor.start(manifest())).ok).toBe(true);
+  });
+});
+
+describe('capability supervisor registration race', () => {
+  it('lets exactly one of two concurrent registrations of the same id win', async () => {
+    const { supervisor } = build({
+      resolveWorkerCwd: async (requested): Promise<Result<string>> => {
+        await new Promise((resolve) => { setTimeout(resolve, 5); });
+        return ok(`${ROOT}/${requested}`);
+      },
+    });
+
+    const [first, second] = await Promise.all([
+      supervisor.register(manifest(), spec),
+      supervisor.register(manifest(), spec),
+    ]);
+
+    expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1);
   });
 });
 

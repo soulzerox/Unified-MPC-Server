@@ -195,15 +195,28 @@ deadline in the registry, not a different TTL.
 ## cwd containment
 
 `CapabilitySupervisor` refuses to register without `resolveWorkerCwd`, and the
-provider's cwd is not a workspace root: the runtime launches it from
-`thaiRagInstallRoot` (`apps/cli/src/runtime/stdio-mcp-runtime.ts:530-535`), the
-checkout that holds `thai_rag_context_mcp.py`.
+provider's cwd is not a workspace root: the provider driver rewrites its launch
+to `cwd = <dataRoot>/thai-rag/sources` and adds `THAI_RAG_CACHE_DIR` and
+`THAI_RAG_CONTROL_MODE: unified_native` at `start()`
+(`apps/cli/src/runtime/native-thai-rag-provider.ts:454-467`), so the install
+root — the checkout holding `thai_rag_context_mcp.py` — is where the executable
+and args come from, not where the child runs.
 
-Decision: the runtime's `resolveWorkerCwd` accepts exactly two shapes — a
-canonical registered workspace root, or the canonical provider install root the
-runtime itself resolved. It is one function with one allowlist entry, not a
-second containment check, and it refuses everything else. A worker whose cwd is
-neither is a registration failure, reported at boot rather than at first call.
+Decision: the runtime's `resolveWorkerCwd` accepts exactly three shapes — the
+provider install root the runtime itself resolved, the provider-owned sources
+root, or a registered workspace root. Each side of the comparison is
+`realpath`-normalized where it resolves; an unreadable root falls back to the
+path as given (`capability-pressure.ts:147-163`), so equality is canonical for
+the boot paths that exist and literal only for the broken ones. The sources root
+is a fixed path derived from the data root (`stdio-mcp-runtime.ts:520-524`),
+created by the runtime at boot because the provider creates it later, and handed
+to the resolver as its only extra root (`:558`); it is never user input. When
+`resolveThaiRagProviderRoot` fails that derivation falls back to the install
+root (`:521-524`), so the extra root then duplicates shape 1 and no `mkdirSync`
+runs. It is one function with one allowlist, not a second containment check, and
+it refuses everything else, including a nested path under an accepted root or a
+sibling beside one. A worker whose cwd is none of these is a registration
+failure, reported at boot rather than at first call.
 
 ## The driver
 

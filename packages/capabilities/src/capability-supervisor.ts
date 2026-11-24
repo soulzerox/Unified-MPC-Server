@@ -315,9 +315,12 @@ export class CapabilitySupervisor {
     });
     const outcome = await raceDeadline(spawn, manifest.startupTimeoutMs);
     if (!outcome.settled) {
+      // `onCreated` may already have handed this attempt's pipes over; a caller
+      // must never reach a process this attempt is about to discard.
+      if (attempt === record.starts) record.pipes = undefined;
       this.recordFailure(record, 'start-failed');
       void spawn.then(
-        (late) => this.discardLateStart(record, late),
+        (late) => this.discardLateStart(record, late, attempt),
         () => undefined,
       );
       return err(appError('PROCESS_TIMEOUT', `capability ${manifest.id} did not spawn inside ${manifest.startupTimeoutMs}ms`, true, { reason: 'start_timeout' }));
@@ -328,7 +331,10 @@ export class CapabilitySupervisor {
       // fails has already subscribed; leaving it registered would let this
       // attempt's close report a death inside a later attempt's start. Scoped to
       // this attempt for the same reason the listener is.
-      if (attempt === record.starts) this.unsubscribe(record);
+      if (attempt === record.starts) {
+        this.unsubscribe(record);
+        record.pipes = undefined;
+      }
       this.recordFailure(record, 'start-failed');
       return started;
     }
@@ -522,8 +528,11 @@ export class CapabilitySupervisor {
     this.lifecycle.fail(record.manifest.id, 'worker-exited');
   }
 
-  private discardLateStart(record: WorkerRecord, late: Result<{ readonly processId: string }>): void {
+  private discardLateStart(record: WorkerRecord, late: Result<{ readonly processId: string }>, attempt: number): void {
     if (!late.ok) return;
+    // The pipes this late spawn handed over belong to the attempt being
+    // discarded; a newer attempt's pipes must stay reachable.
+    if (attempt === record.starts) record.pipes = undefined;
     // A later start of the same id may already own the subscription; only this
     // attempt's own subscription may be dropped.
     if (record.subscribedProcessId === late.value.processId) this.unsubscribe(record);

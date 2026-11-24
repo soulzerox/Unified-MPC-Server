@@ -695,4 +695,38 @@ describe('capability supervisor worker pipes', () => {
     expect(processes.specs[0]?.exposeStdio).toBeUndefined();
     expect(supervisor.pipes('worker')).toBeUndefined();
   });
+
+  it('drops the pipes of an attempt that failed or timed out after spawning', async () => {
+    const pipesOf = (): { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough } =>
+      ({ stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+    const withSpec = { ...spec, exposeStdio: true };
+
+    const failed = build();
+    await failed.supervisor.register(manifest(), withSpec);
+    failed.processes.configure({
+      start: async (_spec, onCreated) => {
+        const pipes = pipesOf();
+        onCreated?.({ ...managedProcess('dead-on-arrival', 'running'), ...pipes });
+        return err(appError('EXECUTABLE_NOT_FOUND', 'missing'));
+      },
+    });
+    expect((await failed.supervisor.start(manifest())).ok).toBe(false);
+    expect(failed.supervisor.pipes('worker')).toBeUndefined();
+
+    const late = build();
+    await late.supervisor.register(manifest({ startupTimeoutMs: 5 }), withSpec);
+    late.processes.configure({
+      start: (_spec, onCreated) => new Promise((resolve) => {
+        setTimeout(() => {
+          const pipes = pipesOf();
+          onCreated?.({ ...managedProcess('late-pipes', 'running'), ...pipes });
+          resolve(ok(managedProcess('late-pipes', 'running')));
+        }, 30);
+      }),
+    });
+    expect((await late.supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(false);
+    expect(late.supervisor.pipes('worker')).toBeUndefined();
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(late.supervisor.pipes('worker')).toBeUndefined();
+  });
 });

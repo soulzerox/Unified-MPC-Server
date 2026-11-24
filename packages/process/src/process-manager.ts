@@ -25,6 +25,13 @@ export const DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES = 24;
 export const MAX_RETAINED_TERMINAL_RECORDS = 64;
 export const MAX_RETAINED_TERMINAL_LOG_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Cap on what a caller-facing `exposeStdio` copy may buffer while its consumer
+ * is not reading. Past it the copy ends, so a stalled reader sees EOF instead of
+ * letting the runtime hold the child's whole output in memory.
+ */
+export const MAX_TEE_BUFFER_BYTES = 8 * 1024 * 1024;
+
 export interface ProcessManagerRecoveryOptions {
   readonly platform?: NodeJS.Platform;
   readonly processStartedAt?: PosixProcessIdentityProbe;
@@ -118,13 +125,11 @@ export class ProcessManager {
     // throw `ERR_STREAM_WRITE_AFTER_END` inside a `'data'` handler.
     child.stdout?.on('data', (chunk: Buffer) => {
       record.logs.append('stdout', chunk.toString('utf8'));
-      // ponytail: an unread tee buffers without bound; add a cap when a consumer
-      // is allowed to stall for long.
-      record.tee?.stdout.write(chunk);
+      if (record.tee !== undefined) this.teeChunk(record.tee.stdout, chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       record.logs.append('stderr', chunk.toString('utf8'));
-      record.tee?.stderr.write(chunk);
+      if (record.tee !== undefined) this.teeChunk(record.tee.stderr, chunk);
     });
     this.records.set(processId, record);
     onCreated?.(this.snapshot(record, tee));
@@ -351,6 +356,21 @@ export class ProcessManager {
     delete record.tee;
     tee.stdout.end();
     tee.stderr.end();
+  }
+
+  /**
+   * Feed one caller-facing copy, bounded. A consumer that stops reading would
+   * otherwise buffer the child's whole output in the `PassThrough`; past the cap
+   * the copy ends so the consumer sees EOF rather than the runtime growing
+   * without a ceiling. The log ring keeps the output either way.
+   */
+  private teeChunk(stream: PassThrough, chunk: Buffer): void {
+    if (stream.writableEnded || stream.destroyed) return;
+    stream.write(chunk);
+    // A paused Transform keeps its readable side near the high-water mark and queues
+    // the rest on the writable side, so both sides make up what a stalled consumer
+    // would otherwise pin.
+    if (stream.readableLength + stream.writableLength > MAX_TEE_BUFFER_BYTES) stream.end();
   }
 
   private notifyExit(record: ManagedRecord): void {

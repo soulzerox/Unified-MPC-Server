@@ -146,7 +146,7 @@ lease, so the index lane cannot be evicted while a probe lane is idle.
   runtimeKind: 'external-process',
   activation: 'on-demand',
   costClass: 'large',
-  idleTtlMs: 5 * 60_000,   // matches McpSessionManager's default idle close
+  idleTtlMs: 5 * 60_000,   // supervisor-side ceiling; the driver sets its own idle close
   startupTimeoutMs: 30_000,
   shutdownTimeoutMs: 10_000,
   recyclable: true,
@@ -160,9 +160,24 @@ restartable by design — `McpSessionManager` already reconnects, and the driver
 restart tests (`native-thai-rag-provider.test.ts`) cover provider loss — so
 recycling it costs a cold start, not correctness.
 
-`idleTtlMs` matches the session manager's idle close so the two mechanisms cannot
-fight: the session closes first, the worker goes `WARM_IDLE`, then the TTL or the
-driver stops the child.
+`idleTtlMs` does not mirror the session manager's default. The provider driver
+overrides that default per lane — 24 h for the main and index sessions, 60 s for
+the probe session (`apps/cli/src/runtime/native-thai-rag-provider.ts:391,404,412`)
+— so a warm provider is closed by `McpSessionManager`'s own idle sweep
+(`packages/extensions/src/mcp-session-manager.ts:424-436`), which the driver only
+configures, and the worker's `idleTtlMs` is a manifest field rather than a copy of
+any one lane's idle close.
+
+The only production reader of `idleTtlMs` is `evictionPlan`: under `elevated` it
+is clamped to 5 s and under `critical` it is not consulted at all
+(`packages/capabilities/src/capability-supervisor.ts:362-372`). `registry.sweep()`
+would enforce it directly
+(`packages/capabilities/src/capability-registry.ts:415-425`), but nothing in
+production calls it and the driver tick below calls `snapshot()` and `reclaim()`
+only. A worker whose lease was released therefore stays up until a pressure tick
+reaches it — the same unbounded class as the never-released lease this spec
+already admits — and closing it needs a `sweep()` call from the tick, or a lease
+deadline in the registry, not a different TTL.
 
 ## cwd containment
 

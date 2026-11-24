@@ -7,12 +7,14 @@ Phase 2 shipped the supervisor, the registry lifecycle port, `evictionPlan` and
 `reclaim`, and deliberately shipped no driver: nothing in the tree calls
 `evictionPlan` outside a test, and no capability is a real child process, so a
 registry constructed today would enforce nothing. This spec closes both gaps at
-once, because a driver with no worker to evict and a worker with no driver are
-each half a feature.
+once — a driver with no worker to evict and a worker with no driver are each half
+a feature — and then states the one thing it cannot do: the first worker is
+pinned, so pressure cannot evict it yet.
 
-Every statement below is written against the tree at `823ed39`. Where a claim is
-about code that exists, the file and the fact are named so a reviewer can check
-it rather than trust it.
+Every statement below is written against the tree at `4481531`, this branch's
+base, and none of the files it cites changed on `main` through `c3ce406`. Where a
+claim is about code that exists, the file and the fact are named so a reviewer
+can check it rather than trust it.
 
 ## Decision
 
@@ -137,7 +139,8 @@ executable, args and cwd the runtime already computes for the provider.
    the driver's own close, not an idle timer.
 
 One factory instance serves all three managers; each `connect` takes its own
-lease, so the index lane cannot be evicted while a probe lane is idle.
+lease. An idle probe lane therefore releases only its own lease — the worker stays
+leased by the pinned main lane, so a lane closing is never what frees it.
 
 ## Worker manifest
 
@@ -148,7 +151,7 @@ lease, so the index lane cannot be evicted while a probe lane is idle.
   runtimeKind: 'external-process',
   activation: 'on-demand',
   costClass: 'large',
-  idleTtlMs: 5 * 60_000,   // 5 min: only releaseIdle's zero-check and evictionPlan's 5 s clamp read it
+  idleTtlMs: 5 * 60_000,   // 5 min: read by releaseIdle's zero-check, evictionPlan's 5 s clamp, and sweep()
   startupTimeoutMs: 30_000,
   shutdownTimeoutMs: 10_000,
   recyclable: true,
@@ -156,11 +159,16 @@ lease, so the index lane cannot be evicted while a probe lane is idle.
 }
 ```
 
-`recyclable: true` is the point of the whole phase: an idle provider must be
-stoppable under pressure and start again on the next call. The provider is
-restartable by design — `McpSessionManager` already reconnects, and the driver's
-restart tests (`native-thai-rag-provider.test.ts`) cover provider loss — so
-recycling it costs a cold start, not correctness.
+`recyclable: true` is what the phase needs: an idle provider is restartable, so
+stopping it costs a cold start, not correctness. Restart is not automatic,
+though. `McpSessionManager.ensure` reuses an entry whose launch fingerprint still
+matches and does not probe the transport
+(`packages/extensions/src/mcp-session-manager.ts:296-300`), and a provider call
+has no retry around `sessions.call`
+(`apps/cli/src/runtime/native-thai-rag-provider.ts:2364-2371`): after the child
+dies the next call fails and only writes a journal line. A fresh child therefore
+needs the manager entry dropped — which deletes it, so the next `ensure`
+connects — not a raw session close, and not a fresh acquire alone.
 
 `idleTtlMs` is not a copy of any lane's idle close, and it is not a warm-window
 ceiling either. The provider pins the session that holds the worker
@@ -170,18 +178,17 @@ ceiling either. The provider pins the session that holds the worker
 never closed by idle at all; only the unpinned index (24 h) and probe (60 s)
 managers age out (`native-thai-rag-provider.ts:404,412`).
 
-Two readers see `idleTtlMs`. `releaseIdle` stops the worker synchronously only
+Three readers see `idleTtlMs`. `releaseIdle` stops the worker synchronously only
 when the value is `0`, and otherwise lands it in `WARM_IDLE`
-(`packages/capabilities/src/capability-registry.ts:653-665`). `evictionPlan`
+(`packages/capabilities/src/capability-registry.ts:654-666`). `evictionPlan`
 clamps it to 5 s under `elevated` and does not consult it under `critical`
 (`packages/capabilities/src/capability-supervisor.ts:362-372`). `registry.sweep()`
-would stop a worker whose TTL elapsed
-(`packages/capabilities/src/capability-registry.ts:415-426`), but nothing in
-production calls it, and the driver tick below calls `snapshot()` and `reclaim()`
-only. The 5-minute value therefore bounds nothing: a released worker stays up
-until a pressure tick reaches it — the same unbounded class as the
-never-released lease this spec already admits — and closing it needs a `sweep()`
-call from the tick, or a lease deadline in the registry, not a different TTL.
+stops a `WARM_IDLE` worker once the TTL elapsed
+(`capability-registry.ts:415-426`), but nothing in production calls it, and the
+driver tick below calls `snapshot()` and `reclaim()` only. The 5-minute value
+therefore bounds nothing: a released worker stays up until a pressure tick
+reaches it, and closing it needs a `sweep()` call from the tick or a lease
+deadline in the registry, not a different TTL.
 
 ## cwd containment
 
@@ -198,30 +205,40 @@ neither is a registration failure, reported at boot rather than at first call.
 
 ## The driver
 
-One tick, five steps. Its only state is the map of sessions it opened:
+One tick, four steps, no state of its own:
 
 ```text
 sample  ProcessMemoryPressureProbe.sample()      → 'normal' | 'elevated' | 'critical'
 map     tier === 'normal' ? skip : tier
 plan    supervisor.evictionPlan(tier, registry.snapshot())
-        plus every recyclable id of costClass 'large' that the driver holds
-        sessions for and that evictionPlan did not return
-reclaim for each planned id: await registry.reclaim(id)
-                                  → WARM_IDLE stops now; a leased id gets pendingStop
-release for each reclaimed id: close the driver's recorded sessions for it
-                                  → the last release runs the stop
+reclaim for each id: await registry.reclaim(id)   → WARM_IDLE stops now,
+                                                    a leased id only gets pendingStop
 ```
 
-`evictionPlan` alone cannot evict this worker: it returns `WARM_IDLE` ids with
-`leaseCount === 0` (`packages/capabilities/src/capability-supervisor.ts:362-372`),
-and the pinned main lane holds a lease for the driver's lifetime. The second
-selection is the driver's own, and it is why the driver keeps the map: the
-registry counts leases but does not name their holders (`leaseCount` is an
-anonymous counter, `packages/capabilities/src/capability-registry.ts:101`), so
-nothing upstream can say which session to close. `shutdown()` already applies
-the same idea to every `WARM_IDLE` then `ACTIVE` id
-(`capability-supervisor.ts:390-406`); a tick doing it under pressure is the
-phase-3 addition.
+What that tick can actually reach, stated plainly: unleased `WARM_IDLE` workers.
+`evictionPlan` returns `WARM_IDLE` ids with `leaseCount === 0`
+(`packages/capabilities/src/capability-supervisor.ts:362-372`), so the provider —
+pinned by a lane that holds a lease for the driver's lifetime — is never in the
+plan. On it, `reclaim` only records `pendingStop`
+(`packages/capabilities/src/capability-registry.ts:497-506`), and the stop runs on
+the last release (`capability-registry.ts:477-490`), which that pin never
+performs. **The provider is therefore not evictable in this phase.** Making it
+evictable needs two things this phase does not have, and inventing them in the
+driver is what earlier drafts of this section got wrong:
+
+1. **Holder attribution.** Leases are an anonymous count
+   (`capability-registry.ts:101`) and `acquire` hands back an opaque
+   `CapabilityLease` (`:345`), so nothing can say which session to close.
+2. **A manager-level lane close.** Dropping the transport is not enough: `ensure`
+   reuses an entry whose launch fingerprint matches and never probes it
+   (`packages/extensions/src/mcp-session-manager.ts:296-300`), and a provider call
+   has no retry (`apps/cli/src/runtime/native-thai-rag-provider.ts:2364-2371`).
+   The close has to delete the manager entry so the next `ensure` connects, which
+   is `drop` (`mcp-session-manager.ts:417-422`) — private today, and pinned lanes
+   are skipped by the idle sweep (`:432-438`).
+
+Both are phase-4 work; the phase-3 deliverable is the tick above plus the
+manifest, factory and cwd decisions around it.
 
 Details that decide whether it is safe:
 
@@ -232,41 +249,28 @@ Details that decide whether it is safe:
   sweeping = false`), so a slow `reclaim` cannot stack.
 - **Failure isolation.** A rejected `reclaim` is logged and skipped; the next
   tick retries. The driver never throws into the interval.
-- **One new surface, and it is driver-local.** The driver reads `snapshot()`,
-  calls `reclaim(id)` and closes sessions it opened itself; it adds no registry
-  or supervisor method. The map is `manifestId → Set<close()>`: written on
-  `connect`, removed on the session's own `close()`. It is the only way to
-  attribute a lease, because `acquire` hands the caller an opaque
-  `CapabilityLease` (`capability-registry.ts:345`) and the registry keeps a
-  count. `PressureTier` is structurally identical to `ResourcePressureState`
-  (`packages/workspace/src/resource-pressure.ts:4`), so the mapping is an
-  assignment, not a table.
-- **Leased workers.** `reclaim` on a leased id records a `pendingStop`
-  (`capability-registry.ts:502-505`) and the stop runs on the last release
-  (`capability-registry.ts:477-490`). This worker is always in that shape: the
-  pinned main lane holds one lease for the driver's lifetime, so eviction is a
-  two-part step — `reclaim(id)`, then close the driver's recorded sessions for
-  that id, and the last release runs the stop. Without the second part the
-  provider is un-evictable, which is the leak this phase narrows below.
-- **Calls in flight are not drained.** Closing a session does not wait for its
-  queue (`McpSessionManager.drop` closes and returns,
-  `packages/extensions/src/mcp-session-manager.ts:415-422`), so a call running
-  when pressure closes its lane fails the way a crashed child fails, and the
-  provider's existing restart path retries it. Eviction is therefore not
-  transparent to a concurrent caller; it is the same failure the worker already
-  has to survive.
+- **No new surface.** The driver reads `snapshot()` and calls `reclaim(id)`; it
+  adds no registry or supervisor method. `PressureTier` is structurally identical
+  to `ResourcePressureState` (`packages/workspace/src/resource-pressure.ts:4`), so
+  the mapping is an assignment, not a table.
+- **Repeating `reclaim` is harmless.** A non-recyclable id, or one not in
+  `ACTIVE`/`WARM_IDLE`, returns `ok`; a leased id rewrites the same
+  `pendingStop` string, which the last release clears
+  (`capability-registry.ts:497-506`, `:477-490`). A tick that retries a
+  still-blocked id changes nothing.
 
 ## What this phase does not bound
 
-Phase 2 left one leak open and this phase narrows it rather than closing it: a
-resident worker whose lease is held by a caller the driver does not own has no
-deadline. The driver's `reclaim` becomes a `pendingStop` and waits for a release
-that may never come, and the driver can only close sessions it opened. The
-provider is not in that class — every lane that leases it was created by the
-driver's factory, so the tick can close them — but a future worker leased
-directly by callers would be. That is observable: `health(id)` keeps reporting
-the live worker and its lease count, and it is bounded to one worker per id,
-because the registry starts only from `COLD`.
+Phase 2 left one leak open and this phase does not close it: a resident worker
+whose lease is never released has no deadline. The driver's `reclaim` becomes a
+`pendingStop` and waits for a release that never comes. That is observable —
+`health(id)` keeps reporting the live worker and its lease count — and it is
+bounded to one worker per id, because the registry starts only from `COLD`.
+
+The provider is in that class for its whole life, by design: the driver pins the
+lane that holds the worker (`native-thai-rag-provider.ts:554`) and unpins it only
+in the stop path (`:711`). Eviction waits on the two phase-4 pieces above, not on
+a different TTL.
 
 Closing it needs a lease deadline, which is a registry concept (a lease that
 expires) and not a driver concept. It stays out of phase 3 on purpose: expiring
@@ -293,23 +297,25 @@ bug. Recorded as an open question, not as a promise.
   hold two leases for one worker.
 - Registry/supervisor integration: a reclamation order on a leased worker becomes
   `pendingStop` and runs on the last release; `WARM_IDLE` under `elevated`
-  respects the 5 s clamp; `critical` evicts an idle worker immediately.
+  respects the 5 s clamp; `critical` evicts an idle worker immediately; a second
+  `reclaim` on the same leased id is a no-op.
 - Driver: normal tier reclaims nothing; a slow reclaim does not stack ticks; a
-  rejected reclaim does not stop the interval; shutdown cancels the timer; the
-  session map drops an entry when that session closes.
-- Provider end-to-end: with the factory injected, a provider call starts a
-  supervised child and records its session under the id; `evictionPlan` alone
-  returns nothing for it while the main lane is pinned (the regression this
-  design exists to avoid); a critical sample takes the driver's own selection,
-  reclaims the id, closes the recorded sessions, the pending stop runs, and the
-  next call starts a new child; an idle close on an unpinned lane releases only
-  that lane's lease and leaves the worker `ACTIVE`.
+  rejected reclaim does not stop the interval; shutdown cancels the timer.
+- Provider, negative case only: with the factory injected, a provider call starts
+  a supervised child and the pinned main lane holds its lease; `evictionPlan`
+  returns nothing for the id at any tier, and `reclaim` leaves the worker
+  `ACTIVE` with `pendingStop` set — the regression guard for the phase-4 gap this
+  spec records. An idle close on an unpinned lane releases only that lane's lease
+  and also leaves the worker `ACTIVE`.
 - `verify:local --pr <n>` on the exact head, plus the exact-head review capsule,
   as the repository requires.
 
 ## Non-goals
 
 - Supervising the shell backend, the browser backend or the native host.
+- Evicting a pinned, leased worker. The provider stays un-evictable under
+  pressure until holder attribution and a manager-level lane close exist; the
+  tick's reach is unleased `WARM_IDLE` workers only.
 - A lease deadline, or any expiry of a live lease.
 - A pressure queue, admission change or backpressure policy: admission keeps
   refusing with `RESOURCE_PRESSURE` exactly as `ResourceAdmission` does today.

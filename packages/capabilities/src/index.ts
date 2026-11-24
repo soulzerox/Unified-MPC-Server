@@ -110,6 +110,7 @@ export {
   type CapabilitySupervisorOptions,
   type CapabilityWorkerHealth,
   type CapabilityWorkerSpec,
+  type WorkerPipes,
   type EvictionCandidate,
   type PressureTier,
   type ResolveWorkerCwd,

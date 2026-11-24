@@ -1,4 +1,5 @@
 import path from 'node:path';
+import type { Readable, Writable } from 'node:stream';
 
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { ProcessManager } from '@unified-mpc/process';
@@ -60,6 +61,13 @@ export interface CapabilityWorkerSpec {
   readonly args: readonly string[];
   /** Path as requested; `register` resolves it through `resolveWorkerCwd`. */
   readonly cwd: string;
+  /**
+   * Asks the process manager to hand its pipes to the supervisor. Only a worker
+   * that carries a transport needs them; a plain worker keeps the default.
+   */
+  readonly exposeStdio?: boolean;
+  /** Merged over the sanitized base environment by the process manager. */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -115,11 +123,19 @@ export interface CapabilitySupervisorOptions {
   readonly shutdownDeadlineMs?: number;
 }
 
+export type WorkerPipes = {
+  readonly stdin: Writable;
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+};
+
 interface WorkerRecord {
   readonly manifest: CapabilityManifest;
   /** Absent for `in-process`: no process, and the hooks are no-ops. */
-  readonly spec?: { readonly executable: string; readonly args: readonly string[]; readonly cwd: string };
+  readonly spec?: CapabilityWorkerSpec;
   processId?: string | undefined;
+  /** The live pipes of the current worker, kept only for `exposeStdio` specs. */
+  pipes?: WorkerPipes | undefined;
   starts: number;
   readonly crashTimes: number[];
   stopUnverified: boolean;
@@ -244,7 +260,13 @@ export class CapabilitySupervisor {
 
       this.records.set(manifest.id, {
         ...this.newRecord(manifest),
-        spec: { executable: spec.executable, args: [...spec.args], cwd: resolvedCwd.value },
+        spec: {
+          executable: spec.executable,
+          args: [...spec.args],
+          cwd: resolvedCwd.value,
+          ...(spec.exposeStdio === undefined ? {} : { exposeStdio: spec.exposeStdio }),
+          ...(spec.env === undefined ? {} : { env: { ...spec.env } }),
+        },
       });
       return ok(undefined);
     } finally {
@@ -276,18 +298,29 @@ export class CapabilitySupervisor {
       executable: spec.executable,
       args: [...spec.args],
       cwd: spec.cwd,
+      ...(spec.exposeStdio === undefined ? {} : { exposeStdio: spec.exposeStdio }),
+      ...(spec.env === undefined ? {} : { env: { ...spec.env } }),
       ...(manifest.recyclable ? {} : { timeoutMs: 0 }),
     };
 
     const attempt = record.starts;
     const spawn = this.processManager.start(startOptions, undefined, (process) => {
+      // The pipes are the attempt's, not the id's: a late spawn from an
+      // abandoned attempt must not hand its streams to the live worker.
+      if (spec.exposeStdio === true && attempt === record.starts
+        && process.stdin !== undefined && process.stdout !== undefined && process.stderr !== undefined) {
+        record.pipes = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr };
+      }
       this.subscribe(record, process.processId, attempt);
     });
     const outcome = await raceDeadline(spawn, manifest.startupTimeoutMs);
     if (!outcome.settled) {
+      // `onCreated` may already have handed this attempt's pipes over; a caller
+      // must never reach a process this attempt is about to discard.
+      if (attempt === record.starts) record.pipes = undefined;
       this.recordFailure(record, 'start-failed');
       void spawn.then(
-        (late) => this.discardLateStart(record, late),
+        (late) => this.discardLateStart(record, late, attempt),
         () => undefined,
       );
       return err(appError('PROCESS_TIMEOUT', `capability ${manifest.id} did not spawn inside ${manifest.startupTimeoutMs}ms`, true, { reason: 'start_timeout' }));
@@ -298,7 +331,10 @@ export class CapabilitySupervisor {
       // fails has already subscribed; leaving it registered would let this
       // attempt's close report a death inside a later attempt's start. Scoped to
       // this attempt for the same reason the listener is.
-      if (attempt === record.starts) this.unsubscribe(record);
+      if (attempt === record.starts) {
+        this.unsubscribe(record);
+        record.pipes = undefined;
+      }
       this.recordFailure(record, 'start-failed');
       return started;
     }
@@ -306,6 +342,7 @@ export class CapabilitySupervisor {
       // The registry writes `ACTIVE` only after this hook resolves, so a death
       // delivered from `onCreated` is reported here instead of being dropped.
       record.pendingDeath = false;
+      record.pipes = undefined;
       this.unsubscribe(record);
       this.recordFailure(record, 'worker-exited');
       void this.processManager.stop(started.value.processId);
@@ -331,6 +368,7 @@ export class CapabilitySupervisor {
     // exit it was asked to perform too, and the guard must not depend on which
     // notification lands first.
     this.unsubscribe(record);
+    record.pipes = undefined;
     const outcome = await raceDeadline(this.processManager.stop(processId), manifest.shutdownTimeoutMs);
     const status = this.processManager.status(processId);
     const unverified = !outcome.settled
@@ -369,6 +407,15 @@ export class CapabilitySupervisor {
           || this.now() - candidate.idleSince >= Math.min(candidate.idleTtlMs, ELEVATED_IDLE_TTL_MS)))
       .sort((left, right) => left.idleSince - right.idleSince);
     return eligible.map((candidate) => candidate.id);
+  }
+
+  /**
+   * The pipes of a live worker registered with `exposeStdio`, or `undefined` when
+   * it is not running. A caller bookkeeping a connection over them must hold a
+   * lease: a reclaim stops the process underneath.
+   */
+  public pipes(id: string): WorkerPipes | undefined {
+    return this.records.get(id)?.pipes;
   }
 
   /** Counts a diagnosis needs; no per-request allocation. */
@@ -476,12 +523,16 @@ export class CapabilitySupervisor {
     }
     if (state !== 'ACTIVE' && state !== 'WARM_IDLE') return;
     record.processId = undefined;
+    record.pipes = undefined;
     this.recordFailure(record, 'worker-exited');
     this.lifecycle.fail(record.manifest.id, 'worker-exited');
   }
 
-  private discardLateStart(record: WorkerRecord, late: Result<{ readonly processId: string }>): void {
+  private discardLateStart(record: WorkerRecord, late: Result<{ readonly processId: string }>, attempt: number): void {
     if (!late.ok) return;
+    // The pipes this late spawn handed over belong to the attempt being
+    // discarded; a newer attempt's pipes must stay reachable.
+    if (attempt === record.starts) record.pipes = undefined;
     // A later start of the same id may already own the subscription; only this
     // attempt's own subscription may be dropped.
     if (record.subscribedProcessId === late.value.processId) this.unsubscribe(record);

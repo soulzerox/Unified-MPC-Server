@@ -1,3 +1,5 @@
+import { PassThrough } from 'node:stream';
+
 import { describe, expect, it } from 'vitest';
 
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -653,5 +655,78 @@ describe('capability supervisor shutdown', () => {
     expect(lifecycle.stateOf('leased')).toBe('ACTIVE');
     const leasedHealth = supervisor.health().find((entry) => entry.id === 'leased');
     expect(leasedHealth?.stopUnverified).toBeUndefined();
+  });
+});
+
+describe('capability supervisor worker pipes', () => {
+  it('hands a supervised worker\'s pipes out and forgets them on stop', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    processes.configure({
+      start: async (_spec, onCreated) => {
+        const process = { ...managedProcess('proc-pipes', 'running'), stdin, stdout, stderr };
+        onCreated?.(process);
+        return ok(process);
+      },
+    });
+    await supervisor.register(manifest(), { ...spec, exposeStdio: true, env: { THAI_RAG_TEST_KEY: 'value' } });
+    lifecycle.set('worker', 'STARTING');
+
+    await supervisor.start(manifest());
+
+    // The spec reaches the process manager unchanged: the supervisor does not
+    // reinterpret the two fields it only forwards.
+    expect(processes.specs[0]).toMatchObject({ exposeStdio: true, env: { THAI_RAG_TEST_KEY: 'value' } });
+    expect(supervisor.pipes('worker')).toEqual({ stdin, stdout, stderr });
+
+    await supervisor.stop(manifest());
+    expect(supervisor.pipes('worker')).toBeUndefined();
+  });
+
+  it('never asks for pipes a plain worker does not need', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+
+    await supervisor.start(manifest());
+
+    expect(processes.specs[0]?.exposeStdio).toBeUndefined();
+    expect(supervisor.pipes('worker')).toBeUndefined();
+  });
+
+  it('drops the pipes of an attempt that failed or timed out after spawning', async () => {
+    const pipesOf = (): { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough } =>
+      ({ stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+    const withSpec = { ...spec, exposeStdio: true };
+
+    const failed = build();
+    await failed.supervisor.register(manifest(), withSpec);
+    failed.processes.configure({
+      start: async (_spec, onCreated) => {
+        const pipes = pipesOf();
+        onCreated?.({ ...managedProcess('dead-on-arrival', 'running'), ...pipes });
+        return err(appError('EXECUTABLE_NOT_FOUND', 'missing'));
+      },
+    });
+    expect((await failed.supervisor.start(manifest())).ok).toBe(false);
+    expect(failed.supervisor.pipes('worker')).toBeUndefined();
+
+    const late = build();
+    await late.supervisor.register(manifest({ startupTimeoutMs: 5 }), withSpec);
+    late.processes.configure({
+      start: (_spec, onCreated) => new Promise((resolve) => {
+        setTimeout(() => {
+          const pipes = pipesOf();
+          onCreated?.({ ...managedProcess('late-pipes', 'running'), ...pipes });
+          resolve(ok(managedProcess('late-pipes', 'running')));
+        }, 30);
+      }),
+    });
+    expect((await late.supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(false);
+    expect(late.supervisor.pipes('worker')).toBeUndefined();
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(late.supervisor.pipes('worker')).toBeUndefined();
   });
 });

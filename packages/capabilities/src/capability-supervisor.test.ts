@@ -441,6 +441,46 @@ describe('capability supervisor crash loop', () => {
   });
 });
 
+describe('capability supervisor late spawn', () => {
+  it('ignores the onCreated of an attempt that already timed out', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ startupTimeoutMs: 5 }), spec);
+    let lateCreated: ((process: ManagedProcess) => void) | undefined;
+    let liveCreated: ((process: ManagedProcess) => void) | undefined;
+    let settleLate: ((value: Result<ManagedProcess>) => void) | undefined;
+    let calls = 0;
+    processes.configure({
+      start: (_spec, onCreated) => {
+        calls += 1;
+        if (calls === 1) {
+          lateCreated = onCreated;
+          // Settles only when the test says so: this is an attempt the
+          // supervisor already abandoned on its deadline.
+          return new Promise((resolve) => { settleLate = resolve; });
+        }
+        liveCreated = onCreated;
+        return Promise.resolve(ok(managedProcess('proc-live', 'running')));
+      },
+    });
+    lifecycle.set('worker', 'STARTING');
+
+    expect((await supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(false);
+    expect((await supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(true);
+    liveCreated?.(managedProcess('proc-live', 'running'));
+
+    // The abandoned attempt reports its process after the live one subscribed;
+    // it must neither take the subscription over nor drop it.
+    lateCreated?.(managedProcess('proc-late', 'running'));
+    settleLate?.(ok(managedProcess('proc-late', 'running')));
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    lifecycle.set('worker', 'ACTIVE');
+    processes.fireExit('proc-live');
+
+    expect(lifecycle.stateOf('worker')).toBe('FAILED');
+    expect(processes.stops).toContain('proc-late');
+  });
+});
+
 describe('capability supervisor registration race', () => {
   it('lets exactly one of two concurrent registrations of the same id win', async () => {
     const { supervisor } = build({
@@ -496,7 +536,8 @@ describe('capability supervisor shutdown', () => {
     ];
     lifecycle.reclaimBehaviour = async (id): Promise<void> => {
       if (id === 'warm') lifecycle.set('warm', 'COLD');
-      if (id === 'leased') lifecycle.set('leased', 'STOPPING', 1);
+      // A lease forbids `STOPPING`: the registry only marks a pending stop and
+      // the release completes it, so the fake must not pretend otherwise.
     };
 
     const startedAt = Date.now();
@@ -525,8 +566,14 @@ describe('capability supervisor shutdown', () => {
       if (id === 'stuck') lifecycle.set('stuck', 'STOPPING');
     };
 
+    const startedAt = Date.now();
     await supervisor.shutdown();
+    const elapsed = Date.now() - startedAt;
 
+    // One capability ignored its grace period, so the sweep must still return,
+    // and it must not overshoot the single deadline it owns.
+    expect(elapsed).toBeGreaterThanOrEqual(20);
+    expect(elapsed).toBeLessThan(300);
     expect(lifecycle.failures).toEqual([{ id: 'stuck', reason: 'stop-unverified' }]);
     expect(lifecycle.stateOf('leased')).toBe('ACTIVE');
     const leasedHealth = supervisor.health().find((entry) => entry.id === 'leased');

@@ -279,8 +279,9 @@ export class CapabilitySupervisor {
       ...(manifest.recyclable ? {} : { timeoutMs: 0 }),
     };
 
+    const attempt = record.starts;
     const spawn = this.processManager.start(startOptions, undefined, (process) => {
-      this.subscribe(record, process.processId);
+      this.subscribe(record, process.processId, attempt);
     });
     const outcome = await raceDeadline(spawn, manifest.startupTimeoutMs);
     if (!outcome.settled) {
@@ -402,8 +403,17 @@ export class CapabilitySupervisor {
     const maxPolls = Math.max(1, Math.ceil(this.shutdownDeadlineMs / SHUTDOWN_POLL_MS));
     for (let poll = 0; poll < maxPolls; poll += 1) {
       if (this.now() >= deadline) break;
-      const stopping = watch.filter((id) => this.lifecycle.health(id)?.state === 'STOPPING');
-      if (stopping.length === 0) return;
+      // A leased id never reaches `STOPPING`: `reclaim` only marks the pending
+      // stop and `releaseLease` completes it, so waiting on `STOPPING` alone
+      // would return before the release-driven stop this sweep ordered. The
+      // deadline still bounds the wait.
+      const pending = watch.filter((id) => {
+        const health = this.lifecycle.health(id);
+        if (health === undefined) return false;
+        return health.state === 'STOPPING'
+          || (health.state === 'ACTIVE' && health.leaseCount > 0);
+      });
+      if (pending.length === 0) return;
       await delay(Math.min(SHUTDOWN_POLL_MS, Math.max(1, deadline - this.now())));
     }
 
@@ -430,7 +440,11 @@ export class CapabilitySupervisor {
     };
   }
 
-  private subscribe(record: WorkerRecord, processId: string): void {
+  private subscribe(record: WorkerRecord, processId: string, attempt: number): void {
+    // An abandoned attempt can report its process after a newer one subscribed;
+    // taking the record over there would drop the live worker's listener and
+    // leave a dead process advertised as `ACTIVE`.
+    if (attempt !== record.starts) return;
     this.unsubscribe(record);
     record.subscribedProcessId = processId;
     record.unsubscribe = this.processManager.onExit(processId, () => {

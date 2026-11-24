@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Result } from '@unified-mpc/domain';
 import type { Workspace, ResolvedWorkspacePath } from './workspace-types.js';
-import { WorkspacePathGuard } from './workspace-path-guard.js';
+import { WorkspacePathGuard, resolveWorkspaceWorkerCwd } from './workspace-path-guard.js';
 
 const temporaryRoots: string[] = [];
 
@@ -140,5 +140,60 @@ describe('WorkspacePathGuard', () => {
       value: { outsideWorkspace: true, absolutePath: outsideNewFile, exists: false },
     });
     expectError(await guard.resolveForRead(workspace, '..' + path.sep + path.basename(outsideRoot) + path.sep + 'proof.txt', authorization), 'PATH_OUTSIDE_WORKSPACE');
+  });
+});
+
+describe('resolveWorkspaceWorkerCwd', () => {
+  function expectCwdError(result: Result<string>, code: 'INVALID_INPUT' | 'PATH_OUTSIDE_WORKSPACE' | 'FILE_NOT_FOUND'): void {
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(code);
+  }
+
+  it('canonicalises a directory inside the root', async () => {
+    const workspace = await createWorkspace();
+
+    await expect(resolveWorkspaceWorkerCwd([workspace.rootPath], path.join('src'))).resolves.toEqual({
+      ok: true,
+      value: await realpath(path.join(workspace.rootPath, 'src')),
+    });
+  });
+
+  it('accepts a relative cwd against the first root and an absolute one inside a later root', async () => {
+    const workspace = await createWorkspace();
+    const other = await createWorkspace();
+
+    await expect(resolveWorkspaceWorkerCwd([workspace.rootPath, other.rootPath], '.')).resolves.toEqual({
+      ok: true,
+      value: workspace.rootPath,
+    });
+    await expect(resolveWorkspaceWorkerCwd([workspace.rootPath, other.rootPath], other.rootPath)).resolves.toEqual({
+      ok: true,
+      value: other.rootPath,
+    });
+  });
+
+  it('refuses a cwd outside every root', async () => {
+    const workspace = await createWorkspace();
+
+    expectCwdError(await resolveWorkspaceWorkerCwd([workspace.rootPath], os.tmpdir()), 'PATH_OUTSIDE_WORKSPACE');
+    expectCwdError(await resolveWorkspaceWorkerCwd([workspace.rootPath], path.join('..', 'outside')), 'PATH_OUTSIDE_WORKSPACE');
+  });
+
+  it('refuses a directory that is inside the root lexically but escapes it through a symlink', async () => {
+    const workspace = await createWorkspace();
+    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'unified-mpc-outside-'));
+    temporaryRoots.push(outsideRoot);
+    const outsideRealPath = await realpath(outsideRoot);
+    await symlink(outsideRealPath, path.join(workspace.rootPath, 'escapes'));
+
+    expectCwdError(await resolveWorkspaceWorkerCwd([workspace.rootPath], path.join('escapes')), 'PATH_OUTSIDE_WORKSPACE');
+  });
+
+  it('reports a missing cwd after checking its canonical ancestor', async () => {
+    const workspace = await createWorkspace();
+
+    expectCwdError(await resolveWorkspaceWorkerCwd([workspace.rootPath], path.join('src', 'missing')), 'FILE_NOT_FOUND');
+    expectCwdError(await resolveWorkspaceWorkerCwd([workspace.rootPath], ''), 'INVALID_INPUT');
+    expectCwdError(await resolveWorkspaceWorkerCwd([], workspace.rootPath), 'INVALID_INPUT');
   });
 });

@@ -172,8 +172,7 @@ export class WorkspacePathGuard {
     }
   }
 
-  private async findExistingAncestor(absolutePath: string): Promise<Result<ExistingAncestor>> {
-    const missing: string[] = [];
+  private async findExistingAncestor(absolutePath: string): Promise<Result<ExistingAncestor>> {    const missing: string[] = [];
     let currentPath = absolutePath;
     const api = hostPathApi(this.platform);
     while (true) {
@@ -188,6 +187,84 @@ export class WorkspacePathGuard {
         missing.unshift(api.basename(currentPath));
         currentPath = parentPath;
       }
+    }
+  }
+}
+
+/**
+ * Canonical cwd for a capability worker (#133 phase 2).
+ *
+ * The containment predicates this package exposes are lexical — `path.relative`
+ * over normalised strings — so a symlinked directory inside a registered root
+ * passes them while `spawn({ cwd })` would still land outside the workspace. The
+ * one canonical resolution that exists is `resolveForRead`, which needs a
+ * `Workspace` and an authorization scope and returns a `ResolvedWorkspacePath`,
+ * so the supervisor cannot reuse it. This is the thin function beside it: realpath
+ * the target, realpath the nearest existing ancestor when the target is missing,
+ * and re-check the roots on the canonical path. Nothing else — no secret scan, no
+ * size decision; those belong to the read and write guards.
+ */
+export async function resolveWorkspaceWorkerCwd(
+  roots: readonly string[],
+  requested: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<Result<string>> {
+  if (roots.length === 0 || typeof requested !== 'string' || requested.length === 0 || requested.includes('\0')) {
+    return err(appError('INVALID_INPUT', 'Worker cwd must be a path inside a registered root'));
+  }
+  if (isForeignAbsolutePath(requested, platform) || (platform !== 'win32' && requested.includes('\\'))) {
+    return err(appError('INVALID_INPUT', 'Path uses a foreign host syntax'));
+  }
+  const api = hostPathApi(platform);
+  const canonicalRoots: string[] = [];
+  for (const root of roots) {
+    const rootPath = resolveHostPath(root, platform);
+    if (rootPath === null) return err(appError('INVALID_INPUT', 'Workspace root uses a foreign host path syntax'));
+    try {
+      canonicalRoots.push(await realpath(rootPath));
+    } catch {
+      return err(appError('WORKSPACE_NOT_FOUND', 'Workspace root was not found'));
+    }
+  }
+  const absolutePath = isAbsoluteHostPath(requested, platform)
+    ? resolveHostPath(requested, platform)!
+    : resolveHostPath(api.join(canonicalRoots[0]!, requested), platform)!;
+  if (!canonicalRoots.some((root) => isHostPathWithin(root, absolutePath, platform))) {
+    return err(appError('PATH_OUTSIDE_WORKSPACE', 'Worker cwd is outside the registered roots'));
+  }
+  let canonicalPath: string;
+  try {
+    canonicalPath = await realpath(absolutePath);
+  } catch {
+    // A missing target is still refused, but only after the same canonical root
+    // check: a symlinked ancestor is how the lexical check above gets bypassed.
+    const ancestor = await nearestExistingHostAncestor(absolutePath, api);
+    if (ancestor === null) return err(appError('PATH_OUTSIDE_WORKSPACE', 'Path has no existing ancestor'));
+    const canonicalAncestor = await realpath(ancestor);
+    if (!canonicalRoots.some((root) => isHostPathWithin(root, canonicalAncestor, platform))) {
+      return err(appError('PATH_OUTSIDE_WORKSPACE', 'Worker cwd escapes its registered root through a symlink'));
+    }
+    return err(appError('FILE_NOT_FOUND', 'Worker cwd was not found'));
+  }
+  if (!canonicalRoots.some((root) => isHostPathWithin(root, canonicalPath, platform))) {
+    return err(appError('PATH_OUTSIDE_WORKSPACE', 'Worker cwd escapes its registered root through a symlink'));
+  }
+  return ok(canonicalPath);
+}
+
+async function nearestExistingHostAncestor(
+  absolutePath: string,
+  api: ReturnType<typeof hostPathApi>,
+): Promise<string | null> {
+  let currentPath = absolutePath;
+  while (true) {
+    try {
+      await lstat(currentPath);
+      return currentPath;
+    } catch {
+      const parentPath = api.dirname(currentPath);
+      if (parentPath === currentPath) return null;
+      currentPath = parentPath;
     }
   }
 }

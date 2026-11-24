@@ -30,6 +30,9 @@ export interface ProcessManagerMcpClientFactoryOptions {
   readonly launch: { readonly command: string; readonly args: readonly string[]; readonly cwd?: string };
 }
 
+/** A child that never emits a frame boundary must fail the transport, not grow memory. */
+const MAX_UNTERMINATED_FRAME_BYTES = 1_048_576;
+
 /** Newline-delimited JSON-RPC over a supervised child's own pipes. */
 export class PipeTransport implements Transport {
   public onclose?: () => void;
@@ -78,6 +81,10 @@ export class PipeTransport implements Transport {
   }
 
   private receive(chunk: string): void {
+    if (this.buffered.length + chunk.length > MAX_UNTERMINATED_FRAME_BYTES) {
+      this.onFailure(new Error(`capability worker wrote more than ${MAX_UNTERMINATED_FRAME_BYTES} bytes without a frame boundary`));
+      return;
+    }
     this.buffered += chunk;
     let newline = this.buffered.indexOf('\n');
     while (newline >= 0) {

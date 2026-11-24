@@ -161,4 +161,27 @@ describe('PipeTransport', () => {
     stdout.write('{"jsonrpc":"2.0","id":2,"result":{}}\n');
     expect(received).toHaveLength(1);
   });
+
+  it('fails instead of buffering an unterminated frame without bound', async () => {
+    const stdout = new PassThrough();
+    const transport = new PipeTransport({ stdin: new PassThrough(), stdout, stderr: new PassThrough() });
+    const errors: Error[] = [];
+    let closes = 0;
+    transport.onerror = (error): void => {
+      errors.push(error);
+    };
+    transport.onclose = (): void => {
+      closes += 1;
+    };
+    await transport.start();
+
+    // 1 MiB of digits, no newline: the transport must give up rather than grow.
+    for (let written = 0; written <= 1_048_576; written += 65_536) {
+      stdout.write('0'.repeat(65_536));
+    }
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toContain('without a frame boundary');
+    expect(closes).toBe(1);
+  });
 });

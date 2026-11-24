@@ -542,8 +542,9 @@ export function createStdioMcpRuntime(
   // pressure sweep can reclaim it instead of a warm worker staying resident. The
   // registry, the supervisor and the worker registration are boot work; the
   // sweep itself is a 30 s unref-ed tick that boot never awaits. A registration
-  // failure is reported here and leaves the provider on its own child lifecycle,
-  // because losing the provider entirely would be worse than keeping it unsupervised.
+  // failure is reported here and fails the provider closed — one spawn path for
+  // one worker is the point of this slice, so there is no unsupervised fallback —
+  // which the host reports as a degraded provider rather than a failed runtime.
   const thaiRagDiagnostics = options.thaiRagDiagnostics ?? ((line: string): void => { process.stderr.write(`${line}\n`); });
   // A caller that injects its own driver owns the provider's child; there is no
   // worker for the supervisor to own.

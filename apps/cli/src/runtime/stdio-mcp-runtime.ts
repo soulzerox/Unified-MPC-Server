@@ -68,6 +68,7 @@ import {
   ThaiRagIndexJobStore,
   ThaiRagProviderCoordinator,
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+  resolveThaiRagProviderRoot,
   type ThaiRagProviderDriver,
 } from '@unified-mpc/thai-rag';
 import {
@@ -108,6 +109,7 @@ import {
   indexCallTimeoutFromEnv,
   type NativeThaiRagWorkspace,
 } from './native-thai-rag-provider.js';
+import { wireThaiRagCapability } from './capability-pressure.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
@@ -510,6 +512,63 @@ export function createStdioMcpRuntime(
       || process.env.UNIFIED_MPC_THAI_RAG_PROVIDER_PATH?.trim()
       || path.join(os.homedir(), 'thai-rag-mcp'),
   );
+  // The supervised child must start with the launch the provider driver will
+  // actually ask for: `start()` rewrites `cwd` to the provider's own sources root
+  // and adds the cache dir and control mode (`native-thai-rag-provider.ts:454-467`).
+  // Registering the install root instead would both refuse that connect and spawn
+  // the worker without the contract env it needs.
+  const thaiRagProviderRoot = resolveThaiRagProviderRoot(dataPath);
+  const thaiRagSourcesRoot = thaiRagProviderRoot.ok
+    ? path.join(thaiRagProviderRoot.value, 'sources')
+    : thaiRagInstallRoot;
+  // The provider creates this root on its own start, but the worker must be
+  // spawnable with it as its cwd before that start happens.
+  if (thaiRagProviderRoot.ok) fs.mkdirSync(thaiRagSourcesRoot, { recursive: true });
+  const thaiRagWorkerLaunch = {
+    executable: process.platform === 'win32'
+      ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')
+      : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
+    args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
+    cwd: thaiRagSourcesRoot,
+    env: {
+      ...thaiRagProviderLaunchEnv(),
+      ...(thaiRagProviderRoot.ok ? {
+        THAI_RAG_CACHE_DIR: path.join(thaiRagProviderRoot.value, 'runtime'),
+        THAI_RAG_CONTROL_MODE: 'unified_native',
+      } : {}),
+    },
+  };
+  // #133 phase 3: the provider child moves under the capability supervisor, so a
+  // pressure sweep can reclaim it instead of a warm worker staying resident. The
+  // registry, the supervisor and the worker registration are boot work; the
+  // sweep itself is a 30 s unref-ed tick that boot never awaits. A registration
+  // failure is reported here and fails the provider closed — one spawn path for
+  // one worker is the point of this slice, so there is no unsupervised fallback —
+  // which the host reports as a degraded provider rather than a failed runtime.
+  const thaiRagDiagnostics = options.thaiRagDiagnostics ?? ((line: string): void => { process.stderr.write(`${line}\n`); });
+  // A caller that injects its own driver owns the provider's child; there is no
+  // worker for the supervisor to own.
+  const thaiRagCapability = options.thaiRagDriver !== undefined
+    ? undefined
+    : wireThaiRagCapability({
+      launch: thaiRagWorkerLaunch,
+      installRoot: thaiRagInstallRoot,
+      // The sources root is runtime-owned, not user input: the provider creates and
+      // owns it, and it is the cwd the driver's own launch asks for.
+      extraCwdRoots: [thaiRagSourcesRoot],
+      workspaceRoots: async (): Promise<readonly string[]> => (await activeWorkspaces()).map((entry) => entry.realRootPath),
+      onError: (error: unknown): void => {
+        thaiRagDiagnostics(`thai-rag capability pressure sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+      },
+    });
+  if (thaiRagCapability !== undefined) {
+    thaiRagCapability.start();
+    void thaiRagCapability.ready.then((runtime) => {
+      if (!runtime.ok) {
+        thaiRagDiagnostics(`thai-rag capability worker unavailable, provider calls fail until it registers: ${runtime.error.message}`);
+      }
+    }).catch(() => undefined);
+  }
   // #210 §1: admission, Goal base pinning and the `code_index` identity port
   // must all read the same base branch, so the policy is built before the
   // provider driver that now needs it.
@@ -525,14 +584,16 @@ export function createStdioMcpRuntime(
     dataRoot: dataPath,
     // #766: stderr is this process's diagnostics channel, and the client never
     // sees the transport failure behind a generic `INTERNAL_ERROR`.
-    diagnostics: options.thaiRagDiagnostics ?? ((line: string): void => { process.stderr.write(`${line}\n`); }),
+    diagnostics: thaiRagDiagnostics,
     launchConfig: {
-      command: process.platform === 'win32'
-        ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')
-        : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
-      args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
-      env: thaiRagProviderLaunchEnv(),
+      command: thaiRagWorkerLaunch.executable,
+      args: [...thaiRagWorkerLaunch.args],
+      cwd: thaiRagWorkerLaunch.cwd,
+      env: thaiRagWorkerLaunch.env,
     },
+    // Take the worker lease before connecting so the provider's sessions are the
+    // supervisor's children, not a second spawn path beside it.
+    ...(thaiRagCapability === undefined ? {} : { clientFactory: thaiRagCapability.factory }),
     canonicalRoot: path.join(dataPath, 'canonical'),
     workspacesProvider: async (): Promise<readonly NativeThaiRagWorkspace[]> => (await rawWorkspaceRepository.list())
       .map((entry) => ({
@@ -1856,6 +1917,9 @@ export function createStdioMcpRuntime(
       publishCredentialSweep.stop();
       mergeReconciliationPoller.close();
       await thaiRagCoordinator.close().catch(() => undefined);
+      // After the provider's own sessions are closed: the sweep stops first, then
+      // any worker still alive is stopped through the supervisor.
+      await thaiRagCapability?.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);
       await workspaceIndex.close().catch(() => undefined);

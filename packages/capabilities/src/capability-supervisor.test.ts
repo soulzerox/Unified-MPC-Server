@@ -292,6 +292,20 @@ describe('capability supervisor start', () => {
     expect(processes.specs[0]?.timeoutMs).toBeUndefined();
     expect(processes.specs[1]?.timeoutMs).toBe(0);
   });
+
+  it('lets the spec state its own wall-clock cap, over the manifest default', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ recyclable: true }), { ...spec, timeoutMs: 0 });
+    await supervisor.register(manifest({ id: 'resident', recyclable: false }), { ...spec, timeoutMs: 5_000 });
+    lifecycle.set('worker', 'STARTING');
+    lifecycle.set('resident', 'STARTING');
+
+    await supervisor.start(manifest({ recyclable: true }));
+    await supervisor.start(manifest({ id: 'resident', recyclable: false }));
+
+    expect(processes.specs[0]?.timeoutMs).toBe(0);
+    expect(processes.specs[1]?.timeoutMs).toBe(5_000);
+  });
 });
 
 describe('capability supervisor worker exit', () => {

@@ -286,6 +286,9 @@ export async function createThaiRagCapabilityRuntime(
     // The worker carries a transport, so its pipes must stay readable.
     exposeStdio: true,
     ...(options.launch.env === undefined ? {} : { env: options.launch.env }),
+    // Recyclable, but not disposable: it serves calls until the sweep evicts it,
+    // so the manager's one-hour wall clock would kill a healthy provider.
+    timeoutMs: 0,
   };
   const worker = await supervisor.register(manifest, spec);
   if (!worker.ok) return worker;

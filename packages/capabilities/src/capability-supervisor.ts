@@ -68,6 +68,12 @@ export interface CapabilityWorkerSpec {
   readonly exposeStdio?: boolean;
   /** Merged over the sanitized base environment by the process manager. */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Wall-clock cap in milliseconds (`0` = no cap). Overrides the default the
+   * supervisor derives from the manifest, so a recyclable worker that serves
+   * calls continuously is not SIGKILLed by a fixed hour.
+   */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -266,6 +272,7 @@ export class CapabilitySupervisor {
           cwd: resolvedCwd.value,
           ...(spec.exposeStdio === undefined ? {} : { exposeStdio: spec.exposeStdio }),
           ...(spec.env === undefined ? {} : { env: { ...spec.env } }),
+          ...(spec.timeoutMs === undefined ? {} : { timeoutMs: spec.timeoutMs }),
         },
       });
       return ok(undefined);
@@ -293,7 +300,8 @@ export class CapabilitySupervisor {
     record.starts += 1;
     const spec = record.spec;
     // A resident worker must not be killed by a fixed hour, so it is the only
-    // activation that drops the manager's wall-clock cap.
+    // activation that drops the manager's wall-clock cap by default. A spec may
+    // state its own cap; the explicit value wins over that default.
     const startOptions = {
       executable: spec.executable,
       args: [...spec.args],
@@ -301,6 +309,7 @@ export class CapabilitySupervisor {
       ...(spec.exposeStdio === undefined ? {} : { exposeStdio: spec.exposeStdio }),
       ...(spec.env === undefined ? {} : { env: { ...spec.env } }),
       ...(manifest.recyclable ? {} : { timeoutMs: 0 }),
+      ...(spec.timeoutMs === undefined ? {} : { timeoutMs: spec.timeoutMs }),
     };
 
     const attempt = record.starts;

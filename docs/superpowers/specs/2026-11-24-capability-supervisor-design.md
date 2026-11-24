@@ -249,11 +249,14 @@ tier is therefore a local union and the caller maps a probe sample onto it.
 
 ## Surface required by phase 2
 
-Six pieces of registry surface do not exist at head and are part of this
-phase, not of the supervisor; a seventh work item lands in
-`packages/workspace`:
+Six pieces of registry surface belong to this phase, not to the supervisor; a
+seventh work item lands in `packages/workspace`. All seven are merged — #973
+(worker cwd), #974 (`start` reports failure), #976 (awaited stop hook), #979
+(lifecycle port), #971 (process `onExit` and `timeoutMs: 0`), and #975 (the
+supervisor itself) — so the items below are the record of what that phase owed,
+written against the phase-2 head rather than against today's main:
 
-1. a `start` option that can report failure. Today it is
+1. a `start` option that can report failure. At that head it is
    `(manifest) => Promise<void> | void` and `start()` coerces the awaited value
    with `.then(() => 'started')`, so a returned `err(...)` would be recorded as
    `ACTIVE` with a dead worker. The option becomes
@@ -316,7 +319,7 @@ phase, not of the supervisor; a seventh work item lands in
    (`isWithin`, `isHostPathWithin`) are lexical — `path.relative` over normalised
    strings — so a symlinked directory inside a registered root passes them while
    `spawn({cwd})` would still land outside the workspace. The one canonical cwd
-   resolution at head is private to the application layer:
+   resolution at that head is private to the application layer:
    `ProcessService.resolveCwd` asks `WorkspacePathGuard.resolveForRead` for the
    realpath of the target, realpaths the nearest existing ancestor when the
    target is missing, and re-checks the root on the canonical path. That needs a
@@ -327,13 +330,19 @@ phase, not of the supervisor; a seventh work item lands in
    canonicalising exactly as `resolveForRead` does — realpath, ancestor realpath
    for a missing target, root re-check on the canonical path — and nothing else:
    no secret scan, no size decision. `@unified-mpc/application` declares neither
-   `capabilities` nor a registry wiring point, so the wiring owner is whichever
-   package constructs the registry: `@unified-mpc/cli` and
-   `@unified-mpc/mcp-server` already depend on both `capabilities` and
-   `workspace`, and phase 2 names one of them and adds no dependency. Without it
-   the single enforcement point the trust section promises has no owner, and a
-   second containment check inside `packages/capabilities` would be exactly the
-   duplicate it forbids.
+   `capabilities` nor a registry wiring point; `@unified-mpc/mcp-server` consumes
+   capability types and metadata helpers but constructs no registry, supervisor
+   or process manager, so the wiring owner is `@unified-mpc/cli`:
+   `apps/cli/src/runtime/stdio-mcp-runtime.ts` is the production place that
+   constructs `ProcessService` (the default in
+   `packages/application/src/project-snapshot-service.ts` is a fallback, not a
+   boot path) and it owns the runtime's workspace roots, and it already depends
+   on both `capabilities` and `workspace`, so naming it adds no dependency. Without a named owner the single enforcement point the
+   trust section promises has no owner, and a second containment check inside
+   `packages/capabilities` would be exactly the duplicate it forbids. The wiring
+   itself lands with the first real worker manifest: a registry constructed with
+   nothing registered enforces nothing, so phase 2 fixes the owner and phase 3's
+   driver lands the construction together with the id it supervises.
 
 Items 3, 5 and 6 plus the existing `health(id)` are exactly what
 `CapabilityLifecyclePort` declares, so the registry implements that interface

@@ -28,6 +28,11 @@ export interface ProcessManagerMcpClientFactoryOptions {
   readonly manifestId: string;
   /** What the runtime already computed, so a mismatched config is caught here. */
   readonly launch: { readonly command: string; readonly args: readonly string[]; readonly cwd?: string };
+  /**
+   * A release the registry refused has no caller left to return it to: the
+   * session is closing. Reported here rather than dropped on the floor.
+   */
+  readonly onReleaseError?: (error: unknown) => void;
 }
 
 /** A child that never emits a frame boundary must fail the transport, not grow memory. */
@@ -121,7 +126,8 @@ export class PipeTransport implements Transport {
  * `connect` takes the lease first, then connects over the pipes the supervisor
  * spawned. The returned session's `close` releases the lease, which is what
  * leaves the worker `WARM_IDLE` and reclaimable under pressure instead of
- * resident for the driver's whole lifetime.
+ * resident for the driver's whole lifetime. A release the registry refuses is
+ * reported through `onReleaseError`, not dropped.
  */
 export class ProcessManagerMcpClientFactory implements McpClientFactory {
   public constructor(private readonly options: ProcessManagerMcpClientFactoryOptions) {}
@@ -142,10 +148,14 @@ export class ProcessManagerMcpClientFactory implements McpClientFactory {
       throw new Error(`capability ${manifestId} refused the lease: ${lease.error.message}`);
     }
     let released = false;
+    const reportRelease = this.options.onReleaseError ?? ((error: unknown): void => {
+      process.stderr.write(`capability ${manifestId} lease release refused: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
     const release = (): void => {
       if (released) return;
       released = true;
-      lease.value.release();
+      const closed = lease.value.release();
+      if (!closed.ok) reportRelease(closed.error);
     };
 
     try {

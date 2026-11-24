@@ -106,6 +106,30 @@ describe('ProcessManagerMcpClientFactory', () => {
     expect(harness.releases).toBe(0);
   });
 
+  it('reports a refused release instead of dropping it', async () => {
+    const reported: unknown[] = [];
+    const harness = source({
+      pipes: fakeWorker(),
+      acquire: async () => ok({
+        release: (): Result<void> => err(appError('CONFLICT', 'capability provider moved to a new generation')),
+      }),
+    });
+    const factory = new ProcessManagerMcpClientFactory({
+      source: harness.source,
+      manifestId: 'provider',
+      launch: LAUNCH,
+      onReleaseError: (error: unknown): void => {
+        reported.push(error);
+      },
+    });
+
+    const session = await factory.connect(config());
+    await session.close();
+
+    expect(reported).toHaveLength(1);
+    expect((reported[0] as { message: string }).message).toMatch(/moved to a new generation/);
+  });
+
   it('refuses a launch config the worker was not registered for, before leasing', async () => {
     const harness = source({ pipes: fakeWorker() });
     const factory = new ProcessManagerMcpClientFactory({ source: harness.source, manifestId: 'provider', launch: LAUNCH });

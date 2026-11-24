@@ -421,6 +421,10 @@ describe('ProcessManager stdio exposure and env', () => {
     if (afterStatus.ok) expect(afterStatus.value).not.toHaveProperty('stdout');
   });
 
+  // Documents the isolation, not a regression proof: on the pre-fix head a pause
+  // taken in `onCreated` was undone by the later `'data'` attach, so this test
+  // passes there too. What would prove it is a caller that pauses after the
+  // listener exists, which the manager does not expose a hook for.
   it('keeps recording logs for a caller that never reads its copy', async () => {
     const manager = new ProcessManager();
     const started = await manager.start({

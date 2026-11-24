@@ -303,9 +303,10 @@ export class ProcessManager {
       return err(appError('INVALID_INPUT', 'Process exposeStdio must be a boolean'));
     }
     if (spec.env !== undefined) {
-      // `spawn` rejects a name holding `=` or NUL, and a value holding NUL, by
-      // throwing synchronously: a caller env that bad must fail here as a Result
-      // instead of escaping the contract.
+      // A NUL in a name or in a value makes `spawn` throw synchronously
+      // (`ERR_INVALID_ARG_VALUE`), and a name holding `=` cannot be expressed in
+      // a POSIX environment at all, so both must fail here as a Result instead of
+      // escaping the contract.
       // A `Map`, a `Date` or a class instance has no enumerable own entries, so it
       // would silently spawn with no caller env at all: refuse it instead.
       const prototype = typeof spec.env === 'object' && spec.env !== null ? Object.getPrototypeOf(spec.env) : undefined;

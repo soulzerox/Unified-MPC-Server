@@ -1,4 +1,4 @@
-import { appError, err, ok } from '@unified-mpc/domain';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { describe, expect, it } from 'vitest';
 
 import {

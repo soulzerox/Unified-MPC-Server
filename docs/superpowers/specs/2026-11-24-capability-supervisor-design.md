@@ -327,13 +327,17 @@ phase, not of the supervisor; a seventh work item lands in
    canonicalising exactly as `resolveForRead` does — realpath, ancestor realpath
    for a missing target, root re-check on the canonical path — and nothing else:
    no secret scan, no size decision. `@unified-mpc/application` declares neither
-   `capabilities` nor a registry wiring point, so the wiring owner is whichever
-   package constructs the registry: `@unified-mpc/cli` and
-   `@unified-mpc/mcp-server` already depend on both `capabilities` and
-   `workspace`, and phase 2 names one of them and adds no dependency. Without it
-   the single enforcement point the trust section promises has no owner, and a
-   second containment check inside `packages/capabilities` would be exactly the
-   duplicate it forbids.
+   `capabilities` nor a registry wiring point, and `@unified-mpc/mcp-server` only
+   assembles tools against services it is handed, so the wiring owner is
+   `@unified-mpc/cli`: `apps/cli/src/runtime/stdio-mcp-runtime.ts` is the one
+   place that constructs `ProcessService` and owns the runtime's workspace roots,
+   and it already depends on both `capabilities` and `workspace`, so naming it
+   adds no dependency. Without a named owner the single enforcement point the
+   trust section promises has no owner, and a second containment check inside
+   `packages/capabilities` would be exactly the duplicate it forbids. The wiring
+   itself lands with the first real worker manifest: a registry constructed with
+   nothing registered enforces nothing, so phase 2 fixes the owner and phase 3's
+   driver lands the construction together with the id it supervises.
 
 Items 3, 5 and 6 plus the existing `health(id)` are exactly what
 `CapabilityLifecyclePort` declares, so the registry implements that interface

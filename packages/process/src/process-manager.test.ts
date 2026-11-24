@@ -2,7 +2,7 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok } from '@unified-mpc/domain';
-import { PathExecutableResolver, ProcessManager, type ExecutableResolver, type ProcessTreeTerminator } from './index.js';
+import { PathExecutableResolver, ProcessManager, MAX_RETAINED_TERMINAL_LOG_BYTES, MAX_RETAINED_TERMINAL_RECORDS, type ExecutableResolver, type ProcessTreeTerminator } from './index.js';
 
 async function waitForState(manager: ProcessManager, processId: string, state: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -384,6 +384,58 @@ describe('ProcessManager', () => {
 
     await expect(manager.stop(first.value.processId)).resolves.toMatchObject({ ok: true });
   });
+
+  it('evicts the oldest finished record once the retained logs outgrow their budget', async () => {
+    const manager = new ProcessManager();
+    const live = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      cwd: process.cwd(),
+    });
+    expect(live.ok).toBe(true);
+    if (!live.ok) return;
+
+    const writeOnce = async (bytes: number): Promise<string> => {
+      const started = await manager.start({
+        executable: process.execPath,
+        args: ['-e', `process.stdout.write('x'.repeat(${bytes}))`],
+        cwd: process.cwd(),
+      });
+      if (!started.ok) throw new Error(started.error.message);
+      await waitForState(manager, started.value.processId, 'exited');
+      return started.value.processId;
+    };
+
+    // Each finished record keeps more than half the budget, so the second one
+    // pushes the first out instead of pinning both ring buffers for the runtime's life.
+    const first = await writeOnce(Math.floor(MAX_RETAINED_TERMINAL_LOG_BYTES * 0.6));
+    const second = await writeOnce(Math.floor(MAX_RETAINED_TERMINAL_LOG_BYTES * 0.6));
+
+    expect(manager.status(first)).toMatchObject({ ok: false, error: { code: 'PROCESS_NOT_FOUND' } });
+    expect(manager.logs(second, { tailLines: 1 }).ok).toBe(true);
+    // Retention never touches a process that is still live.
+    expect(manager.status(live.value.processId).ok).toBe(true);
+    await expect(manager.stop(live.value.processId)).resolves.toMatchObject({ ok: true });
+  }, 60_000);
+
+  it('keeps the retained record count bounded even when every log is tiny', async () => {
+    const manager = new ProcessManager();
+    const processIds: string[] = [];
+    for (let index = 0; index < MAX_RETAINED_TERMINAL_RECORDS + 2; index += 1) {
+      const started = await manager.start({
+        executable: process.execPath,
+        args: ['-e', 'process.stdout.write("tiny\\n")'],
+        cwd: process.cwd(),
+      });
+      if (!started.ok) throw new Error(started.error.message);
+      await waitForState(manager, started.value.processId, 'exited');
+      processIds.push(started.value.processId);
+    }
+
+    expect(manager.list()).toHaveLength(MAX_RETAINED_TERMINAL_RECORDS);
+    expect(manager.status(processIds[0])).toMatchObject({ ok: false, error: { code: 'PROCESS_NOT_FOUND' } });
+    expect(manager.status(processIds[processIds.length - 1]).ok).toBe(true);
+  }, 120_000);
 });
 
 describe('ProcessManager stdio exposure and env', () => {

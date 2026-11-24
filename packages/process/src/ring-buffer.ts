@@ -11,6 +11,11 @@ export class LogRingBuffer {
 
   public constructor(private readonly maxBytes = DEFAULT_MAX_BYTES) {}
 
+  /** Bytes this buffer currently holds, so a retention budget can account for it. */
+  public get byteLength(): number {
+    return this.bytes;
+  }
+
   public append(stream: ProcessLogStream, text: string): void {
     const chunks = text.split(/(?<=\n)/).filter((chunk) => chunk.length > 0);
     for (const chunk of chunks) this.appendChunk(stream, chunk);

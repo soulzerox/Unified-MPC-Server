@@ -11,8 +11,10 @@ once — a driver with no worker to evict and a worker with no driver are each h
 a feature — and then states the one thing it cannot do: the first worker is
 pinned, so pressure cannot evict it yet.
 
-Every statement below is written against the tree at `4481531`, this branch's
-base, and none of the files it cites changed on `main` through `c3ce406`. Where a
+Every statement below is written against the tree at `acd7fb5`, this branch's
+base; `capability-supervisor.ts` gained the worker-pipe accessor in `acd7fb5`, so
+the ranges it cites were re-checked there, and the other cited files are
+unchanged on `main`. Where a
 claim is about code that exists, the file and the fact are named so a reviewer
 can check it rather than trust it.
 
@@ -182,7 +184,7 @@ Three readers see `idleTtlMs`. `releaseIdle` stops the worker synchronously only
 when the value is `0`, and otherwise lands it in `WARM_IDLE`
 (`packages/capabilities/src/capability-registry.ts:654-666`). `evictionPlan`
 clamps it to 5 s under `elevated` and does not consult it under `critical`
-(`packages/capabilities/src/capability-supervisor.ts:362-372`). `registry.sweep()`
+(`packages/capabilities/src/capability-supervisor.ts:400-411`). `registry.sweep()`
 stops a `WARM_IDLE` worker once the TTL elapsed
 (`capability-registry.ts:415-426`), but nothing in production calls it, and the
 driver tick below calls `snapshot()` and `reclaim()` only. The 5-minute value
@@ -217,7 +219,7 @@ reclaim for each id: await registry.reclaim(id)   → WARM_IDLE stops now,
 
 What that tick can actually reach, stated plainly: unleased `WARM_IDLE` workers.
 `evictionPlan` returns `WARM_IDLE` ids with `leaseCount === 0`
-(`packages/capabilities/src/capability-supervisor.ts:362-372`), so the provider —
+(`packages/capabilities/src/capability-supervisor.ts:400-411`), so the provider —
 pinned by a lane that holds a lease for the driver's lifetime — is never in the
 plan. On it, `reclaim` only records `pendingStop`
 (`packages/capabilities/src/capability-registry.ts:497-506`), and the stop runs on

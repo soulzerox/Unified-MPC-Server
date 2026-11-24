@@ -206,6 +206,12 @@ release_commit="$(node --input-type=commonjs -e '
 # `mv` dance proved, now done without touching the checkout.
 remove_snapshot_worktree
 [[ ! -d "$source_snapshot" ]]
+# And the registration must not outlive the run: a leftover one points at a
+# deleted path in the gitdir this checkout shares with every goal worktree, so
+# each later gate run carries it (#969). Match on this run's own path rather
+# than on the admin name, so a concurrent worktree of the same clone is not
+# mistaken for a leak.
+[[ -z "$(git -C "$REPO_ROOT" worktree list --porcelain | grep -F -- "$source_snapshot" || true)" ]]
 
 node "$SCRIPT_DIR/smoke-materialized-runtime.mjs" "$release"
 

@@ -68,7 +68,10 @@ The cost is stated rather than hidden: for an id whose spec states `0` there is
 no timed kill, so `shutdown()` at the process boundary is the end of its life,
 `health(id)` is the only report that it is still up, and the registry starts
 only from `COLD` — a recycled one is replaced at most once per id instead of
-accumulating. A `recyclable: true` id that relies on the default keeps the
+accumulating. "Still up" is all that report proves: a worker that stays alive but
+wedges is not replaced either, because the timeout was the only thing that could
+have noticed and the supervisor has no in-worker liveness check to put in its
+place. A `recyclable: true` id that relies on the default keeps the
 backstop, and a future worker with a bounded lease should not state `0`.
 
 ## Seam
@@ -400,9 +403,11 @@ Two additions belong to the process package instead, and neither is optional:
   Thai-RAG provider runtime states `0`, and the amendment under "Decision" gives
   the reason and the bounds it leaves. So the wall-clock backstop still
   applies to a worker whose lease a caller leaks. For a resident id the cap is
-  deliberately gone — a resident worker must not be killed by a fixed hour, and a
-  one-hour `timed_out` would reach the new `onExit` and be reported as
-  `worker-exited` → `FAILED` — and phase 2 ships no
+  deliberately gone by default — a resident worker must not be killed by a fixed
+  hour, and a one-hour `timed_out` would reach the new `onExit` and be reported
+  as `worker-exited` → `FAILED`; a resident spec that states a nonzero
+  `timeoutMs` opts back into exactly that reported kill, so stating one there
+  needs its own reason. Phase 2 also ships no
   replacement bound for one whose lease is never released: `shutdownTimeoutMs`
   only bounds a stop that was already ordered, the crash-loop refusal only
   refuses a new start, and `reclaim` needs a driver phase 2 does not ship. Such a

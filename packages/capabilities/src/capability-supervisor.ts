@@ -296,8 +296,9 @@ export class CapabilitySupervisor {
     if (!started.ok) {
       // `onCreated` runs before the start promise settles, so a spawn that then
       // fails has already subscribed; leaving it registered would let this
-      // attempt's close report a death inside a later attempt's start.
-      this.unsubscribe(record);
+      // attempt's close report a death inside a later attempt's start. Scoped to
+      // this attempt for the same reason the listener is.
+      if (attempt === record.starts) this.unsubscribe(record);
       this.recordFailure(record, 'start-failed');
       return started;
     }

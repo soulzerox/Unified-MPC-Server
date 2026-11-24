@@ -520,6 +520,40 @@ describe('capability supervisor late spawn', () => {
     expect(lifecycle.failures).toEqual([{ id: 'worker', reason: 'worker-exited' }]);
     expect(processes.stops).not.toContain('proc-live');
   });
+
+  it('ignores an exit delivered to a listener that outlived its attempt', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    // A manager that notifies before the unsubscribe lands leaves the dead
+    // attempt's listener callable, so only the attempt guard can reject it.
+    processes.notifyAfterUnsubscribe = true;
+    let calls = 0;
+    let liveCreated: ((process: ManagedProcess) => void) | undefined;
+    let settleLive: ((value: Result<ManagedProcess>) => void) | undefined;
+    processes.configure({
+      start: (_spec, onCreated) => {
+        calls += 1;
+        if (calls === 1) {
+          onCreated?.(managedProcess('proc-dead', 'running'));
+          return Promise.resolve(err(appError('EXECUTABLE_NOT_FOUND', 'Executable was not found')));
+        }
+        liveCreated = onCreated;
+        return new Promise((resolve) => { settleLive = resolve; });
+      },
+    });
+
+    lifecycle.set('worker', 'STARTING');
+    expect((await supervisor.start(manifest())).ok).toBe(false);
+
+    lifecycle.set('worker', 'STARTING');
+    const second = supervisor.start(manifest());
+    processes.fireExit('proc-dead');
+    liveCreated?.(managedProcess('proc-live', 'running'));
+    settleLive?.(ok(managedProcess('proc-live', 'running')));
+
+    expect((await second).ok).toBe(true);
+    expect(processes.stops).not.toContain('proc-live');
+  });
 });
 
 describe('capability supervisor registration race', () => {

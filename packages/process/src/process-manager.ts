@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { PassThrough } from 'node:stream';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import { PathExecutableResolver, type ExecutableResolver } from './executable-resolver.js';
 import { LogRingBuffer } from './ring-buffer.js';
@@ -37,6 +38,8 @@ interface ManagedRecord {
   terminationVerified?: Promise<void>;
   resolveTerminationVerified?: () => void;
   exitListeners?: Set<() => void>;
+  /** Caller-facing copies of the pipes, present only for `exposeStdio`. */
+  tee?: { readonly stdout: PassThrough; readonly stderr: PassThrough };
 }
 
 export class ProcessManager {
@@ -80,7 +83,7 @@ export class ProcessManager {
     const processId = randomUUID();
     const child = spawn(invocation.value.executable, [...invocation.value.args], {
       cwd: spec.cwd,
-      env: createSafeEnvironment(process.env),
+      env: { ...createSafeEnvironment(process.env), ...(spec.env ?? {}) },
       shell: false,
       detached: process.platform !== 'win32',
       windowsHide: true,
@@ -94,10 +97,28 @@ export class ProcessManager {
       logs: new LogRingBuffer(),
       state: 'starting',
     };
+    // The pipes are read here, once, before any caller can see them: the ring
+    // buffer and the tee are fed from the same chunk, so a caller that pauses
+    // its copy cannot stall diagnostics.
+    const tee = spec.exposeStdio === true
+      ? { stdout: new PassThrough(), stderr: new PassThrough() }
+      : undefined;
+    if (tee !== undefined) record.tee = tee;
+    // Reached through `record.tee` rather than the captured `tee`: a chunk that
+    // lands after `endTee` would otherwise be written into an ended stream and
+    // throw `ERR_STREAM_WRITE_AFTER_END` inside a `'data'` handler.
+    child.stdout?.on('data', (chunk: Buffer) => {
+      record.logs.append('stdout', chunk.toString('utf8'));
+      // ponytail: an unread tee buffers without bound; add a cap when a consumer
+      // is allowed to stall for long.
+      record.tee?.stdout.write(chunk);
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      record.logs.append('stderr', chunk.toString('utf8'));
+      record.tee?.stderr.write(chunk);
+    });
     this.records.set(processId, record);
-    onCreated?.(this.snapshot(record));
-    child.stdout?.on('data', (chunk: Buffer) => record.logs.append('stdout', chunk.toString('utf8')));
-    child.stderr?.on('data', (chunk: Buffer) => record.logs.append('stderr', chunk.toString('utf8')));
+    onCreated?.(this.snapshot(record, tee));
     child.once('error', (error: Error & { code?: string }) => this.handleError(record, error));
     child.once('close', (exitCode: number | null) => this.handleClose(record, exitCode));
 
@@ -278,18 +299,49 @@ export class ProcessManager {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMEOUT_MS) {
       return err(appError('INVALID_INPUT', 'Process timeout is invalid'));
     }
+    if (spec.exposeStdio !== undefined && typeof spec.exposeStdio !== 'boolean') {
+      return err(appError('INVALID_INPUT', 'Process exposeStdio must be a boolean'));
+    }
+    if (spec.env !== undefined) {
+      // A NUL in a name or in a value makes `spawn` throw synchronously
+      // (`ERR_INVALID_ARG_VALUE`), and a name holding `=` cannot be expressed in
+      // a POSIX environment at all, so both must fail here as a Result instead of
+      // escaping the contract.
+      // A `Map`, a `Date` or a class instance has no enumerable own entries, so it
+      // would silently spawn with no caller env at all: refuse it instead.
+      const prototype = typeof spec.env === 'object' && spec.env !== null ? Object.getPrototypeOf(spec.env) : undefined;
+      const isPlain = prototype === Object.prototype || prototype === null;
+      const valid = isPlain
+        && Object.entries(spec.env).every(([key, value]) => key.trim().length > 0
+          && !key.includes('=')
+          && !key.includes('\0')
+          && typeof value === 'string'
+          && !value.includes('\0'));
+      if (!valid) return err(appError('INVALID_INPUT', 'Process env must be a plain object mapping non-empty names to NUL-free strings'));
+    }
     return ok(undefined);
   }
 
   private handleError(record: ManagedRecord, error: Error & { code?: string }): void {
     if (record.stopRequested === undefined && !isTerminal(record.state)) this.finish(record, 'failed');
     if (error.code !== 'ENOENT') record.exitCode = -1;
+    this.endTee(record);
   }
 
   private handleClose(record: ManagedRecord, exitCode: number | null): void {
     if (record.stopRequested === undefined && !isTerminal(record.state)) this.finish(record, 'exited');
     if (record.exitCode === undefined && exitCode !== null) record.exitCode = exitCode;
+    this.endTee(record);
     this.notifyExit(record);
+  }
+
+  /** A dead child cannot produce more output, so the caller's copies must end too. */
+  private endTee(record: ManagedRecord): void {
+    const tee = record.tee;
+    if (tee === undefined) return;
+    delete record.tee;
+    tee.stdout.end();
+    tee.stderr.end();
   }
 
   private notifyExit(record: ManagedRecord): void {
@@ -349,6 +401,9 @@ export class ProcessManager {
 
   private finish(record: ManagedRecord, state: ManagedProcessState): void {
     record.state = state;
+    // A verified stop can land without a `close` event of its own, and a caller
+    // waiting on the copy must not wait forever.
+    this.endTee(record);
     delete record.stopRequested;
     delete record.errorMessage;
     delete record.terminationTarget;
@@ -377,7 +432,8 @@ export class ProcessManager {
     return record.terminationVerified;
   }
 
-  private snapshot(record: ManagedRecord): ManagedProcess {
+  private snapshot(record: ManagedRecord, tee?: { readonly stdout: PassThrough; readonly stderr: PassThrough }): ManagedProcess {
+    const { stdin } = record.child;
     return {
       processId: record.processId,
       executable: record.spec.executable,
@@ -388,6 +444,8 @@ export class ProcessManager {
       ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
       ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
       ...(record.errorMessage === undefined ? {} : { error: record.errorMessage }),
+      ...(tee === undefined || stdin === null ? {} : { stdin }),
+      ...(tee === undefined ? {} : { stdout: tee.stdout, stderr: tee.stderr }),
     };
   }
 }

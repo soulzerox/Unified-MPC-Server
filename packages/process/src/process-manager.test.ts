@@ -386,6 +386,168 @@ describe('ProcessManager', () => {
   });
 });
 
+describe('ProcessManager stdio exposure and env', () => {
+  it('hands the pipes to onCreated when the spec asks, without losing the log ring buffer', async () => {
+    const manager = new ProcessManager();
+    let created: import('./index.js').ManagedProcess | undefined;
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', "process.stdout.write('exposed-marker\\n')"],
+      cwd: process.cwd(),
+      exposeStdio: true,
+    }, undefined, (handle) => { created = handle; });
+
+    expect(started.ok).toBe(true);
+    expect(created?.stdout).toBeDefined();
+    expect(created?.stderr).toBeDefined();
+    if (!started.ok) return;
+
+    const seen: string[] = [];
+    created?.stdout?.on('data', (chunk: Buffer) => seen.push(chunk.toString('utf8')));
+
+    await waitForState(manager, started.value.processId, 'exited');
+    const logs = manager.logs(started.value.processId, {});
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) return;
+    expect(logs.value.entries.map((entry) => entry.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining('exposed-marker'),
+    ]));
+    expect(seen.join('')).toContain('exposed-marker');
+
+    // The returned handle is a snapshot, never a live handle.
+    expect(started.value.stdout).toBeUndefined();
+    const afterStatus = manager.status(started.value.processId);
+    expect(afterStatus.ok).toBe(true);
+    if (afterStatus.ok) expect(afterStatus.value).not.toHaveProperty('stdout');
+  });
+
+  // Documents the isolation, not a regression proof: on the pre-fix head a pause
+  // taken in `onCreated` was undone by the later `'data'` attach, so this test
+  // passes there too. What would prove it is a caller that pauses after the
+  // listener exists, which the manager does not expose a hook for.
+  it('keeps recording logs for a caller that never reads its copy', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', "for (let index = 0; index < 200; index += 1) process.stdout.write(`line-${index}\\n`)"],
+      cwd: process.cwd(),
+      exposeStdio: true,
+    }, undefined, (handle) => {
+      // A real transport pauses until it reads; this copy is never read.
+      handle.stdout?.pause();
+    });
+
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await waitForState(manager, started.value.processId, 'exited');
+    const logs = manager.logs(started.value.processId, {});
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) return;
+    expect(logs.value.entries.map((entry) => entry.text).join('')).toContain('line-199');
+  });
+
+  it('carries no streams when the spec does not ask for them', async () => {
+    const manager = new ProcessManager();
+    let created: import('./index.js').ManagedProcess | undefined;
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', "process.stdout.write('quiet-marker\\n')"],
+      cwd: process.cwd(),
+    }, undefined, (handle) => { created = handle; });
+
+    expect(started.ok).toBe(true);
+    expect(created?.stdout).toBeUndefined();
+    expect(created?.stdin).toBeUndefined();
+    if (!started.ok) return;
+
+    await waitForState(manager, started.value.processId, 'exited');
+    const logs = manager.logs(started.value.processId, {});
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) return;
+    expect(logs.value.entries.map((entry) => entry.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining('quiet-marker'),
+    ]));
+  });
+
+  it('adds a caller env on top of the sanitized base instead of replacing it', async () => {
+    const manager = new ProcessManager();
+    const probe = "process.stdout.write(JSON.stringify({named:process.env.THAI_RAG_TEST_KEY??null,stripped:process.env.AWS_SECRET_ACCESS_KEY??null}))";
+
+    const previous = process.env.AWS_SECRET_ACCESS_KEY;
+    process.env.AWS_SECRET_ACCESS_KEY = 'ambient-secret';
+    try {
+      const withEnv = await manager.start({
+        executable: process.execPath,
+        args: ['-e', probe],
+        cwd: process.cwd(),
+        env: { THAI_RAG_TEST_KEY: 'caller-value' },
+      });
+      const withoutEnv = await manager.start({
+        executable: process.execPath,
+        args: ['-e', probe],
+        cwd: process.cwd(),
+      });
+
+      expect(withEnv.ok).toBe(true);
+      expect(withoutEnv.ok).toBe(true);
+      if (!withEnv.ok || !withoutEnv.ok) return;
+
+      await waitForState(manager, withEnv.value.processId, 'exited');
+      await waitForState(manager, withoutEnv.value.processId, 'exited');
+      const read = (processId: string): string => {
+        const logs = manager.logs(processId, {});
+        if (!logs.ok) throw new Error('logs unavailable');
+        return logs.value.entries.map((entry) => entry.text).join('');
+      };
+
+      expect(JSON.parse(read(withEnv.value.processId))).toEqual({ named: 'caller-value', stripped: null });
+      expect(JSON.parse(read(withoutEnv.value.processId))).toEqual({ named: null, stripped: null });
+    } finally {
+      if (previous === undefined) delete process.env.AWS_SECRET_ACCESS_KEY;
+      else process.env.AWS_SECRET_ACCESS_KEY = previous;
+    }
+  });
+
+  it('refuses a malformed env or exposeStdio value', async () => {
+    const manager = new ProcessManager();
+    await expect(manager.start({
+      executable: process.execPath,
+      args: ['-e', ''],
+      cwd: process.cwd(),
+      env: { '': 'value' },
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    await expect(manager.start({
+      executable: process.execPath,
+      args: ['-e', ''],
+      cwd: process.cwd(),
+      env: { 'WITH=EQUALS': 'value' },
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    // A Map has no enumerable own entries, so it would silently spawn with no
+    // caller env at all instead of failing the contract.
+    await expect(manager.start({
+      executable: process.execPath,
+      args: ['-e', ''],
+      cwd: process.cwd(),
+      env: new Map([['THAI_RAG_TEST_KEY', 'value']]) as unknown as Record<string, string>,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    // A NUL survives `spawn`'s own checks only by throwing synchronously, so the
+    // contract must answer INVALID_INPUT instead of rejecting the promise.
+    await expect(manager.start({
+      executable: process.execPath,
+      args: ['-e', ''],
+      cwd: process.cwd(),
+      env: { THAI_RAG_TEST_KEY: 'a\0b' },
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    await expect(manager.start({
+      executable: process.execPath,
+      args: ['-e', ''],
+      cwd: process.cwd(),
+      exposeStdio: 'yes' as unknown as boolean,
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+});
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

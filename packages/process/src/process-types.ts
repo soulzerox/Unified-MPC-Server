@@ -1,3 +1,5 @@
+import type { Readable, Writable } from 'node:stream';
+
 export type ManagedProcessState = 'starting' | 'running' | 'exited' | 'failed' | 'stopped' | 'timed_out' | 'termination_unverified';
 
 export interface ManagedProcessStart {
@@ -10,6 +12,18 @@ export interface ManagedProcessStart {
    * value must be a positive integer.
    */
   readonly timeoutMs?: number;
+  /**
+   * Hand the child's pipes to the caller (`onCreated` carries them) instead of
+   * draining them into the log ring buffer alone. The ring buffer keeps
+   * receiving every chunk, so diagnostics do not go blind.
+   */
+  readonly exposeStdio?: boolean;
+  /**
+   * Added on top of the allowlisted base environment. Caller-owned code, not
+   * ambient env: the sanitized base stays the floor, so a stripped variable is
+   * only present when the caller names it here.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 export interface ManagedProcess {
@@ -22,6 +36,13 @@ export interface ManagedProcess {
   readonly finishedAt?: string;
   readonly exitCode?: number;
   readonly error?: string;
+  /**
+   * Present only on the handle `onCreated` receives for a spec that asked for
+   * `exposeStdio`; `status()` and `list()` never project live handles.
+   */
+  readonly stdin?: Writable;
+  readonly stdout?: Readable;
+  readonly stderr?: Readable;
 }
 
 /**

@@ -527,6 +527,14 @@ describe('ProcessManager stdio exposure and env', () => {
       cwd: process.cwd(),
       env: new Map([['THAI_RAG_TEST_KEY', 'value']]) as unknown as Record<string, string>,
     })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    // A NUL survives `spawn`'s own checks only by throwing synchronously, so the
+    // contract must answer INVALID_INPUT instead of rejecting the promise.
+    await expect(manager.start({
+      executable: process.execPath,
+      args: ['-e', ''],
+      cwd: process.cwd(),
+      env: { THAI_RAG_TEST_KEY: 'a\0b' },
+    })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     await expect(manager.start({
       executable: process.execPath,
       args: ['-e', ''],

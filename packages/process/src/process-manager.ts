@@ -104,15 +104,18 @@ export class ProcessManager {
       ? { stdout: new PassThrough(), stderr: new PassThrough() }
       : undefined;
     if (tee !== undefined) record.tee = tee;
+    // Reached through `record.tee` rather than the captured `tee`: a chunk that
+    // lands after `endTee` would otherwise be written into an ended stream and
+    // throw `ERR_STREAM_WRITE_AFTER_END` inside a `'data'` handler.
     child.stdout?.on('data', (chunk: Buffer) => {
       record.logs.append('stdout', chunk.toString('utf8'));
       // ponytail: an unread tee buffers without bound; add a cap when a consumer
       // is allowed to stall for long.
-      tee?.stdout.write(chunk);
+      record.tee?.stdout.write(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       record.logs.append('stderr', chunk.toString('utf8'));
-      tee?.stderr.write(chunk);
+      record.tee?.stderr.write(chunk);
     });
     this.records.set(processId, record);
     onCreated?.(this.snapshot(record, tee));
@@ -300,15 +303,20 @@ export class ProcessManager {
       return err(appError('INVALID_INPUT', 'Process exposeStdio must be a boolean'));
     }
     if (spec.env !== undefined) {
-      // `spawn` throws synchronously on a name holding `=` or NUL, so a caller env
-      // that bad must fail here as a Result instead of escaping the contract.
+      // `spawn` rejects a name holding `=` or NUL, and a value holding NUL, by
+      // throwing synchronously: a caller env that bad must fail here as a Result
+      // instead of escaping the contract.
       // A `Map`, a `Date` or a class instance has no enumerable own entries, so it
       // would silently spawn with no caller env at all: refuse it instead.
       const prototype = typeof spec.env === 'object' && spec.env !== null ? Object.getPrototypeOf(spec.env) : undefined;
       const isPlain = prototype === Object.prototype || prototype === null;
       const valid = isPlain
-        && Object.entries(spec.env).every(([key, value]) => key.trim().length > 0 && !key.includes('=') && !key.includes('\0') && typeof value === 'string');
-      if (!valid) return err(appError('INVALID_INPUT', 'Process env must be a plain object mapping non-empty names to strings'));
+        && Object.entries(spec.env).every(([key, value]) => key.trim().length > 0
+          && !key.includes('=')
+          && !key.includes('\0')
+          && typeof value === 'string'
+          && !value.includes('\0'));
+      if (!valid) return err(appError('INVALID_INPUT', 'Process env must be a plain object mapping non-empty names to NUL-free strings'));
     }
     return ok(undefined);
   }
@@ -392,6 +400,9 @@ export class ProcessManager {
 
   private finish(record: ManagedRecord, state: ManagedProcessState): void {
     record.state = state;
+    // A verified stop can land without a `close` event of its own, and a caller
+    // waiting on the copy must not wait forever.
+    this.endTee(record);
     delete record.stopRequested;
     delete record.errorMessage;
     delete record.terminationTarget;

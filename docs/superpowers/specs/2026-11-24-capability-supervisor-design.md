@@ -122,13 +122,23 @@ export interface CapabilityLifecyclePort {
   fail(id: string, reason: string): Result<void>;
 }
 
+/**
+ * Structural, exactly the calls the supervisor makes: `ProcessManager` satisfies
+ * it, and a test fake can too, which a class-typed option would forbid because
+ * the real class carries private fields.
+ */
+export type CapabilityProcessPort = Pick<
+  ProcessManager,
+  'start' | 'stop' | 'status' | 'onExit'
+>;
+
 export interface CapabilitySupervisorOptions {
   readonly now?: () => number;
   /** Required: the only place a spec's `cwd` becomes trusted. */
   readonly resolveWorkerCwd: ResolveWorkerCwd;
   /** Required: the supervisor cannot report an exit or order a stop without it. */
   readonly lifecycle: CapabilityLifecyclePort;
-  readonly processManager?: ProcessManager;
+  readonly processManager?: CapabilityProcessPort;
   /** Failure window for crash-loop bounding. */
   readonly crashWindowMs?: number;
   readonly maxCrashRestarts?: number;
@@ -513,8 +523,11 @@ would hide a real crash and needs a reason the registry does not have.
 - `termination_unverified` maps to `FAILED` with reason `stop-unverified`, and
   is reported by `health()`; it is never reported as `COLD`.
 - `shutdown()` reads `port.snapshot()` and asks `port.reclaim(id)` for every
-  `WARM_IDLE` and every unleased `ACTIVE` id: one pass over the warm ids, then
-  the rest. **Both passes are the same registry call.** The port has no stop
+  `WARM_IDLE` and every `ACTIVE` id, leased or not: one pass over the warm ids,
+  then the rest. On an unleased id that call is a stop; on a leased one it only
+  marks the pending stop, because `reclaim` takes the `STOPPING` edge only when
+  `leaseCount` is zero, so no kill is ever ordered while a lease is held.
+  **Both passes are the same registry call.** The port has no stop
   operation, `CapabilityRegistry.stop()` is private, and the supervisor has no
   kill primitive of its own, so a supervisor that killed a warm worker directly
   would leave the registry advertising a worker that no longer exists — and the
@@ -546,7 +559,9 @@ would hide a real crash and needs a reason the registry does not have.
   the hook settles `err` — write the same `STOPPING -> FAILED` with the same
   reason. Whichever settles first wins and the second is a no-op rejected from
   `FAILED`; there is one state, one reason, and no ordering the reader has to
-  infer from timing. `fail` is accepted only from `STOPPING`, and the registry's
+  infer from timing. For this deadline path `fail` is accepted only from
+  `STOPPING` — the `ACTIVE|WARM_IDLE -> FAILED` worker-exit edges above are the
+  other, separate case — and the registry's
   continuation writes `COLD` only while the record is still `STOPPING` carrying
   the `stopEpoch` it captured when it took that edge (registry change 3). A `stop`
   hook that finally settles `ok` after the deadline therefore writes nothing: the
@@ -565,7 +580,8 @@ magnitude above a worker's.
 
 ## Verification
 
-Unit tests in `packages/capabilities`, with an injected fake `ProcessManager`, a
+Unit tests in `packages/capabilities`, with a fake `CapabilityProcessPort` (the
+structural type above), a
 fake clock and a constant pressure:
 
 1. `register` refuses a non-`in-process` manifest with no spec, refuses a spec
@@ -603,8 +619,9 @@ fake clock and a constant pressure:
    settles `ok` *after* the deadline wrote `FAILED` writes no transition at all,
    so `FAILED -> COLD` is proven unreachable and the unverified kill stays
    observable through `health()`;
-8. `shutdown()` reclaims the `WARM_IDLE` ids and then the unleased `ACTIVE` ones
-   through the one registry call, waits for a leased capability's pending
+8. `shutdown()` reclaims the `WARM_IDLE` ids and then every `ACTIVE` id — a
+   leased one only gets a pending stop, never a kill — through the one registry
+   call, waits for a leased capability's pending
    `reclaim` to complete on its last release, and returns inside
    `shutdownDeadlineMs` even when one capability ignores its grace period; both
    deadline outcomes are asserted separately — a `STOPPING` id whose termination

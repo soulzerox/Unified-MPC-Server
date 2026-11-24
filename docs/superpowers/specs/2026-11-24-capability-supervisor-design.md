@@ -250,11 +250,13 @@ tier is therefore a local union and the caller maps a probe sample onto it.
 ## Surface required by phase 2
 
 Six pieces of registry surface belong to this phase, not to the supervisor; a
-seventh work item lands in `packages/workspace`. All seven were merged with the
-phase-2 PRs (#975, #978, #979), so this section is the record of what that
-phase owed rather than a description of an unbuilt head:
+seventh work item lands in `packages/workspace`. All seven are merged — #973
+(worker cwd), #974 (`start` reports failure), #976 (awaited stop hook), #979
+(lifecycle port), #971 (process `onExit` and `timeoutMs: 0`), and #975 (the
+supervisor itself) — so the items below are the record of what that phase owed,
+written against the phase-2 head rather than against today's main:
 
-1. a `start` option that can report failure. Today it is
+1. a `start` option that can report failure. At that head it is
    `(manifest) => Promise<void> | void` and `start()` coerces the awaited value
    with `.then(() => 'started')`, so a returned `err(...)` would be recorded as
    `ACTIVE` with a dead worker. The option becomes
@@ -317,7 +319,7 @@ phase owed rather than a description of an unbuilt head:
    (`isWithin`, `isHostPathWithin`) are lexical — `path.relative` over normalised
    strings — so a symlinked directory inside a registered root passes them while
    `spawn({cwd})` would still land outside the workspace. The one canonical cwd
-   resolution at head is private to the application layer:
+   resolution at that head is private to the application layer:
    `ProcessService.resolveCwd` asks `WorkspacePathGuard.resolveForRead` for the
    realpath of the target, realpaths the nearest existing ancestor when the
    target is missing, and re-checks the root on the canonical path. That needs a

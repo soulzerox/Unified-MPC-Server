@@ -90,4 +90,45 @@ describe('capability supervisor with the real ProcessManager', () => {
     expect(registry.health('worker')?.lastTransition?.reason).toBe('worker-exited');
   });
 
+  /**
+   * #133's remaining acceptance item: "repeated activate/recycle loops reach
+   * bounded steady-state RSS". The bound is deliberately generous, because the
+   * invariant is "memory falls again", not a byte budget: a loop that kept a
+   * child, its record or its buffers alive per iteration would still be running
+   * children and a growing resident set after the second cycle.
+   */
+  it('reaches a bounded steady state after repeated activate/recycle cycles', async () => {
+    const { registry, supervisor, processes } = build();
+    const spec = manifest('worker', { idleTtlMs: 0 });
+    expect((await supervisor.register(spec, workerSpec(CHILD))).ok).toBe(true);
+    expect((await registry.register(spec)).ok).toBe(true);
+
+    const cycles = 6;
+    const rssMiB: number[] = [];
+    for (let cycle = 0; cycle < cycles; cycle += 1) {
+      const lease = await registry.acquire('worker');
+      if (!lease.ok) throw new Error(`cycle ${cycle} could not acquire: ${lease.error.message}`);
+      expect(supervisor.health()[0]?.processId).toBeDefined();
+      expect(lease.value.release().ok).toBe(true);
+      await waitUntil(() => registry.health('worker')?.state === 'COLD', `cycle ${cycle} to stop`);
+      rssMiB.push(process.memoryUsage().rss / 1024 / 1024);
+    }
+
+    // Every child is gone, not merely unreferenced: the recycle is a loop, not a ratchet.
+    expect(processes.list().filter((entry) => entry.state === 'running' || entry.state === 'starting')).toHaveLength(0);
+    expect(registry.health('worker')?.leaseCount).toBe(0);
+    expect(rssMiB.at(-1)! - rssMiB[0]!).toBeLessThan(150);
+
+    await supervisor.shutdown();
+    expect(registry.health('worker')?.state).toBe('COLD');
+  }, 60_000);
+
 });
+
+async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+  }
+}

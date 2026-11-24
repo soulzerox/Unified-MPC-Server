@@ -130,6 +130,13 @@ export interface CapabilitySupervisorOptions {
   /** Failure window for crash-loop bounding. */
   readonly crashWindowMs?: number;
   readonly maxCrashRestarts?: number;
+  /**
+   * One deadline for the whole `shutdown()` sweep. Each manifest's
+   * `shutdownTimeoutMs` bounds its own `stop` hook; this bounds the wait across
+   * all of them, so a hundred idle capabilities cannot add up to a hundred
+   * per-manifest windows.
+   */
+  readonly shutdownDeadlineMs?: number;
 }
 
 /**
@@ -485,8 +492,8 @@ would hide a real crash and needs a reason the registry does not have.
 - A leased id never reaches `STOPPING` (`reclaim` only marks a pending stop, and
   `stop` refuses `leaseCount > 0`), so shutdown cannot wait on a kill for it: the
   pending stop completes from `releaseLease` (registry change 3) and the wait is a
-  `port.health(id)` poll against one global deadline. The deadline bounds two
-  outcomes, and they must not be conflated:
+  `port.health(id)` poll against the single `shutdownDeadlineMs` window. The
+  deadline bounds two outcomes, and they must not be conflated:
   - an id that reached `STOPPING` and whose termination could not be verified is
     written `FAILED` with `stop-unverified` through `port.fail`;
   - an id that never reached `STOPPING` is still `ACTIVE` and leased: no kill was
@@ -545,12 +552,12 @@ fake clock and a constant pressure:
    `termination_unverified` state visible instead of claiming a kill;
 8. `shutdown()` reclaims the `WARM_IDLE` ids and then the unleased `ACTIVE` ones
    through the one registry call, waits for a leased capability's pending
-   `reclaim` to complete on its last release, and returns inside the global
-   deadline even when one capability ignores its grace period; both deadline
-   outcomes are asserted separately — a `STOPPING` id whose termination could not
-   be verified is `FAILED` with `stop-unverified`, and a leased id that never
-   reached `STOPPING` keeps `ACTIVE` with no transition, no `stopUnverified` and
-   no invented kill, which is what distinguishes "never shorten a lease" from
+   `reclaim` to complete on its last release, and returns inside
+   `shutdownDeadlineMs` even when one capability ignores its grace period; both
+   deadline outcomes are asserted separately — a `STOPPING` id whose termination
+   could not be verified is `FAILED` with `stop-unverified`, and a leased id that
+   never reached `STOPPING` keeps `ACTIVE` with no transition, no `stopUnverified`
+   and no invented kill, which is what distinguishes "never shorten a lease" from
    "report an unverified kill";
 9. spawn bounds: the supervisor passes `timeoutMs: 0` for a `recyclable: true`
    capability and the manager's default cap for every other activation, a spawn

@@ -80,7 +80,7 @@ export class ProcessManager {
     const processId = randomUUID();
     const child = spawn(invocation.value.executable, [...invocation.value.args], {
       cwd: spec.cwd,
-      env: createSafeEnvironment(process.env),
+      env: { ...createSafeEnvironment(process.env), ...(spec.env ?? {}) },
       shell: false,
       detached: process.platform !== 'win32',
       windowsHide: true,
@@ -95,7 +95,7 @@ export class ProcessManager {
       state: 'starting',
     };
     this.records.set(processId, record);
-    onCreated?.(this.snapshot(record));
+    onCreated?.(this.snapshot(record, spec.exposeStdio === true));
     child.stdout?.on('data', (chunk: Buffer) => record.logs.append('stdout', chunk.toString('utf8')));
     child.stderr?.on('data', (chunk: Buffer) => record.logs.append('stderr', chunk.toString('utf8')));
     child.once('error', (error: Error & { code?: string }) => this.handleError(record, error));
@@ -278,6 +278,16 @@ export class ProcessManager {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMEOUT_MS) {
       return err(appError('INVALID_INPUT', 'Process timeout is invalid'));
     }
+    if (spec.exposeStdio !== undefined && typeof spec.exposeStdio !== 'boolean') {
+      return err(appError('INVALID_INPUT', 'Process exposeStdio must be a boolean'));
+    }
+    if (spec.env !== undefined) {
+      // `spawn` throws synchronously on a name holding `=` or NUL, so a caller env
+      // that bad must fail here as a Result instead of escaping the contract.
+      const valid = typeof spec.env === 'object' && spec.env !== null && !Array.isArray(spec.env)
+        && Object.entries(spec.env).every(([key, value]) => key.trim().length > 0 && !key.includes('=') && !key.includes('\0') && typeof value === 'string');
+      if (!valid) return err(appError('INVALID_INPUT', 'Process env must map non-empty names to strings'));
+    }
     return ok(undefined);
   }
 
@@ -377,7 +387,8 @@ export class ProcessManager {
     return record.terminationVerified;
   }
 
-  private snapshot(record: ManagedRecord): ManagedProcess {
+  private snapshot(record: ManagedRecord, withStdio = false): ManagedProcess {
+    const { stdin, stdout, stderr } = record.child;
     return {
       processId: record.processId,
       executable: record.spec.executable,
@@ -388,6 +399,9 @@ export class ProcessManager {
       ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
       ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
       ...(record.errorMessage === undefined ? {} : { error: record.errorMessage }),
+      ...(withStdio && stdin !== null ? { stdin } : {}),
+      ...(withStdio && stdout !== null ? { stdout } : {}),
+      ...(withStdio && stderr !== null ? { stderr } : {}),
     };
   }
 }

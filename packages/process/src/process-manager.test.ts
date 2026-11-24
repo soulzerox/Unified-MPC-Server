@@ -51,6 +51,87 @@ describe('ProcessManager', () => {
     await expect(manager.stop(started.value.processId)).resolves.toMatchObject({ ok: true });
   });
 
+  it('keeps a child alive when the wall-clock cap is disabled', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'setTimeout(() => {}, 10000)'],
+      cwd: process.cwd(),
+      timeoutMs: 0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    expect(manager.status(started.value.processId)).toMatchObject({ ok: true, value: { state: 'running' } });
+    await expect(manager.stop(started.value.processId)).resolves.toMatchObject({ ok: true });
+  });
+
+  it('rejects a negative wall-clock cap', async () => {
+    const result = await new ProcessManager().start({
+      executable: process.execPath,
+      args: ['-e', 'process.exit(0)'],
+      cwd: process.cwd(),
+      timeoutMs: -1,
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('reports an unrequested exit once through onExit', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'setTimeout(() => process.exit(3), 60)'],
+      cwd: process.cwd(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    let notifications = 0;
+    manager.onExit(started.value.processId, () => { notifications += 1; });
+    await waitForState(manager, started.value.processId, 'exited');
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    expect(notifications).toBe(1);
+  });
+
+  it('replays onExit immediately for a process that is already terminal', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'process.exit(0)'],
+      cwd: process.cwd(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await waitForState(manager, started.value.processId, 'exited');
+    let notifications = 0;
+    manager.onExit(started.value.processId, () => { notifications += 1; });
+
+    expect(notifications).toBe(1);
+  });
+
+  it('stops reporting an exit after the subscription is released', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({
+      executable: process.execPath,
+      args: ['-e', 'setTimeout(() => process.exit(0), 80)'],
+      cwd: process.cwd(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    let notifications = 0;
+    const unsubscribe = manager.onExit(started.value.processId, () => { notifications += 1; });
+    unsubscribe();
+    await waitForState(manager, started.value.processId, 'exited');
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    expect(notifications).toBe(0);
+  });
+
   it('returns EXECUTABLE_NOT_FOUND without accepting an arbitrary shell command', async () => {
     const result = await new ProcessManager().start({
       executable: 'unified-mpc-executable-that-does-not-exist',

@@ -34,8 +34,9 @@ import { ProcessMemoryPressureProbe, type ResourcePressureProbe } from '@unified
  * - a tick that is still running makes the next one a no-op, so a slow reclaim
  *   cannot stack;
  * - a rejected reclaim is reported and skipped, never thrown into the interval;
- * - `cwd` is resolved once, against the canonical install root or a canonical
- *   registered workspace root, and refused otherwise.
+ * - `cwd` is resolved once, against the canonical install root, the provider's
+ *   own sources root, or a canonical registered workspace root, and refused
+ *   otherwise — a sibling or nested path is refused, never contained.
  */
 
 export const THAI_RAG_WORKER_ID = 'thai-rag-provider';
@@ -131,9 +132,10 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
 }
 
 /**
- * The one `cwd` allowlist: the canonical provider install root, or a canonical
- * registered workspace root. Anything else is a registration failure reported at
- * boot, not at first call.
+ * The one `cwd` allowlist: the canonical provider install root, the provider's
+ * own sources root (`extraRoots`), or a canonical registered workspace root.
+ * Comparison is equality, so a sibling or nested path is refused. Anything else
+ * is a registration failure reported at boot, not at first call.
  */
 export function createWorkerCwdResolver(options: {
   readonly installRoot: string;

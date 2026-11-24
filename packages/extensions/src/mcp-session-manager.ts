@@ -438,6 +438,49 @@ export class McpSessionManager {
   }
 }
 
+/**
+ * The `McpClientSession` view of a connected `Client`, shared by every factory
+ * so one transport cannot drift from another in how it maps results or closes.
+ * `close` runs once, after the client is closed, and owns whatever the factory
+ * must release besides the connection itself.
+ */
+export function mcpClientSession(client: Client, close: () => Promise<void>): McpClientSession {
+  let closed = false;
+  return {
+    async listTools(signal?: AbortSignal): Promise<readonly McpToolSummary[]> {
+      const listed = await client.listTools(undefined, signal === undefined ? undefined : { signal });
+      return listed.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description ?? '',
+        ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+        ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
+      }));
+    },
+    async listResources(signal?: AbortSignal): Promise<readonly McpResourceSummary[]> {
+      const listed = await client.listResources(undefined, signal === undefined ? undefined : { signal });
+      return listed.resources.map((resource) => ({
+        uri: resource.uri,
+        ...(resource.name === undefined ? {} : { name: resource.name }),
+        ...(resource.description === undefined ? {} : { description: resource.description }),
+        ...(resource.mimeType === undefined ? {} : { mimeType: resource.mimeType }),
+      }));
+    },
+    async callTool(name: string, args: Readonly<Record<string, unknown>>, callSignal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
+      return client.callTool(
+        { name, arguments: { ...args } },
+        callSignal === undefined && timeoutMs === undefined
+          ? undefined
+          : { ...(callSignal === undefined ? {} : { signal: callSignal }), ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
+      );
+    },
+    async close(): Promise<void> {
+      if (closed) return;
+      closed = true;
+      await close();
+    },
+  };
+}
+
 export const defaultMcpClientFactory: McpClientFactory = {
   async connect(config: McpServerLaunchConfig, signal?: AbortSignal): Promise<McpClientSession> {
     let disposeStderrDrain = (): void => undefined;
@@ -477,44 +520,13 @@ export const defaultMcpClientFactory: McpClientFactory = {
       disposeStderrDrain();
       throw withChildStderr(error, childStderr);
     }
-    let closed = false;
-    return {
-      async listTools(listSignal?: AbortSignal): Promise<readonly McpToolSummary[]> {
-        const listed = await client.listTools(undefined, listSignal === undefined ? undefined : { signal: listSignal });
-        return listed.tools.map((tool) => ({
-          name: tool.name,
-          description: tool.description ?? '',
-          ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
-          ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
-        }));
-      },
-      async listResources(listSignal?: AbortSignal): Promise<readonly McpResourceSummary[]> {
-        const listed = await client.listResources(undefined, listSignal === undefined ? undefined : { signal: listSignal });
-        return listed.resources.map((resource) => ({
-          uri: resource.uri,
-          ...(resource.name === undefined ? {} : { name: resource.name }),
-          ...(resource.description === undefined ? {} : { description: resource.description }),
-          ...(resource.mimeType === undefined ? {} : { mimeType: resource.mimeType }),
-        }));
-      },
-      async callTool(name: string, args: Readonly<Record<string, unknown>>, callSignal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
-        return client.callTool(
-          { name, arguments: { ...args } },
-          callSignal === undefined && timeoutMs === undefined
-            ? undefined
-            : { ...(callSignal === undefined ? {} : { signal: callSignal }), ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
-        );
-      },
-      async close(): Promise<void> {
-        if (closed) return;
-        closed = true;
-        try {
-          await client.close();
-        } finally {
-          disposeStderrDrain();
-        }
-      },
-    };
+    return mcpClientSession(client, async () => {
+      try {
+        await client.close();
+      } finally {
+        disposeStderrDrain();
+      }
+    });
   },
 };
 

@@ -42,9 +42,17 @@ export { McpConfigLoader, exclusionReason, normalizeLaunchConfig, stripJsonComme
 export {
   McpSessionManager,
   defaultMcpClientFactory,
+  mcpClientSession,
   type McpClientFactory,
   type McpClientSession,
 } from './mcp-session-manager.js';
+export {
+  ProcessManagerMcpClientFactory,
+  PipeTransport,
+  type CapabilityWorkerPipes,
+  type CapabilityWorkerSource,
+  type ProcessManagerMcpClientFactoryOptions,
+} from './capability-worker-client-factory.js';
 export {
   PrivateFdStdioClientTransport,
   type PrivateFdStdioClientTransportOptions,

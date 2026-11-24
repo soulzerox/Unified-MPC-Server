@@ -266,7 +266,13 @@ phase, not of the supervisor; a seventh work item lands in
    promise settles. A rejecting hook is caught by that continuation and writes
    `STOPPING -> FAILED` with `stop-unverified`, so the release path never produces
    an unhandled rejection and the releaser still observes the outcome through
-   `health(id)`. Making the private `stop` awaitable changes the public `sweep()`
+   `health(id)`. Since `port.fail` can write `FAILED` for that same record before
+   the awaited hook settles, the two writers are ordered by one guard: the
+   registry's continuation writes `STOPPING -> COLD` **only if the record is still
+   `STOPPING`, at the generation the hook was started for**. A late `ok` after the
+   supervisor already wrote `FAILED` writes nothing, so `FAILED -> COLD` is never
+   taken and the unverified kill cannot be laundered into a clean stop; `fail` is
+   likewise accepted only from `STOPPING` for the deadline path. Making the private `stop` awaitable changes the public `sweep()`
    signature to `Promise<void>`, so its existing test call sites are updated to
    `await` it in the same PR;
 4. a `burst` default of `idleTtlMs = 0` in `normalizeCapabilityManifest`, so
@@ -504,6 +510,16 @@ would hide a real crash and needs a reason the registry does not have.
   unverified", not "killed": `ProcessManager` has already attempted its own
   SIGTERM/SIGKILL escalation inside `ProcessTreeTerminator`, and the supervisor
   has no second kill primitive.
+- Who writes that outcome is fixed, so the deadline cannot be undone later: the
+  supervisor calls `port.fail(id, 'stop-unverified')`, which the registry accepts
+  only from `STOPPING`, and the registry's own stop continuation writes `COLD`
+  only while the record is still `STOPPING` at the generation the hook was started
+  for (registry change 3). A `stop` hook that finally settles `ok` after the
+  deadline therefore writes nothing: the id stays `FAILED`, `health()` keeps
+  reporting `stopUnverified`, and the shutdown path never turns an unverified
+  kill into `COLD`. The supervisor's `stop` hook returns `err` in that case rather
+  than `ok`, so a caller of `reclaim` that is still awaiting the hook sees the
+  same failure the deadline reported.
 
 ## Model lifecycle stays separate
 
@@ -549,7 +565,10 @@ fake clock and a constant pressure:
    without spawning; the registry keeps `FAILED` and writes no invented reason;
 7. `stop` that exceeds `shutdownTimeoutMs` abandons the await, reports
    `stop-unverified`, never `COLD`, and leaves `ProcessManager`'s
-   `termination_unverified` state visible instead of claiming a kill;
+   `termination_unverified` state visible instead of claiming a kill; a hook that
+   settles `ok` *after* the deadline wrote `FAILED` writes no transition at all,
+   so `FAILED -> COLD` is proven unreachable and the unverified kill stays
+   observable through `health()`;
 8. `shutdown()` reclaims the `WARM_IDLE` ids and then the unleased `ACTIVE` ones
    through the one registry call, waits for a leased capability's pending
    `reclaim` to complete on its last release, and returns inside

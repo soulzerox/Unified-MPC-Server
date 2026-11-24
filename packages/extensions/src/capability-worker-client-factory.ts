@@ -128,8 +128,16 @@ export class PipeTransport implements Transport {
  * leaves the worker `WARM_IDLE` and reclaimable under pressure instead of
  * resident for the driver's whole lifetime. A release the registry refuses is
  * reported through `onReleaseError`, not dropped.
+ *
+ * One live session per worker is also a rule: a child's pipes carry a single
+ * JSON-RPC conversation, so a second `connect` while one is open would have two
+ * transports reading every frame. It is refused with the session still open,
+ * rather than corrupting both. Shares are multiplexed on the open session.
  */
 export class ProcessManagerMcpClientFactory implements McpClientFactory {
+  /** Set before the first await, so two racing connects cannot both pass. */
+  private connected = false;
+
   public constructor(private readonly options: ProcessManagerMcpClientFactoryOptions) {}
 
   public async connect(config: McpServerLaunchConfig, signal?: AbortSignal): Promise<McpClientSession> {
@@ -142,9 +150,14 @@ export class ProcessManagerMcpClientFactory implements McpClientFactory {
       || (config.args ?? []).join('\u0000') !== launch.args.join('\u0000')) {
       throw new Error(`capability ${manifestId} was asked to connect with a launch config it was not registered for`);
     }
+    if (this.connected) {
+      throw new Error(`capability ${manifestId} already has a live session; its pipes carry one JSON-RPC conversation`);
+    }
+    this.connected = true;
 
     const lease = await this.options.source.acquire(manifestId);
     if (!lease.ok) {
+      this.connected = false;
       throw new Error(`capability ${manifestId} refused the lease: ${lease.error.message}`);
     }
     let released = false;
@@ -154,6 +167,7 @@ export class ProcessManagerMcpClientFactory implements McpClientFactory {
     const release = (): void => {
       if (released) return;
       released = true;
+      this.connected = false;
       const closed = lease.value.release();
       if (!closed.ok) reportRelease(closed.error);
     };

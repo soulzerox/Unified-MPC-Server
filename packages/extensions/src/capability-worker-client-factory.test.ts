@@ -130,6 +130,35 @@ describe('ProcessManagerMcpClientFactory', () => {
     expect((reported[0] as { message: string }).message).toMatch(/moved to a new generation/);
   });
 
+  it('refuses a second session while one is live, and frees the slot on close', async () => {
+    const harness = source({ pipes: fakeWorker() });
+    const factory = new ProcessManagerMcpClientFactory({ source: harness.source, manifestId: 'provider', launch: LAUNCH });
+
+    const first = await factory.connect(config());
+    await expect(factory.connect(config())).rejects.toThrow(/already has a live session/);
+    expect(harness.acquires).toEqual(['provider']);
+
+    await first.close();
+    expect(harness.releases).toBe(1);
+
+    const second = await factory.connect(config());
+    expect(harness.acquires).toEqual(['provider', 'provider']);
+    await second.close();
+    expect(harness.releases).toBe(2);
+  });
+
+  it('does not let two racing connects both take the slot', async () => {
+    const harness = source({ pipes: fakeWorker() });
+    const factory = new ProcessManagerMcpClientFactory({ source: harness.source, manifestId: 'provider', launch: LAUNCH });
+
+    const results = await Promise.allSettled([factory.connect(config()), factory.connect(config())]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(harness.acquires).toHaveLength(1);
+    await Promise.all(results.map(async (result) => {
+      if (result.status === 'fulfilled') await result.value.close();
+    }));
+  });
+
   it('refuses a launch config the worker was not registered for, before leasing', async () => {
     const harness = source({ pipes: fakeWorker() });
     const factory = new ProcessManagerMcpClientFactory({ source: harness.source, manifestId: 'provider', launch: LAUNCH });

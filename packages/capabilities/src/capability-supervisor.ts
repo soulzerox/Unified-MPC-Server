@@ -127,6 +127,8 @@ interface WorkerRecord {
   lastFailure?: WorkerFailure | undefined;
   /** A death delivered inside the `STARTING` window; the `start` hook reports it. */
   pendingDeath: boolean;
+  /** The id the live `onExit` subscription belongs to, so a late spawn cannot drop someone else's. */
+  subscribedProcessId?: string | undefined;
   unsubscribe?: (() => void) | undefined;
 }
 
@@ -416,6 +418,7 @@ export class CapabilitySupervisor {
 
   private subscribe(record: WorkerRecord, processId: string): void {
     this.unsubscribe(record);
+    record.subscribedProcessId = processId;
     record.unsubscribe = this.processManager.onExit(processId, () => {
       this.onWorkerExit(record);
     });
@@ -424,6 +427,7 @@ export class CapabilitySupervisor {
   private unsubscribe(record: WorkerRecord): void {
     record.unsubscribe?.();
     record.unsubscribe = undefined;
+    record.subscribedProcessId = undefined;
   }
 
   private onWorkerExit(record: WorkerRecord): void {
@@ -442,7 +446,9 @@ export class CapabilitySupervisor {
 
   private discardLateStart(record: WorkerRecord, late: Result<{ readonly processId: string }>): void {
     if (!late.ok) return;
-    this.unsubscribe(record);
+    // A later start of the same id may already own the subscription; only this
+    // attempt's own subscription may be dropped.
+    if (record.subscribedProcessId === late.value.processId) this.unsubscribe(record);
     void this.processManager.stop(late.value.processId);
   }
 

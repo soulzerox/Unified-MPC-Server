@@ -1,0 +1,486 @@
+import { describe, expect, it } from 'vitest';
+
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import type { ManagedProcess, ManagedProcessStart, ManagedProcessState } from '@unified-mpc/process';
+
+import {
+  normalizeCapabilityManifest,
+  type CapabilityHealth,
+  type CapabilityManifest,
+  type CapabilityState,
+} from './capability-registry.js';
+import {
+  CapabilitySupervisor,
+  type CapabilityLifecyclePort,
+  type CapabilityProcessPort,
+  type EvictionCandidate,
+} from './capability-supervisor.js';
+
+const ROOT = '/home/test/workspace';
+
+function manifest(overrides: Partial<CapabilityManifest> = {}): CapabilityManifest {
+  const normalized = normalizeCapabilityManifest({
+    id: 'worker',
+    provides: ['token'],
+    runtimeKind: 'native-worker',
+    startupTimeoutMs: 100,
+    shutdownTimeoutMs: 100,
+    ...overrides,
+  });
+  if (!normalized.ok) throw new Error('manifest fixture is invalid');
+  return normalized.value;
+}
+
+interface FakeWorkerState {
+  state: CapabilityState;
+  leaseCount: number;
+}
+
+/** The supervisor's whole lifecycle view, as a scripted fake. */
+class FakeLifecycle implements CapabilityLifecyclePort {
+  public readonly workers = new Map<string, FakeWorkerState>();
+
+  public readonly failures: Array<{ id: string; reason: string }> = [];
+
+  public readonly reclaimCalls: string[] = [];
+
+  public snapshotValue: readonly EvictionCandidate[] = [];
+
+  public reclaimBehaviour: (id: string) => Promise<void> = async (id) => {
+    const worker = this.workers.get(id);
+    if (worker !== undefined && worker.leaseCount === 0) worker.state = 'COLD';
+  };
+
+  public snapshot(): readonly EvictionCandidate[] {
+    return this.snapshotValue;
+  }
+
+  public health(id: string): CapabilityHealth | undefined {
+    const worker = this.workers.get(id);
+    return worker === undefined ? undefined : { id, state: worker.state, leaseCount: worker.leaseCount };
+  }
+
+  public async reclaim(id: string): Promise<Result<void>> {
+    this.reclaimCalls.push(id);
+    await this.reclaimBehaviour(id);
+    return ok(undefined);
+  }
+
+  public fail(id: string, reason: string): Result<void> {
+    this.failures.push({ id, reason });
+    const worker = this.workers.get(id);
+    if (worker !== undefined) worker.state = 'FAILED';
+    return ok(undefined);
+  }
+
+  public set(id: string, state: CapabilityState, leaseCount = 0): void {
+    this.workers.set(id, { state, leaseCount });
+  }
+
+  public stateOf(id: string): CapabilityState | undefined {
+    return this.workers.get(id)?.state;
+  }
+}
+
+interface FakeProcessControl {
+  start: (spec: ManagedProcessStart, onCreated?: (process: ManagedProcess) => void) => Promise<Result<ManagedProcess>>;
+  stop: (processId: string) => Promise<Result<void>>;
+  state: (processId: string) => ManagedProcessState | undefined;
+}
+
+function managedProcess(processId: string, state: ManagedProcessState): ManagedProcess {
+  return { processId, executable: '/usr/bin/node', args: [], cwd: ROOT, state, startedAt: new Date(0).toISOString() };
+}
+
+class FakeProcesses implements CapabilityProcessPort {
+  public readonly specs: ManagedProcessStart[] = [];
+
+  public readonly stops: string[] = [];
+
+  public unsubscribes = 0;
+
+  private readonly exitListeners = new Map<string, () => void>();
+
+  private nextProcess = 0;
+
+  private control: FakeProcessControl = {
+    start: async (_spec, onCreated) => {
+      const process = managedProcess(`proc-${this.nextProcess}`, 'running');
+      this.nextProcess += 1;
+      onCreated?.(process);
+      return ok(process);
+    },
+    stop: async () => ok(undefined),
+    state: () => 'stopped',
+  };
+
+  public configure(control: Partial<FakeProcessControl>): void {
+    this.control = { ...this.control, ...control };
+  }
+
+  public async start(
+    spec: ManagedProcessStart,
+    _signal?: AbortSignal,
+    onCreated?: (process: ManagedProcess) => void,
+  ): Promise<Result<ManagedProcess>> {
+    this.specs.push(spec);
+    return this.control.start(spec, onCreated);
+  }
+
+  public async stop(processId: string, _autoRetry = false): Promise<Result<void>> {
+    this.stops.push(processId);
+    return this.control.stop(processId);
+  }
+
+  public status(processId: string): Result<ManagedProcess> {
+    const state = this.control.state(processId);
+    return state === undefined
+      ? err(appError('PROCESS_NOT_FOUND', 'Process was not found'))
+      : ok(managedProcess(processId, state));
+  }
+
+  public onExit(processId: string, listener: () => void): () => void {
+    this.exitListeners.set(processId, listener);
+    return () => {
+      this.unsubscribes += 1;
+      this.exitListeners.delete(processId);
+    };
+  }
+
+  public fireExit(processId: string): void {
+    this.exitListeners.get(processId)?.();
+  }
+}
+
+function build(options: {
+  lifecycle?: FakeLifecycle;
+  processes?: FakeProcesses;
+  now?: () => number;
+  resolveWorkerCwd?: (requested: string) => Promise<Result<string>>;
+  maxCrashRestarts?: number;
+  shutdownDeadlineMs?: number;
+} = {}): { supervisor: CapabilitySupervisor; lifecycle: FakeLifecycle; processes: FakeProcesses } {
+  const lifecycle = options.lifecycle ?? new FakeLifecycle();
+  const processes = options.processes ?? new FakeProcesses();
+  const supervisor = new CapabilitySupervisor({
+    lifecycle,
+    processManager: processes,
+    now: options.now ?? ((): number => 1_000),
+    resolveWorkerCwd: options.resolveWorkerCwd ?? (async (requested): Promise<Result<string>> => ok(`${ROOT}/${requested}`)),
+    ...(options.maxCrashRestarts === undefined ? {} : { maxCrashRestarts: options.maxCrashRestarts }),
+    ...(options.shutdownDeadlineMs === undefined ? {} : { shutdownDeadlineMs: options.shutdownDeadlineMs }),
+  });
+  return { supervisor, lifecycle, processes };
+}
+
+const spec = { executable: '/usr/bin/node', args: ['--version'], cwd: 'sub' };
+
+describe('capability supervisor registration', () => {
+  it('refuses a non-in-process manifest with no spec, and a spec for an id registered twice', async () => {
+    const { supervisor } = build();
+    const worker = manifest();
+
+    const missing = await supervisor.register(worker);
+    expect(missing.ok).toBe(false);
+    expect(missing.ok ? '' : missing.error.message).toContain('needs a worker spec');
+
+    expect((await supervisor.register(worker, spec)).ok).toBe(true);
+    expect((await supervisor.register(worker, spec)).ok).toBe(false);
+  });
+
+  it('refuses an in-process manifest that carries a spec', async () => {
+    const { supervisor } = build();
+
+    const registered = await supervisor.register(manifest({ runtimeKind: 'in-process' }), spec);
+
+    expect(registered.ok).toBe(false);
+  });
+
+  it('refuses a blank argv element, a relative executable and a rejected cwd', async () => {
+    const relative = build();
+    expect((await relative.supervisor.register(manifest(), { ...spec, executable: 'node' })).ok).toBe(false);
+    expect((await relative.supervisor.register(manifest(), { ...spec, args: [' '] })).ok).toBe(false);
+
+    const rejected = build({
+      resolveWorkerCwd: async () => err(appError('PATH_OUTSIDE_WORKSPACE', 'outside every root')),
+    });
+    const refused = await rejected.supervisor.register(manifest(), { ...spec, cwd: '../etc' });
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.error.code).toBe('PATH_OUTSIDE_WORKSPACE');
+    expect(rejected.processes.specs).toHaveLength(0);
+  });
+
+  it('stores the resolved cwd rather than the requested one', async () => {
+    const { supervisor, processes, lifecycle } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+
+    await supervisor.start(manifest());
+
+    expect(processes.specs[0]?.cwd).toBe(`${ROOT}/sub`);
+  });
+
+  it('makes start and stop a no-op for an in-process capability', async () => {
+    const { supervisor, processes } = build();
+    const inProcess = manifest({ runtimeKind: 'in-process' });
+    await supervisor.register(inProcess);
+
+    expect((await supervisor.start(inProcess)).ok).toBe(true);
+    expect((await supervisor.stop(inProcess)).ok).toBe(true);
+    expect(processes.specs).toHaveLength(0);
+  });
+});
+
+describe('capability supervisor start', () => {
+  it('reports a failed spawn and counts it', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+    processes.configure({ start: async () => err(appError('EXECUTABLE_NOT_FOUND', 'missing')) });
+
+    const started = await supervisor.start(manifest());
+
+    expect(started.ok).toBe(false);
+    expect(supervisor.health()[0]?.lastFailure).toBe('start-failed');
+  });
+
+  it('abandons a spawn that exceeds startupTimeoutMs and stops the late process', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ startupTimeoutMs: 5 }), spec);
+    lifecycle.set('worker', 'STARTING');
+    processes.configure({
+      start: (_spec, onCreated) => new Promise((resolve) => {
+        setTimeout(() => {
+          onCreated?.(managedProcess('late', 'running'));
+          resolve(ok(managedProcess('late', 'running')));
+        }, 30);
+      }),
+    });
+
+    const started = await supervisor.start(manifest({ startupTimeoutMs: 5 }));
+
+    expect(started.ok).toBe(false);
+    expect(started.ok ? '' : started.error.code).toBe('PROCESS_TIMEOUT');
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(processes.stops).toEqual(['late']);
+    expect(supervisor.health()[0]?.processId).toBeUndefined();
+  });
+
+  it('drops the manager cap only for a resident worker', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ recyclable: true }), spec);
+    await supervisor.register(manifest({ id: 'resident', recyclable: false }), spec);
+    lifecycle.set('worker', 'STARTING');
+    lifecycle.set('resident', 'STARTING');
+
+    await supervisor.start(manifest({ recyclable: true }));
+    await supervisor.start(manifest({ id: 'resident', recyclable: false }));
+
+    expect(processes.specs[0]?.timeoutMs).toBeUndefined();
+    expect(processes.specs[1]?.timeoutMs).toBe(0);
+  });
+});
+
+describe('capability supervisor worker exit', () => {
+  it('reports an unrequested exit as FAILED while ACTIVE and while WARM_IDLE', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+    await supervisor.start(manifest());
+
+    lifecycle.set('worker', 'ACTIVE');
+    processes.fireExit('proc-0');
+    expect(lifecycle.failures).toEqual([{ id: 'worker', reason: 'worker-exited' }]);
+    expect(supervisor.health()[0]?.lastFailure).toBe('worker-exited');
+
+    lifecycle.set('worker', 'WARM_IDLE');
+    lifecycle.set('worker', 'STARTING');
+    await supervisor.start(manifest());
+    lifecycle.set('worker', 'WARM_IDLE');
+    processes.fireExit('proc-1');
+
+    expect(lifecycle.failures).toEqual([
+      { id: 'worker', reason: 'worker-exited' },
+      { id: 'worker', reason: 'worker-exited' },
+    ]);
+    expect(supervisor.health()[0]?.restarts).toBe(1);
+  });
+
+  it('turns a death inside the STARTING window into a refused start instead of ACTIVE', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+    processes.configure({
+      start: async (_spec, onCreated) => {
+        const process = managedProcess('proc-dies', 'exited');
+        onCreated?.(process);
+        processes.fireExit(process.processId);
+        return ok(process);
+      },
+    });
+
+    const started = await supervisor.start(manifest());
+
+    expect(started.ok).toBe(false);
+    expect(lifecycle.failures).toEqual([]);
+    expect(supervisor.health()[0]?.lastFailure).toBe('worker-exited');
+  });
+
+  it('ignores an exit for the kill it ordered itself, and drops the subscription first', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+    await supervisor.start(manifest());
+    lifecycle.set('worker', 'ACTIVE');
+
+    processes.configure({
+      stop: async (processId) => {
+        lifecycle.set('worker', 'STOPPING');
+        processes.fireExit(processId);
+        return ok(undefined);
+      },
+      state: () => 'stopped',
+    });
+    await supervisor.stop(manifest());
+
+    expect(lifecycle.failures).toEqual([]);
+    expect(processes.unsubscribes).toBeGreaterThan(0);
+    expect(supervisor.health()[0]?.crashLoop).toBe(false);
+  });
+});
+
+describe('capability supervisor eviction plan', () => {
+  const candidate = (overrides: Partial<EvictionCandidate>): EvictionCandidate => ({
+    id: 'a',
+    state: 'WARM_IDLE',
+    leaseCount: 0,
+    idleSince: 0,
+    idleTtlMs: 60_000,
+    recyclable: true,
+    ...overrides,
+  });
+
+  it('lists nothing at normal pressure', () => {
+    const { supervisor } = build();
+
+    expect(supervisor.evictionPlan('normal', [candidate({})])).toEqual([]);
+  });
+
+  it('clamps to five seconds at elevated pressure, oldest first, and never a lease', () => {
+    const { supervisor } = build({ now: () => 10_000 });
+    const snapshot = [
+      candidate({ id: 'recent', idleSince: 9_500, idleTtlMs: 60_000 }),
+      candidate({ id: 'old-default', idleSince: 4_000 }),
+      candidate({ id: 'leased', idleSince: 0, leaseCount: 1 }),
+      candidate({ id: 'active', idleSince: 0, state: 'ACTIVE' }),
+      candidate({ id: 'resident', idleSince: 0, recyclable: false }),
+    ];
+
+    expect(supervisor.evictionPlan('elevated', snapshot)).toEqual(['old-default']);
+  });
+
+  it('lists every unleased warm id at critical pressure, ignoring its TTL', () => {
+    const { supervisor } = build({ now: () => 10_000 });
+    const snapshot = [
+      candidate({ id: 'a', idleSince: 9_999 }),
+      candidate({ id: 'b', idleSince: 9_000 }),
+      candidate({ id: 'leased', leaseCount: 2 }),
+    ];
+
+    expect(supervisor.evictionPlan('critical', snapshot)).toEqual(['b', 'a']);
+  });
+});
+
+describe('capability supervisor crash loop', () => {
+  it('refuses to start once the window is exhausted and reports crashLoop', async () => {
+    const { supervisor, lifecycle, processes } = build({ maxCrashRestarts: 2 });
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+    processes.configure({ start: async () => err(appError('INTERNAL_ERROR', 'nope')) });
+
+    await supervisor.start(manifest());
+    await supervisor.start(manifest());
+    const refused = await supervisor.start(manifest());
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.error.details?.['reason']).toBe('crash_loop');
+    expect(processes.specs).toHaveLength(2);
+    expect(supervisor.health()[0]?.crashLoop).toBe(true);
+  });
+});
+
+describe('capability supervisor stop', () => {
+  it('never reports COLD for a stop whose termination could not be verified', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ shutdownTimeoutMs: 5 }), spec);
+    lifecycle.set('worker', 'STARTING');
+    await supervisor.start(manifest());
+    lifecycle.set('worker', 'ACTIVE');
+    processes.configure({
+      stop: () => new Promise(() => { /* a kill that never verifies */ }),
+      state: () => 'termination_unverified',
+    });
+
+    const stopped = await supervisor.stop(manifest({ shutdownTimeoutMs: 5 }));
+
+    expect(stopped.ok).toBe(false);
+    expect(lifecycle.failures).toEqual([{ id: 'worker', reason: 'stop-unverified' }]);
+    expect(lifecycle.stateOf('worker')).toBe('FAILED');
+    expect(supervisor.health()[0]?.stopUnverified).toBe(true);
+  });
+});
+
+describe('capability supervisor shutdown', () => {
+  it('reclaims warm ids, marks a leased id for a pending stop and returns inside the deadline', async () => {
+    const { supervisor, lifecycle } = build({ shutdownDeadlineMs: 200 });
+    await supervisor.register(manifest({ id: 'warm' }), spec);
+    await supervisor.register(manifest({ id: 'leased' }), spec);
+    lifecycle.set('warm', 'WARM_IDLE');
+    lifecycle.set('leased', 'ACTIVE', 1);
+    lifecycle.set('cold', 'COLD');
+    lifecycle.snapshotValue = [
+      { id: 'warm', state: 'WARM_IDLE', leaseCount: 0, idleSince: 0, idleTtlMs: 0, recyclable: true },
+      { id: 'leased', state: 'ACTIVE', leaseCount: 1, idleSince: 0, idleTtlMs: 0, recyclable: true },
+      { id: 'cold', state: 'COLD', leaseCount: 0, idleSince: 0, idleTtlMs: 0, recyclable: true },
+      { id: 'resident', state: 'ACTIVE', leaseCount: 0, idleSince: 0, idleTtlMs: 0, recyclable: false },
+    ];
+    lifecycle.reclaimBehaviour = async (id): Promise<void> => {
+      if (id === 'warm') lifecycle.set('warm', 'COLD');
+      if (id === 'leased') lifecycle.set('leased', 'STOPPING', 1);
+    };
+
+    const startedAt = Date.now();
+    const sweep = supervisor.shutdown();
+    setTimeout(() => { lifecycle.set('leased', 'COLD'); }, 20);
+    await sweep;
+
+    expect(lifecycle.reclaimCalls).toEqual(['warm', 'leased']);
+    expect(lifecycle.stateOf('warm')).toBe('COLD');
+    expect(lifecycle.stateOf('leased')).toBe('COLD');
+    expect(lifecycle.failures).toEqual([]);
+    expect(Date.now() - startedAt).toBeLessThan(200);
+  });
+
+  it('fails only the id that reached STOPPING and leaves a still-leased id alone', async () => {
+    const { supervisor, lifecycle } = build({ shutdownDeadlineMs: 30 });
+    await supervisor.register(manifest({ id: 'stuck' }), spec);
+    await supervisor.register(manifest({ id: 'leased' }), spec);
+    lifecycle.set('stuck', 'WARM_IDLE');
+    lifecycle.set('leased', 'ACTIVE', 1);
+    lifecycle.snapshotValue = [
+      { id: 'stuck', state: 'WARM_IDLE', leaseCount: 0, idleSince: 0, idleTtlMs: 0, recyclable: true },
+      { id: 'leased', state: 'ACTIVE', leaseCount: 1, idleSince: 0, idleTtlMs: 0, recyclable: true },
+    ];
+    lifecycle.reclaimBehaviour = async (id): Promise<void> => {
+      if (id === 'stuck') lifecycle.set('stuck', 'STOPPING');
+    };
+
+    await supervisor.shutdown();
+
+    expect(lifecycle.failures).toEqual([{ id: 'stuck', reason: 'stop-unverified' }]);
+    expect(lifecycle.stateOf('leased')).toBe('ACTIVE');
+    const leasedHealth = supervisor.health().find((entry) => entry.id === 'leased');
+    expect(leasedHealth?.stopUnverified).toBeUndefined();
+  });
+});

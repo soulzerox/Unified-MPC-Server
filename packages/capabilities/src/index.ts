@@ -104,6 +104,18 @@ export {
   type CapabilityTransition,
 } from './capability-registry.js';
 export {
+  CapabilitySupervisor,
+  type CapabilityLifecyclePort,
+  type CapabilityProcessPort,
+  type CapabilitySupervisorOptions,
+  type CapabilityWorkerHealth,
+  type CapabilityWorkerSpec,
+  type EvictionCandidate,
+  type PressureTier,
+  type ResolveWorkerCwd,
+  type WorkerFailure,
+} from './capability-supervisor.js';
+export {
   capabilityDescriptors,
   type CapabilityAvailability,
   type CapabilityDescriptor,

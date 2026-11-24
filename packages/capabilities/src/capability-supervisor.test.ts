@@ -479,6 +479,47 @@ describe('capability supervisor late spawn', () => {
     expect(lifecycle.stateOf('worker')).toBe('FAILED');
     expect(processes.stops).toContain('proc-late');
   });
+
+  it('drops the listener of a start that failed after its process was created', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    let calls = 0;
+    let liveCreated: ((process: ManagedProcess) => void) | undefined;
+    let settleLive: ((value: Result<ManagedProcess>) => void) | undefined;
+    processes.configure({
+      // `onCreated` runs before the start promise settles, so this is the real
+      // ordering of a spawn that fails after the process record exists.
+      start: (_spec, onCreated) => {
+        calls += 1;
+        if (calls === 1) {
+          onCreated?.(managedProcess('proc-dead', 'running'));
+          return Promise.resolve(err(appError('EXECUTABLE_NOT_FOUND', 'Executable was not found')));
+        }
+        // A real manager resolves its executable before reporting the process,
+        // which leaves the next attempt's start window open to the stale close.
+        liveCreated = onCreated;
+        return new Promise((resolve) => { settleLive = resolve; });
+      },
+    });
+
+    lifecycle.set('worker', 'STARTING');
+    expect((await supervisor.start(manifest())).ok).toBe(false);
+
+    lifecycle.set('worker', 'STARTING');
+    const second = supervisor.start(manifest());
+    // The dead attempt's close lands while the new attempt is still starting.
+    processes.fireExit('proc-dead');
+    liveCreated?.(managedProcess('proc-live', 'running'));
+    settleLive?.(ok(managedProcess('proc-live', 'running')));
+
+    expect((await second).ok).toBe(true);
+    lifecycle.set('worker', 'ACTIVE');
+    processes.fireExit('proc-live');
+
+    expect(lifecycle.stateOf('worker')).toBe('FAILED');
+    expect(lifecycle.failures).toEqual([{ id: 'worker', reason: 'worker-exited' }]);
+    expect(processes.stops).not.toContain('proc-live');
+  });
 });
 
 describe('capability supervisor registration race', () => {

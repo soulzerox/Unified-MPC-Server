@@ -1,5 +1,7 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 
+import type { CapabilityLifecyclePort, EvictionCandidate } from './capability-supervisor.js';
+
 /**
  * Phase 1 of the on-demand capability runtime (#133): the manifest contract and
  * the in-process lifecycle registry.
@@ -151,8 +153,11 @@ const ALLOWED_TRANSITIONS: Readonly<Record<CapabilityState, readonly CapabilityS
   REGISTERED: ['COLD'],
   COLD: ['STARTING'],
   STARTING: ['ACTIVE', 'FAILED'],
-  ACTIVE: ['WARM_IDLE', 'STOPPING'],
-  WARM_IDLE: ['ACTIVE', 'STOPPING'],
+  // Phase 2 adds exactly two edges: a real worker can die on its own, and an
+  // unverified kill has to be recorded. The supervisor writes both through
+  // `fail(id, reason)`; neither is reachable from a requested stop.
+  ACTIVE: ['WARM_IDLE', 'STOPPING', 'FAILED'],
+  WARM_IDLE: ['ACTIVE', 'STOPPING', 'FAILED'],
   STOPPING: ['COLD', 'FAILED'],
   FAILED: ['COLD'],
 };
@@ -166,6 +171,14 @@ interface CapabilityRecord {
   highestGeneration?: number;
   idleSince: number;
   starting: Promise<Result<void>> | undefined;
+  /**
+   * Bumped on entering `STOPPING`. The awaited stop continuation captures it, so
+   * a hook that settles `ok` after the supervisor already wrote `FAILED` writes
+   * nothing: `FAILED -> COLD` must never be reachable through a late stop.
+   */
+  stopEpoch: number;
+  /** A stop a release still owes, marked while a lease is held. */
+  pendingStop?: string | undefined;
   readonly transitions: CapabilityTransition[];
 }
 
@@ -203,7 +216,10 @@ export function normalizeCapabilityManifest(input: CapabilityManifestInput): Res
     return invalid(`capability ${input.id} has a dependency cycle: ${input.id} -> ${input.id}`);
   }
 
-  const idleTtlMs = input.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+  // A burst capability stops on its last release; the 60 s default belongs to
+  // `on-demand`/`always`, whose warm window is worth keeping.
+  const activation = input.activation ?? 'on-demand';
+  const idleTtlMs = input.idleTtlMs ?? (activation === 'burst' ? 0 : DEFAULT_IDLE_TTL_MS);
   if (!isNonNegativeInteger(idleTtlMs)) return invalid(`capability ${input.id} idleTtlMs must be a non-negative integer`);
 
   const startupTimeoutMs = input.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
@@ -223,7 +239,7 @@ export function normalizeCapabilityManifest(input: CapabilityManifestInput): Res
     requires: [...requires],
     externalRequires: [...(input.externalRequires ?? [])],
     runtimeKind: input.runtimeKind ?? 'in-process',
-    activation: input.activation ?? 'on-demand',
+    activation,
     costClass: input.costClass ?? 'small',
     idleTtlMs,
     startupTimeoutMs,
@@ -234,7 +250,7 @@ export function normalizeCapabilityManifest(input: CapabilityManifestInput): Res
   });
 }
 
-export class CapabilityRegistry {
+export class CapabilityRegistry implements CapabilityLifecyclePort {
   private readonly records = new Map<string, CapabilityRecord>();
 
   public constructor(private readonly options: CapabilityRegistryOptions = {}) {}
@@ -270,6 +286,7 @@ export class CapabilityRegistry {
       nextLeaseId: 0,
       idleSince: 0,
       starting: undefined,
+      stopEpoch: 0,
       transitions: [],
     };
     this.records.set(manifest.id, record);
@@ -459,7 +476,65 @@ export class CapabilityRegistry {
 
   private releaseLease(record: CapabilityRecord): void {
     record.leaseCount -= 1;
-    if (record.leaseCount === 0) this.releaseIdle(record);
+    if (record.leaseCount !== 0) return;
+    const pendingStop = record.pendingStop;
+    record.pendingStop = undefined;
+    // A lease cannot await, so the stop a `reclaim` marked is started here and
+    // the terminal transition is written when the hook settles. The releaser
+    // observes the outcome through `health(id)`.
+    if (pendingStop !== undefined) {
+      void this.stop(record, pendingStop);
+      return;
+    }
+    this.releaseIdle(record);
+  }
+
+  /**
+   * The targeted stop a pressure governor asks for with the ids `evictionPlan`
+   * returned. On a leased id it only marks the pending stop: a lease forbids a
+   * kill, so `releaseLease` completes it when the last holder lets go.
+   */
+  public async reclaim(id: string): Promise<Result<void>> {
+    const record = this.records.get(id);
+    if (record === undefined) return invalid(`capability ${id} is not registered`);
+    if (!record.manifest.recyclable) return ok(undefined);
+    if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE') return ok(undefined);
+    if (record.leaseCount > 0) {
+      record.pendingStop = 'reclaimed while leased';
+      return ok(undefined);
+    }
+    return this.stop(record, 'reclaimed');
+  }
+
+  /**
+   * The only write a worker death needs: the supervisor holds no lifecycle
+   * state, so an unrequested exit or an unverified kill is written here, by the
+   * module that owns the transition. `leaseCount` is deliberately not consulted:
+   * a lease cannot keep a dead process in the registry, and `acquire` refuses
+   * `FAILED`, so the holder still releases normally.
+   */
+  public fail(id: string, reason: string): Result<void> {
+    const record = this.records.get(id);
+    if (record === undefined) return invalid(`capability ${id} is not registered`);
+    if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE' && record.state !== 'STOPPING') {
+      // The second writer of the same death is a no-op: `FAILED` is the state
+      // both of them write, and neither may move it anywhere else.
+      return ok(undefined);
+    }
+    this.transition(record, 'FAILED', reason);
+    return ok(undefined);
+  }
+
+  /** One entry per registered capability: the facts an eviction plan compares. */
+  public snapshot(): readonly EvictionCandidate[] {
+    return [...this.records.values()].map((record) => ({
+      id: record.manifest.id,
+      state: record.state,
+      leaseCount: record.leaseCount,
+      idleSince: record.idleSince,
+      idleTtlMs: record.manifest.idleTtlMs,
+      recyclable: record.manifest.recyclable,
+    }));
   }
 
   /**
@@ -599,19 +674,19 @@ export class CapabilityRegistry {
     if (!record.manifest.recyclable || record.leaseCount > 0) return ok(undefined);
     if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE') return ok(undefined);
     this.transition(record, 'STOPPING', reason);
+    record.stopEpoch += 1;
+    const epoch = record.stopEpoch;
+
+    let failure: Result<void> | undefined;
     const hook = this.options.stop;
     if (hook !== undefined) {
       try {
         const stopped = await hook(record.manifest);
-        if (!stopped.ok) {
-          this.transition(record, 'FAILED', 'stop-unverified');
-          return stopped;
-        }
+        if (!stopped.ok) failure = stopped;
       } catch (error) {
         // Same verdict for a rejected hook as for one that resolves `err`: the
         // kill was ordered, not verified, so `COLD` would be a lie.
-        this.transition(record, 'FAILED', 'stop-unverified');
-        return err(
+        failure = err(
           appError(
             'INTERNAL_ERROR',
             `capability ${record.manifest.id} failed to stop: ${error instanceof Error ? error.message : String(error)}`,
@@ -620,13 +695,32 @@ export class CapabilityRegistry {
         );
       }
     }
+
+    // The supervisor writes `FAILED` for this same attempt when its deadline
+    // passes; whichever writer lands second must not move the record again.
+    // Read through a method: `transition` mutates the record, so the compiler's
+    // narrowing of the pre-`STOPPING` check would otherwise be stale here.
+    if (this.readState(record) !== 'STOPPING' || record.stopEpoch !== epoch) {
+      return failure ?? ok(undefined);
+    }
+    if (failure !== undefined) {
+      this.transition(record, 'FAILED', 'stop-unverified');
+      return failure;
+    }
     this.transition(record, 'COLD', 'stopped');
     return ok(undefined);
   }
 
+  /**
+   * The live state, read through a call: `transition` mutates the record, so a
+   * narrowing the compiler derived before that call would be stale.
+   */
+  private readState(record: CapabilityRecord): CapabilityState {
+    return record.state;
+  }
+
   private transition(record: CapabilityRecord, to: CapabilityState, reason: string): void {
-    const from = record.state;
-    if (!ALLOWED_TRANSITIONS[from].includes(to)) {
+    const from = record.state;    if (!ALLOWED_TRANSITIONS[from].includes(to)) {
       throw new Error(`capability ${record.manifest.id} cannot move ${from} -> ${to}`);
     }
     record.state = to;

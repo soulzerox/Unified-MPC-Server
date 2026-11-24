@@ -426,10 +426,20 @@ export class ProcessManager {
 
   /**
    * Evict the oldest finished records once the retained set outgrows its bounds.
-   * A live, unverified or still-subscribed record is never a candidate, and the
-   * record that just finished is kept even when it alone exceeds the budget.
+   *
+   * Candidates are records in a verified terminal state with no exit listener
+   * waiting; the record that just finished is kept even when it alone exceeds
+   * the budget. A live record is never a candidate, and neither is one in
+   * `termination_unverified`: `stop` may still be waiting on it, so evicting it
+   * would strand that waiter. Such a record stays until a later stop attempt
+   * resolves it, which means a host that keeps failing verification without
+   * retrying retains one record per failed attempt — known, and left alone here
+   * because bounding it needs a resolver-aware rule rather than this ordering.
+   *
    * A caller that kept only the id of an evicted process gets
-   * `PROCESS_NOT_FOUND`, the same answer a restarted host gives.
+   * `PROCESS_NOT_FOUND`, the same answer a restarted host gives. A live log tee
+   * is not tracked on the record either, so an evicted id also stops answering
+   * `logs`; the stream the caller already holds keeps working.
    */
   private pruneTerminalRecords(newest: ManagedRecord): void {
     const evictable = [...this.records.values()]

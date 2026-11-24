@@ -142,7 +142,7 @@ lease, so the index lane cannot be evicted while a probe lane is idle.
 ```ts
 {
   id: 'thai-rag-provider',
-  provides: ['thai_rag.context', 'thai_rag.index'],
+  provides: ['pre_edit_context', 'code_index', 'code_search', 'code_context'],
   runtimeKind: 'external-process',
   activation: 'on-demand',
   costClass: 'large',
@@ -185,7 +185,7 @@ One tick, four steps, no state of its own:
 sample  ProcessMemoryPressureProbe.sample()      → 'normal' | 'elevated' | 'critical'
 map     tier === 'normal' ? skip : tier
 plan    supervisor.evictionPlan(tier, registry.snapshot())
-reclaim for each id: await supervisor.stop-by-id path (registry.reclaim(id))
+reclaim for each id: await registry.reclaim(id)   → stop hook → supervisor.stop(manifest)
 ```
 
 Details that decide whether it is safe:

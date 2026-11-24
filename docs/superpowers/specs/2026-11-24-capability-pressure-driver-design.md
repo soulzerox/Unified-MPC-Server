@@ -1,0 +1,272 @@
+# On-demand capability runtime — phase 3: the pressure driver and the first supervised worker
+
+Status: design. Implements phase 3 of #133 on top of the phase-2 supervisor
+(`docs/superpowers/specs/2026-11-24-capability-supervisor-design.md`).
+
+Phase 2 shipped the supervisor, the registry lifecycle port, `evictionPlan` and
+`reclaim`, and deliberately shipped no driver: nothing in the tree calls
+`evictionPlan` outside a test, and no capability is a real child process, so a
+registry constructed today would enforce nothing. This spec closes both gaps at
+once, because a driver with no worker to evict and a worker with no driver are
+each half a feature.
+
+Every statement below is written against the tree at `823ed39`. Where a claim is
+about code that exists, the file and the fact are named so a reviewer can check
+it rather than trust it.
+
+## Decision
+
+1. The first supervised worker is the **native Thai-RAG provider** — the
+   `venv/bin/python3 thai_rag_context_mcp.py` child the runtime launches today.
+2. The seam is a **`ProcessManager`-backed `McpClientFactory`**. `McpSessionManager`
+   already accepts an injected factory (`packages/extensions/src/mcp-session-manager.ts:21`),
+   so the provider's child moves under `ProcessManager` without the provider
+   driver, its admission rules or its restart semantics changing at all.
+3. The driver is a **runtime-owned interval sweep** in
+   `apps/cli/src/runtime/stdio-mcp-runtime.ts`, following the pattern the runtime
+   already uses for the heavy-job queue (`heavyJobQueueRecoveryTimer`, line 1492):
+   one `setInterval`, `unref()`ed, a `try`/`catch` per tick, no new module surface.
+4. Phase 3 adds **one** process-package capability: a caller-owned stdio hook on
+   `ProcessManager.start`, because `ProcessManager` today consumes `stdout`/`stderr`
+   into its log ring buffer (`packages/process/src/process-manager.ts:99-100`) and
+   returns only a snapshot, so no MCP client can attach to a supervised child.
+
+## Why this worker, and not the other two candidates
+
+The #133 acceptance criteria name the target: "Thai-RAG, Code Intelligence and
+Context Assurance use this lifecycle rather than bespoke always-on daemons". The
+provider is also the only child in the tree whose resident lifetime is a real
+memory cost: it stays warm after indexing and it spawns `llama-server` itself.
+
+The alternatives were checked and rejected on evidence, not taste:
+
+- **Shell heavy runs.** `packages/capabilities/src/shell-backend.ts` spawns
+  directly with `node:child_process` (line 480) and carries durable task parking,
+  heartbeats, owner reconciliation and restart re-attachment around that spawn.
+  Moving it under the supervisor means re-proving every one of those semantics
+  against a new spawn path, for a capability whose work is burst-shaped and
+  therefore the *least* valuable thing to keep warm or reclaim.
+- **The native host bridge.** `NativeHostProcessBridge` already has the injection
+  seam we would want (`NativeHostSpawner`), but it is not live in production:
+  `createPlatformCapabilitySet` is called without `nativeHost`
+  (`apps/cli/src/runtime/stdio-mcp-runtime.ts:2017`), so the platform backends
+  fall back to `unavailable`, and `LinuxProcessBridge` requires an
+  integrity-bound packaged binary (`packages/capabilities/src/linux-process-bridge.ts:5-14`).
+  Supervising it would first require a packaging story that phase 3 does not own.
+
+## Seam
+
+```text
+NativeThaiRagProviderDriver            (unchanged: admission, anchors, retries)
+        │  sessions.call(...) / describe(...)
+        ▼
+McpSessionManager (×3: sessions, index, probe)      (unchanged)
+        │  clientFactory.connect(config)            ← the one injected seam
+        ▼
+ProcessManagerMcpClientFactory          (new, apps/cli/src/runtime)
+        │  registry.acquire('thai-rag-provider')    → lease
+        │  supervisor.start(manifest)               → ProcessManager child
+        │  MCP client over the child's stdio
+        ▼
+CapabilityRegistry ──start/stop──▶ CapabilitySupervisor ──▶ ProcessManager
+        ▲                                                       │
+        │ snapshot()/reclaim()                                  │ onExit
+        └───────────── pressure driver (runtime tick) ───────────┘
+```
+
+The provider driver keeps speaking MCP to a session manager. What changes is who
+owns the process behind that session: the supervisor, through the registry, so a
+reclamation order and a provider call can no longer race on the same child.
+
+## The one process addition
+
+`ProcessManager` must hand the child's stdio to the caller that needs it, without
+losing the log ring buffer that `health`/diagnostics read. The interfaces are in
+`packages/process/src/process-types.ts`, and `ManagedProcess` carries no streams
+today (lines 15-25).
+
+```ts
+interface ManagedProcessStart {
+  // … existing fields
+  /** `false` keeps today's behaviour: pipes are drained into the log ring buffer only. */
+  readonly exposeStdio?: boolean;
+}
+
+// start() gains no new parameter; the created child is announced through the
+// existing onCreated callback, which now carries the streams when the spec asks.
+interface ManagedProcess {
+  readonly stdin?: Writable;
+  readonly stdout?: Readable;
+  readonly stderr?: Readable;
+}
+```
+
+Rules the addition must keep:
+
+- With `exposeStdio` absent or `false`, nothing changes: both pipes are still
+  consumed by the ring buffer, and `ManagedProcess` carries no streams.
+- With `exposeStdio: true`, both pipes are *teed*: the ring buffer still receives
+  every chunk, and the caller's transport receives the same chunks. Diagnostics
+  must not go blind because a worker became supervised.
+- The supervisor passes `exposeStdio: true` only for a worker whose spec declares
+  it needs a transport. A plain `executable`+`args` worker (the phase-2 shape)
+  keeps the default.
+- No new public method on `ProcessManager`; `onExit` and `status` keep their
+  phase-2 contracts.
+
+## The factory
+
+`ProcessManagerMcpClientFactory implements McpClientFactory` and is constructed
+with `{ registry, supervisor, manifestId, launch }`, where `launch` carries the
+executable, args and cwd the runtime already computes for the provider.
+
+`connect(config, signal)`:
+
+1. `registry.acquire(manifestId)` — this is the lease. A refusal (crash loop,
+   `FAILED`, a stop in flight) surfaces as the same connection failure the
+   driver already handles, not as a new error type.
+2. The registry's start hook calls `supervisor.start(manifest)`, which spawns
+   through `ProcessManager` and subscribes `onExit` as phase 2 defined.
+3. The factory builds an MCP client over the supervised child's stdio and
+   performs the existing handshake (`describe`/version validation stays in
+   `McpSessionManager`).
+4. The returned session's `close()` releases the lease. A session that
+   `McpSessionManager` closes on idle timeout therefore lands the worker in
+   `WARM_IDLE`, where the driver may reclaim it.
+
+One factory instance serves all three managers; each `connect` takes its own
+lease, so the index lane cannot be evicted while a probe lane is idle.
+
+## Worker manifest
+
+```ts
+{
+  id: 'thai-rag-provider',
+  provides: ['thai_rag.context', 'thai_rag.index'],
+  runtimeKind: 'external-process',
+  activation: 'on-demand',
+  costClass: 'large',
+  idleTtlMs: 5 * 60_000,   // matches McpSessionManager's default idle close
+  startupTimeoutMs: 30_000,
+  shutdownTimeoutMs: 10_000,
+  recyclable: true,
+  generationFenced: false,
+}
+```
+
+`recyclable: true` is the point of the whole phase: an idle provider must be
+stoppable under pressure and start again on the next call. The provider is
+restartable by design — `McpSessionManager` already reconnects, and the driver's
+restart tests (`native-thai-rag-provider.test.ts`) cover provider loss — so
+recycling it costs a cold start, not correctness.
+
+`idleTtlMs` matches the session manager's idle close so the two mechanisms cannot
+fight: the session closes first, the worker goes `WARM_IDLE`, then the TTL or the
+driver stops the child.
+
+## cwd containment
+
+`CapabilitySupervisor` refuses to register without `resolveWorkerCwd`, and the
+provider's cwd is not a workspace root: the runtime launches it from
+`thaiRagInstallRoot` (`apps/cli/src/runtime/stdio-mcp-runtime.ts:530-535`), the
+checkout that holds `thai_rag_context_mcp.py`.
+
+Decision: the runtime's `resolveWorkerCwd` accepts exactly two shapes — a
+canonical registered workspace root, or the canonical provider install root the
+runtime itself resolved. It is one function with one allowlist entry, not a
+second containment check, and it refuses everything else. A worker whose cwd is
+neither is a registration failure, reported at boot rather than at first call.
+
+## The driver
+
+One tick, four steps, no state of its own:
+
+```text
+sample  ProcessMemoryPressureProbe.sample()      → 'normal' | 'elevated' | 'critical'
+map     tier === 'normal' ? skip : tier
+plan    supervisor.evictionPlan(tier, registry.snapshot())
+reclaim for each id: await supervisor.stop-by-id path (registry.reclaim(id))
+```
+
+Details that decide whether it is safe:
+
+- **Interval.** 30 s, `unref()`ed, started after the runtime's existing recovery
+  promises settle, never awaited by boot. One interval per process, cancelled in
+  the runtime's shutdown path beside `heavyJobQueueRecoveryTimer`.
+- **Overlap.** A tick that is still running makes the next tick a no-op (`let
+  sweeping = false`), so a slow `reclaim` cannot stack.
+- **Failure isolation.** A rejected `reclaim` is logged and skipped; the next
+  tick retries. The driver never throws into the interval.
+- **No new surface.** The driver reads `snapshot()`, calls `reclaim(id)` and
+  nothing else. `PressureTier` is structurally identical to
+  `ResourcePressureState` (`packages/workspace/src/resource-pressure.ts:4`), so
+  the mapping is an assignment, not a table.
+- **Leased workers.** `reclaim` on a leased id already records a `pendingStop`
+  (`packages/capabilities/src/capability-registry.ts:502-505`) and stops the
+  worker on release. The driver therefore never kills a child mid-call, and a
+  provider call that ends under pressure does not survive as a warm worker.
+
+## What this phase does not bound
+
+Phase 2 left one leak open and this phase narrows it rather than closing it: a
+resident worker whose lease is never released has no deadline. The driver's
+`reclaim` becomes a `pendingStop` and waits for a release that never comes, so
+the child stays. That is observable — `health(id)` keeps reporting the live
+worker and its lease count — and it is bounded to one worker per id, because the
+registry starts only from `COLD`.
+
+Closing it needs a lease deadline, which is a registry concept (a lease that
+expires) and not a driver concept. It stays out of phase 3 on purpose: expiring
+a lease under a caller that is still using it turns a leak into a correctness
+bug. Recorded as an open question, not as a promise.
+
+## What must not change
+
+- Provider admission, source-identity anchors, index generations and the
+  "cannot restart after stop" refusal in `NativeThaiRagProviderDriver`.
+- `McpSessionManager`'s launch fingerprints, tool-catalog validation, idle close
+  and per-session queue.
+- The phase-2 supervisor interface: `register`, `start`, `stop`, `evictionPlan`,
+  `health`, `shutdown` keep their signatures.
+- `ProcessManager`'s default behaviour for every existing caller.
+
+## Verification
+
+- `ProcessManager`: `exposeStdio: true` still fills the log ring buffer; without
+  it, `ManagedProcess` carries no streams; a stream consumer that stops reading
+  cannot wedge the ring buffer.
+- `ProcessManagerMcpClientFactory`: acquire-then-connect ordering, lease released
+  on close, a refused acquire surfaces as a connection failure, and two managers
+  hold two leases for one worker.
+- Registry/supervisor integration: a reclamation order on a leased worker becomes
+  `pendingStop` and stops on release; `WARM_IDLE` under `elevated` respects the
+  5 s clamp; `critical` evicts an idle worker immediately.
+- Driver: normal tier reclaims nothing; a slow reclaim does not stack ticks; a
+  rejected reclaim does not stop the interval; shutdown cancels the timer.
+- Provider end-to-end: with the factory injected, a provider call starts a
+  supervised child, an idle close leaves `WARM_IDLE`, and a simulated critical
+  sample stops the child and the next call starts a new one.
+- `verify:local --pr <n>` on the exact head, plus the exact-head review capsule,
+  as the repository requires.
+
+## Non-goals
+
+- Supervising the shell backend, the browser backend or the native host.
+- A lease deadline, or any expiry of a live lease.
+- A pressure queue, admission change or backpressure policy: admission keeps
+  refusing with `RESOURCE_PRESSURE` exactly as `ResourceAdmission` does today.
+- Moving `llama-server` under supervision. It is the provider's own child; phase
+  3 supervises the provider, and a nested worker is a later question.
+- Any model-lifecycle work.
+
+## Open questions
+
+1. **Lease deadline.** The one unbounded case above. Needs a registry concept
+   (lease expiry with generation fencing) and a caller contract for "your lease
+   may end". Phase 4 at the earliest.
+2. **`llama-server` as a nested worker.** The provider spawns it from PATH and
+   owns its lifetime. If pressure reclamation must reach it, the provider has to
+   expose that child, which is a provider-contract change, not a runtime one.
+3. **Second worker.** Code Intelligence and Context Assurance share the provider
+   process today, so the next real worker id is whichever of them stops sharing
+   it. Nothing in this spec assumes one.

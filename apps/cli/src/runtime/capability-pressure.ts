@@ -138,6 +138,11 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
 export function createWorkerCwdResolver(options: {
   readonly installRoot: string;
   readonly workspaceRoots: () => Promise<readonly string[]>;
+  /**
+   * Runtime-owned roots the provider itself creates (its sources root). Not user
+   * input: the driver's launch asks for exactly this cwd.
+   */
+  readonly extraRoots?: readonly string[];
 }): ResolveWorkerCwd {
   return async (requested: string): Promise<Result<string>> => {
     const resolved = await realpath(requested).catch(() => undefined);
@@ -146,6 +151,9 @@ export function createWorkerCwdResolver(options: {
     }
     const installRoot = await realpath(options.installRoot).catch(() => options.installRoot);
     if (resolved === installRoot) return ok(resolved);
+    for (const extra of options.extraRoots ?? []) {
+      if (await realpath(extra).catch(() => extra) === resolved) return ok(resolved);
+    }
     const roots = await options.workspaceRoots().catch(() => [] as readonly string[]);
     for (const root of roots) {
       const canonical = await realpath(root).catch(() => root);
@@ -175,6 +183,7 @@ export interface ThaiRagCapabilityRuntime {
 export interface ThaiRagCapabilityRuntimeOptions {
   readonly launch: ThaiRagWorkerLaunch;
   readonly installRoot: string;
+  readonly extraCwdRoots?: readonly string[];
   readonly workspaceRoots: () => Promise<readonly string[]>;
   readonly probe?: ResourcePressureProbe;
   readonly intervalMs?: number;
@@ -261,6 +270,7 @@ export async function createThaiRagCapabilityRuntime(
     resolveWorkerCwd: createWorkerCwdResolver({
       installRoot: options.installRoot,
       workspaceRoots: options.workspaceRoots,
+      ...(options.extraCwdRoots === undefined ? {} : { extraRoots: options.extraCwdRoots }),
     }),
     ...(options.processManager === undefined ? {} : { processManager: options.processManager }),
   });

@@ -68,6 +68,7 @@ import {
   ThaiRagIndexJobStore,
   ThaiRagProviderCoordinator,
   THAI_RAG_DEPLOYMENT_EMBEDDING_PROFILE,
+  resolveThaiRagProviderRoot,
   type ThaiRagProviderDriver,
 } from '@unified-mpc/thai-rag';
 import {
@@ -511,13 +512,31 @@ export function createStdioMcpRuntime(
       || process.env.UNIFIED_MPC_THAI_RAG_PROVIDER_PATH?.trim()
       || path.join(os.homedir(), 'thai-rag-mcp'),
   );
+  // The supervised child must start with the launch the provider driver will
+  // actually ask for: `start()` rewrites `cwd` to the provider's own sources root
+  // and adds the cache dir and control mode (`native-thai-rag-provider.ts:454-467`).
+  // Registering the install root instead would both refuse that connect and spawn
+  // the worker without the contract env it needs.
+  const thaiRagProviderRoot = resolveThaiRagProviderRoot(dataPath);
+  const thaiRagSourcesRoot = thaiRagProviderRoot.ok
+    ? path.join(thaiRagProviderRoot.value, 'sources')
+    : thaiRagInstallRoot;
+  // The provider creates this root on its own start, but the worker must be
+  // spawnable with it as its cwd before that start happens.
+  if (thaiRagProviderRoot.ok) fs.mkdirSync(thaiRagSourcesRoot, { recursive: true });
   const thaiRagWorkerLaunch = {
     executable: process.platform === 'win32'
       ? path.join(thaiRagInstallRoot, 'venv', 'Scripts', 'python.exe')
       : path.join(thaiRagInstallRoot, 'venv', 'bin', 'python3'),
     args: [path.join(thaiRagInstallRoot, 'thai_rag_context_mcp.py')],
-    cwd: thaiRagInstallRoot,
-    env: thaiRagProviderLaunchEnv(),
+    cwd: thaiRagSourcesRoot,
+    env: {
+      ...thaiRagProviderLaunchEnv(),
+      ...(thaiRagProviderRoot.ok ? {
+        THAI_RAG_CACHE_DIR: path.join(thaiRagProviderRoot.value, 'runtime'),
+        THAI_RAG_CONTROL_MODE: 'unified_native',
+      } : {}),
+    },
   };
   // #133 phase 3: the provider child moves under the capability supervisor, so a
   // pressure sweep can reclaim it instead of a warm worker staying resident. The
@@ -533,6 +552,9 @@ export function createStdioMcpRuntime(
     : wireThaiRagCapability({
       launch: thaiRagWorkerLaunch,
       installRoot: thaiRagInstallRoot,
+      // The sources root is runtime-owned, not user input: the provider creates and
+      // owns it, and it is the cwd the driver's own launch asks for.
+      extraCwdRoots: [thaiRagSourcesRoot],
       workspaceRoots: async (): Promise<readonly string[]> => (await activeWorkspaces()).map((entry) => entry.realRootPath),
       onError: (error: unknown): void => {
         thaiRagDiagnostics(`thai-rag capability pressure sweep failed: ${error instanceof Error ? error.message : String(error)}`);

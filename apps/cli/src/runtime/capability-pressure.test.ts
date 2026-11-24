@@ -184,6 +184,21 @@ describe('capability worker cwd', () => {
     expect((await resolve(path.join(installRoot, 'venv'))).ok).toBe(false);
     expect((await resolve(path.join(installRoot, 'does-not-exist'))).ok).toBe(false);
   });
+
+  it('accepts a runtime-owned extra root, and only that root', async () => {
+    const installRoot = await dir();
+    const sourcesRoot = await dir();
+    const foreign = await dir();
+    const resolve = createWorkerCwdResolver({
+      installRoot,
+      workspaceRoots: async () => [],
+      extraRoots: [sourcesRoot],
+    });
+
+    expect((await resolve(sourcesRoot)).ok).toBe(true);
+    expect((await resolve(path.join(sourcesRoot, 'nested'))).ok).toBe(false);
+    expect((await resolve(foreign)).ok).toBe(false);
+  });
 });
 
 describe('thai-rag capability runtime', () => {

@@ -2,7 +2,7 @@ import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ok } from '@unified-mpc/domain';
-import { PathExecutableResolver, ProcessManager, MAX_RETAINED_TERMINAL_LOG_BYTES, MAX_RETAINED_TERMINAL_RECORDS, type ExecutableResolver, type ProcessTreeTerminator } from './index.js';
+import { PathExecutableResolver, ProcessManager, MAX_RETAINED_TERMINAL_LOG_BYTES, MAX_RETAINED_TERMINAL_RECORDS, MAX_TEE_BUFFER_BYTES, type ExecutableResolver, type ProcessTreeTerminator } from './index.js';
 
 async function waitForState(manager: ProcessManager, processId: string, state: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -498,6 +498,42 @@ describe('ProcessManager stdio exposure and env', () => {
     if (!logs.ok) return;
     expect(logs.value.entries.map((entry) => entry.text).join('')).toContain('line-199');
   });
+
+  it('ends a caller copy that outgrows its buffer instead of holding the whole output', async () => {
+    const manager = new ProcessManager();
+    const chunks = 192;
+    let created: import('./index.js').ManagedProcess | undefined;
+    const started = await manager.start({
+      executable: process.execPath,
+      // 12 MiB while the child stays alive: a consumer that never reads must not be
+      // able to make the runtime hold all of it before the process ends.
+      args: ['-e', `const chunk = Buffer.alloc(64 * 1024, 120); for (let index = 0; index < ${chunks}; index += 1) process.stdout.write(chunk); setInterval(() => {}, 1000);`],
+      cwd: process.cwd(),
+      exposeStdio: true,
+    }, undefined, (handle) => {
+      created = handle;
+      handle.stdout?.pause();
+    });
+
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    try {
+      const copy = created?.stdout;
+      expect(copy).toBeDefined();
+      // The copy ends on its own, so a stalled consumer sees EOF instead of silence.
+      for (let attempt = 0; attempt < 500 && copy?.writableEnded !== true; attempt += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      expect(copy?.writableEnded).toBe(true);
+      const buffered = (copy?.readableLength ?? 0) + (copy?.writableLength ?? 0);
+      expect(buffered).toBeLessThanOrEqual(MAX_TEE_BUFFER_BYTES + 64 * 1024);
+      // The diagnostics ring is unaffected by the copy ending.
+      expect(manager.logs(started.value.processId, { tailLines: 1 }).ok).toBe(true);
+    } finally {
+      await manager.stop(started.value.processId);
+    }
+  }, 30_000);
 
   it('carries no streams when the spec does not ask for them', async () => {
     const manager = new ProcessManager();

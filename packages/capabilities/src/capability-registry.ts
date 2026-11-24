@@ -720,7 +720,8 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
   }
 
   private transition(record: CapabilityRecord, to: CapabilityState, reason: string): void {
-    const from = record.state;    if (!ALLOWED_TRANSITIONS[from].includes(to)) {
+    const from = record.state;
+    if (!ALLOWED_TRANSITIONS[from].includes(to)) {
       throw new Error(`capability ${record.manifest.id} cannot move ${from} -> ${to}`);
     }
     record.state = to;

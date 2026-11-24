@@ -141,10 +141,22 @@ describe('capability registry lifecycle port', () => {
   it('is a no-op to fail an id twice or an unregistered id', async () => {
     const registry = new CapabilityRegistry();
     await registry.register({ id: 'a', provides: ['t'] });
+    expect((await registry.acquire('a')).ok).toBe(true);
 
     expect(registry.fail('a', 'worker-exited').ok).toBe(true);
-    expect(registry.health('a')?.state).toBe('COLD');
-    expect(registry.fail('a', 'worker-exited').ok).toBe(true);
+    expect(registry.health('a')?.state).toBe('FAILED');
+    const written = registry.transitions('a').length;
+
+    // A second writer for the same death writes nothing: `FAILED -> FAILED` is not
+    // in the table, so a guard rather than a throw keeps the loser quiet.
+    expect(registry.fail('a', 'stop-unverified').ok).toBe(true);
+    expect(registry.transitions('a')).toHaveLength(written);
+
+    // A `COLD` id has no death to record, so the same call is a no-op, not an error.
+    await registry.register({ id: 'cold', provides: ['t'] });
+    expect(registry.fail('cold', 'worker-exited').ok).toBe(true);
+    expect(registry.health('cold')?.state).toBe('COLD');
+
     expect(registry.fail('nobody', 'worker-exited').ok).toBe(false);
   });
 

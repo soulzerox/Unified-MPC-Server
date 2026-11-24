@@ -133,9 +133,11 @@ describe('capability supervisor with the real ProcessManager', () => {
       // Every child is gone, not merely unreferenced: the recycle is a loop, not a ratchet.
       expect(processes.list().filter((entry) => entry.state === 'running' || entry.state === 'starting')).toHaveLength(0);
       expect(registry.health('worker')?.leaseCount).toBe(0);
-      // The plateau is measured against the warm baseline: a per-cycle leak of the
-      // size this item exists to catch (a child, its buffers, its log ring) adds far
-      // more than this over eight cycles, while ordinary V8 growth comes nowhere near it.
+      // The plateau is measured against the warm baseline and is deliberately coarse:
+      // child RSS is not parent RSS, and the records the manager keeps per spawn are
+      // kilobytes, so this ceiling catches a gross ratchet (a retained buffer, a child
+      // that never exits) while the record-retention bound is proven in the process
+      // package instead.
       const plateauMiB = Math.max(...rssMiB.slice(warmup)) - warmRss;
       expect(plateauMiB).toBeLessThan(24);
     } finally {

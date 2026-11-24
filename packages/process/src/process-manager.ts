@@ -16,6 +16,15 @@ const START_CANCELLATION_RETRY_MS = 250;
 
 export const DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES = 24;
 
+/**
+ * A finished process is kept so its status and logs stay readable after it exits,
+ * but only the newest few: the record map is the one structure that would
+ * otherwise grow for the life of the runtime, and each entry pins a child handle,
+ * its spec and up to `MAX_PROCESS_LOG_BYTES` of ring buffer.
+ */
+export const MAX_RETAINED_TERMINAL_RECORDS = 64;
+export const MAX_RETAINED_TERMINAL_LOG_BYTES = 16 * 1024 * 1024;
+
 export interface ProcessManagerRecoveryOptions {
   readonly platform?: NodeJS.Platform;
   readonly processStartedAt?: PosixProcessIdentityProbe;
@@ -412,6 +421,31 @@ export class ProcessManager {
     record.resolveTerminationVerified?.();
     delete record.resolveTerminationVerified;
     delete record.terminationVerified;
+    this.pruneTerminalRecords(record);
+  }
+
+  /**
+   * Evict the oldest finished records once the retained set outgrows its bounds.
+   * A live, unverified or still-subscribed record is never a candidate, and the
+   * record that just finished is kept even when it alone exceeds the budget.
+   * A caller that kept only the id of an evicted process gets
+   * `PROCESS_NOT_FOUND`, the same answer a restarted host gives.
+   */
+  private pruneTerminalRecords(newest: ManagedRecord): void {
+    const evictable = [...this.records.values()]
+      .filter((record) => record !== newest
+        && isVerifiedTerminal(record.state)
+        && record.exitListeners === undefined)
+      .sort((left, right) => (left.finishedAt ?? '').localeCompare(right.finishedAt ?? ''));
+    let count = evictable.length + 1;
+    let bytes = newest.logs.byteLength
+      + evictable.reduce((total, record) => total + record.logs.byteLength, 0);
+    for (const record of evictable) {
+      if (count <= MAX_RETAINED_TERMINAL_RECORDS && bytes <= MAX_RETAINED_TERMINAL_LOG_BYTES) return;
+      this.records.delete(record.processId);
+      count -= 1;
+      bytes -= record.logs.byteLength;
+    }
   }
 
   private markTerminationUnverified(record: ManagedRecord, errorMessage: string): void {

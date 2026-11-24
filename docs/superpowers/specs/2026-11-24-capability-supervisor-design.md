@@ -32,7 +32,9 @@ Two things already exist and must be reused, not re-implemented:
   resident worker. Without the second, `ProcessManager` would kill a resident
   worker after its one-hour default (hard ceiling four hours) and the design's
   own exit notification would report that as `worker-exited` → `FAILED`. Only
-  `recyclable: true` ids get the zero; every other activation keeps the cap.
+  `recyclable: false` ids — the ones the manifest pins for the process lifetime,
+  which phase 1 refuses to stop at all — get the zero; every `recyclable: true`
+  activation keeps the cap.
 - `ProcessMemoryPressureProbe` (`packages/workspace/src/resource-pressure.ts`)
   already samples available memory with a cached, injectable clock. Phase 2 does
   not import it: `ResourceAdmission` already owns the production consumer (it
@@ -263,18 +265,21 @@ phase, not of the supervisor; a seventh work item lands in
    `releaseLease` and the public `release(): Result<void>` stay synchronous and
    therefore cannot await the hook: the release marks the pending stop, starts the
    hook without awaiting it, and the transition to `COLD` is written when that
-   promise settles. A rejecting hook is caught by that continuation and writes
-   `STOPPING -> FAILED` with `stop-unverified`, so the release path never produces
-   an unhandled rejection and the releaser still observes the outcome through
-   `health(id)`. Since `port.fail` can write `FAILED` for that same record before
-   the awaited hook settles, the two writers are ordered by one guard: the
-   registry's continuation writes `STOPPING -> COLD` **only if the record is still
-   `STOPPING`, at the generation the hook was started for**. A late `ok` after the
-   supervisor already wrote `FAILED` writes nothing, so `FAILED -> COLD` is never
-   taken and the unverified kill cannot be laundered into a clean stop; `fail` is
-   likewise accepted only from `STOPPING` for the deadline path. Making the private `stop` awaitable changes the public `sweep()`
-   signature to `Promise<void>`, so its existing test call sites are updated to
-   `await` it in the same PR;
+   promise settles. A rejecting hook, and a hook that resolves `err`, are both
+   caught by that continuation, which writes `STOPPING -> FAILED` with
+   `stop-unverified`; neither is reported as `COLD`. The release path therefore
+   never produces an unhandled rejection and the releaser still observes the
+   outcome through `health(id)`. Since `port.fail` can write `FAILED` for that same
+   record before the awaited hook settles, the two writers are ordered by one
+   guard, carried by the record rather than inferred: entering `STOPPING` bumps a
+   `stopEpoch` counter, the continuation captures that number before awaiting the
+   hook, and it writes `STOPPING -> COLD` **only if the record is still `STOPPING`
+   with the same `stopEpoch`**. A late `ok` after the supervisor already wrote
+   `FAILED` writes nothing, so `FAILED -> COLD` is never taken and the unverified
+   kill cannot be laundered into a clean stop; `fail` is likewise accepted only
+   from `STOPPING` for the deadline path. Making the private `stop` awaitable
+   changes the public `sweep()` signature to `Promise<void>`, so its existing test
+   call sites are updated to `await` it in the same PR;
 4. a `burst` default of `idleTtlMs = 0` in `normalizeCapabilityManifest`, so
    `activation: 'burst'` stops on its last release instead of going `WARM_IDLE`
    for the default 60 s. No per-tick TTL override is needed once `reclaim` is
@@ -325,10 +330,13 @@ Two additions belong to the process package instead, and neither is optional:
   exactly one method and no `onCreated` callback has to be added.
 - `ManagedProcessStart.timeoutMs` accepts `0` meaning "no wall-clock cap", and a
   zero skips the manager's timer. The supervisor passes `0` only for a
-  `recyclable: true` capability and leaves the manager's default cap in place for
-  every other activation, so the wall-clock backstop still applies to a worker
-  whose lease a caller leaks. For a resident id the cap is deliberately gone — a
-  resident worker must not be killed by a fixed hour — and phase 2 ships no
+  `recyclable: false` capability — the resident id, which phase 1 pins for the
+  process lifetime and never stops — and leaves the manager's default cap in
+  place for every `recyclable: true` activation, so the wall-clock backstop still
+  applies to a worker whose lease a caller leaks. For a resident id the cap is
+  deliberately gone — a resident worker must not be killed by a fixed hour, and a
+  one-hour `timed_out` would reach the new `onExit` and be reported as
+  `worker-exited` → `FAILED` — and phase 2 ships no
   replacement bound for one whose lease is never released: `shutdownTimeoutMs`
   only bounds a stop that was already ordered, the crash-loop refusal only
   refuses a new start, and `reclaim` needs a driver phase 2 does not ship. Such a
@@ -513,13 +521,13 @@ would hide a real crash and needs a reason the registry does not have.
 - Who writes that outcome is fixed, so the deadline cannot be undone later: the
   supervisor calls `port.fail(id, 'stop-unverified')`, which the registry accepts
   only from `STOPPING`, and the registry's own stop continuation writes `COLD`
-  only while the record is still `STOPPING` at the generation the hook was started
-  for (registry change 3). A `stop` hook that finally settles `ok` after the
-  deadline therefore writes nothing: the id stays `FAILED`, `health()` keeps
-  reporting `stopUnverified`, and the shutdown path never turns an unverified
-  kill into `COLD`. The supervisor's `stop` hook returns `err` in that case rather
-  than `ok`, so a caller of `reclaim` that is still awaiting the hook sees the
-  same failure the deadline reported.
+  only while the record is still `STOPPING` carrying the `stopEpoch` it captured
+  when it took that edge (registry change 3). A `stop` hook that finally settles
+  `ok` after the deadline therefore writes nothing: the id stays `FAILED`,
+  `health()` keeps reporting `stopUnverified`, and the shutdown path never turns
+  an unverified kill into `COLD`. The supervisor's `stop` hook returns `err` in
+  that case rather than `ok`, so a caller of `reclaim` that is still awaiting the
+  hook sees the same failure the deadline reported.
 
 ## Model lifecycle stays separate
 
@@ -578,11 +586,12 @@ fake clock and a constant pressure:
    never reached `STOPPING` keeps `ACTIVE` with no transition, no `stopUnverified`
    and no invented kill, which is what distinguishes "never shorten a lease" from
    "report an unverified kill";
-9. spawn bounds: the supervisor passes `timeoutMs: 0` for a `recyclable: true`
-   capability and the manager's default cap for every other activation, a spawn
-   that settles after the registry's `startupTimeoutMs` is stopped instead of
-   stored, and a resident worker that outlives several hours is not reported as
-   `timed_out`.
+9. spawn bounds: the supervisor passes `timeoutMs: 0` for a `recyclable: false`
+   capability and the manager's default cap for every `recyclable: true`
+   activation, a spawn that settles after the registry's `startupTimeoutMs` is
+   stopped instead of stored, and a resident worker that outlives several hours
+   is not reported as `timed_out` (and therefore never reported as
+   `worker-exited` by the `onExit` subscription).
 
 Integration test in `packages/capabilities` with the real `ProcessManager` and a
 `node -e` child that prints one line and exits: start, log, stop, and a start

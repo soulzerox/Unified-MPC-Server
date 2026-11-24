@@ -1,3 +1,4 @@
+import { appError, err, ok } from '@unified-mpc/domain';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -67,8 +68,9 @@ describe('capability registry', () => {
     const started: string[] = [];
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         started.push(manifest.id);
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 5_000 });
@@ -99,8 +101,9 @@ describe('capability registry', () => {
     const started: string[] = [];
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         started.push(manifest.id);
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 5_000 });
@@ -117,9 +120,10 @@ describe('capability registry', () => {
   it('refuses to acquire a FAILED capability until it is recycled', async () => {
     let attempts = 0;
     const registry = new CapabilityRegistry({
-      start: (): void => {
+      start: (): Result<void> => {
         attempts += 1;
         if (attempts === 1) throw new Error('boom');
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'a', provides: ['t'] });
@@ -134,7 +138,7 @@ describe('capability registry', () => {
 
   it('fails a start that outlives its startup timeout', async () => {
     const registry = new CapabilityRegistry({
-      start: (): Promise<void> => new Promise<void>(() => undefined),
+      start: (): Promise<Result<void>> => new Promise<Result<void>>(() => undefined),
     });
     await registry.register({ id: 'a', provides: ['t'], startupTimeoutMs: 25 });
 
@@ -145,12 +149,30 @@ describe('capability registry', () => {
     expect(registry.health('a')?.state).toBe('FAILED');
   });
 
+  it('fails a start that returns err and keeps the caller error code', async () => {
+    const refused = appError('EXECUTABLE_NOT_FOUND', 'worker binary is missing', true);
+    const registry = new CapabilityRegistry({
+      start: (): Result<void> => err(refused),
+    });
+    await registry.register({ id: 'a', provides: ['t'] });
+
+    const result = await registry.acquire('a');
+
+    expect(result.ok).toBe(false);
+    // The caller's own error survives: wrapping it as `INTERNAL_ERROR` would
+    // hide why the worker stayed down.
+    expect(result.ok ? undefined : result.error).toEqual(refused);
+    expect(states(registry, 'a')).toEqual(['COLD', 'STARTING', 'FAILED']);
+    expect(registry.transitions('a').at(-1)?.reason).toBe('startup failed: worker binary is missing');
+  });
+
   it('returns a started dependency to the idle path when the acquire that needed it fails', async () => {
     let now = 0;
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         if (manifest.id === 'top') throw new Error('boom');
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'base', provides: ['base'], idleTtlMs: 5_000 });
@@ -169,9 +191,10 @@ describe('capability registry', () => {
     const starts: string[] = [];
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         starts.push(manifest.id);
         if (manifest.id === 'top') throw new Error('boom');
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'base', provides: ['base'], idleTtlMs: 1_000 });
@@ -225,9 +248,10 @@ describe('capability registry', () => {
   it('does not start a capability below a dependency that is already failed', async () => {
     const starts: string[] = [];
     const registry = new CapabilityRegistry({
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         starts.push(manifest.id);
         if (manifest.id === 'middle') throw new Error('boom');
+        return ok(undefined);
       },
     });
     // `idleTtlMs: 0` sends `leaf` back to COLD when the failed acquire hands it
@@ -264,8 +288,9 @@ describe('capability registry', () => {
     let now = 0;
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         if (manifest.id === 'resident') throw new Error('boom');
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'base', provides: ['base'], idleTtlMs: 5_000 });
@@ -284,8 +309,9 @@ describe('capability registry', () => {
     let now = 0;
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         if (manifest.id === 'resident') throw new Error('boom');
+        return ok(undefined);
       },
     });
     // `activation: 'always'` boots at registration: ACTIVE with no lease is its
@@ -306,8 +332,9 @@ describe('capability registry', () => {
     let now = 0;
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         if (manifest.id === 'dependent') throw new Error('boom');
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'base', provides: ['base'], activation: 'always', idleTtlMs: 5_000 });
@@ -324,8 +351,9 @@ describe('capability registry', () => {
   it('unregisters a capability whose always boot failed so registration can retry', async () => {
     let failing = true;
     const registry = new CapabilityRegistry({
-      start: (): void => {
+      start: (): Result<void> => {
         if (failing) throw new Error('boom');
+        return ok(undefined);
       },
     });
 
@@ -340,8 +368,9 @@ describe('capability registry', () => {
   it('starts the requires path of an always capability at registration', async () => {
     const started: string[] = [];
     const registry = new CapabilityRegistry({
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         started.push(manifest.id);
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'base', provides: ['base'] });
@@ -443,7 +472,7 @@ describe('capability registry', () => {
     let now = 0;
     const registry = new CapabilityRegistry({
       now: (): number => now,
-      start: (): void => undefined,
+      start: (): Result<void> => ok(undefined),
     });
     await registry.register({ id: 'resident', provides: ['t'], idleTtlMs: 1, recyclable: false });
     const lease = await registry.acquire('resident');
@@ -456,8 +485,9 @@ describe('capability registry', () => {
 
     let failing = true;
     const failingRegistry = new CapabilityRegistry({
-      start: (): void => {
+      start: (): Result<void> => {
         if (failing) throw new Error('boom');
+        return ok(undefined);
       },
     });
     await failingRegistry.register({ id: 'broken', provides: ['t'], recyclable: false });
@@ -470,8 +500,9 @@ describe('capability registry', () => {
   it('records an external requirement without starting or owning it', async () => {
     const started: string[] = [];
     const registry = new CapabilityRegistry({
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         started.push(manifest.id);
+        return ok(undefined);
       },
     });
 
@@ -487,8 +518,9 @@ describe('capability registry', () => {
   it('starts only the requires path of an acquire', async () => {
     const started: string[] = [];
     const registry = new CapabilityRegistry({
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         started.push(manifest.id);
+        return ok(undefined);
       },
     });
     await registry.register({ id: 'base', provides: ['base'] });
@@ -517,8 +549,9 @@ describe('capability registry', () => {
   it('starts an always capability at registration', async () => {
     const manifests: CapabilityManifest[] = [];
     const registry = new CapabilityRegistry({
-      start: (manifest): void => {
+      start: (manifest): Result<void> => {
         manifests.push(manifest);
+        return ok(undefined);
       },
     });
 

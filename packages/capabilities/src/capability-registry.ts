@@ -114,8 +114,12 @@ export interface CapabilityRegistryOptions {
   /**
    * The only startup this phase performs: an in-process begin, awaited inside
    * `startupTimeoutMs`. Phase 2 replaces it with a real supervisor.
+   *
+   * A returned `err` means the worker did not come up, so the record goes
+   * `STARTING -> FAILED` instead of `ACTIVE`. Coercing the awaited value to
+   * `'started'` would record a dead worker as healthy.
    */
-  readonly start?: (manifest: CapabilityManifest) => Promise<void> | void;
+  readonly start?: (manifest: CapabilityManifest) => Promise<Result<void>> | Result<void>;
   /**
    * How many transitions one capability keeps. A warm capability appends two
    * entries per acquire/release, so an unbounded history grows with uptime; the
@@ -522,12 +526,21 @@ export class CapabilityRegistry {
         timer.unref();      });
       try {
         const outcome = await Promise.race([
-          Promise.resolve(this.options.start?.(record.manifest)).then((): 'started' => 'started'),
-          timedOut,
+          Promise.resolve(this.options.start?.(record.manifest)).then((started) => ({
+            timedOut: false as const,
+            started: started ?? ok(undefined),
+          })),
+          timedOut.then(() => ({ timedOut: true as const, started: ok(undefined) })),
         ]);
-        if (outcome === 'timeout') {
+        if (outcome.timedOut) {
           this.transition(record, 'FAILED', 'startup timed out');
           return err(appError('PROCESS_TIMEOUT', `capability ${record.manifest.id} did not start in time`, true));
+        }
+        if (!outcome.started.ok) {
+          // Same `FAILED` wording a thrown error produces; the caller's own
+          // error is returned rather than masked as `INTERNAL_ERROR`.
+          this.transition(record, 'FAILED', `startup failed: ${outcome.started.error.message}`);
+          return outcome.started;
         }
       } catch (error) {
         this.transition(record, 'FAILED', `startup failed: ${error instanceof Error ? error.message : String(error)}`);

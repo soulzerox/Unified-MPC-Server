@@ -4,6 +4,11 @@ export interface ManagedProcessStart {
   readonly executable: string;
   readonly args: readonly string[];
   readonly cwd: string;
+  /**
+   * Wall-clock cap. `0` disables the cap, for a worker whose lifetime is the
+   * caller's to end and which must not be killed by a fixed hour; any other
+   * value must be a positive integer.
+   */
   readonly timeoutMs?: number;
 }
 

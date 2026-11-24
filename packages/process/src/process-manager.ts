@@ -36,6 +36,7 @@ interface ManagedRecord {
   terminationTarget?: 'stopped' | 'timed_out';
   terminationVerified?: Promise<void>;
   resolveTerminationVerified?: () => void;
+  exitListeners?: Set<() => void>;
 }
 
 export class ProcessManager {
@@ -135,7 +136,9 @@ export class ProcessManager {
           return;
         }
         if (record.state === 'starting') record.state = 'running';
-        record.timer = setTimeout(() => { void this.timeout(record); }, spec.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        // `0` is "no wall-clock cap": no timer, so nothing schedules a kill.
+        if (timeoutMs > 0) record.timer = setTimeout(() => { void this.timeout(record); }, timeoutMs);
         settle(ok(this.snapshot(record)));
       });
       child.once('error', (error: Error & { code?: string }) => {
@@ -153,6 +156,35 @@ export class ProcessManager {
   public status(processId: string): Result<ManagedProcess> {
     const record = this.records.get(processId);
     return record === undefined ? err(appError('PROCESS_NOT_FOUND', 'Process was not found')) : ok(this.snapshot(record));
+  }
+
+  /**
+   * Report an exit the caller did not order. `handleClose` also runs for a kill
+   * this manager was asked to perform, so the listener is a reporter: it does
+   * not decide whether the exit was wanted, and it must not be able to break the
+   * manager's bookkeeping. One notification per process, and a subscribe to a
+   * process that is already terminal replays immediately — a worker that dies
+   * inside the start window would otherwise be invisible without a poll. An
+   * unknown id keeps the caller's no-op unsubscribe rather than inventing a
+   * subscription that can never fire.
+   */
+  public onExit(processId: string, listener: () => void): () => void {
+    const record = this.records.get(processId);
+    if (record === undefined) return () => {};
+    if (isTerminal(record.state)) {
+      try {
+        listener();
+      } catch {
+        // Replay is a report; a throwing listener is the caller's bug.
+      }
+      return () => {};
+    }
+    const listeners = record.exitListeners ?? new Set<() => void>();
+    record.exitListeners = listeners;
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
   }
 
   public async recoveryIdentity(processId: string): Promise<Result<ManagedProcessRecoveryIdentity>> {
@@ -243,7 +275,7 @@ export class ProcessManager {
       return err(appError('INVALID_INPUT', 'Process cwd must be an absolute path'));
     }
     const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMEOUT_MS) {
       return err(appError('INVALID_INPUT', 'Process timeout is invalid'));
     }
     return ok(undefined);
@@ -257,6 +289,20 @@ export class ProcessManager {
   private handleClose(record: ManagedRecord, exitCode: number | null): void {
     if (record.stopRequested === undefined && !isTerminal(record.state)) this.finish(record, 'exited');
     if (record.exitCode === undefined && exitCode !== null) record.exitCode = exitCode;
+    this.notifyExit(record);
+  }
+
+  private notifyExit(record: ManagedRecord): void {
+    const listeners = record.exitListeners;
+    if (listeners === undefined || listeners.size === 0) return;
+    delete record.exitListeners;
+    for (const listener of listeners) {
+      try {
+        listener();
+      } catch {
+        // A reporter must not be able to break the manager's own bookkeeping.
+      }
+    }
   }
 
   private async timeout(record: ManagedRecord): Promise<void> {

@@ -189,6 +189,7 @@ export interface ThaiRagCapabilityRuntimeOptions {
   readonly workspaceRoots: () => Promise<readonly string[]>;
   readonly probe?: ResourcePressureProbe;
   readonly intervalMs?: number;
+  /** Sweep failures and a lease release the registry refused are reported here. */
   readonly onError?: (error: unknown) => void;
   /** Injected only so a test can avoid spawning a real child. */
   readonly processManager?: CapabilityProcessPort;
@@ -314,6 +315,9 @@ export async function createThaiRagCapabilityRuntime(
     },
     manifestId: manifest.id,
     launch: { command: spec.executable, args: spec.args, cwd: spec.cwd },
+    // A refused release happens while a session is closing, so there is no caller
+    // to return the error to; the diagnostics channel is where it belongs.
+    ...(options.onError === undefined ? {} : { onReleaseError: options.onError }),
   });
   const driver = createCapabilityPressureDriver({
     registry,

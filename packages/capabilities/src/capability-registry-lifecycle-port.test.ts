@@ -138,7 +138,7 @@ describe('capability registry lifecycle port', () => {
     expect(warm.health('w')?.state).toBe('FAILED');
   });
 
-  it('is a no-op to fail an id twice or an unregistered id', async () => {
+  it('writes no second death and refuses an unregistered id', async () => {
     const registry = new CapabilityRegistry();
     await registry.register({ id: 'a', provides: ['t'] });
     expect((await registry.acquire('a')).ok).toBe(true);

@@ -189,7 +189,7 @@ export class CapabilitySupervisor {
   public evictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
   /** Counts a diagnosis needs; no per-request allocation. */
   public health(): readonly CapabilityWorkerHealth[];
-  /** Bounded graceful stop of everything this supervisor started, via the port. */
+  /** Bounded graceful stop of every id the registry reports as stoppable, via the port. */
   public shutdown(): Promise<void>;
 }
 ```
@@ -214,8 +214,13 @@ export type PressureTier = 'normal' | 'elevated' | 'critical';
 
 `packages/capabilities` depends on `domain`, `process` and `shared` only. It does
 not depend on `@unified-mpc/workspace`, so this phase introduces no such
-dependency and no type-only import that the workspace dependency audit would
-reject: the tier is a local union and the caller maps a probe sample onto it.
+dependency. The workspace dependency audit only inspects runtime imports
+(`scripts/check-workspace-dependencies.mjs` skips `import type` and type-only
+re-exports), so it would stay silent about
+`import type { ResourcePressureState } from '@unified-mpc/workspace'` — but that
+specifier still would not resolve for `tsc`, which is the real constraint: an
+undeclared dependency is unresolvable whether or not the audit notices it. The
+tier is therefore a local union and the caller maps a probe sample onto it.
 
 ## Trust and admission
 
@@ -297,15 +302,28 @@ phase, not of the supervisor; a seventh work item lands in
    transition, on the supervisor's report;
 7. one piece in `packages/workspace`, not in the registry: a `resolveWorkerCwd`
    implementation. `packages/capabilities` may not import
-   `@unified-mpc/workspace`, and nothing at head resolves a worker `cwd` — that
-   package exposes containment predicates (`isWithin`, `isHostPathWithin`) and
-   `WorkspacePathGuard.resolveForWrite(workspace, relativePath)`, which needs a
-   `Workspace` object and returns a different shape. This phase adds one thin
-   function there, `resolveWorkspaceWorkerCwd(roots, requested)` returning
-   `Result<string>` over the containment predicate, and the application layer
-   passes it into the supervisor options. Without it the single enforcement
-   point the trust section promises has no owner, and a second containment check
-   inside `packages/capabilities` would be exactly the duplicate it forbids.
+   `@unified-mpc/workspace`, and the containment predicates that package exposes
+   (`isWithin`, `isHostPathWithin`) are lexical — `path.relative` over normalised
+   strings — so a symlinked directory inside a registered root passes them while
+   `spawn({cwd})` would still land outside the workspace. The one canonical cwd
+   resolution at head is private to the application layer:
+   `ProcessService.resolveCwd` asks `WorkspacePathGuard.resolveForRead` for the
+   realpath of the target, realpaths the nearest existing ancestor when the
+   target is missing, and re-checks the root on the canonical path. That needs a
+   `Workspace` and an authorization scope and returns
+   `Result<ResolvedWorkspacePath>`, so the supervisor cannot reuse it. This phase
+   adds one thin function beside the guard,
+   `resolveWorkspaceWorkerCwd(roots, requested)` returning `Result<string>`,
+   canonicalising exactly as `resolveForRead` does — realpath, ancestor realpath
+   for a missing target, root re-check on the canonical path — and nothing else:
+   no secret scan, no size decision. `@unified-mpc/application` declares neither
+   `capabilities` nor a registry wiring point, so the wiring owner is whichever
+   package constructs the registry: `@unified-mpc/cli` and
+   `@unified-mpc/mcp-server` already depend on both `capabilities` and
+   `workspace`, and phase 2 names one of them and adds no dependency. Without it
+   the single enforcement point the trust section promises has no owner, and a
+   second containment check inside `packages/capabilities` would be exactly the
+   duplicate it forbids.
 
 Items 3, 5 and 6 plus the existing `health(id)` are exactly what
 `CapabilityLifecyclePort` declares, so the registry implements that interface
@@ -502,7 +520,11 @@ would hide a real crash and needs a reason the registry does not have.
   would leave the registry advertising a worker that no longer exists — and the
   `onExit` guard above would then report that ordered kill as `worker-exited`.
   `ProcessManager.stop()` therefore stays confined to the stop hook the registry
-  invokes.
+  invokes. The sweep is registry-wide, not a supervisor-owned set: an id the
+  supervisor never spawned — an `in-process` capability has no spec and no
+  `processId` — reaches the same hook, and for it the hook returns
+  `ok(undefined)` without touching `ProcessManager`, so the registry writes
+  `COLD` exactly as it does today.
 - A leased id never reaches `STOPPING` (`reclaim` only marks a pending stop, and
   `stop` refuses `leaseCount > 0`), so shutdown cannot wait on a kill for it: the
   pending stop completes from `releaseLease` (registry change 3) and the wait is a
@@ -518,16 +540,20 @@ would hide a real crash and needs a reason the registry does not have.
   unverified", not "killed": `ProcessManager` has already attempted its own
   SIGTERM/SIGKILL escalation inside `ProcessTreeTerminator`, and the supervisor
   has no second kill primitive.
-- Who writes that outcome is fixed, so the deadline cannot be undone later: the
-  supervisor calls `port.fail(id, 'stop-unverified')`, which the registry accepts
-  only from `STOPPING`, and the registry's own stop continuation writes `COLD`
-  only while the record is still `STOPPING` carrying the `stopEpoch` it captured
-  when it took that edge (registry change 3). A `stop` hook that finally settles
-  `ok` after the deadline therefore writes nothing: the id stays `FAILED`,
-  `health()` keeps reporting `stopUnverified`, and the shutdown path never turns
-  an unverified kill into `COLD`. The supervisor's `stop` hook returns `err` in
-  that case rather than `ok`, so a caller of `reclaim` that is still awaiting the
-  hook sees the same failure the deadline reported.
+- The outcome, not the writer, is fixed, so the deadline cannot be undone later:
+  both admissible writers — the supervisor's
+  `port.fail(id, 'stop-unverified')` and the registry's stop continuation when
+  the hook settles `err` — write the same `STOPPING -> FAILED` with the same
+  reason. Whichever settles first wins and the second is a no-op rejected from
+  `FAILED`; there is one state, one reason, and no ordering the reader has to
+  infer from timing. `fail` is accepted only from `STOPPING`, and the registry's
+  continuation writes `COLD` only while the record is still `STOPPING` carrying
+  the `stopEpoch` it captured when it took that edge (registry change 3). A `stop`
+  hook that finally settles `ok` after the deadline therefore writes nothing: the
+  id stays `FAILED`, `health()` keeps reporting `stopUnverified`, and the shutdown
+  path never turns an unverified kill into `COLD`. The supervisor's `stop` hook
+  returns `err` in that case rather than `ok`, so a caller of `reclaim` that is
+  still awaiting the hook sees the same failure the deadline reported.
 
 ## Model lifecycle stays separate
 

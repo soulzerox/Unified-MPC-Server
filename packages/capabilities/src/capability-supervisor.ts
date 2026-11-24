@@ -294,6 +294,11 @@ export class CapabilitySupervisor {
     }
     const started = outcome.value;
     if (!started.ok) {
+      // `onCreated` runs before the start promise settles, so a spawn that then
+      // fails has already subscribed; leaving it registered would let this
+      // attempt's close report a death inside a later attempt's start. Scoped to
+      // this attempt for the same reason the listener is.
+      if (attempt === record.starts) this.unsubscribe(record);
       this.recordFailure(record, 'start-failed');
       return started;
     }
@@ -448,6 +453,9 @@ export class CapabilitySupervisor {
     this.unsubscribe(record);
     record.subscribedProcessId = processId;
     record.unsubscribe = this.processManager.onExit(processId, () => {
+      // The listener is scoped to its own attempt for the same reason: an exit
+      // delivered late must not be reported against the attempt now in flight.
+      if (attempt !== record.starts) return;
       this.onWorkerExit(record);
     });
   }

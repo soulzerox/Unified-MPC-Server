@@ -2,8 +2,8 @@ import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ok, type Result } from '@unified-mpc/domain';
-import type { EvictionCandidate, PressureTier } from '@unified-mpc/capabilities';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import type { CapabilityProcessPort, EvictionCandidate, PressureTier } from '@unified-mpc/capabilities';
 import type { ResourcePressureProbe, ResourcePressureState } from '@unified-mpc/workspace';
 import {
   CAPABILITY_PRESSURE_INTERVAL_MS,
@@ -237,6 +237,50 @@ describe('thai-rag capability runtime', () => {
     });
 
     expect(runtime.ok).toBe(false);
+  });
+
+  it('states no wall-clock cap on the provider spec, so a serving worker is not killed hourly', async () => {
+    const installRoot = await dir();
+    await mkdir(path.join(installRoot, 'venv'));
+    const specs: { timeoutMs?: number }[] = [];
+    const processes: CapabilityProcessPort = {
+      start: async (startSpec, _signal, onCreated) => {
+        specs.push(startSpec);
+        const spawned = {
+          processId: `proc-${specs.length}`,
+          executable: startSpec.executable,
+          args: startSpec.args,
+          cwd: startSpec.cwd,
+          state: 'running' as const,
+          startedAt: new Date(0).toISOString(),
+        };
+        onCreated?.(spawned);
+        return ok(spawned);
+      },
+      stop: async () => ok(undefined),
+      status: () => err(appError('PROCESS_NOT_FOUND', 'Process was not found')),
+      onExit: () => () => {},
+    };
+    const runtime = await createThaiRagCapabilityRuntime({
+      installRoot,
+      workspaceRoots: async () => [],
+      launch: {
+        executable: path.join(installRoot, 'venv', 'bin', 'python3'),
+        args: [path.join(installRoot, 'thai_rag_context_mcp.py')],
+        cwd: installRoot,
+      },
+      processManager: processes,
+    });
+
+    expect(runtime.ok).toBe(true);
+    if (!runtime.ok) return;
+    const lease = await runtime.value.registry.acquire(THAI_RAG_WORKER_ID);
+    expect(lease.ok).toBe(true);
+    // The literal is the fix's whole production effect: without this assertion,
+    // deleting it restores the hourly SIGKILL with every other test still green.
+    expect(specs.map((spec) => spec.timeoutMs)).toEqual([0]);
+    if (lease.ok) lease.value.release();
+    await runtime.value.close();
   });
 
   it('turns a refused registration into a connection failure, not a boot failure', async () => {

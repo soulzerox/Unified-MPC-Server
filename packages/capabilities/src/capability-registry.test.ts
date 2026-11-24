@@ -5,6 +5,7 @@ import {
   CapabilityRegistry,
   normalizeCapabilityManifest,
   type CapabilityManifest,
+  type CapabilityRegistryOptions,
   type CapabilityState,
 } from './capability-registry.js';
 
@@ -90,7 +91,7 @@ describe('capability registry', () => {
     expect(second.ok && second.value.release().ok).toBe(true);
 
     now += 5_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('a')).toMatchObject({ state: 'COLD', leaseCount: 0 });
     expect(states(registry, 'a')).toEqual(['COLD', 'STARTING', 'ACTIVE', 'WARM_IDLE', 'ACTIVE', 'WARM_IDLE', 'STOPPING', 'COLD']);
     expect(started).toEqual(['a']);
@@ -182,7 +183,7 @@ describe('capability registry', () => {
     expect(registry.health('base')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
 
     now += 5_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('base')?.state).toBe('COLD');
   });
 
@@ -202,7 +203,7 @@ describe('capability registry', () => {
 
     expect((await registry.acquire('top')).ok).toBe(false);
     now += 1_000;
-    registry.sweep();
+    await registry.sweep();
     // The dependency is cold again, so a second attempt that walked `requires`
     // would show up as a real start.
     expect(registry.health('base')?.state).toBe('COLD');
@@ -301,7 +302,7 @@ describe('capability registry', () => {
     expect(registry.health('base')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
 
     now += 5_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('base')?.state).toBe('COLD');
   });
 
@@ -324,7 +325,7 @@ describe('capability registry', () => {
     expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
 
     now += 5_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('base')?.state).toBe('ACTIVE');
   });
 
@@ -344,7 +345,7 @@ describe('capability registry', () => {
     expect(registry.health('base')).toMatchObject({ state: 'ACTIVE', leaseCount: 0 });
 
     now += 5_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('base')?.state).toBe('ACTIVE');
   });
 
@@ -403,14 +404,14 @@ describe('capability registry', () => {
     if (!lease.ok) throw new Error('expected a lease');
 
     now += 60_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('a')).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
 
     lease.value.release();
     expect(registry.health('a')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
 
     now += 5_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('a')?.state).toBe('COLD');
   });
 
@@ -423,6 +424,63 @@ describe('capability registry', () => {
     lease.value.release();
     expect(registry.health('a')).toMatchObject({ state: 'COLD', leaseCount: 0 });
     expect(states(registry, 'a')).not.toContain('WARM_IDLE');
+  });
+
+  it('waits for the stop hook before writing COLD', async () => {
+    let now = 0;
+    let confirm!: () => void;
+    const stopped: string[] = [];
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      stop: async (manifest): Promise<Result<void>> => {
+        stopped.push(manifest.id);
+        await new Promise<void>((resolve) => {
+          confirm = resolve;
+        });
+        return ok(undefined);
+      },
+    });
+    await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 10 });
+    const lease = await registry.acquire('a');
+    if (!lease.ok) throw new Error('expected a lease');
+    lease.value.release();
+    now += 10;
+
+    const swept = registry.sweep();
+    expect(stopped).toEqual(['a']);
+    // Ordered is not stopped: a `COLD` record would let the next acquire reuse a
+    // worker that has not confirmed its exit.
+    expect(registry.health('a')?.state).toBe('STOPPING');
+    expect((await registry.acquire('a')).ok).toBe(false);
+
+    confirm();
+    await swept;
+    expect(registry.health('a')?.state).toBe('COLD');
+  });
+
+  it('records stop-unverified when the stop hook reports err or rejects', async () => {
+    const sweepOnce = async (stop: CapabilityRegistryOptions['stop']): Promise<CapabilityRegistry> => {
+      const registry = new CapabilityRegistry({ stop });
+      await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 0 });
+      const lease = await registry.acquire('a');
+      if (!lease.ok) throw new Error('expected a lease');
+      lease.value.release();
+      await registry.sweep();
+      return registry;
+    };
+
+    const refused = await sweepOnce(() => err(appError('PROCESS_NOT_FOUND', 'worker already gone')));
+    const thrown = await sweepOnce(() => {
+      throw new Error('kill refused');
+    });
+
+    for (const registry of [refused, thrown]) {
+      expect(registry.health('a')?.state).toBe('FAILED');
+      expect(registry.transitions('a').at(-1)?.reason).toBe('stop-unverified');
+      // `FAILED` is recyclable, `COLD` is not reachable from an unverified stop.
+      expect(registry.recycle('a').ok).toBe(true);
+      expect((await registry.acquire('a')).ok).toBe(true);
+    }
   });
 
   it('fences a stale generation on acquire and publish but still releases it', async () => {
@@ -480,7 +538,7 @@ describe('capability registry', () => {
 
     lease.value.release();
     now += 1_000_000;
-    registry.sweep();
+    await registry.sweep();
     expect(registry.health('resident')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
 
     let failing = true;

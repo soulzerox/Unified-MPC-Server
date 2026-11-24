@@ -16,6 +16,8 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
  *
  * - a transition that is not in the table is refused, not coerced;
  * - `acquire` never resurrects `STOPPING` or `FAILED`;
+ * - `STOPPING -> COLD` is written only after the `stop` hook confirms the worker
+ *   is gone; a hook that reports `err` or rejects leaves the record `FAILED`;
  * - `leaseCount` never goes negative and a double release is an error;
  * - while a lease is held the capability cannot enter `STOPPING`, even when its
  *   idle TTL has already elapsed;
@@ -120,6 +122,18 @@ export interface CapabilityRegistryOptions {
    * `'started'` would record a dead worker as healthy.
    */
   readonly start?: (manifest: CapabilityManifest) => Promise<Result<void>> | Result<void>;
+  /**
+   * Verified termination, awaited between `STOPPING` and `COLD`: the record
+   * reaches `COLD` only once the worker is confirmed gone. Phase 2 replaces it
+   * with a real supervisor stop; today nothing is spawned, so it is optional.
+   *
+   * A rejected hook and one that resolves `err` both write `STOPPING -> FAILED`
+   * with `stop-unverified`, because "the stop was ordered" is not "the worker
+   * stopped" — reporting `COLD` there would hand a live process to the next
+   * acquire.
+   */
+  readonly stop?: (manifest: CapabilityManifest) => Promise<Result<void>> | Result<void>;
+
   /**
    * How many transitions one capability keeps. A warm capability appends two
    * entries per acquire/release, so an unbounded history grows with uptime; the
@@ -381,14 +395,16 @@ export class CapabilityRegistry {
    * Reclaims warm capabilities whose idle TTL has elapsed. Phase 3 calls this
    * from a pressure signal; phase 1 calls it from a clock tick or a test.
    */
-  public sweep(): void {
+  public async sweep(): Promise<void> {
     const now = this.now();
     for (const record of this.records.values()) {
       if (record.state !== 'WARM_IDLE') continue;
       if (record.leaseCount > 0) continue;
       if (!record.manifest.recyclable) continue;
       if (now - record.idleSince < record.manifest.idleTtlMs) continue;
-      this.stop(record, 'idle TTL elapsed');
+      // Sequential on purpose: the `stop` hook owns a real process in phase 2,
+      // and one reclaim at a time keeps the reason on each transition truthful.
+      await this.stop(record, 'idle TTL elapsed');
     }
   }
 
@@ -563,7 +579,10 @@ export class CapabilityRegistry {
   private releaseIdle(record: CapabilityRecord): void {
     if (record.state !== 'ACTIVE') return;
     if (record.manifest.idleTtlMs === 0) {
-      this.stop(record, 'idle TTL is zero');
+      // `release()` is synchronous and stays that way, so this stop is started
+      // and not awaited: the caller reads the outcome from `health(id)`, which
+      // reports `COLD` (or `FAILED` when the hook could not verify the stop).
+      void this.stop(record, 'idle TTL is zero');
       return;
     }
     record.idleSince = this.now();
@@ -571,15 +590,38 @@ export class CapabilityRegistry {
   }
 
   /**
-   * `STOPPING -> COLD`. A capability that promised to stay resident for the
-   * process lifetime (`recyclable: false`) never reaches here, and neither does
-   * one holding a lease.
+   * `STOPPING -> COLD`, written only after the `stop` hook confirms the worker is
+   * gone. A capability that promised to stay resident for the process lifetime
+   * (`recyclable: false`) never reaches here, and neither does one holding a
+   * lease.
    */
-  private stop(record: CapabilityRecord, reason: string): void {
-    if (!record.manifest.recyclable || record.leaseCount > 0) return;
-    if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE') return;
+  private async stop(record: CapabilityRecord, reason: string): Promise<Result<void>> {
+    if (!record.manifest.recyclable || record.leaseCount > 0) return ok(undefined);
+    if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE') return ok(undefined);
     this.transition(record, 'STOPPING', reason);
+    const hook = this.options.stop;
+    if (hook !== undefined) {
+      try {
+        const stopped = await hook(record.manifest);
+        if (!stopped.ok) {
+          this.transition(record, 'FAILED', 'stop-unverified');
+          return stopped;
+        }
+      } catch (error) {
+        // Same verdict for a rejected hook as for one that resolves `err`: the
+        // kill was ordered, not verified, so `COLD` would be a lie.
+        this.transition(record, 'FAILED', 'stop-unverified');
+        return err(
+          appError(
+            'INTERNAL_ERROR',
+            `capability ${record.manifest.id} failed to stop: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          ),
+        );
+      }
+    }
     this.transition(record, 'COLD', 'stopped');
+    return ok(undefined);
   }
 
   private transition(record: CapabilityRecord, to: CapabilityState, reason: string): void {

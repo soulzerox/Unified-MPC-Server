@@ -91,11 +91,15 @@ describe('capability supervisor with the real ProcessManager', () => {
   });
 
   /**
-   * #133's remaining acceptance item: "repeated activate/recycle loops reach
-   * bounded steady-state RSS". The bound is deliberately generous, because the
-   * invariant is "memory falls again", not a byte budget: a loop that kept a
-   * child, its record or its buffers alive per iteration would still be running
-   * children and a growing resident set after the second cycle.
+   * #133's acceptance item "repeated activate/recycle loops reach bounded
+   * steady-state RSS". Two things are asserted, because neither alone is honest:
+   *
+   * - every cycle spawns a fresh child and leaves nothing behind (unique ids, no
+   *   live child, no surviving lease), which is what actually returns memory to
+   *   the OS and is stable enough to be a hard assertion;
+   * - the parent's resident set plateaus instead of climbing once the loop is
+   *   warm. RSS is only indicative inside one process on one platform, so the
+   *   ceiling is calibrated from a warm baseline rather than from a byte budget.
    */
   it('reaches a bounded steady state after repeated activate/recycle cycles', async () => {
     const { registry, supervisor, processes } = build();
@@ -103,29 +107,47 @@ describe('capability supervisor with the real ProcessManager', () => {
     expect((await supervisor.register(spec, workerSpec(CHILD))).ok).toBe(true);
     expect((await registry.register(spec)).ok).toBe(true);
 
-    const cycles = 6;
+    const warmup = 2;
+    const measured = 8;
+    const processIds = new Set<string>();
     const rssMiB: number[] = [];
-    for (let cycle = 0; cycle < cycles; cycle += 1) {
+    const cycleOnce = async (index: number): Promise<void> => {
       const lease = await registry.acquire('worker');
-      if (!lease.ok) throw new Error(`cycle ${cycle} could not acquire: ${lease.error.message}`);
-      expect(supervisor.health()[0]?.processId).toBeDefined();
+      if (!lease.ok) throw new Error(`cycle ${index} could not acquire: ${lease.error.message}`);
+      const processId = supervisor.health().find((entry) => entry.id === 'worker')?.processId;
+      if (processId === undefined) throw new Error(`cycle ${index} spawned no worker`);
+      // A reused worker would leave the previous id here, so the set proves the
+      // loop really tore the old child down and spawned a new one every time.
+      processIds.add(processId);
       expect(lease.value.release().ok).toBe(true);
-      await waitUntil(() => registry.health('worker')?.state === 'COLD', `cycle ${cycle} to stop`);
+      await waitUntil(() => registry.health('worker')?.state === 'COLD', `cycle ${index} to stop`, 8_000);
       rssMiB.push(process.memoryUsage().rss / 1024 / 1024);
+    };
+
+    try {
+      for (let index = 0; index < warmup; index += 1) await cycleOnce(index);
+      const warmRss = process.memoryUsage().rss / 1024 / 1024;
+      for (let index = warmup; index < warmup + measured; index += 1) await cycleOnce(index);
+
+      expect(processIds.size).toBe(warmup + measured);
+      // Every child is gone, not merely unreferenced: the recycle is a loop, not a ratchet.
+      expect(processes.list().filter((entry) => entry.state === 'running' || entry.state === 'starting')).toHaveLength(0);
+      expect(registry.health('worker')?.leaseCount).toBe(0);
+      // The plateau is measured against the warm baseline: a per-cycle leak of the
+      // size this item exists to catch (a child, its buffers, its log ring) adds far
+      // more than this over eight cycles, while ordinary V8 growth comes nowhere near it.
+      const plateauMiB = Math.max(...rssMiB.slice(warmup)) - warmRss;
+      expect(plateauMiB).toBeLessThan(24);
+    } finally {
+      // A failing assertion must not strand a detached child for the rest of the run.
+      await supervisor.shutdown().catch(() => undefined);
     }
-
-    // Every child is gone, not merely unreferenced: the recycle is a loop, not a ratchet.
-    expect(processes.list().filter((entry) => entry.state === 'running' || entry.state === 'starting')).toHaveLength(0);
-    expect(registry.health('worker')?.leaseCount).toBe(0);
-    expect(rssMiB.at(-1)! - rssMiB[0]!).toBeLessThan(150);
-
-    await supervisor.shutdown();
     expect(registry.health('worker')?.state).toBe('COLD');
-  }, 60_000);
+  }, 120_000);
 
 });
 
-async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 15_000): Promise<void> {
+async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 8_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);

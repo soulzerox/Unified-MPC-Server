@@ -65,7 +65,8 @@ activation          'always' | 'on-demand' | 'burst'
 costClass           'small' | 'medium' | 'large'   (advisory, for phase 3)
 idleTtlMs           warm-idle lifetime; 0 means stop immediately on last release
 startupTimeoutMs    bound on STARTING -> ACTIVE
-shutdownTimeoutMs   graceful bound before a forced kill (phase 2 uses it)
+shutdownTimeoutMs   deadline the supervisor stops waiting for a verified kill
+                    (phase 2)
 recyclable          boolean; false pins the capability for the process lifetime
 generationFenced    boolean; true requires a generation on every acquire
 healthProbe         optional id of a registered probe
@@ -86,9 +87,11 @@ reclamation.
   `WARM_IDLE`.
 
 `costClass` and `shutdownTimeoutMs` are recorded now because changing the
-manifest later is a `version` bump. Enforcing `shutdownTimeoutMs` is phase 2's
-job, because it only matters once something can be killed; `costClass` is
-advisory until phase 3 has a pressure signal to weigh it against.
+manifest later is a `version` bump. `shutdownTimeoutMs` is phase 2's job because
+it only matters once something can be killed, and it bounds the *wait* for a
+verified kill, not the kill itself: the SIGTERM→SIGKILL escalation already lives
+inside `PosixProcessTree` with its own fixed graces. `costClass` is advisory
+until phase 3 has a pressure signal to weigh it against.
 
 `costClass` is deliberately not called `resourceClass`: that name already means
 the admission class of a *request* (`goal_process`, `delegated_agent`,

@@ -27,8 +27,9 @@ export const MAX_RETAINED_TERMINAL_LOG_BYTES = 16 * 1024 * 1024;
 
 /**
  * Cap on what a caller-facing `exposeStdio` copy may buffer while its consumer
- * is not reading. Past it the copy ends, so a stalled reader sees EOF instead of
- * letting the runtime hold the child's whole output in memory.
+ * is not reading. Past it the copy ends and its child is stopped: a stalled
+ * reader gets EOF instead of the runtime holding the child's whole output, and
+ * the next acquire cannot attach to pipes whose buffered prefix it would replay.
  */
 export const MAX_TEE_BUFFER_BYTES = 8 * 1024 * 1024;
 
@@ -125,11 +126,11 @@ export class ProcessManager {
     // throw `ERR_STREAM_WRITE_AFTER_END` inside a `'data'` handler.
     child.stdout?.on('data', (chunk: Buffer) => {
       record.logs.append('stdout', chunk.toString('utf8'));
-      if (record.tee !== undefined) this.teeChunk(record.tee.stdout, chunk);
+      if (record.tee !== undefined) this.teeChunk(record, record.tee.stdout, chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       record.logs.append('stderr', chunk.toString('utf8'));
-      if (record.tee !== undefined) this.teeChunk(record.tee.stderr, chunk);
+      if (record.tee !== undefined) this.teeChunk(record, record.tee.stderr, chunk);
     });
     this.records.set(processId, record);
     onCreated?.(this.snapshot(record, tee));
@@ -363,14 +364,22 @@ export class ProcessManager {
    * otherwise buffer the child's whole output in the `PassThrough`; past the cap
    * the copy ends so the consumer sees EOF rather than the runtime growing
    * without a ceiling. The log ring keeps the output either way.
+   *
+   * The child is stopped too. Ending only the copy would leave a live worker
+   * whose pipes no session can use: the next consumer replays the buffered
+   * prefix, then reaches EOF while the child keeps writing. A stop is observable
+   * (the supervisor records `worker-exited` and the capability is `FAILED`, so a
+   * caller recycles it) instead of handing out pipes that fail a handshake.
    */
-  private teeChunk(stream: PassThrough, chunk: Buffer): void {
+  private teeChunk(record: ManagedRecord, stream: PassThrough, chunk: Buffer): void {
     if (stream.writableEnded || stream.destroyed) return;
     stream.write(chunk);
     // A paused Transform keeps its readable side near the high-water mark and queues
     // the rest on the writable side, so both sides make up what a stalled consumer
     // would otherwise pin.
-    if (stream.readableLength + stream.writableLength > MAX_TEE_BUFFER_BYTES) stream.end();
+    if (stream.readableLength + stream.writableLength <= MAX_TEE_BUFFER_BYTES) return;
+    stream.end();
+    void this.stop(record.processId);
   }
 
   private notifyExit(record: ManagedRecord): void {

@@ -528,6 +528,17 @@ describe('ProcessManager stdio exposure and env', () => {
       expect(copy?.writableEnded).toBe(true);
       const buffered = (copy?.readableLength ?? 0) + (copy?.writableLength ?? 0);
       expect(buffered).toBeLessThanOrEqual(MAX_TEE_BUFFER_BYTES + 64 * 1024);
+      // `endTee` also ends the copy when the child exits, so a bare `writableEnded`
+      // would pass for a child that died on its own. The child had a live interval
+      // and the cap is what stopped it: the record must read `stopped`, not `exited`.
+      let terminalState: string | undefined;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const status = manager.status(started.value.processId);
+        terminalState = status.ok ? status.value.state : undefined;
+        if (terminalState === 'stopped') break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      expect(terminalState).toBe('stopped');
       // The diagnostics ring is unaffected by the copy ending.
       expect(manager.logs(started.value.processId, { tailLines: 1 }).ok).toBe(true);
     } finally {

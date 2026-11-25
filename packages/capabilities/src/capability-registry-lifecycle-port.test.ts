@@ -53,11 +53,15 @@ describe('capability registry lifecycle port', () => {
 
     expect((await registry.reclaim('a')).ok).toBe(true);
     expect(registry.health('a')).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
+    // A caller that can end the lease has to see the request waiting on it; the
+    // state alone stays ACTIVE, so without this mark the reclaim is invisible.
+    expect(registry.health('a')?.pendingStop).toBe('reclaimed while leased');
 
     expect(lease.value.release().ok).toBe(true);
     await settle();
 
     expect(registry.health('a')).toMatchObject({ state: 'COLD', leaseCount: 0 });
+    expect(registry.health('a')?.pendingStop).toBeUndefined();
   });
 
   it('reclaims a warm id through the stop hook', async () => {

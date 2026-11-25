@@ -5505,3 +5505,42 @@ describe('canonical code_index source identity (#210 §13)', () => {
     }
   });
 });
+
+describe('NativeThaiRagProviderDriver lane release', () => {
+  it('releases the lane on request and reconnects on the next call', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let connects = 0;
+    const closed = new Set<number>();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        onConnect(): void { connects += 1; },
+        onClose(connection): void { closed.add(connection); },
+        async onCall(tool): Promise<unknown> {
+          return tool === 'health' ? success('health', defaultHandshake()) : success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    expect(connects).toBe(1);
+
+    // #133 phase 4: pressure ends the one lane that holds the worker's lease.
+    expect(await driver.releaseWorkerLane()).toBe(true);
+    expect(closed.has(1)).toBe(true);
+
+    // The provider stays started: the next call connects onto a fresh child.
+    // More than one connect is expected here (the provider's own probe lane is a
+    // separate manager), so the assertion is that the closed lane is replaced.
+    const beforeCall = connects;
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(connects).toBeGreaterThan(beforeCall);
+
+    await driver.stop();
+    // A provider that is stopping has no lane to give up; the request is refused
+    // rather than closing a session its own stop path is already tearing down.
+    expect(await driver.releaseWorkerLane()).toBe(false);
+  });
+});

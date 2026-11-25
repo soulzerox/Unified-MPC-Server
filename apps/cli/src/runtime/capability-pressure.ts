@@ -67,6 +67,11 @@ export interface CapabilityPressureSweepPort {
     reclaim(id: string): Promise<Result<void>>;
     /** Stops warm workers whose idle TTL elapsed; time-based, not pressure-based. */
     sweep(): Promise<void>;
+    /**
+     * The stop a `reclaim` left waiting on a lease. Optional: a port that cannot
+     * report it is never nudged, which is the pre-phase-4 behaviour.
+     */
+    health?(id: string): { readonly pendingStop?: string } | undefined;
   };
   readonly supervisor: {
     evictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
@@ -78,6 +83,12 @@ export interface CapabilityPressureDriverOptions extends CapabilityPressureSweep
   readonly intervalMs?: number;
   /** A failed reclaim is reported here; the next tick retries it. */
   readonly onError?: (error: unknown) => void;
+  /**
+   * Releases the one lane that holds a leased worker's lease, so the stop a
+   * `reclaim` marked can run. `true` when the lane was released. Only asked at
+   * `critical`, and only after a reclaim left a `pendingStop` behind.
+   */
+  readonly requestEviction?: (id: string) => Promise<boolean>;
   /** Injected only so a test can drive the interval without real timers. */
   readonly timers?: {
     readonly setInterval: typeof setInterval;
@@ -113,9 +124,28 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
       await options.registry.sweep();
       const tier = probe.sample().state;
       if (tier === 'normal') return;
-      for (const id of options.supervisor.evictionPlan(tier, options.registry.snapshot())) {
+      const plan = options.supervisor.evictionPlan(tier, options.registry.snapshot());
+      const blocked: string[] = [];
+      for (const id of plan) {
         const reclaimed = await options.registry.reclaim(id);
-        if (!reclaimed.ok) report(reclaimed.error);
+        if (!reclaimed.ok) {
+          report(reclaimed.error);
+          continue;
+        }
+        // A leased id is only marked: the stop runs on the last release, and
+        // that release is what the nudge asks for. A reclaim that stopped the
+        // worker leaves no mark, so nothing is nudged for it.
+        if (tier === 'critical' && options.requestEviction !== undefined
+          && options.registry.health?.(id)?.pendingStop !== undefined) {
+          blocked.push(id);
+        }
+      }
+      for (const id of blocked) {
+        try {
+          if (!await options.requestEviction!(id)) report(appError('CONFLICT', `capability ${id} kept its lease; pressure could not release it`));
+        } catch (error: unknown) {
+          report(error);
+        }
       }
     } catch (error: unknown) {
       report(error);
@@ -201,6 +231,11 @@ export interface ThaiRagCapabilityRuntimeOptions {
   readonly intervalMs?: number;
   /** Sweep failures and a lease release the registry refused are reported here. */
   readonly onError?: (error: unknown) => void;
+  /**
+   * #133 phase 4: releases the lane that holds a leased worker's lease, so a
+   * `critical` reclaim can run. Absent means leased workers are never evicted.
+   */
+  readonly requestEviction?: (id: string) => Promise<boolean>;
   /** Injected only so a test can avoid spawning a real child. */
   readonly processManager?: CapabilityProcessPort;
 }
@@ -334,6 +369,7 @@ export async function createThaiRagCapabilityRuntime(
     supervisor,
     ...(options.probe === undefined ? {} : { probe: options.probe }),
     ...(options.intervalMs === undefined ? {} : { intervalMs: options.intervalMs }),
+    ...(options.requestEviction === undefined ? {} : { requestEviction: options.requestEviction }),
     ...(options.onError === undefined ? {} : { onError: options.onError }),
   });
 

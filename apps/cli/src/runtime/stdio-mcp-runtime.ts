@@ -109,7 +109,7 @@ import {
   indexCallTimeoutFromEnv,
   type NativeThaiRagWorkspace,
 } from './native-thai-rag-provider.js';
-import { wireThaiRagCapability } from './capability-pressure.js';
+import { THAI_RAG_WORKER_ID, wireThaiRagCapability } from './capability-pressure.js';
 import { createStrictThaiRagGoalAdmissionProvider } from './native-thai-rag-goal-admission.js';
 import { DEFAULT_THAI_RAG_CONNECT_BUDGET_SECONDS, DEFAULT_THAI_RAG_RESPONSE_BUDGET_SECONDS } from './thai-rag-call-budget.js';
 import { createActivityRecordErrorSink } from './diagnostic-sink.js';
@@ -548,6 +548,10 @@ export function createStdioMcpRuntime(
   const thaiRagDiagnostics = options.thaiRagDiagnostics ?? ((line: string): void => { process.stderr.write(`${line}\n`); });
   // A caller that injects its own driver owns the provider's child; there is no
   // worker for the supervisor to own.
+  // #133 phase 4: an eviction is a request to the layer that owns the lane, and
+  // that layer (the provider driver) is built after the capability runtime. The
+  // holder is the one seam between them; the sweep never touches a lane itself.
+  const thaiRagLaneRelease: { release?: () => Promise<boolean> } = {};
   const thaiRagCapability = options.thaiRagDriver !== undefined
     ? undefined
     : wireThaiRagCapability({
@@ -557,6 +561,11 @@ export function createStdioMcpRuntime(
       // owns it, and it is the cwd the driver's own launch asks for.
       extraCwdRoots: [thaiRagSourcesRoot],
       workspaceRoots: async (): Promise<readonly string[]> => (await activeWorkspaces()).map((entry) => entry.realRootPath),
+      requestEviction: async (id: string): Promise<boolean> => {
+        if (id !== THAI_RAG_WORKER_ID) return false;
+        const release = thaiRagLaneRelease.release;
+        return release === undefined ? false : release();
+      },
       onError: (error: unknown): void => {
         thaiRagDiagnostics(`thai-rag capability pressure sweep failed: ${error instanceof Error ? error.message : String(error)}`);
       },
@@ -685,6 +694,12 @@ export function createStdioMcpRuntime(
     // pass (issue #445 option 4), so it must never be implicit.
     codeIndexVectors: codeIndexVectorsFromEnv(process.env.UNIFIED_MPC_THAI_RAG_CODE_INDEX_VECTORS),
   });
+  // A caller-injected driver owns its own lanes, so only the supervised provider
+  // can be asked to release one.
+  const laneReleaser = (thaiRagDriver as Partial<Pick<NativeThaiRagProviderDriver, 'releaseWorkerLane'>>).releaseWorkerLane;
+  if (laneReleaser !== undefined) {
+    thaiRagLaneRelease.release = (): Promise<boolean> => laneReleaser.call(thaiRagDriver);
+  }
   // Designated forward-only mode (#407 req 3): a peer never runs the owner
   // election; it follows the designated owner straight or fails with the
   // machine-readable forward-host-unreachable reason (locked hosts stay

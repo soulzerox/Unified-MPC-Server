@@ -691,6 +691,22 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
     }
   }
 
+  /**
+   * #133 phase 4: lets memory pressure end this provider's one lane so the
+   * capability supervisor can stop the worker underneath it. The lane is
+   * unpinned first, so the manager's idle sweep cannot keep it alive again once
+   * pressure has decided against it. The provider stays started: the next call
+   * reconnects through `ensure`, onto a fresh child, exactly as a worker death
+   * after `#766` does. Returns `false` when there is no lane left to release or
+   * the provider is already stopping.
+   */
+  public async releaseWorkerLane(): Promise<boolean> {
+    if (this.stopped || this.shuttingDown) return false;
+    this.sessions.unpin(SERVER_NAME);
+    await this.sessions.dropServer(SERVER_NAME);
+    return true;
+  }
+
   public stop(): Promise<Result<void>> {
     if (this.stopPromise !== undefined) return this.stopPromise;
     this.stopRequested = true;

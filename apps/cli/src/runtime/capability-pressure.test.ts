@@ -149,6 +149,100 @@ describe('capability pressure driver', () => {
     expect(errors).toHaveLength(1);
   });
 
+  it('asks for the lease to be released only at critical, and only when a reclaim left a mark', async () => {
+    const nudged: string[] = [];
+    const port = sweepPort([THAI_RAG_WORKER_ID], async () => ok(undefined));
+    const driver = createCapabilityPressureDriver({
+      ...port,
+      registry: {
+        ...port.registry,
+        // A leased id: `reclaim` only marked it, so the stop is waiting on the holder.
+        health: (): { pendingStop?: string } => ({ pendingStop: 'reclaimed while leased' }),
+      },
+      probe: probeReturning('critical'),
+      requestEviction: async (id: string): Promise<boolean> => {
+        nudged.push(id);
+        return true;
+      },
+    });
+
+    await driver.tick();
+
+    expect(nudged).toEqual([THAI_RAG_WORKER_ID]);
+  });
+
+  it('never ends a live session on an elevated sample', async () => {
+    const nudged: string[] = [];
+    const port = sweepPort([THAI_RAG_WORKER_ID], async () => ok(undefined));
+    const driver = createCapabilityPressureDriver({
+      ...port,
+      registry: {
+        ...port.registry,
+        health: (): { pendingStop?: string } => ({ pendingStop: 'reclaimed while leased' }),
+      },
+      probe: probeReturning('elevated'),
+      requestEviction: async (id: string): Promise<boolean> => {
+        nudged.push(id);
+        return true;
+      },
+    });
+
+    await driver.tick();
+
+    expect(nudged).toEqual([]);
+  });
+
+  it('does not nudge a worker the reclaim actually stopped', async () => {
+    const nudged: string[] = [];
+    const port = sweepPort([THAI_RAG_WORKER_ID], async () => ok(undefined));
+    const driver = createCapabilityPressureDriver({
+      ...port,
+      registry: { ...port.registry, health: (): { pendingStop?: string } => ({}) },
+      probe: probeReturning('critical'),
+      requestEviction: async (id: string): Promise<boolean> => {
+        nudged.push(id);
+        return true;
+      },
+    });
+
+    await driver.tick();
+
+    expect(nudged).toEqual([]);
+  });
+
+  it('reports a nudge that could not release the lane, and one that throws', async () => {
+    const errors: unknown[] = [];
+    const port = sweepPort([THAI_RAG_WORKER_ID], async () => ok(undefined));
+    const driver = createCapabilityPressureDriver({
+      ...port,
+      registry: {
+        ...port.registry,
+        health: (): { pendingStop?: string } => ({ pendingStop: 'reclaimed while leased' }),
+      },
+      probe: probeReturning('critical'),
+      onError: (error) => errors.push(error),
+      requestEviction: async (): Promise<boolean> => false,
+    });
+    await driver.tick();
+
+    const throwing = createCapabilityPressureDriver({
+      ...port,
+      registry: {
+        ...port.registry,
+        health: (): { pendingStop?: string } => ({ pendingStop: 'reclaimed while leased' }),
+      },
+      probe: probeReturning('critical'),
+      onError: (error) => errors.push(error),
+      requestEviction: async (): Promise<boolean> => {
+        throw new Error('lane close refused');
+      },
+    });
+    await throwing.tick();
+
+    // Both stay inside the interval: one reported refusal, one reported throw.
+    expect(errors).toHaveLength(2);
+  });
+
   it('does not stack ticks while a reclaim is still running', async () => {
     let release: (() => void) | undefined;
     const reclaimed: string[] = [];

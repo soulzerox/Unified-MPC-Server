@@ -123,9 +123,11 @@ first eviction.
   `pendingStop` the reclaim just wrote, so an id is never closed without the
   registry having decided the worker should stop. A host whose reclaim was
   refused does not close anything.
-- **Once per id per tick, and idempotent.** A lane already closed returns `ok`
-  from the manager (no entry); a second nudge for the same id in the same tick
-  is skipped. The existing `sweeping` guard already stops ticks from stacking.
+- **Once per id per tick, and idempotent.** `dropServer` reports whether a lane
+  was there, so a release that finds none returns `false` and the driver reports
+  it as a `CONFLICT` instead of silently claiming success; a second nudge for the
+  same id in the same tick is skipped. The existing `sweeping` guard already
+  stops ticks from stacking.
 - **An in-flight call may fail, truthfully.** `closeSessionWithin`
   (`mcp-session-manager.ts:57-70`) waits a bounded `closeTimeoutMs`, and a
   pending JSON-RPC request rejects when its client closes. The provider already

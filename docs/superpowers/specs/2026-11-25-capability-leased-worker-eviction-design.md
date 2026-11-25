@@ -37,7 +37,7 @@ manager-level lane close.
 | The lease is taken at `connect` and released when the session closes | `capability-worker-client-factory.ts:158`, `:167-173`, `:189-195` |
 | `McpSessionManager.ensure` reuses an entry whose launch fingerprint matches and never probes it, so dropping the transport is not enough — the entry itself must go | `packages/extensions/src/mcp-session-manager.ts:292-300` |
 | `drop` deletes the entry and closes the session; it is private, and the idle sweep skips pinned lanes | `mcp-session-manager.ts:417-422`, `:432-438`, `pin`/`unpin` `:96-104` |
-| The provider pins its lane when it starts and unpins it only on the stop path | `apps/cli/src/runtime/native-thai-rag-provider.ts:554`, `:711` |
+| The provider pins its lane when it starts, unpins and drops it when pressure asks (`releaseWorkerLane`), and unpins again on the stop path | `apps/cli/src/runtime/native-thai-rag-provider.ts:554`, `:703-708`, `:727` |
 | The provider refuses new work while stopping, and refuses to start while stopping | `native-thai-rag-provider.ts:2517`, `:444` |
 
 ## Decision 1 — holder attribution is the wrong lever
@@ -73,10 +73,12 @@ kill is untouched.
 tick (critical)
   sweep   registry.sweep()                                     unchanged: stops WARM_IDLE past its TTL
   plan    supervisor.evictionPlan(tier, registry.snapshot())   unchanged: unleased WARM_IDLE only
-  reclaim registry.reclaim(id)                                 unchanged: leased id -> pendingStop
+          supervisor.pendingEvictionPlan(tier, snapshot())     new: leased, recyclable, live ids
+  reclaim registry.reclaim(id)                                 unchanged: unleased stops; leased id -> pendingStop
   nudge   registry.health(id).pendingStop !== undefined        new read: the mark is visible
             -> requestEviction(id)                             new: runtime callback, once per id per tick
-                 provider driver: sessions.close(laneName)     new: public manager close, pinned allowed by this path
+                 provider driver: every lane manager, unpin + dropServer(name)
+                   whichever of sessions/indexSessions/probeSessions holds the one lease
                    session close -> factory release -> last release -> pendingStop runs
                      -> child stopped, worker COLD
                        -> next provider call acquires a fresh child (existing #766 path)
@@ -92,17 +94,25 @@ The two new reads/writes are small and stay on the side that owns them:
 1. `CapabilityHealth.pendingStop?: string` — the registry already stores the
    mark (`capability-registry.ts:503`); this exposes it. Diagnostics only, no
    lifecycle change.
-2. `McpSessionManager.closeLane(server: string): Promise<void>` — `drop` made
-   public for a caller that has decided to end the lane. `drop` already deletes
-   the entry so the next `ensure` connects (`:417-422`), which is the whole
-   reason a transport-level close is not enough. The name is `closeLane`, not
-   `close`: `close()` already means "close every session and the manager"
-   (`:276-291`), and overloading it would make a per-lane call look like a
-   shutdown.
+2. One manager surface: `McpSessionManager.dropServer(server)` is already
+   public (`mcp-session-manager.ts:240-247`) and wraps the private `drop`, which
+   deletes the entry so the next `ensure` connects (`:417-422`). It now also
+   aborts and awaits a connect in flight for that name, because a pending connect
+   holds the lease without holding a map entry yet (`:303-321`), and returns
+   whether a lane was actually there. That is the whole reason a transport-level
+   close is not enough, and it is why the provider can release its lane without
+   `close()`, which means "close every session and the manager" (`:276-291`).
 
-Nothing else moves. `evictionPlan` keeps refusing leased ids; `reclaim` keeps
-marking instead of killing; the provider keeps pinning for its lifetime; the
-idle sweep keeps skipping pinned lanes.
+Nothing else moves. `evictionPlan` keeps refusing leased ids — that refusal is why
+`pendingEvictionPlan` exists, since `reclaim` is what writes the mark, and a leased
+id that never enters a plan is never marked, so the nudge would never fire. The
+second plan is consulted only at `critical`, only when a `requestEviction`
+callback is wired, only when `registry.health` can read the mark back, and only
+for an id the port's `ownsLeasedWorker` claims; a mark nothing can release is not
+an eviction request. `reclaim` keeps marking instead of killing; the provider
+pins on start, unpins and drops the lane pressure asked for, and pins again only
+when it is started again, so the idle sweep skips a pinned lane only until the
+first eviction.
 
 ## Rules that decide whether it is safe
 
@@ -127,7 +137,13 @@ idle sweep keeps skipping pinned lanes.
   reclaim today: `onError`, next tick retries.
 - **Not for a lane this runtime did not register.** The callback carries the
   manifest id and the runtime resolves it to the lane it registered for that id;
-  an unknown id returns `false` and closes nothing.
+  an unknown id returns `false` and closes nothing. The same claim gates the
+  mark: `pendingEvictionPlan` ids are only reclaimed for an id `ownsLeasedWorker`
+  names, so an id this runtime cannot release never gets a stop request.
+- **The nudge releases whichever lane holds the lease.** The provider's request,
+  index and probe managers share one capability factory, which allows a single
+  live session, so the lease sits on the lane that connected last. Every manager
+  is unpinned and dropped, and `false` is returned when none of them had a lane.
 - **Shutdown still wins.** `close()` cancels the driver before it stops
   workers, so no nudge can run against a runtime that is already tearing down.
 
@@ -150,15 +166,19 @@ does not reclaim a worker whose holder is not the lane this runtime registered
 - Driver: at `critical`, a leased id with a pending mark calls `requestEviction`
   once; at `elevated` and `normal` it never does; a nudge that returns `false`
   is reported and retried next tick; a nudge that throws is caught and reported,
-  never thrown into the interval.
-- Manager: `close(server)` ends a **pinned** entry, deletes it, and a following
-  `ensure` with the same fingerprint connects instead of reusing; `close` on an
-  unknown name is a no-op; `close` while a connect is pending settles after it.
-- Provider (fake supervised child, real factory and manager): a `critical`
-  eviction closes the lane, the lease releases, the worker reaches `WARM_IDLE`
-  and then stops via the `pendingStop` path; the next call connects a fresh
-  child; an in-flight call at the moment of the close gets a bounded error, not
-  a hang.
+  never thrown into the interval. A leased id is reclaimed — and so marked —
+  only from `pendingEvictionPlan`, only at `critical`, only with a callback, and
+  only when the mark can be read back and `ownsLeasedWorker` claims the id.
+- Manager: `dropServer(name)` ends a **pinned** entry, deletes it, and a following
+  `ensure` with the same fingerprint connects instead of reusing; a drop of an
+  unknown name is a no-op; a drop while a connect is pending settles after it.
+- Provider (real capability factory and registry): a session close is the lane
+  drop, so the lease releases, the worker reaches `COLD` through the
+  `pendingStop` path, and the next connect starts a fresh child. Because the
+  three lane managers share that one factory, the release must also find the
+  lease on the index or probe lane after the request lane failed, and report
+  `false` when no lane was there; a pending connect is aborted and awaited
+  rather than left to take the lane after the drop returns.
 - Regression: the idle sweep still skips a pinned lane; `evictionPlan` still
   never returns a leased id; a provider call with no pressure behaves exactly as
   before.

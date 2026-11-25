@@ -100,6 +100,12 @@ export interface CapabilityHealth {
   readonly state: CapabilityState;
   readonly leaseCount: number;
   readonly highestGeneration?: number;
+  /**
+   * The stop a `reclaim` asked for while a lease was held. A caller that can end
+   * that lease reads this to know the request is waiting on it; the state itself
+   * stays `ACTIVE` until the last release.
+   */
+  readonly pendingStop?: string;
   readonly lastTransition?: CapabilityTransition;
 }
 
@@ -328,6 +334,7 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
       state: record.state,
       leaseCount: record.leaseCount,
       ...(record.highestGeneration === undefined ? {} : { highestGeneration: record.highestGeneration }),
+      ...(record.pendingStop === undefined ? {} : { pendingStop: record.pendingStop }),
       ...(lastTransition === undefined ? {} : { lastTransition }),
     };
   }

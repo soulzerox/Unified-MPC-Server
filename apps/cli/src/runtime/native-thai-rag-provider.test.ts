@@ -8,7 +8,7 @@ import {
   computeTreeOid,
   type WorkspaceSourceEvidenceIdentity,
 } from '@unified-mpc/domain';
-import type { McpClientFactory, McpClientSession, McpServerLaunchConfig } from '@unified-mpc/extensions';
+import { McpSessionManager, type McpClientFactory, type McpClientSession, type McpServerLaunchConfig } from '@unified-mpc/extensions';
 import {
   CanonicalManifestStore,
   CanonicalRefStore,
@@ -31,7 +31,7 @@ import {
   type ProviderError,
   type ProviderResult,
 } from '@unified-mpc/thai-rag';
-import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv, indexCallTimeoutFromEnv } from './native-thai-rag-provider.js';
+import { NativeThaiRagProviderDriver, codeIndexVectorsFromEnv, indexCallTimeoutFromEnv, releaseLaneAcrossManagers } from './native-thai-rag-provider.js';
 
 const roots: string[] = [];
 const workspaceId = '11111111-1111-4111-8111-111111111111';
@@ -5503,5 +5503,88 @@ describe('canonical code_index source identity (#210 §13)', () => {
       // envelope; the provider payload itself must survive field-for-field.
       expect(payload.data, `${file} provider data`).toEqual(fixture.data);
     }
+  });
+});
+
+describe('NativeThaiRagProviderDriver lane release', () => {
+  it('releases the lane on request and reconnects on the next call', async () => {
+    const dataRoot = await tempRoot();
+    const workspaceRoot = await tempRoot();
+    let connects = 0;
+    const closed = new Set<number>();
+    const driver = new NativeThaiRagProviderDriver({
+      dataRoot,
+      launchConfig: { command: '/python' },
+      workspacesProvider: async (): Promise<readonly { id: string; realRootPath: string }[]> => [{ id: workspaceId, realRootPath: workspaceRoot }],
+      clientFactory: clientFactory({
+        onConnect(): void { connects += 1; },
+        onClose(connection): void { closed.add(connection); },
+        async onCall(tool): Promise<unknown> {
+          return tool === 'health' ? success('health', defaultHandshake()) : success(tool);
+        },
+      }),
+    });
+    expect((await driver.start({ providerRoot: path.join(dataRoot, 'thai-rag'), ownerId: 'owner', providerVersion: '4.61.0', embeddingIndexGeneration: 1 })).ok).toBe(true);
+    expect(connects).toBe(1);
+
+    // #133 phase 4: pressure ends the one lane that holds the worker's lease.
+    expect(await driver.releaseWorkerLane()).toBe(true);
+    expect(closed.has(1)).toBe(true);
+
+    // The provider stays started: the next call connects onto a fresh child.
+    // More than one connect is expected here (the provider's own probe lane is a
+    // separate manager), so the assertion is that the closed lane is replaced.
+    const beforeCall = connects;
+    await expect(driver.call('pre_edit_context', { workspace_id: workspaceId, file_path: 'src/index.ts' })).resolves.toMatchObject({ ok: true });
+    expect(connects).toBeGreaterThan(beforeCall);
+
+    await driver.stop();
+    // A provider that is stopping has no lane to give up; the request is refused
+    // rather than closing a session its own stop path is already tearing down.
+    expect(await driver.releaseWorkerLane()).toBe(false);
+  });
+
+  it('releases the lease from the index lane that holds it after the main lane failed', async () => {
+    // One capability factory allows one live session, so the lease sits on the
+    // lane that connected last. A main-lane failure drops `sessions`; the next
+    // index call takes the lease instead, and the release must find it there.
+    let live = 0;
+    let connects = 0;
+    const closed: number[] = [];
+    const factory: McpClientFactory = {
+      async connect(): Promise<McpClientSession> {
+        if (live > 0) throw new Error('capability thai-rag-provider already has a live session');
+        live += 1;
+        const connection = ++connects;
+        return {
+          listTools: async (): Promise<Array<{ name: string; description: string }>> => [{ name: 'ping', description: 'Ping tool' }],
+          listResources: async (): Promise<[]> => [],
+          callTool: async (): Promise<Record<string, never>> => ({}),
+          close: async (): Promise<void> => {
+            live -= 1;
+            closed.push(connection);
+          },
+        };
+      },
+    };
+    const managers = [0, 1, 2].map(() => new McpSessionManager({ clientFactory: factory }));
+    const server = 'thai-rag-native';
+
+    expect((await managers[0]!.describe(server, { command: '/python' })).ok).toBe(true);
+    expect(live).toBe(1);
+    // The failure path `call` takes (mcp-session-manager.ts:232-233).
+    expect(await managers[0]!.dropServer(server)).toBe(true);
+    expect(live).toBe(0);
+    expect((await managers[1]!.describe(server, { command: '/python' })).ok).toBe(true);
+    expect(live).toBe(1);
+
+    // The blocking bug: dropping only the request lane released nothing and still
+    // reported success, so the marked stop never ran.
+    expect(await releaseLaneAcrossManagers(managers, server)).toBe(true);
+    expect(live).toBe(0);
+    expect(closed).toContain(2);
+
+    // No lane left is not a release.
+    expect(await releaseLaneAcrossManagers(managers, server)).toBe(false);
   });
 });

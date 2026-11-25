@@ -54,13 +54,26 @@ function sweepPort(
   reclaim: (id: string) => Promise<Result<void>>,
 ): {
   readonly calls: { tier: PressureTier; snapshot: readonly EvictionCandidate[] }[];
-  readonly registry: { snapshot: () => readonly EvictionCandidate[]; reclaim: (id: string) => Promise<Result<void>> };
+  readonly sweeps: number[];
+  readonly registry: {
+    snapshot: () => readonly EvictionCandidate[];
+    reclaim: (id: string) => Promise<Result<void>>;
+    sweep: () => Promise<void>;
+  };
   readonly supervisor: { evictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]) => readonly string[] };
 } {
   const calls: { tier: PressureTier; snapshot: readonly EvictionCandidate[] }[] = [];
+  const sweeps: number[] = [];
   return {
     calls,
-    registry: { snapshot: (): readonly EvictionCandidate[] => [candidate], reclaim },
+    sweeps,
+    registry: {
+      snapshot: (): readonly EvictionCandidate[] => [candidate],
+      reclaim,
+      sweep: async (): Promise<void> => {
+        sweeps.push(Date.now());
+      },
+    },
     supervisor: {
       evictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[] => {
         calls.push({ tier, snapshot });
@@ -83,6 +96,22 @@ describe('capability pressure driver', () => {
 
     expect(reclaimed).toEqual([]);
     expect(port.calls).toEqual([]);
+  });
+
+  it('sweeps warm workers even on a normal sample', async () => {
+    const reclaimed: string[] = [];
+    const port = sweepPort([THAI_RAG_WORKER_ID], async (id) => {
+      reclaimed.push(id);
+      return ok(undefined);
+    });
+    const driver = createCapabilityPressureDriver({ ...port, probe: probeReturning('normal') });
+
+    await driver.tick();
+
+    // An idle TTL is time, not a symptom: a healthy host still reclaims.
+    expect(port.sweeps).toHaveLength(1);
+    expect(port.calls).toEqual([]);
+    expect(reclaimed).toEqual([]);
   });
 
   it('plans and reclaims at the sampled tier', async () => {

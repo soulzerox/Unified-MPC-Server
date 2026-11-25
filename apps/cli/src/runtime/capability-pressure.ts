@@ -30,7 +30,10 @@ import { ProcessMemoryPressureProbe, type ResourcePressureProbe } from '@unified
  * Rules that decide whether this is safe, and are tested in
  * `capability-pressure.test.ts`:
  *
- * - a `normal` sample reclaims nothing, so the sweep is free on a healthy host;
+ * - every tick asks the registry to sweep warm idle workers, because an idle TTL
+ *   is elapsed time rather than a symptom — a healthy host still has to reclaim;
+ * - a `normal` sample reclaims nothing, so pressure eviction is free on a
+ *   healthy host;
  * - a tick that is still running makes the next one a no-op, so a slow reclaim
  *   cannot stack;
  * - a rejected reclaim is reported and skipped, never thrown into the interval;
@@ -62,6 +65,8 @@ export interface CapabilityPressureSweepPort {
   readonly registry: {
     snapshot(): readonly EvictionCandidate[];
     reclaim(id: string): Promise<Result<void>>;
+    /** Stops warm workers whose idle TTL elapsed; time-based, not pressure-based. */
+    sweep(): Promise<void>;
   };
   readonly supervisor: {
     evictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
@@ -101,6 +106,11 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
     if (sweeping) return;
     sweeping = true;
     try {
+      // An idle TTL is time, not a symptom: a released worker must not wait for
+      // memory pressure to be reclaimed, or a warm 5-minute provider stays up for
+      // as long as the host is healthy. The registry owns that rule (`sweep`),
+      // skipping leased and non-recyclable ids itself.
+      await options.registry.sweep();
       const tier = probe.sample().state;
       if (tier === 'normal') return;
       for (const id of options.supervisor.evictionPlan(tier, options.registry.snapshot())) {

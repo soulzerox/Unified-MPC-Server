@@ -186,11 +186,10 @@ when the value is `0`, and otherwise lands it in `WARM_IDLE`
 clamps it to 5 s under `elevated` and does not consult it under `critical`
 (`packages/capabilities/src/capability-supervisor.ts:400-411`). `registry.sweep()`
 stops a `WARM_IDLE` worker once the TTL elapsed
-(`capability-registry.ts:415-426`), but nothing in production calls it, and the
-driver tick below calls `snapshot()` and `reclaim()` only. The 5-minute value
-therefore bounds nothing: a released worker stays up until a pressure tick
-reaches it, and closing it needs a `sweep()` call from the tick or a lease
-deadline in the registry, not a different TTL.
+(`capability-registry.ts:415-426`), and the driver tick below calls it first,
+before sampling: an idle TTL is elapsed time rather than a symptom, so a healthy
+host still reclaims. `sweep()` skips leased and non-recyclable ids itself. The
+pressure path (`snapshot()` + `reclaim()`) is what stays gated on the tier.
 
 ## cwd containment
 
@@ -220,9 +219,10 @@ failure, reported at boot rather than at first call.
 
 ## The driver
 
-One tick, four steps, no state of its own:
+One tick, five steps, no state of its own:
 
 ```text
+sweep   await registry.sweep()                   → stops WARM_IDLE past its idle TTL
 sample  ProcessMemoryPressureProbe.sample()      → 'normal' | 'elevated' | 'critical'
 map     tier === 'normal' ? skip : tier
 plan    supervisor.evictionPlan(tier, registry.snapshot())
@@ -314,8 +314,10 @@ bug. Recorded as an open question, not as a promise.
   `pendingStop` and runs on the last release; `WARM_IDLE` under `elevated`
   respects the 5 s clamp; `critical` evicts an idle worker immediately; a second
   `reclaim` on the same leased id is a no-op.
-- Driver: normal tier reclaims nothing; a slow reclaim does not stack ticks; a
-  rejected reclaim does not stop the interval; shutdown cancels the timer.
+- Driver: every tick, including a `normal` one, asks the registry to sweep, so a
+  warm idle worker is reclaimed on time rather than on pressure; normal tier
+  pressure-evicts nothing; a slow reclaim does not stack ticks; a rejected
+  reclaim does not stop the interval; shutdown cancels the timer.
 - Provider, negative case only: with the factory injected, a provider call starts
   a supervised child and the pinned main lane holds its lease; `evictionPlan`
   returns nothing for the id at any tier, and `reclaim` leaves the worker

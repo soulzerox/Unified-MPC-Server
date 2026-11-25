@@ -75,6 +75,13 @@ export interface CapabilityPressureSweepPort {
   };
   readonly supervisor: {
     evictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
+    /**
+     * Leased ids a `critical` sweep may *mark* for a stop. `evictionPlan` never
+     * returns these (a lease forbids a kill), so without this plan no reclaim
+     * writes the mark the nudge below depends on, and a leased worker is never
+     * evicted at any tier.
+     */
+    pendingEvictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[];
   };
 }
 
@@ -124,7 +131,17 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
       await options.registry.sweep();
       const tier = probe.sample().state;
       if (tier === 'normal') return;
-      const plan = options.supervisor.evictionPlan(tier, options.registry.snapshot());
+      const snapshot = options.registry.snapshot();
+      const plan = [...options.supervisor.evictionPlan(tier, snapshot)];
+      // A leased id is absent from `evictionPlan` by design, so it has to be
+      // planned separately or its `pendingStop` is never written and the nudge
+      // below has nothing to follow. Only when a callback can release the lane:
+      // without one, marking would evict on a release nobody asked for.
+      if (tier === 'critical' && options.requestEviction !== undefined) {
+        for (const id of options.supervisor.pendingEvictionPlan(tier, snapshot)) {
+          if (!plan.includes(id)) plan.push(id);
+        }
+      }
       const blocked: string[] = [];
       for (const id of plan) {
         const reclaimed = await options.registry.reclaim(id);

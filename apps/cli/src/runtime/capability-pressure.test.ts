@@ -52,20 +52,27 @@ const candidate: EvictionCandidate = {
 function sweepPort(
   plan: readonly string[],
   reclaim: (id: string) => Promise<Result<void>>,
+  pendingPlan: readonly string[] = [],
 ): {
   readonly calls: { tier: PressureTier; snapshot: readonly EvictionCandidate[] }[];
+  readonly pendingCalls: { tier: PressureTier; snapshot: readonly EvictionCandidate[] }[];
   readonly sweeps: number[];
   readonly registry: {
     snapshot: () => readonly EvictionCandidate[];
     reclaim: (id: string) => Promise<Result<void>>;
     sweep: () => Promise<void>;
   };
-  readonly supervisor: { evictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]) => readonly string[] };
+  readonly supervisor: {
+    evictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]) => readonly string[];
+    pendingEvictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]) => readonly string[];
+  };
 } {
   const calls: { tier: PressureTier; snapshot: readonly EvictionCandidate[] }[] = [];
+  const pendingCalls: { tier: PressureTier; snapshot: readonly EvictionCandidate[] }[] = [];
   const sweeps: number[] = [];
   return {
     calls,
+    pendingCalls,
     sweeps,
     registry: {
       snapshot: (): readonly EvictionCandidate[] => [candidate],
@@ -78,6 +85,10 @@ function sweepPort(
       evictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[] => {
         calls.push({ tier, snapshot });
         return plan;
+      },
+      pendingEvictionPlan: (tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[] => {
+        pendingCalls.push({ tier, snapshot });
+        return pendingPlan;
       },
     },
   };
@@ -169,6 +180,55 @@ describe('capability pressure driver', () => {
     await driver.tick();
 
     expect(nudged).toEqual([THAI_RAG_WORKER_ID]);
+  });
+
+  it('reclaims a leased id at critical so the mark the nudge follows is written', async () => {
+    const reclaimed: string[] = [];
+    const nudged: string[] = [];
+    // `evictionPlan` refuses a leased id; only the pending plan can name it.
+    const port = sweepPort([], async (id) => {
+      reclaimed.push(id);
+      return ok(undefined);
+    }, [THAI_RAG_WORKER_ID]);
+    const driver = createCapabilityPressureDriver({
+      ...port,
+      registry: {
+        ...port.registry,
+        health: (): { pendingStop?: string } => ({ pendingStop: 'reclaimed while leased' }),
+      },
+      probe: probeReturning('critical'),
+      requestEviction: async (id: string): Promise<boolean> => {
+        nudged.push(id);
+        return true;
+      },
+    });
+
+    await driver.tick();
+
+    expect(port.pendingCalls).toEqual([{ tier: 'critical', snapshot: [candidate] }]);
+    expect(reclaimed).toEqual([THAI_RAG_WORKER_ID]);
+    expect(nudged).toEqual([THAI_RAG_WORKER_ID]);
+  });
+
+  it('never plans a leased id below critical, or when no callback can release the lane', async () => {
+    const reclaimed: string[] = [];
+    const port = sweepPort([], async (id) => {
+      reclaimed.push(id);
+      return ok(undefined);
+    }, [THAI_RAG_WORKER_ID]);
+    const elevated = createCapabilityPressureDriver({
+      ...port,
+      probe: probeReturning('elevated'),
+      requestEviction: async (): Promise<boolean> => true,
+    });
+    await elevated.tick();
+    expect(reclaimed).toEqual([]);
+    expect(port.pendingCalls).toEqual([]);
+
+    const unreleasable = createCapabilityPressureDriver({ ...port, probe: probeReturning('critical') });
+    await unreleasable.tick();
+    // No callback means the mark would outlive this tick with nobody to honour it.
+    expect(reclaimed).toEqual([]);
   });
 
   it('never ends a live session on an elevated sample', async () => {

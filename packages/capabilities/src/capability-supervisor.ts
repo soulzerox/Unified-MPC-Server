@@ -419,6 +419,22 @@ export class CapabilitySupervisor {
   }
 
   /**
+   * Which leased ids a `critical` sweep may ask a holder to give up, oldest
+   * first. Separate from `evictionPlan` on purpose: a lease still forbids a
+   * kill, so these ids are only *marked* for a stop by `reclaim`, and the stop
+   * runs when the holder releases. Pure, like `evictionPlan`.
+   */
+  public pendingEvictionPlan(tier: PressureTier, snapshot: readonly EvictionCandidate[]): readonly string[] {
+    if (tier !== 'critical') return [];
+    return snapshot
+      .filter((candidate) => candidate.recyclable
+        && candidate.leaseCount > 0
+        && (candidate.state === 'ACTIVE' || candidate.state === 'WARM_IDLE'))
+      .sort((left, right) => left.idleSince - right.idleSince)
+      .map((candidate) => candidate.id);
+  }
+
+  /**
    * The pipes of a live worker registered with `exposeStdio`, or `undefined` when
    * it is not running. A caller bookkeeping a connection over them must hold a
    * lease: a reclaim stops the process underneath.

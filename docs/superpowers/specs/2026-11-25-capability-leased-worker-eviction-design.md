@@ -73,7 +73,8 @@ kill is untouched.
 tick (critical)
   sweep   registry.sweep()                                     unchanged: stops WARM_IDLE past its TTL
   plan    supervisor.evictionPlan(tier, registry.snapshot())   unchanged: unleased WARM_IDLE only
-  reclaim registry.reclaim(id)                                 unchanged: leased id -> pendingStop
+          supervisor.pendingEvictionPlan(tier, snapshot())     new: leased, recyclable, live ids
+  reclaim registry.reclaim(id)                                 unchanged: unleased stops; leased id -> pendingStop
   nudge   registry.health(id).pendingStop !== undefined        new read: the mark is visible
             -> requestEviction(id)                             new: runtime callback, once per id per tick
                  provider driver: sessions.dropServer(name)   existing public close, pinned allowed by this path
@@ -99,9 +100,13 @@ The two new reads/writes are small and stay on the side that owns them:
    provider can release its lane without `close()`, which means "close every
    session and the manager" (`:276-291`).
 
-Nothing else moves. `evictionPlan` keeps refusing leased ids; `reclaim` keeps
-marking instead of killing; the provider keeps pinning for its lifetime; the
-idle sweep keeps skipping pinned lanes.
+Nothing else moves. `evictionPlan` keeps refusing leased ids — that refusal is why
+`pendingEvictionPlan` exists, since `reclaim` is what writes the mark, and a leased
+id that never enters a plan is never marked, so the nudge would never fire. The
+second plan is consulted only at `critical` and only when a `requestEviction`
+callback is wired, because a mark nothing can release is not an eviction request;
+`reclaim` keeps marking instead of killing; the provider keeps pinning for its
+lifetime; the idle sweep keeps skipping pinned lanes.
 
 ## Rules that decide whether it is safe
 
@@ -149,7 +154,8 @@ does not reclaim a worker whose holder is not the lane this runtime registered
 - Driver: at `critical`, a leased id with a pending mark calls `requestEviction`
   once; at `elevated` and `normal` it never does; a nudge that returns `false`
   is reported and retried next tick; a nudge that throws is caught and reported,
-  never thrown into the interval.
+  never thrown into the interval. A leased id is reclaimed — and so marked —
+  only from `pendingEvictionPlan`, only at `critical`, and only with a callback.
 - Manager: `dropServer(name)` ends a **pinned** entry, deletes it, and a following
   `ensure` with the same fingerprint connects instead of reusing; a drop of an
   unknown name is a no-op; a drop while a connect is pending settles after it.

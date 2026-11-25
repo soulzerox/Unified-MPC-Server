@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CapabilityProcessPort, EvictionCandidate, PressureTier } from '@unified-mpc/capabilities';
@@ -38,6 +39,37 @@ function probeReturning(state: ResourcePressureState): ResourcePressureProbe {
       sampledAtMs: 0,
     }),
   };
+}
+
+/**
+ * A supervised worker that answers `initialize` over its pipes: enough for the
+ * client handshake the capability factory performs before a session exists.
+ */
+function fakeWorkerPipes(): { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough } {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  let buffered = '';
+  stdin.on('data', (chunk: Buffer) => {
+    buffered += chunk.toString('utf8');
+    let newline = buffered.indexOf('\n');
+    while (newline >= 0) {
+      const frame = buffered.slice(0, newline).trim();
+      buffered = buffered.slice(newline + 1);
+      newline = buffered.indexOf('\n');
+      if (frame.length === 0) continue;
+      const message = JSON.parse(frame) as { id?: number; method?: string; params?: { protocolVersion?: string } };
+      if (message.id === undefined) continue;
+      const result = message.method === 'initialize'
+        ? {
+          protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
+          capabilities: {},
+          serverInfo: { name: 'fake-worker', version: '1.0.0' },
+        }
+        : {};
+      stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`);
+    }
+  });
+  return { stdin, stdout, stderr: new PassThrough() };
 }
 
 const candidate: EvictionCandidate = {
@@ -201,6 +233,7 @@ describe('capability pressure driver', () => {
         nudged.push(id);
         return true;
       },
+      ownsLeasedWorker: (): boolean => true,
     });
 
     await driver.tick();
@@ -208,6 +241,37 @@ describe('capability pressure driver', () => {
     expect(port.pendingCalls).toEqual([{ tier: 'critical', snapshot: [candidate] }]);
     expect(reclaimed).toEqual([THAI_RAG_WORKER_ID]);
     expect(nudged).toEqual([THAI_RAG_WORKER_ID]);
+  });
+
+  it('never marks a leased id it cannot release or cannot read the mark back from', async () => {
+    const reclaimed: string[] = [];
+    const port = sweepPort([], async (id) => {
+      reclaimed.push(id);
+      return ok(undefined);
+    }, [THAI_RAG_WORKER_ID]);
+    // No `health` read: the nudge could never see the mark it caused.
+    const unreadable = createCapabilityPressureDriver({
+      ...port,
+      probe: probeReturning('critical'),
+      requestEviction: async (): Promise<boolean> => true,
+      ownsLeasedWorker: (): boolean => true,
+    });
+    await unreadable.tick();
+    expect(reclaimed).toEqual([]);
+
+    // A leased id this runtime does not own: its lane has no releaser here.
+    const foreign = createCapabilityPressureDriver({
+      ...port,
+      registry: {
+        ...port.registry,
+        health: (): { pendingStop?: string } => ({ pendingStop: 'reclaimed while leased' }),
+      },
+      probe: probeReturning('critical'),
+      requestEviction: async (): Promise<boolean> => true,
+      ownsLeasedWorker: (): boolean => false,
+    });
+    await foreign.tick();
+    expect(reclaimed).toEqual([]);
   });
 
   it('never plans a leased id below critical, or when no callback can release the lane', async () => {
@@ -385,6 +449,75 @@ describe('capability worker cwd', () => {
 });
 
 describe('thai-rag capability runtime', () => {
+  it('closes a real capability session so the marked stop runs', async () => {
+    const installRoot = await dir();
+    const stops: string[] = [];
+    let starts = 0;
+    const processes: CapabilityProcessPort = {
+      start: async (spec, _signal, onCreated) => {
+        starts += 1;
+        const pipes = fakeWorkerPipes();
+        const spawned = {
+          processId: `proc-${starts}`,
+          executable: spec.executable,
+          args: spec.args,
+          cwd: spec.cwd,
+          state: 'running' as const,
+          startedAt: new Date(0).toISOString(),
+          stdin: pipes.stdin,
+          stdout: pipes.stdout,
+          stderr: pipes.stderr,
+        };
+        onCreated?.(spawned);
+        return ok(spawned);
+      },
+      stop: async (processId) => {
+        stops.push(processId);
+        return ok(undefined);
+      },
+      status: (processId) => ok({
+        processId,
+        executable: '/usr/bin/node',
+        args: [],
+        cwd: installRoot,
+        state: stops.includes(processId) ? 'stopped' : 'running',
+        startedAt: new Date(0).toISOString(),
+      }),
+      onExit: () => () => {},
+    };
+    const launch = {
+      executable: path.join(installRoot, 'venv', 'bin', 'python3'),
+      args: [path.join(installRoot, 'thai_rag_context_mcp.py')],
+      cwd: installRoot,
+    };
+    const runtime = await createThaiRagCapabilityRuntime({
+      installRoot,
+      workspaceRoots: async () => [],
+      launch,
+      processManager: processes,
+    });
+    expect(runtime.ok).toBe(true);
+    if (!runtime.ok) return;
+
+    // The lease a lane takes is the registry's, not the factory's.
+    const config = { command: launch.executable, args: [...launch.args], cwd: launch.cwd };
+    const session = await runtime.value.factory.connect(config);
+    expect(runtime.value.registry.snapshot()[0]).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
+    expect((await runtime.value.registry.reclaim(THAI_RAG_WORKER_ID)).ok).toBe(true);
+    expect(runtime.value.registry.health(THAI_RAG_WORKER_ID)?.pendingStop).toBe('reclaimed while leased');
+
+    // Closing the session is what a lane drop does; the last release runs the mark.
+    await session.close();
+    for (let attempt = 0; attempt < 50 && runtime.value.registry.snapshot()[0]?.state !== 'COLD'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(stops).toEqual(['proc-1']);
+    expect(runtime.value.registry.health(THAI_RAG_WORKER_ID)?.pendingStop).toBeUndefined();
+    expect(runtime.value.registry.snapshot()[0]).toMatchObject({ state: 'COLD', leaseCount: 0 });
+    await runtime.value.close();
+  });
+
   it('registers the provider worker with a resolvable spec', async () => {
     const installRoot = await dir();
     await mkdir(path.join(installRoot, 'venv'));

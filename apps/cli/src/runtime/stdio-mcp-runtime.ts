@@ -566,6 +566,9 @@ export function createStdioMcpRuntime(
         const release = thaiRagLaneRelease.release;
         return release === undefined ? false : release();
       },
+      // The provider driver is the only lane this runtime registered, so it is
+      // the only leased id a mark may be written for.
+      ownsLeasedWorker: (id: string): boolean => id === THAI_RAG_WORKER_ID,
       onError: (error: unknown): void => {
         thaiRagDiagnostics(`thai-rag capability pressure sweep failed: ${error instanceof Error ? error.message : String(error)}`);
       },

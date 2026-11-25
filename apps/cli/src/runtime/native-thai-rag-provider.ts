@@ -693,18 +693,18 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
 
   /**
    * #133 phase 4: lets memory pressure end this provider's one lane so the
-   * capability supervisor can stop the worker underneath it. The lane is
+   * capability supervisor can stop the worker underneath it. All three managers
+   * share the one capability factory, which allows a single live session, so the
+   * lease can sit on the request, index or probe lane; whichever holds it is
    * unpinned first, so the manager's idle sweep cannot keep it alive again once
-   * pressure has decided against it. The provider stays started: the next call
-   * reconnects through `ensure`, onto a fresh child, exactly as a worker death
-   * after `#766` does. Returns `false` when there is no lane left to release or
-   * the provider is already stopping.
+   * pressure has decided against it, and then dropped. The provider stays
+   * started: the next call reconnects through `ensure`, onto a fresh child,
+   * exactly as a worker death after `#766` does. Returns `false` when no lane
+   * was left to release or the provider is already stopping.
    */
   public async releaseWorkerLane(): Promise<boolean> {
     if (this.stopped || this.shuttingDown) return false;
-    this.sessions.unpin(SERVER_NAME);
-    await this.sessions.dropServer(SERVER_NAME);
-    return true;
+    return releaseLaneAcrossManagers([this.sessions, this.indexSessions, this.probeSessions], SERVER_NAME);
   }
 
   public stop(): Promise<Result<void>> {
@@ -2557,6 +2557,25 @@ export class NativeThaiRagProviderDriver implements ThaiRagProviderDriver {
   private refreshIsCurrent(generation: number): boolean {
     return !this.stopRequested && generation === this.lifecycleGeneration;
   }
+}
+
+/**
+ * #133 phase 4: ends the lane that holds the capability lease. The managers of
+ * one driver share one capability factory, which allows a single live session,
+ * so the lease sits on whichever lane connected last: every manager is asked,
+ * and an id is only reported released when a lane (or a connect in flight) was
+ * actually there. A release that found nothing is not a release.
+ */
+export async function releaseLaneAcrossManagers(
+  managers: readonly McpSessionManager[],
+  server: string,
+): Promise<boolean> {
+  let released = false;
+  for (const manager of managers) {
+    manager.unpin(server);
+    if (await manager.dropServer(server)) released = true;
+  }
+  return released;
 }
 
 async function syncWorkspaceSourceAliases(

@@ -237,8 +237,21 @@ export class McpSessionManager {
     }
   }
 
-  public async dropServer(server: string): Promise<void> {
+  /**
+   * Ends a lane, connected or still connecting. A connect in flight holds no
+   * map entry yet, so dropping only the entry would let it take the lane after
+   * this returns; the pending connect is aborted and awaited first, and its own
+   * teardown closes the half-open session. Returns whether anything was there.
+   */
+  public async dropServer(server: string): Promise<boolean> {
+    const pending = this.pendingConnections.get(server);
+    if (pending !== undefined) {
+      pending.abortController.abort();
+      await pending.promise.catch(() => undefined);
+    }
+    const connected = this.sessions.has(server);
     await this.drop(server);
+    return pending !== undefined || connected;
   }
 
   public async reconcile(servers: readonly {

@@ -96,6 +96,13 @@ export interface CapabilityPressureDriverOptions extends CapabilityPressureSweep
    * `critical`, and only after a reclaim left a `pendingStop` behind.
    */
   readonly requestEviction?: (id: string) => Promise<boolean>;
+  /**
+   * Whether this runtime owns the lane `requestEviction` would release. A leased
+   * id nobody here can release is never planned: the mark would schedule a stop
+   * no release would ever run. Absent means no id is owned, which is the
+   * pre-phase-4 behaviour.
+   */
+  readonly ownsLeasedWorker?: (id: string) => boolean;
   /** Injected only so a test can drive the interval without real timers. */
   readonly timers?: {
     readonly setInterval: typeof setInterval;
@@ -135,10 +142,13 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
       const plan = [...options.supervisor.evictionPlan(tier, snapshot)];
       // A leased id is absent from `evictionPlan` by design, so it has to be
       // planned separately or its `pendingStop` is never written and the nudge
-      // below has nothing to follow. Only when a callback can release the lane:
-      // without one, marking would evict on a release nobody asked for.
-      if (tier === 'critical' && options.requestEviction !== undefined) {
+      // below has nothing to follow. Only when a callback can release the lane,
+      // only when the mark is readable afterwards, and only for an id this
+      // runtime owns: a mark nothing here can release is not an eviction request.
+      if (tier === 'critical' && options.requestEviction !== undefined
+        && options.registry.health !== undefined && options.ownsLeasedWorker !== undefined) {
         for (const id of options.supervisor.pendingEvictionPlan(tier, snapshot)) {
+          if (!options.ownsLeasedWorker(id)) continue;
           if (!plan.includes(id)) plan.push(id);
         }
       }
@@ -253,6 +263,8 @@ export interface ThaiRagCapabilityRuntimeOptions {
    * `critical` reclaim can run. Absent means leased workers are never evicted.
    */
   readonly requestEviction?: (id: string) => Promise<boolean>;
+  /** Which leased ids this runtime's `requestEviction` can actually release. */
+  readonly ownsLeasedWorker?: (id: string) => boolean;
   /** Injected only so a test can avoid spawning a real child. */
   readonly processManager?: CapabilityProcessPort;
 }
@@ -387,6 +399,7 @@ export async function createThaiRagCapabilityRuntime(
     ...(options.probe === undefined ? {} : { probe: options.probe }),
     ...(options.intervalMs === undefined ? {} : { intervalMs: options.intervalMs }),
     ...(options.requestEviction === undefined ? {} : { requestEviction: options.requestEviction }),
+    ...(options.ownsLeasedWorker === undefined ? {} : { ownsLeasedWorker: options.ownsLeasedWorker }),
     ...(options.onError === undefined ? {} : { onError: options.onError }),
   });
 

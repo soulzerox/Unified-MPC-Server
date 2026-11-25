@@ -424,7 +424,8 @@ describe('capability supervisor eviction plan', () => {
   it('lists only leased, recyclable live ids at critical, oldest first', () => {
     const { supervisor } = build({ now: () => 10_000 });
     const snapshot = [
-      candidate({ id: 'leased-old', leaseCount: 1, idleSince: 1_000 }),
+      // The production case: a live lease keeps the record ACTIVE, never WARM_IDLE.
+      candidate({ id: 'leased-old', leaseCount: 1, idleSince: 1_000, state: 'ACTIVE' }),
       candidate({ id: 'leased-warm', leaseCount: 1, idleSince: 2_000, state: 'WARM_IDLE' }),
       candidate({ id: 'unleased', idleSince: 0 }),
       candidate({ id: 'leased-resident', leaseCount: 1, recyclable: false }),

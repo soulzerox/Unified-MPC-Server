@@ -32,7 +32,7 @@ one record per capability with these mutable fields:
 | `highestGeneration` | generation high-water mark | **not yet durable, and this is the only real hazard** |
 | `idleSince` | warm-idle clock | no — restart starts cold |
 | `starting` | in-flight start promise | no — a promise is process-local |
-| `stopEpoch`, `pendingStop` | stop bookkeeping | no — the stop it describes already happened |
+| `stopEpoch`, `pendingStop`, `lastStopFailure` | stop bookkeeping, and the last unverified stop's own message | no — the stop it describes already happened |
 | `transitions` | bounded history | no — diagnostics only |
 
 Manifests are not state: the host declares them in code at boot, so a restart

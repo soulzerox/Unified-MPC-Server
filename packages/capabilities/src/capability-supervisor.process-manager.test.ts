@@ -175,7 +175,7 @@ describe('capability supervisor with the real ProcessManager', () => {
       // Every activation produced a record, so a list shorter than the cycle count
       // is proof the manager evicted, not proof it never recorded.
       expect(records.length).toBeLessThan(cycles);
-      expect(records.length).toBeLessThanOrEqual(MAX_RETAINED_TERMINAL_RECORDS + 1);
+      expect(records.length).toBe(MAX_RETAINED_TERMINAL_RECORDS);
       expect(records.filter((entry) => entry.state === 'running' || entry.state === 'starting')).toHaveLength(0);
 
       // `DEFAULT_MAX_TRANSITIONS` is 64: four transitions per cycle would be 280

@@ -76,6 +76,59 @@ describe('capability registry release stop', () => {
     expect(registry.health('a')?.lastStopFailure).toBe('worker already gone');
   });
 
+  it('keeps the message when the supervisor settled the record first', async () => {
+    let settle!: (result: Result<void>) => void;
+    const registry = new CapabilityRegistry({
+      stop: (): Promise<Result<void>> => new Promise<Result<void>>((resolve): void => { settle = resolve; }),
+    });
+    await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 0 });
+    const lease = await registry.acquire('a');
+    if (!lease.ok) throw new Error('expected a lease');
+
+    lease.value.release();
+    // The supervisor's deadline writes `FAILED` while the hook is still out; the
+    // attempt itself has not changed, so its verdict still belongs to the record.
+    expect(registry.fail('a', 'stop-unverified').ok).toBe(true);
+    settle(err(appError('PROCESS_NOT_FOUND', 'kill refused')));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.health('a')?.state).toBe('FAILED');
+    expect(registry.health('a')?.lastStopFailure).toBe('kill refused');
+  });
+
+  it('does not let a stale hook message land on a newer stop attempt', async () => {
+    const settles: Array<(result: Result<void>) => void> = [];
+    const registry = new CapabilityRegistry({
+      stop: (): Promise<Result<void>> => new Promise<Result<void>>((resolve): void => { settles.push(resolve); }),
+    });
+    await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 0 });
+
+    const first = await registry.acquire('a');
+    if (!first.ok) throw new Error('expected a lease');
+    first.value.release();
+    expect(registry.health('a')?.state).toBe('STOPPING');
+    // Deadline first, then the record is recycled and a second attempt begins.
+    expect(registry.fail('a', 'stop-unverified').ok).toBe(true);
+    expect(registry.recycle('a').ok).toBe(true);
+
+    const second = await registry.acquire('a');
+    if (!second.ok) throw new Error('expected a second lease');
+    second.value.release();
+    expect(registry.health('a')?.state).toBe('STOPPING');
+    settles[1]?.(ok(undefined));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.health('a')?.state).toBe('COLD');
+
+    // The first hook reports now. It speaks for the attempt that already ended,
+    // so it must not overwrite the verdict of the one that verified cleanly.
+    settles[0]?.(err(appError('PROCESS_NOT_FOUND', 'kill refused')));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.health('a')?.state).toBe('COLD');
+    expect(registry.health('a')?.lastStopFailure).toBeUndefined();
+  });
+
   it('reports the hook message for a reclaim that waited on the last release', async () => {
     const registry = new CapabilityRegistry({
       stop: async (): Promise<Result<void>> => {

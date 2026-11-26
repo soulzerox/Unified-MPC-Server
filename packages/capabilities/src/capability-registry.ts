@@ -724,7 +724,12 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
 
     // Kept even when another writer already settled the record: the hook still
     // failed, and that message is the only account of why the stop is unverified.
-    if (failure !== undefined && !failure.ok) record.lastStopFailure = failure.error.message;
+    // The epoch, not the state, is the proof this message belongs to the attempt
+    // that is still standing: a hook that settles after a newer attempt began
+    // must not overwrite that attempt's verdict.
+    if (failure !== undefined && !failure.ok && record.stopEpoch === epoch) {
+      record.lastStopFailure = failure.error.message;
+    }
 
     // The supervisor writes `FAILED` for this same attempt when its deadline
     // passes; whichever writer lands second must not move the record again.

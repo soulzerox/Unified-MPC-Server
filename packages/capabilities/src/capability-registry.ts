@@ -106,6 +106,14 @@ export interface CapabilityHealth {
    * stays `ACTIVE` until the last release.
    */
   readonly pendingStop?: string;
+  /**
+   * Why the last stop attempt could not be verified, as the hook reported it.
+   * The transition only carries the shared `stop-unverified` reason, which says
+   * the kill was ordered but not that it happened; this keeps the hook's own
+   * message (or the rejection's) for a diagnosis. Absent after a verified stop,
+   * and cleared when a new attempt begins.
+   */
+  readonly lastStopFailure?: string;
   readonly lastTransition?: CapabilityTransition;
 }
 
@@ -185,6 +193,12 @@ interface CapabilityRecord {
   stopEpoch: number;
   /** A stop a release still owes, marked while a lease is held. */
   pendingStop?: string | undefined;
+  /**
+   * The hook's own message for the last stop that could not be verified. The
+   * transition reason is the shared `stop-unverified` vocabulary, so the
+   * specific error would otherwise be dropped.
+   */
+  lastStopFailure?: string | undefined;
   readonly transitions: CapabilityTransition[];
 }
 
@@ -335,6 +349,7 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
       leaseCount: record.leaseCount,
       ...(record.highestGeneration === undefined ? {} : { highestGeneration: record.highestGeneration }),
       ...(record.pendingStop === undefined ? {} : { pendingStop: record.pendingStop }),
+      ...(record.lastStopFailure === undefined ? {} : { lastStopFailure: record.lastStopFailure }),
       ...(lastTransition === undefined ? {} : { lastTransition }),
     };
   }
@@ -488,7 +503,8 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
     record.pendingStop = undefined;
     // A lease cannot await, so the stop a `reclaim` marked is started here and
     // the terminal transition is written when the hook settles. The releaser
-    // observes the outcome through `health(id)`.
+    // observes the outcome through `health(id)`; a hook that could not verify
+    // the kill keeps its message there as `lastStopFailure`.
     if (pendingStop !== undefined) {
       void this.stop(record, pendingStop);
       return;
@@ -683,6 +699,9 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
     this.transition(record, 'STOPPING', reason);
     record.stopEpoch += 1;
     const epoch = record.stopEpoch;
+    // A new attempt starts with no verdict; the field describes the last stop
+    // that finished, so a stale message must not outlive the attempt that wrote it.
+    delete record.lastStopFailure;
 
     let failure: Result<void> | undefined;
     const hook = this.options.stop;
@@ -702,6 +721,10 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
         );
       }
     }
+
+    // Kept even when another writer already settled the record: the hook still
+    // failed, and that message is the only account of why the stop is unverified.
+    if (failure !== undefined && !failure.ok) record.lastStopFailure = failure.error.message;
 
     // The supervisor writes `FAILED` for this same attempt when its deadline
     // passes; whichever writer lands second must not move the record again.

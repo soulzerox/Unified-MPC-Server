@@ -129,6 +129,54 @@ describe('capability registry release stop', () => {
     expect(registry.health('a')?.lastStopFailure).toBeUndefined();
   });
 
+  it('drops the previous incarnation message once a new one starts', async () => {
+    const registry = new CapabilityRegistry({
+      stop: async (): Promise<Result<void>> => err(appError('PROCESS_NOT_FOUND', 'worker already gone')),
+    });
+    await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 0 });
+    const first = await registry.acquire('a');
+    if (!first.ok) throw new Error('expected a lease');
+    first.value.release();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.health('a')?.state).toBe('FAILED');
+    expect(registry.health('a')?.lastStopFailure).toBe('worker already gone');
+
+    // Recycling is what lets the next acquire retry; the old message described a
+    // worker that is no longer this record's live incarnation.
+    expect(registry.recycle('a').ok).toBe(true);
+    const second = await registry.acquire('a');
+    if (!second.ok) throw new Error('expected a second lease');
+    expect(registry.health('a')?.state).toBe('ACTIVE');
+    expect(registry.health('a')?.lastStopFailure).toBeUndefined();
+  });
+
+  it('keeps a late hook from the previous incarnation off a live worker', async () => {
+    const settles: Array<(result: Result<void>) => void> = [];
+    const registry = new CapabilityRegistry({
+      stop: (): Promise<Result<void>> => new Promise<Result<void>>((resolve): void => { settles.push(resolve); }),
+    });
+    await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 0 });
+
+    const first = await registry.acquire('a');
+    if (!first.ok) throw new Error('expected a lease');
+    first.value.release();
+    expect(registry.health('a')?.state).toBe('STOPPING');
+    // Deadline, recycle, restart: no stop attempt is made for the second worker,
+    // so only the incarnation bump can invalidate the first hook.
+    expect(registry.fail('a', 'stop-unverified').ok).toBe(true);
+    expect(registry.recycle('a').ok).toBe(true);
+    const second = await registry.acquire('a');
+    if (!second.ok) throw new Error('expected a second lease');
+    expect(registry.health('a')?.state).toBe('ACTIVE');
+
+    settles[0]?.(err(appError('PROCESS_NOT_FOUND', 'kill refused')));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registry.health('a')?.state).toBe('ACTIVE');
+    expect(registry.health('a')?.lastStopFailure).toBeUndefined();
+  });
+
   it('reports the hook message for a reclaim that waited on the last release', async () => {
     const registry = new CapabilityRegistry({
       stop: async (): Promise<Result<void>> => {

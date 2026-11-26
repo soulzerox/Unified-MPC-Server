@@ -316,7 +316,12 @@ written against the phase-2 head rather than against today's main:
    `stop-unverified`; neither is reported as `COLD`. The transition reason stays
    the shared `stop-unverified` word the plan and the supervisor compare, so the
    hook's own message is kept alongside it and reported as
-   `health(id).lastStopFailure`. The release path therefore
+   `health(id).lastStopFailure`. That message belongs to the attempt and the
+   incarnation that produced it: a newer stop attempt, or a new worker started
+   through `recycle()`, drops it, and the start bumps the same `stopEpoch` the
+   stop continuation captured, so a hook still out from the previous incarnation
+   cannot stamp its failure on the live one. A running `ACTIVE` record therefore
+   never carries the previous worker's failure. The release path therefore
    never produces an unhandled rejection and the releaser still observes the
    outcome through `health(id)`. Since `port.fail` can write `FAILED` for that same
    record before the awaited hook settles, the two writers are ordered by one

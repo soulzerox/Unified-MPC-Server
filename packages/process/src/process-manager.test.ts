@@ -546,6 +546,54 @@ describe('ProcessManager stdio exposure and env', () => {
     }
   }, 30_000);
 
+  it('holds one buffered ceiling across both caller copies, not one per stream', async () => {
+    const manager = new ProcessManager();
+    const chunksPerStream = 96;
+    let created: import('./index.js').ManagedProcess | undefined;
+    const started = await manager.start({
+      executable: process.execPath,
+      // 6 MiB on each stream: under the per-stream cap, over it together, with
+      // neither consumer reading.
+      args: ['-e', `const out = Buffer.alloc(64 * 1024, 120); const err = Buffer.alloc(64 * 1024, 101); for (let index = 0; index < ${chunksPerStream}; index += 1) { process.stdout.write(out); process.stderr.write(err); } setInterval(() => {}, 1000);`],
+      cwd: process.cwd(),
+      exposeStdio: true,
+    }, undefined, (handle) => {
+      created = handle;
+      handle.stdout?.pause();
+      handle.stderr?.pause();
+    });
+
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    try {
+      const stdout = created?.stdout;
+      const stderr = created?.stderr;
+      expect(stdout).toBeDefined();
+      expect(stderr).toBeDefined();
+      for (let attempt = 0; attempt < 500 && (stdout?.writableEnded !== true || stderr?.writableEnded !== true); attempt += 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      // Both copies end: a per-stream cap would end neither, since each is only
+      // 6 MiB, and the child would stay alive holding 12 MiB of buffered output.
+      expect(stdout?.writableEnded).toBe(true);
+      expect(stderr?.writableEnded).toBe(true);
+      const buffered = (stdout?.readableLength ?? 0) + (stdout?.writableLength ?? 0)
+        + (stderr?.readableLength ?? 0) + (stderr?.writableLength ?? 0);
+      expect(buffered).toBeLessThanOrEqual(MAX_TEE_BUFFER_BYTES + 64 * 1024);
+      let terminalState: string | undefined;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const status = manager.status(started.value.processId);
+        terminalState = status.ok ? status.value.state : undefined;
+        if (terminalState === 'stopped') break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      expect(terminalState).toBe('stopped');
+    } finally {
+      await manager.stop(started.value.processId);
+    }
+  }, 30_000);
+
   it('carries no streams when the spec does not ask for them', async () => {
     const manager = new ProcessManager();
     let created: import('./index.js').ManagedProcess | undefined;

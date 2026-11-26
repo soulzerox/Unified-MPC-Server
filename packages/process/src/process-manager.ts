@@ -26,10 +26,12 @@ export const MAX_RETAINED_TERMINAL_RECORDS = 64;
 export const MAX_RETAINED_TERMINAL_LOG_BYTES = 16 * 1024 * 1024;
 
 /**
- * Cap on what a caller-facing `exposeStdio` copy may buffer while its consumer
- * is not reading. Past it the copy ends and its child is stopped: a stalled
- * reader gets EOF instead of the runtime holding the child's whole output, and
- * the next acquire cannot attach to pipes whose buffered prefix it would replay.
+ * Cap on what a child's caller-facing `exposeStdio` copies may buffer together
+ * while their consumers are not reading. The ceiling is per child, so stdout
+ * and stderr share it rather than each getting one. Past it the copies end and
+ * the child is stopped: a stalled reader gets EOF instead of the runtime holding
+ * the child's whole output, and the next acquire cannot attach to pipes whose
+ * buffered prefix it would replay.
  */
 export const MAX_TEE_BUFFER_BYTES = 8 * 1024 * 1024;
 
@@ -362,8 +364,12 @@ export class ProcessManager {
   /**
    * Feed one caller-facing copy, bounded. A consumer that stops reading would
    * otherwise buffer the child's whole output in the `PassThrough`; past the cap
-   * the copy ends so the consumer sees EOF rather than the runtime growing
+   * the copies end so the consumer sees EOF rather than the runtime growing
    * without a ceiling. The log ring keeps the output either way.
+   *
+   * The ceiling is per child: stdout and stderr are summed, so a worker writing
+   * both cannot pin twice the budget. Ending one copy and leaving the other to
+   * keep filling would make the aggregate cap a per-stream one in disguise.
    *
    * The child is stopped too. Ending only the copy would leave a live worker
    * whose pipes no session can use: the next consumer replays the buffered
@@ -374,11 +380,16 @@ export class ProcessManager {
   private teeChunk(record: ManagedRecord, stream: PassThrough, chunk: Buffer): void {
     if (stream.writableEnded || stream.destroyed) return;
     stream.write(chunk);
+    const tee = record.tee;
+    if (tee === undefined) return;
     // A paused Transform keeps its readable side near the high-water mark and queues
     // the rest on the writable side, so both sides make up what a stalled consumer
     // would otherwise pin.
-    if (stream.readableLength + stream.writableLength <= MAX_TEE_BUFFER_BYTES) return;
-    stream.end();
+    const buffered = tee.stdout.readableLength + tee.stdout.writableLength
+      + tee.stderr.readableLength + tee.stderr.writableLength;
+    if (buffered <= MAX_TEE_BUFFER_BYTES) return;
+    tee.stdout.end();
+    tee.stderr.end();
     void this.stop(record.processId);
   }
 

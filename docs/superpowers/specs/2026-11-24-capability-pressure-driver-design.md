@@ -112,6 +112,10 @@ Rules the addition must keep:
 - With `exposeStdio: true`, both pipes are *teed*: the ring buffer still receives
   every chunk, and the caller's transport receives the same chunks. Diagnostics
   must not go blind because a worker became supervised.
+- The tee buffer ceiling is per child, not per stream: stdout and stderr share
+  one budget, so a worker writing both cannot pin twice the memory. Past it both
+  copies end and the child is stopped, because pipes with buffered output no
+  consumer can read are not reusable.
 - The supervisor passes `exposeStdio: true` only for a worker whose spec declares
   it needs a transport. A plain `executable`+`args` worker (the phase-2 shape)
   keeps the default.

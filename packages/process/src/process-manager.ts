@@ -468,8 +468,9 @@ export class ProcessManager {
    * Evict the oldest finished records once the retained set outgrows its bounds.
    *
    * Candidates are records in a verified terminal state with no exit listener
-   * waiting; the record that just finished is kept even when it alone exceeds
-   * the budget. A live record is never a candidate, and neither is one in
+   * still waiting; an empty set is what an unsubscribed listener leaves behind,
+   * and it must not pin the record. The record that just finished is kept even
+   * when it alone exceeds the budget. A live record is never a candidate, and neither is one in
    * `termination_unverified`: `stop` may still be waiting on it, so evicting it
    * would strand that waiter. Such a record stays until a later stop attempt
    * resolves it, which means a host that keeps failing verification without
@@ -485,7 +486,9 @@ export class ProcessManager {
     const evictable = [...this.records.values()]
       .filter((record) => record !== newest
         && isVerifiedTerminal(record.state)
-        && record.exitListeners === undefined)
+        // A listener that unsubscribed leaves an empty set; treating it as
+        // "someone is still waiting" would retain one record per activation.
+        && (record.exitListeners === undefined || record.exitListeners.size === 0))
       .sort((left, right) => (left.finishedAt ?? '').localeCompare(right.finishedAt ?? ''));
     let count = evictable.length + 1;
     let bytes = newest.logs.byteLength

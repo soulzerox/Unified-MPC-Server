@@ -436,6 +436,28 @@ describe('ProcessManager', () => {
     expect(manager.status(processIds[0])).toMatchObject({ ok: false, error: { code: 'PROCESS_NOT_FOUND' } });
     expect(manager.status(processIds[processIds.length - 1]).ok).toBe(true);
   }, 120_000);
+
+  it('evicts a record whose exit listener unsubscribed before the exit', async () => {
+    const manager = new ProcessManager();
+    const processIds: string[] = [];
+    for (let index = 0; index < MAX_RETAINED_TERMINAL_RECORDS + 2; index += 1) {
+      const started = await manager.start({
+        executable: process.execPath,
+        args: ['-e', 'process.stdout.write("tiny\\n")'],
+        cwd: process.cwd(),
+      });
+      if (!started.ok) throw new Error(started.error.message);
+      // The supervisor subscribes on spawn and unsubscribes when it stops the
+      // worker, leaving an empty set behind. That must not pin the record.
+      manager.onExit(started.value.processId, () => {})();
+      await waitForState(manager, started.value.processId, 'exited');
+      processIds.push(started.value.processId);
+    }
+
+    expect(manager.list()).toHaveLength(MAX_RETAINED_TERMINAL_RECORDS);
+    expect(manager.status(processIds[0])).toMatchObject({ ok: false, error: { code: 'PROCESS_NOT_FOUND' } });
+    expect(manager.status(processIds[processIds.length - 1]).ok).toBe(true);
+  }, 120_000);
 });
 
 describe('ProcessManager stdio exposure and env', () => {

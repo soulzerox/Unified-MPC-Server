@@ -111,7 +111,7 @@ export interface CapabilityHealth {
    * The transition only carries the shared `stop-unverified` reason, which says
    * the kill was ordered but not that it happened; this keeps the hook's own
    * message (or the rejection's) for a diagnosis. Absent after a verified stop,
-   * and cleared when a new attempt begins.
+   * and cleared when a new attempt begins or a new incarnation starts.
    */
   readonly lastStopFailure?: string;
   readonly lastTransition?: CapabilityTransition;
@@ -633,6 +633,10 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
     if (!verdict.ok) return verdict;
 
     this.transition(record, 'STARTING', reason);
+    // A new incarnation starts with no verdict from the one before it; the field
+    // describes a stop that already happened, so `ACTIVE` must never be reported
+    // beside the previous worker's failure.
+    delete record.lastStopFailure;
     const pending = (async (): Promise<Result<void>> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = new Promise<'timeout'>((resolve) => {

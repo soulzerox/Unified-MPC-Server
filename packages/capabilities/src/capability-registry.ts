@@ -186,9 +186,11 @@ interface CapabilityRecord {
   idleSince: number;
   starting: Promise<Result<void>> | undefined;
   /**
-   * Bumped on entering `STOPPING`. The awaited stop continuation captures it, so
-   * a hook that settles `ok` after the supervisor already wrote `FAILED` writes
-   * nothing: `FAILED -> COLD` must never be reachable through a late stop.
+   * Bumped on entering `STOPPING` and when a new incarnation starts. The awaited
+   * stop continuation captures it, so a hook that settles after the supervisor
+   * already wrote `FAILED`, or after the record was recycled and restarted, writes
+   * nothing: `FAILED -> COLD` must never be reachable through a late stop, and a
+   * dead incarnation's verdict must not land on the live one.
    */
   stopEpoch: number;
   /** A stop a release still owes, marked while a lease is held. */
@@ -633,9 +635,11 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
     if (!verdict.ok) return verdict;
 
     this.transition(record, 'STARTING', reason);
-    // A new incarnation starts with no verdict from the one before it; the field
-    // describes a stop that already happened, so `ACTIVE` must never be reported
-    // beside the previous worker's failure.
+    // A new incarnation starts with no verdict from the one before it. The epoch
+    // bump is what enforces that: a stop hook still out from the previous
+    // incarnation captured the old number, so it can neither write the record nor
+    // stamp its failure here after this start.
+    record.stopEpoch += 1;
     delete record.lastStopFailure;
     const pending = (async (): Promise<Result<void>> => {
       let timer: ReturnType<typeof setTimeout> | undefined;

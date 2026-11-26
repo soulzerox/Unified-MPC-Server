@@ -1,5 +1,5 @@
 import { ok, type Result } from '@unified-mpc/domain';
-import { ProcessManager } from '@unified-mpc/process';
+import { MAX_RETAINED_TERMINAL_RECORDS, ProcessManager } from '@unified-mpc/process';
 import { describe, expect, it } from 'vitest';
 
 import { CapabilityRegistry, type CapabilityManifest } from './capability-registry.js';
@@ -146,6 +146,50 @@ describe('capability supervisor with the real ProcessManager', () => {
     }
     expect(registry.health('worker')?.state).toBe('COLD');
   }, 120_000);
+
+  /**
+   * The same acceptance item taken past the point where every layer that keeps
+   * per-activation state has to evict: the loop runs longer than
+   * `MAX_RETAINED_TERMINAL_RECORDS`, so a manager that only appends would be
+   * visible here as record growth, and longer than the registry's transition cap,
+   * so its bounded history is exercised too. The shorter test above proves the
+   * steady state and the RSS plateau; this one proves the bound is eviction, not
+   * a large constant.
+   */
+  it('keeps retained state bounded across more cycles than the retention cap', async () => {
+    const { registry, supervisor, processes } = build();
+    const spec = manifest('worker', { idleTtlMs: 0 });
+    expect((await supervisor.register(spec, workerSpec(CHILD))).ok).toBe(true);
+    expect((await registry.register(spec)).ok).toBe(true);
+
+    const cycles = MAX_RETAINED_TERMINAL_RECORDS + 6;
+    try {
+      for (let index = 0; index < cycles; index += 1) {
+        const lease = await registry.acquire('worker');
+        if (!lease.ok) throw new Error(`cycle ${index} could not acquire: ${lease.error.message}`);
+        expect(lease.value.release().ok).toBe(true);
+        await waitUntil(() => registry.health('worker')?.state === 'COLD', `cycle ${index} to stop`, 8_000);
+      }
+
+      const records = processes.list();
+      // Every activation produced a record, so a list shorter than the cycle count
+      // is proof the manager evicted, not proof it never recorded.
+      expect(records.length).toBeLessThan(cycles);
+      expect(records.length).toBeLessThanOrEqual(MAX_RETAINED_TERMINAL_RECORDS + 1);
+      expect(records.filter((entry) => entry.state === 'running' || entry.state === 'starting')).toHaveLength(0);
+
+      // `DEFAULT_MAX_TRANSITIONS` is 64: four transitions per cycle would be 280
+      // here, so the history is bounded only if the splice runs.
+      expect(registry.transitions('worker').length).toBeLessThanOrEqual(64);
+      expect(registry.transitions('worker').length).toBeLessThan(4 * cycles);
+      expect(registry.snapshot()).toHaveLength(1);
+      expect(supervisor.health()).toHaveLength(1);
+      expect(registry.health('worker')?.leaseCount).toBe(0);
+      expect(registry.health('worker')?.state).toBe('COLD');
+    } finally {
+      await supervisor.shutdown().catch(() => undefined);
+    }
+  }, 240_000);
 
 });
 

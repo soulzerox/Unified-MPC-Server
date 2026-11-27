@@ -132,6 +132,7 @@ import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApi
 import { createAuthoritativeMergeSubjectSource } from './github-pull-request-subject.js';
 import { canonicalRefForBranch, createCanonicalMergeAdvance } from './canonical-merge-advance.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
+import { createMergeGateCommandRunner } from './merge-gate-capability.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { projectIndexJobHistory } from './index-job-history-projection.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
@@ -912,12 +913,24 @@ export function createStdioMcpRuntime(
   const mergeReconciliationRepository = new SqliteMergeReconciliationRepository(database);
   const githubApi = options.githubApi ?? createGitHubApiReader();
   const mergeObserver = createGitHubMergeObservationPort(githubApi);
+  // A heavy local gate is a supervised `burst` worker: its own exit is the
+  // verdict, so the registry and the crash window account for it. The
+  // `verification_heavy` admission above still decides whether it may run.
+  // The allowlist is every workspace the verifier could accept, not only the
+  // ones selected as Active Projects: the gate runs in whichever exact-head
+  // checkout the receipt names.
+  const mergeGateCommandRunner = createMergeGateCommandRunner({
+    workspaceRoots: async (): Promise<readonly string[]> =>
+      ((await workspaceRepository.listAll?.()) ?? (await workspaceRepository.list()))
+        .map((workspace) => workspace.realRootPath),
+  });
   const mergeVerificationRun = createMergeVerificationRunPort({
     github: githubApi,
     receipts: mergeReceiptRepository,
     workspaces: workspaceRepository,
     attempts: mergeAttemptRepository,
     admission: resourceAdmissionController,
+    commandRunner: mergeGateCommandRunner,
   });
   const mergeReconciliationCore = new MergeReconciliationService(
     mergeReceiptRepository,
@@ -1938,6 +1951,9 @@ export function createStdioMcpRuntime(
       // After the provider's own sessions are closed: the sweep stops first, then
       // any worker still alive is stopped through the supervisor.
       await thaiRagCapability?.close().catch(() => undefined);
+      // A gate still running must not outlive the runtime: it writes into a
+      // checkout the next verification is about to inspect.
+      await mergeGateCommandRunner.close().catch(() => undefined);
       await (await sharedActivityLease)?.close();
       await extensions.close().catch(() => undefined);
       await workspaceIndex.close().catch(() => undefined);

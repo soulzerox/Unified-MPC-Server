@@ -438,10 +438,11 @@ Two additions belong to the process package instead, and neither is optional:
   accepted cost of not killing a resident worker mid-use. A nonzero value keeps
   today's meaning, so no existing caller changes.
 
-Items 1–5 add surface and change no transition. Item 6 is the exception and is
-listed here for exactly that reason: it adds the two `FAILED` edges below, which
-phase 1's table does not contain, so the phase-2 PR needs the guard tests for
-those two edges and nothing else in the table moves.
+Items 1–5 add surface and change no transition. Items 6 and 7 are the
+exceptions and are listed here for exactly that reason: 6 adds the two `FAILED`
+edges below, which phase 1's table does not contain, and 7 adds the two `COLD`
+completion edges described after them. Nothing else in the table moves, and the
+phase-2 PR needs the guard tests for those four edges.
 
 Phase 1's table has no edge out of a running state on worker death:
 
@@ -450,11 +451,12 @@ ACTIVE     -> WARM_IDLE | STOPPING
 WARM_IDLE  -> ACTIVE | STOPPING
 ```
 
-A real worker can exit on its own. Phase 2 adds exactly two edges, both with a
-reason that names the exit and both written through `fail(id, reason)` from
-registry change 6. The trigger is a subscription, not a poll: the supervisor
-keeps the `processId` it started and subscribes with the one small
-`@unified-mpc/process` addition below, then calls
+A real worker can exit on its own. Phase 2 adds four edges in total: the two
+`FAILED` edges below, both with a reason that names the exit and both written
+through `fail(id, reason)` from registry change 6, plus the two `COLD` edges the
+burst-completion change adds at the end of this section. The trigger is a
+subscription, not a poll: the supervisor keeps the `processId` it started and
+subscribes with the one small `@unified-mpc/process` addition below, then calls
 `port.fail(id, 'worker-exited')` from the listener:
 
 ```text
@@ -477,10 +479,16 @@ subscription is dropped first, so the id is captured before `unsubscribe`.
 `lastExit(manifest)` and `waitForExit(manifest)` expose the same fact to a
 leaseholder that started the worker; neither starts nor stops anything, and the
 caller races the promise against its own deadline. `waitForExit` answers from
-`lastExit` when the current attempt already exited, so a fast burst cannot be
-missed by a caller that starts first and waits second, and it never answers with
-an older attempt's code. An exit delivered inside `STARTING` still takes the
-start-failure path: the spawn has not resolved, so there is no verdict to read.
+`lastExit` when the current attempt already exited, so a fast burst is answered
+even by a caller that starts first and waits second, and it never answers with an
+older attempt's code. That answer lives with the record: a replacement registered
+between the exit and a slow wait starts a new record with no `lastExit`, and the
+wait is then bounded only by the caller's own deadline. Only `waitForExit` is
+attempt-scoped; `lastExit` and `health().lastExitCode` keep the last exit the
+capability ever reported, so a caller that needs this attempt's verdict awaits
+`waitForExit`. An exit delivered inside `STARTING` still takes the start-failure
+path — the spawn has not resolved, so there is no lifecycle verdict — although
+the exit is already recorded in `lastExit` and visible to a waiter.
 
 `onExit` fires from `handleClose`, which also runs for a kill the manager was
 asked to perform, so the listener is a reporter with a guard rather than a

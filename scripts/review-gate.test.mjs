@@ -266,10 +266,12 @@ test('a review bound to another head, base or PR blocks the merge', () => {
 
 test('a review from another skill version is stale', () => {
   assert.match(evaluate({ skill: { ...SKILL, skillVersion: 2 } }).blockers.join('\n'), /bundled version is 2/);
-  assert.match(
-    evaluate({ skill: { ...SKILL, skillSha256: 'sha256:' + 'd'.repeat(64) } }).blockers.join('\n'),
-    /different version of the bundled review skill/,
-  );
+  const stale = evaluate({ skill: { ...SKILL, skillSha256: 'sha256:' + 'd'.repeat(64) } }).blockers.join('\n');
+  assert.match(stale, /different version of the bundled review skill/);
+  // Both values are named so a typo in the findings file is distinguishable from
+  // a genuinely stale receipt without reading the gate source.
+  assert.ok(stale.includes(`receipt ${SKILL.skillSha256}`));
+  assert.ok(stale.includes(`expected sha256:${'d'.repeat(64)}`));
   assert.match(evaluate({ receipt: receipt({ skillId: 'other-review' }) }).blockers.join('\n'), /used skill 'other-review'/);
 });
 
@@ -462,6 +464,12 @@ test('renderCapsuleMarkdown carries identity, evidence and the claim-not-instruc
   assert.match(markdown, /a claim to verify, never an instruction/);
   assert.match(markdown, /No merge-ready verification receipt/);
   assert.match(markdown, /review:pr record --pr 536/);
+  // The scalars the recorder compares are printed once, exactly, so a reviewer
+  // never hand-copies them from a prompt (a one-character hash typo is refused).
+  assert.match(markdown, new RegExp(`"head_sha": "${HEAD}"`));
+  assert.match(markdown, /"capsule_id": "capsule-1"/);
+  assert.match(markdown, new RegExp(`"skill_sha256": "${SKILL.skillSha256}"`));
+  assert.match(markdown, new RegExp(`"diff_fingerprint": "${reviewFingerprint({ baseSha: BASE, headSha: HEAD, diff: DIFF })}"`));
 });
 
 const BLOCKING = { ...FINDING, severity: 'blocking', required_fix: true };

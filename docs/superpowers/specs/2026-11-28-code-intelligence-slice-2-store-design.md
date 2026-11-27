@@ -152,10 +152,24 @@ the second write of the same id is refused with the stored generation unchanged.
 ## Generation reconciliation (and what is explicitly not here)
 
 When the ref moves, the new extraction has a new `revision_id`/`commit_sha`, so it
-is a new generation. Old generations stay readable. That means a Goal overlay's
-generation and the base ref's generation coexist, which is required: they are
-different evidence, and #131's cross-Goal rule is that a consumer must not blur
-them.
+is a new generation. Old generations stay readable.
+
+A Goal does **not** get a second generation. `resolveCanonicalSourceIdentity`
+returns the same six fields for an admitted Goal as for its base ref: admission
+means the overlay's recorded base still matches the live ref, so the covered tree
+is the same tree and the records are shared evidence — #131's reuse requirement,
+not a per-Goal copy. The overlay itself stays where it is (`goal-overlay-store.ts`)
+and is not structural evidence. A Goal whose overlay base no longer matches is
+`goal_unadmitted` and has no canonical identity at all, so it has nothing to write
+here.
+
+That makes one caller contract load-bearing: the caller must extract the tree the
+identity describes (a checkout at `commit_sha`), not a worktree with overlay edits
+on top. Records carry the identity they were extracted under and a fingerprint of
+the bytes read, so a mislabelled extraction shows up as fingerprints that disagree
+with the base generation rather than as a silent relabelling — but it is still a
+caller error the store cannot detect, and it is stated here so a later slice does
+not assume the store enforces it.
 
 Deletion is not part of this slice **and no deletion API ships with it**. #131
 requires cleanup to be reference-aware ("Cleanup is reference-aware and cannot

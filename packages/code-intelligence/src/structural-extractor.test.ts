@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -135,6 +136,43 @@ describe('structural extractor', () => {
       files: [path.join(elsewhere, 'outside.ts')],
     });
     expect(absolute).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('orders records by the path they carry, not by the raw input', async () => {
+    const base = await root();
+    await writeFile(path.join(base, 'a.ts'), 'export const a = 1;\n');
+    await writeFile(path.join(base, 'b.ts'), 'export const b = 1;\n');
+
+    // `./b.ts` sorts before `a.ts` as a raw string, but its record is `b.ts`.
+    const result = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['./b.ts', 'a.ts'] });
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.map((record) => record.path)).toEqual(['a.ts', 'b.ts']);
+  });
+
+  it('emits one record for an input that names the same admitted path twice', async () => {
+    const base = await root();
+    await writeFile(path.join(base, 'a.ts'), 'export const a = 1;\n');
+
+    const result = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['a.ts', './a.ts'] });
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.map((record) => record.path)).toEqual(['a.ts']);
+  });
+
+  it('fingerprints the bytes read, so a BOM cannot be shared with its BOM-less twin', async () => {
+    const base = await root();
+    const plain = Buffer.from('export const a = 1;\n', 'utf8');
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), plain]);
+    await writeFile(path.join(base, 'plain.ts'), plain);
+    await writeFile(path.join(base, 'bom.ts'), withBom);
+
+    const result = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['plain.ts', 'bom.ts'] });
+    if (!result.ok) throw new Error(result.error.message);
+
+    const byPath = new Map(result.value.map((record) => [record.path, record]));
+    expect(byPath.get('bom.ts')?.fingerprint).toBe(`sha256:${createHash('sha256').update(withBom).digest('hex')}`);
+    expect(byPath.get('plain.ts')?.fingerprint).not.toBe(byPath.get('bom.ts')?.fingerprint);
   });
 
   it('sorts paths by code unit, not the process locale', async () => {

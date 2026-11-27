@@ -90,7 +90,13 @@ function refuse(file: string, reason: string): Result<never> {
   return err(appError('INVALID_INPUT', `structural extraction refused ${file}: ${reason}`));
 }
 
-const UTF8 = new TextDecoder('utf-8', { fatal: true });
+/**
+ * `ignoreBOM` keeps a leading U+FEFF in the decoded text, so re-encoding it gives
+ * the bytes back exactly: the fingerprint is sha256 of the file as read, and a
+ * BOM-prefixed file cannot share a fingerprint with its BOM-less twin.
+ * `fatal` refuses invalid bytes instead of substituting U+FFFD.
+ */
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** `undefined` when the bytes are not valid UTF-8, never a U+FFFD-substituted string. */
 function decodeUtf8(bytes: Uint8Array): string | undefined {
@@ -295,31 +301,39 @@ export async function extractStructuralRecords(
     return err(appError('INVALID_INPUT', `structural extraction refused the root: ${options.repositoryRoot} is not readable`));
   }
 
-  const records: SourceStructuralRecord[] = [];
-  for (const file of [...options.files].sort(compareText)) {
+  // Order by the path the record will carry, not by the raw input: `./b.ts`
+  // sorts before `a.ts` but its record is `b.ts`, which would break the
+  // documented sort. An input that names the same admitted path twice is one
+  // file, so it contributes one record.
+  const admitted = new Map<string, string>();
+  for (const file of options.files) {
     const requested = path.resolve(realRoot, file);
     if (!isInside(realRoot, requested)) return refuse(file, 'the path is outside the admitted repository root');
+    admitted.set(toPosix(path.relative(realRoot, requested)), requested);
+  }
 
+  const records: SourceStructuralRecord[] = [];
+  for (const [admittedPath, requested] of [...admitted].sort((left, right) => compareText(left[0], right[0]))) {
     const realFile = await realpath(requested).catch(() => undefined);
-    if (realFile === undefined) return refuse(file, 'the path does not exist');
-    if (!isInside(realRoot, realFile)) return refuse(file, 'the path resolves outside the admitted repository root');
+    if (realFile === undefined) return refuse(admittedPath, 'the path does not exist');
+    if (!isInside(realRoot, realFile)) return refuse(admittedPath, 'the path resolves outside the admitted repository root');
     // `realpath` resolves `..` that a symlink introduced, so the check above must
     // run again on the resolved path — a link inside the tree can still point out.
     const stats = await stat(realFile).catch(() => undefined);
-    if (stats === undefined) return refuse(file, 'the path is not readable');
-    if (!stats.isFile()) return refuse(file, 'the path is not a regular file');
+    if (stats === undefined) return refuse(admittedPath, 'the path is not readable');
+    if (!stats.isFile()) return refuse(admittedPath, 'the path is not a regular file');
 
     const bytes = await readFile(realFile).catch(() => undefined);
-    if (bytes === undefined) return refuse(file, 'the path is not readable');
+    if (bytes === undefined) return refuse(admittedPath, 'the path is not readable');
     // `readFile(file, 'utf8')` silently substitutes U+FFFD for invalid bytes, so
     // the fingerprint would describe lossy text and the UTF-8 refusal below could
     // never fire. A fatal decode keeps both honest.
     const contents = decodeUtf8(bytes);
-    if (contents === undefined) return refuse(file, 'the path is not valid UTF-8');
+    if (contents === undefined) return refuse(admittedPath, 'the path is not valid UTF-8');
 
     // The record names the admitted path, not its target: an in-tree symlink must
     // stay visible under the name the caller asked for.
-    const record = extractStructuralRecord({ path: toPosix(path.relative(realRoot, requested)), identity: options.identity, contents });
+    const record = extractStructuralRecord({ path: admittedPath, identity: options.identity, contents });
     if (!record.ok) return record;
     records.push(record.value);
   }

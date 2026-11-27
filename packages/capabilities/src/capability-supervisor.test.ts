@@ -188,8 +188,8 @@ function build(options: {
 const spec = { executable: '/usr/bin/node', args: ['--version'], cwd: 'sub' };
 
 describe('capability supervisor registration', () => {
-  it('refuses a non-in-process manifest with no spec, and a spec for an id registered twice', async () => {
-    const { supervisor } = build();
+  it('refuses a non-in-process manifest with no spec, and replaces a registration only while idle', async () => {
+    const { supervisor, lifecycle, processes } = build();
     const worker = manifest();
 
     const missing = await supervisor.register(worker);
@@ -197,7 +197,161 @@ describe('capability supervisor registration', () => {
     expect(missing.ok ? '' : missing.error.message).toContain('needs a worker spec');
 
     expect((await supervisor.register(worker, spec)).ok).toBe(true);
-    expect((await supervisor.register(worker, spec)).ok).toBe(false);
+    // A second registration of an idle id replaces the spec: a gate check's argv is
+    // the host's per run, and a fresh id per run would leak records instead.
+    expect((await supervisor.register(worker, { ...spec, args: ['--version', '--help'] })).ok).toBe(true);
+
+    lifecycle.set('worker', 'STARTING');
+    await supervisor.start(worker);
+
+    expect(processes.specs.at(-1)?.args).toEqual(['--version', '--help']);
+  });
+
+  it('refuses to replace the spec of a worker that is live or possibly live', async () => {
+    const { supervisor, lifecycle } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(manifest());
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.error.message).toContain('already has a worker registration');
+  });
+
+  it('refuses a replacement while a start is still resolving its executable', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+
+    // Real `ProcessManager.start` awaits executable resolution before it calls
+    // `onCreated`, so no process id or subscription exists yet at this point.
+    let release: (() => void) | undefined;
+    processes.configure({
+      start: (_spec, onCreated): Promise<Result<ManagedProcess>> => new Promise((resolve): void => {
+        release = (): void => {
+          const process = managedProcess('proc-1', 'running');
+          onCreated?.(process);
+          resolve(ok(process));
+        };
+      }),
+    });
+    const pending = supervisor.start(manifest());
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+    expect(refused.ok).toBe(false);
+
+    release?.();
+    expect((await pending).ok).toBe(true);
+  });
+
+  it('refuses a replacement whose cwd resolution outlived a start', async () => {
+    let awaited = 0;
+    let release: (() => void) | undefined;
+    const { supervisor, lifecycle } = build({
+      resolveWorkerCwd: async (requested) => {
+        awaited += 1;
+        if (awaited === 2) await new Promise<void>((resolve) => { release = resolve; });
+        return ok(`${ROOT}/${requested}`);
+      },
+    });
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'STARTING');
+
+    const replacement = supervisor.register(manifest(), { ...spec, args: ['--other'] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await supervisor.start(manifest());
+    release?.();
+
+    expect((await replacement).ok).toBe(false);
+  });
+
+  it('refuses a replacement while a spawn that timed out still owns a subscription', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ startupTimeoutMs: 5 }), spec);
+    lifecycle.set('worker', 'STARTING');
+
+    // `onCreated` arrives before the start promise settles, so a timeout leaves a
+    // live, subscribed child behind with no `processId` and no in-flight start.
+    processes.configure({
+      start: (_spec, onCreated): Promise<Result<ManagedProcess>> => new Promise((): void => {
+        onCreated?.(managedProcess('proc-stuck', 'running'));
+      }),
+    });
+    expect((await supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(false);
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+
+    expect(refused.ok).toBe(false);
+  });
+
+  it('refuses a replacement while a stop it ordered is still unverified', async () => {
+    const { supervisor, lifecycle, processes } = build({ shutdownDeadlineMs: 10_000 });
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(manifest());
+
+    // `stop` drops the subscription before it orders the kill, so the process id
+    // is the only thing keeping the record from looking idle mid-stop.
+    let release: (() => void) | undefined;
+    processes.configure({
+      stop: (): Promise<Result<void>> => new Promise((resolve): void => {
+        release = (): void => { resolve(ok(undefined)); };
+      }),
+    });
+    const stopping = supervisor.stop(manifest());
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+
+    expect(refused.ok).toBe(false);
+    release?.();
+    expect((await stopping).ok).toBe(true);
+  });
+
+  it('carries the crash window across a replacement so a per-run argv cannot launder a crash loop', async () => {
+    const { supervisor, processes } = build({ maxCrashRestarts: 1 });
+    await supervisor.register(manifest(), spec);
+    processes.configure({ start: async () => err(appError('CONFLICT', 'spawn refused')) });
+    expect((await supervisor.start(manifest())).ok).toBe(false);
+
+    // Replacing the record is allowed — nothing of it can still run — but the
+    // failure still counts against the capability.
+    expect((await supervisor.register(manifest(), { ...spec, args: ['--other'] })).ok).toBe(true);
+    const refused = await supervisor.start(manifest());
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.error.message).toContain('crash loop');
+  });
+
+  it('does not let a spawn an abandoned attempt still owes fail the replaced record', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ startupTimeoutMs: 5 }), spec);
+
+    // A start that never settles leaves an abandoned attempt behind; the late
+    // spawn it still owes arrives after the id has a new spec, and dies inside
+    // the same tick, before the supervisor's own discard runs.
+    const late: ManagedProcess[] = [];
+    processes.configure({
+      start: (_spec, onCreated) => new Promise((resolve) => {
+        setTimeout(() => {
+          const process = managedProcess('proc-late', 'running');
+          late.push(process);
+          onCreated?.(process);
+          processes.fireExit('proc-late');
+          resolve(ok(process));
+        }, 20);
+      }),
+    });
+    expect((await supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(false);
+
+    expect((await supervisor.register(manifest(), { ...spec, args: ['--help'] })).ok).toBe(true);
+    lifecycle.set('worker', 'ACTIVE');
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(late).toHaveLength(1);
+    // The death is reported against a record that no longer owns the id.
+    expect(lifecycle.failures).toEqual([]);
   });
 
   it('refuses an in-process manifest that carries a spec', async () => {
@@ -206,6 +360,13 @@ describe('capability supervisor registration', () => {
     const registered = await supervisor.register(manifest({ runtimeKind: 'in-process' }), spec);
 
     expect(registered.ok).toBe(false);
+  });
+
+  it('keeps the conflict for a second in-process registration', async () => {
+    const { supervisor } = build();
+
+    expect((await supervisor.register(manifest({ runtimeKind: 'in-process' }))).ok).toBe(true);
+    expect((await supervisor.register(manifest({ runtimeKind: 'in-process' }))).ok).toBe(false);
   });
 
   it('refuses a blank argv element, a relative executable and a rejected cwd', async () => {

@@ -148,6 +148,12 @@ export interface CapabilityLifecyclePort {
    * a *stop*: pressure and shutdown never take `STOPPING` while a lease is held.
    */
   fail(id: string, reason: string): Result<void>;
+  /**
+   * A `burst` worker that ended its own run: `ACTIVE|WARM_IDLE -> COLD` with the
+   * exit code, so a finished check is not a crash. Optional, because a port that
+   * cannot express completion leaves the exit reported as a death.
+   */
+  complete?(id: string, exitCode: number | null): Result<void>;
 }
 
 /**
@@ -351,7 +357,10 @@ written against the phase-2 head rather than against today's main:
    every transition and the supervisor holds no lifecycle state, so an
    unrequested worker exit can only be written by the module that owns the
    transition, on the supervisor's report;
-7. one piece in `packages/workspace`, not in the registry: a `resolveWorkerCwd`
+7. a public `complete(id, exitCode)` for the burst-completion edge: the counter
+   edge to `fail`, writing `ACTIVE|WARM_IDLE -> COLD` and keeping the code in
+   `health(id).lastExitCode`;
+8. one piece in `packages/workspace`, not in the registry: a `resolveWorkerCwd`
    implementation. `packages/capabilities` may not import
    `@unified-mpc/workspace`, and the containment predicates that package exposes
    (`isWithin`, `isHostPathWithin`) are lexical — `path.relative` over normalised
@@ -457,6 +466,22 @@ Nothing else changes: `FAILED -> COLD` already exists for recycling, `acquire`
 still refuses `FAILED`, and the phase-1 tests for every other edge stay as they
 are.
 
+A `burst` worker's own exit is not a death. It ended the run it was started for,
+so phase 2 routes that exit through `complete(id, exitCode)`, which writes
+`ACTIVE|WARM_IDLE -> COLD` (reason `completed`) and keeps the code for
+`health(id).lastExitCode`. The supervisor decides by `manifest.activation`, not by
+the code: a non-zero exit is still a completed run whose verdict the gate layer
+reads, and only a port without `complete` falls back to the `worker-exited`
+death above. The exit code itself comes from `status(processId).exitCode` — the
+subscription is dropped first, so the id is captured before `unsubscribe`.
+`lastExit(manifest)` and `waitForExit(manifest)` expose the same fact to a
+leaseholder that started the worker; neither starts nor stops anything, and the
+caller races the promise against its own deadline. `waitForExit` answers from
+`lastExit` when the current attempt already exited, so a fast burst cannot be
+missed by a caller that starts first and waits second, and it never answers with
+an older attempt's code. An exit delivered inside `STARTING` still takes the
+start-failure path: the spawn has not resolved, so there is no verdict to read.
+
 `onExit` fires from `handleClose`, which also runs for a kill the manager was
 asked to perform, so the listener is a reporter with a guard rather than a
 transition: it reads `port.health(id)` and writes `fail(id, 'worker-exited')`
@@ -557,12 +582,15 @@ queue here would need fairness, backpressure and its own lease to be correct;
 none of that exists, and a busy host should shed burst work rather than stack it
 in memory.
 
-A burst worker still exits only through the stop hook: phase 1's "exits after its
-work" is honoured by the registry taking the stop edge on the last release (the
-`idleTtlMs = 0` default above), not by the child deciding it is done. A child
-that exits on its own is `worker-exited` → `FAILED` and counts toward the
-crash-loop bound for every activation, including `burst`; treating it as success
-would hide a real crash and needs a reason the registry does not have.
+A burst worker can end its own run or be stopped: the last release still takes
+the stop edge (`idleTtlMs = 0` above), and an exit the child decides itself is a
+**completion**, not a death. `complete(id, exitCode)` writes `COLD` and keeps the
+code as a verdict for the caller; it never counts toward the crash-loop bound.
+This is why a gate check can run as a burst worker: its non-zero exit is a
+*result* the receipt records, not a crash the supervisor retries. A port without
+`complete` keeps the older behaviour — that exit is `worker-exited` → `FAILED` —
+so the transition table above only grows for a registry that can express the
+edge.
 
 ## Shutdown
 
@@ -657,24 +685,30 @@ fake clock and a constant pressure:
    subscription is released by that `stop`; and an `onExit` subscription made
    after the record is already terminal notifies immediately, so an exit between
    spawn and subscribe is still reported with no timer to fall back on;
-4. `evictionPlan('elevated', snapshot)` lists only unleased `WARM_IDLE` ids whose
+4. a `burst` worker's own exit is a completion: the registry writes
+   `ACTIVE|WARM_IDLE -> COLD` with reason `completed`, keeps the code in
+   `health(id).lastExitCode`, and adds nothing to the crash window; a manager
+   that reports no code completes with `null`; `waitForExit(id)` resolves with the
+   same code and `lastExit(id)` keeps it, while a non-`burst` worker's exit still
+   writes `worker-exited` through `fail`;
+5. `evictionPlan('elevated', snapshot)` lists only unleased `WARM_IDLE` ids whose
    `now - idleSince` reached `min(idleTtlMs, 5_000)`, oldest first, and never
    lists `recyclable: false`, with the snapshot supplied by a fake port so the
    function is proven pure;
-5. `evictionPlan('critical', snapshot)` lists every unleased `WARM_IDLE` whatever
+6. `evictionPlan('critical', snapshot)` lists every unleased `WARM_IDLE` whatever
    its TTL; the `RESOURCE_PRESSURE` refusal it relies on is asserted in
    `packages/workspace` next to `ResourceAdmission`, not here, because
    `capabilities` must not import that package;
-6. crash-loop bounding: after `maxCrashRestarts` failures inside the window the
+7. crash-loop bounding: after `maxCrashRestarts` failures inside the window the
    supervisor reports `crashLoop: true` from `health()` and its `start` refuses
    without spawning; the registry keeps `FAILED` and writes no invented reason;
-7. `stop` that exceeds `shutdownTimeoutMs` abandons the await, reports
+8. `stop` that exceeds `shutdownTimeoutMs` abandons the await, reports
    `stop-unverified`, never `COLD`, and leaves `ProcessManager`'s
    `termination_unverified` state visible instead of claiming a kill; a hook that
    settles `ok` *after* the deadline wrote `FAILED` writes no transition at all,
    so `FAILED -> COLD` is proven unreachable and the unverified kill stays
    observable through `health()`;
-8. `shutdown()` reclaims the `WARM_IDLE` ids and then every `ACTIVE` id — a
+9. `shutdown()` reclaims the `WARM_IDLE` ids and then every `ACTIVE` id — a
    leased one only gets a pending stop, never a kill — through the one registry
    call, waits for a leased capability's pending
    `reclaim` to complete on its last release, and returns inside
@@ -684,7 +718,7 @@ fake clock and a constant pressure:
    never reached `STOPPING` keeps `ACTIVE` with no transition, no `stopUnverified`
    and no invented kill, which is what distinguishes "never shorten a lease" from
    "report an unverified kill";
-9. spawn bounds: the supervisor passes the spec's `timeoutMs` when it states
+10. spawn bounds: the supervisor passes the spec's `timeoutMs` when it states
    one, otherwise `0` for a `recyclable: false` capability and the manager's
    default cap for every `recyclable: true` activation, a spawn that settles
    after the registry's `startupTimeoutMs` is

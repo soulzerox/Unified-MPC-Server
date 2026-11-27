@@ -13,6 +13,7 @@ import {
 } from './capability-registry.js';
 import {
   CapabilitySupervisor,
+  type CapabilityExit,
   type CapabilityLifecyclePort,
   type CapabilityProcessPort,
   type EvictionCandidate,
@@ -44,6 +45,8 @@ class FakeLifecycle implements CapabilityLifecyclePort {
 
   public readonly failures: Array<{ id: string; reason: string }> = [];
 
+  public readonly completions: Array<{ id: string; exitCode: number | null }> = [];
+
   public readonly reclaimCalls: string[] = [];
 
   public snapshotValue: readonly EvictionCandidate[] = [];
@@ -65,6 +68,13 @@ class FakeLifecycle implements CapabilityLifecyclePort {
   public async reclaim(id: string): Promise<Result<void>> {
     this.reclaimCalls.push(id);
     await this.reclaimBehaviour(id);
+    return ok(undefined);
+  }
+
+  public complete(id: string, exitCode: number | null): Result<void> {
+    this.completions.push({ id, exitCode });
+    const worker = this.workers.get(id);
+    if (worker !== undefined) worker.state = 'COLD';
     return ok(undefined);
   }
 
@@ -106,6 +116,9 @@ class FakeProcesses implements CapabilityProcessPort {
 
   public lastListener: (() => void) | undefined;
 
+  /** The code `status` reports once the child is gone. */
+  public exitCode: number | undefined;
+
   private readonly exitListeners = new Map<string, () => void>();
 
   private nextProcess = 0;
@@ -141,9 +154,11 @@ class FakeProcesses implements CapabilityProcessPort {
 
   public status(processId: string): Result<ManagedProcess> {
     const state = this.control.state(processId);
-    return state === undefined
-      ? err(appError('PROCESS_NOT_FOUND', 'Process was not found'))
-      : ok(managedProcess(processId, state));
+    if (state === undefined) return err(appError('PROCESS_NOT_FOUND', 'Process was not found'));
+    return ok({
+      ...managedProcess(processId, state),
+      ...(this.exitCode === undefined ? {} : { exitCode: this.exitCode }),
+    });
   }
 
   public onExit(processId: string, listener: () => void): () => void {
@@ -925,5 +940,95 @@ describe('capability supervisor worker pipes', () => {
     expect(late.supervisor.pipes('worker')).toBeUndefined();
     await new Promise((resolve) => { setTimeout(resolve, 50); });
     expect(late.supervisor.pipes('worker')).toBeUndefined();
+  });
+});
+
+describe('capability supervisor burst completion', () => {
+  it('reports a burst worker own exit as a completion with its code, not a crash', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const burst = manifest({ activation: 'burst' });
+    await supervisor.register(burst, spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(burst);
+
+    const exited = supervisor.waitForExit(burst);
+    processes.exitCode = 0;
+    processes.fireExit('proc-0');
+
+    expect(await exited).toEqual({ exitCode: 0 });
+    expect(lifecycle.completions).toEqual([{ id: 'worker', exitCode: 0 }]);
+    expect(lifecycle.failures).toEqual([]);
+    expect(supervisor.lastExit(burst)).toEqual({ exitCode: 0 });
+  });
+
+  it('reports a burst exit the manager gave no code for as a completion with null', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const burst = manifest({ activation: 'burst' });
+    await supervisor.register(burst, spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(burst);
+
+    processes.exitCode = undefined;
+    processes.fireExit('proc-0');
+    await Promise.resolve();
+
+    expect(lifecycle.completions).toEqual([{ id: 'worker', exitCode: null }]);
+    expect(lifecycle.failures).toEqual([]);
+  });
+
+  it('still reports an unrequested exit of a non-burst worker as a death', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(manifest());
+
+    processes.exitCode = 1;
+    processes.fireExit('proc-0');
+    await Promise.resolve();
+
+    expect(lifecycle.completions).toEqual([]);
+    expect(lifecycle.failures).toEqual([{ id: 'worker', reason: 'worker-exited' }]);
+  });
+
+  it('answers a wait that begins after the exit already happened', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const burst = manifest({ activation: 'burst' });
+    await supervisor.register(burst, spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(burst);
+
+    processes.exitCode = 0;
+    processes.fireExit('proc-0');
+
+    // A fast burst can finish before the leaseholder starts waiting.
+    await expect(supervisor.waitForExit(burst)).resolves.toEqual({ exitCode: 0 });
+  });
+
+  it('does not answer a wait with the exit of an older attempt', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const burst = manifest({ activation: 'burst' });
+    await supervisor.register(burst, spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(burst);
+    processes.exitCode = 0;
+    processes.fireExit('proc-0');
+
+    await supervisor.start(burst);
+    let settled = false;
+    const waiting = supervisor.waitForExit(burst).then((exit): CapabilityExit => {
+      settled = true;
+      return exit;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    processes.exitCode = 1;
+    processes.fireExit('proc-1');
+    await expect(waiting).resolves.toEqual({ exitCode: 1 });
+  });
+
+  it('refuses to wait on an id with no registration', async () => {
+    const { supervisor } = build();
+    await expect(supervisor.waitForExit(manifest())).rejects.toThrow('no worker registration');
   });
 });

@@ -59,6 +59,7 @@ test('merge profile runs every gate in a deterministic order', () => {
     'test:process',
     'test:project',
     'test:workspace',
+    'test:code-intelligence',
     'test:capabilities',
     'test:codex',
     'test:filesystem',

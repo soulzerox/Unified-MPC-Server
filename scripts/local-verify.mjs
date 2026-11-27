@@ -40,7 +40,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 // set of steps it vouches for. The number alone is not evidence: every version
 // must also record the digest of the step set it ran, and a mismatch refuses
 // the merge profile instead of reusing a stale number (#579 review).
-export const PROFILE_VERSION = 5;
+export const PROFILE_VERSION = 6;
 export const PROFILES = ['merge', 'targeted'];
 
 /**
@@ -52,6 +52,7 @@ export const PROFILES = ['merge', 'targeted'];
 const RECORDED_STEP_SET_DIGESTS = new Map([
   [4, 'sha256:215be23752cd3f3b58ee52280d87a98aa212bf8565f954fb63dee052812f8f5f'],
   [5, 'sha256:b5cff5d69a19e1e5a8fde656d0eaec81fa35bd919df69735406d3bbd09babb91'],
+  [6, 'sha256:55f84af90d41214620099d4ed03ee56d6fc9f074624920f7514b90e05f464358'],
 ]);
 
 const testStep = (packageName) => ({
@@ -99,6 +100,7 @@ export const STEP_DEFINITIONS = [
   testStep('@unified-mpc/process'),
   testStep('@unified-mpc/project'),
   testStep('@unified-mpc/workspace'),
+  testStep('@unified-mpc/code-intelligence'),
   testStep('@unified-mpc/capabilities'),
   testStep('@unified-mpc/codex'),
   testStep('@unified-mpc/filesystem'),

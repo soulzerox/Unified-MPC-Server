@@ -107,7 +107,8 @@ Three deliberate restrictions:
 
 The extractor is the boundary that makes the rest of the subsystem reproducible:
 
-- files are processed in sorted repo-relative path order;
+- files are processed in sorted repo-relative path order, compared by code unit
+  rather than locale collation;
 - symbols are sorted by `(startLine, container, name)`, imports by `startLine`;
 - nothing reads the clock, the environment, or the network;
 - the same tree and identity produce byte-identical JSON.
@@ -163,7 +164,9 @@ that a capability lane would otherwise be wrapping before it exists.
 - **A second identity.** If a consumer ever needs "which tree is this?", it asks
   `resolveCanonicalSourceIdentity`, not the extractor.
 - **A silent partial result.** A file that fails to parse produces a record with
-  empty `symbols` and `imports` plus `parseError: string`, never a dropped file:
-  a consumer must be able to tell "no symbols" from "not read".
+  `parseError: string`, never a dropped file: a consumer must be able to tell
+  "no symbols" from "not read". Whatever the recovering parser still produced is
+  kept, so a consumer must treat `parseError` as the authority, not an empty
+  `symbols` array.
 - **A cross-Goal leak.** Records carry the identity they were extracted under, so
   a Goal overlay's file can never be served as the base ref's file.

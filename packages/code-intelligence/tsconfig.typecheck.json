@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../../.typecheck/packages/code-intelligence",
+    "tsBuildInfoFile": "../../.typecheck/packages/code-intelligence/tsconfig.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../domain/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../workspace/tsconfig.typecheck.json"
+    }
+  ]
+}

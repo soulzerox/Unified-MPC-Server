@@ -21,6 +21,7 @@
     { "path": "./packages/mcp-server" },
     { "path": "./packages/ipc-contracts" },
     { "path": "./packages/search" },
+    { "path": "./packages/code-intelligence" },
     { "path": "./packages/thai-rag" }
   ]
 }

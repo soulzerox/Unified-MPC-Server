@@ -285,6 +285,29 @@ describe('capability supervisor registration', () => {
     expect(refused.ok).toBe(false);
   });
 
+  it('refuses a replacement while a stop it ordered is still unverified', async () => {
+    const { supervisor, lifecycle, processes } = build({ shutdownDeadlineMs: 10_000 });
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(manifest());
+
+    // `stop` drops the subscription before it orders the kill, so the process id
+    // is the only thing keeping the record from looking idle mid-stop.
+    let release: (() => void) | undefined;
+    processes.configure({
+      stop: (): Promise<Result<void>> => new Promise((resolve): void => {
+        release = (): void => { resolve(ok(undefined)); };
+      }),
+    });
+    const stopping = supervisor.stop(manifest());
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+
+    expect(refused.ok).toBe(false);
+    release?.();
+    expect((await stopping).ok).toBe(true);
+  });
+
   it('carries the crash window across a replacement so a per-run argv cannot launder a crash loop', async () => {
     const { supervisor, processes } = build({ maxCrashRestarts: 1 });
     await supervisor.register(manifest(), spec);

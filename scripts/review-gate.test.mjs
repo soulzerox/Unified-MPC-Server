@@ -12,6 +12,7 @@ import {
   cleanTreeBlockers,
   createExclusiveFile,
   evaluateReviewEvidence,
+  findingsIdentityBlockers,
   findReviewReceipt,
   formatReviewBacklog,
   issueRefsFrom,
@@ -277,6 +278,52 @@ test('a review from another skill version is stale', () => {
     `findings were produced with a different version of the bundled review skill ("sha256:${'a'.repeat(64)}", bundled "sha256:${'c'.repeat(64)}")`,
   );
   assert.match(evaluate({ receipt: receipt({ skillId: 'other-review' }) }).blockers.join('\n'), /used skill 'other-review'/);
+});
+
+test('the record path has its own tested refusal for every identity mismatch', () => {
+  const submitted = {
+    head_sha: HEAD,
+    capsule_id: 'capsule-1',
+    skill_id: SKILL_ID,
+    skill_version: 1,
+    skill_sha256: SKILL.skillSha256,
+    diff_fingerprint: 'sha256:ff',
+  };
+  const identity = { submitted, headSha: HEAD, capsuleId: 'capsule-1', skill: SKILL, diffFingerprint: 'sha256:ff' };
+  // A matching submission is the only accepted one, so each refusal below is the
+  // exact reason the recipient of the file sees.
+  assert.deepEqual(findingsIdentityBlockers(identity), []);
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, head_sha: 'd'.repeat(40) } }),
+    [`findings were written for ${'d'.repeat(12)}, current PR head is ${HEAD.slice(0, 12)}; run a fresh review`],
+  );
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, capsule_id: 'other' } }),
+    ['findings do not reference the frozen capsule for this head'],
+  );
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, skill_id: 'other-review' } }),
+    ["findings used skill 'other-review'"],
+  );
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, skill_version: '2' } }),
+    [skillVersionBlocker('2', 1)],
+  );
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, skill_sha256: 'sha256:' + 'd'.repeat(64) } }),
+    [skillShaMismatchBlocker('findings were produced', 'sha256:' + 'd'.repeat(64), SKILL.skillSha256)],
+  );
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, diff_fingerprint: 'sha256:ee' } }),
+    ['findings fingerprint does not match the frozen capsule'],
+  );
+  // A findings file without `skill_sha256` reaches this check, and JSON.stringify
+  // would render `undefined` unquoted — which reads like a wrong hash rather than
+  // a missing field.
+  assert.deepEqual(
+    findingsIdentityBlockers({ ...identity, submitted: { ...submitted, skill_sha256: undefined } }),
+    [`findings were produced with a different version of the bundled review skill (undefined (missing), bundled "${SKILL.skillSha256}")`],
+  );
 });
 
 test('blocking findings, or a hand-edited receipt, block the merge', () => {

@@ -114,6 +114,11 @@ export interface CapabilityHealth {
    * and cleared when a new attempt begins or a new incarnation starts.
    */
   readonly lastStopFailure?: string;
+  /**
+   * The exit code of the last `burst` run that completed. `null` means the
+   * manager delivered the exit without a code, not that it succeeded.
+   */
+  readonly lastExitCode?: number | null;
   readonly lastTransition?: CapabilityTransition;
 }
 
@@ -170,8 +175,10 @@ const ALLOWED_TRANSITIONS: Readonly<Record<CapabilityState, readonly CapabilityS
   // Phase 2 adds exactly two edges: a real worker can die on its own, and an
   // unverified kill has to be recorded. The supervisor writes both through
   // `fail(id, reason)`; neither is reachable from a requested stop.
-  ACTIVE: ['WARM_IDLE', 'STOPPING', 'FAILED'],
-  WARM_IDLE: ['ACTIVE', 'STOPPING', 'FAILED'],
+  // `COLD` is the completed `burst` edge: a worker that ended its own run is
+  // finished, not dead, and the supervisor reports the code with `complete`.
+  ACTIVE: ['WARM_IDLE', 'STOPPING', 'COLD', 'FAILED'],
+  WARM_IDLE: ['ACTIVE', 'STOPPING', 'COLD', 'FAILED'],
   STOPPING: ['COLD', 'FAILED'],
   FAILED: ['COLD'],
 };
@@ -201,6 +208,8 @@ interface CapabilityRecord {
    * specific error would otherwise be dropped.
    */
   lastStopFailure?: string | undefined;
+  /** The exit code of the last `burst` run that completed. */
+  lastExitCode?: number | null | undefined;
   readonly transitions: CapabilityTransition[];
 }
 
@@ -352,6 +361,7 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
       ...(record.highestGeneration === undefined ? {} : { highestGeneration: record.highestGeneration }),
       ...(record.pendingStop === undefined ? {} : { pendingStop: record.pendingStop }),
       ...(record.lastStopFailure === undefined ? {} : { lastStopFailure: record.lastStopFailure }),
+      ...(record.lastExitCode === undefined ? {} : { lastExitCode: record.lastExitCode }),
       ...(lastTransition === undefined ? {} : { lastTransition }),
     };
   }
@@ -538,6 +548,19 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
    * a lease cannot keep a dead process in the registry, and `acquire` refuses
    * `FAILED`, so the holder still releases normally.
    */
+  public complete(id: string, exitCode: number | null): Result<void> {
+    const record = this.records.get(id);
+    if (record === undefined) return invalid(`capability ${id} is not registered`);
+    if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE') {
+      // A completion after a stop or a death is the same no-op `fail` refuses:
+      // neither writer may move a terminal state anywhere else.
+      return ok(undefined);
+    }
+    record.lastExitCode = exitCode;
+    this.transition(record, 'COLD', 'completed');
+    return ok(undefined);
+  }
+
   public fail(id: string, reason: string): Result<void> {
     const record = this.records.get(id);
     if (record === undefined) return invalid(`capability ${id} is not registered`);

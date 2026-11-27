@@ -103,6 +103,18 @@ export interface CapabilityLifecyclePort {
    * unrequested exit and `STOPPING -> FAILED` for `stop-unverified`.
    */
   fail(id: string, reason: string): Result<void>;
+  /**
+   * A `burst` worker that ended its own run: `ACTIVE|WARM_IDLE -> COLD` with the
+   * exit code, so a finished check is not a crash. A port that cannot express
+   * completion omits it, and the exit is then reported as a death.
+   */
+  complete?(id: string, exitCode: number | null): Result<void>;
+}
+
+/** The outcome of a worker's own exit, as the supervisor observed it. */
+export interface CapabilityExit {
+  /** Absent when the manager could not report one; never guessed from a signal. */
+  readonly exitCode: number | null;
 }
 
 /**
@@ -151,6 +163,10 @@ interface WorkerRecord {
   /** The id the live `onExit` subscription belongs to, so a late spawn cannot drop someone else's. */
   subscribedProcessId?: string | undefined;
   unsubscribe?: (() => void) | undefined;
+  /** The last exit this record's own listener delivered. */
+  lastExit?: CapabilityExit | undefined;
+  /** Callers waiting for the next exit of this record. */
+  readonly exitWaiters: Array<(exit: CapabilityExit) => void>;
 }
 
 const DEFAULT_CRASH_WINDOW_MS = 60_000;
@@ -559,6 +575,7 @@ export class CapabilitySupervisor {
       crashTimes: [],
       stopUnverified: false,
       pendingDeath: false,
+      exitWaiters: [],
     };
   }
 
@@ -599,10 +616,21 @@ export class CapabilitySupervisor {
   }
 
   private onWorkerExit(record: WorkerRecord): void {
+    // The subscription is dropped with the exit it just delivered, so the id is
+    // read first: it is the only handle `status` can report the exit code from.
+    const processId = record.subscribedProcessId;
     this.unsubscribe(record);
     // A replaced record no longer owns this id: a spawn or exit an abandoned
     // attempt still owes must not fail the worker that took its place.
     if (this.records.get(record.manifest.id) !== record) return;
+    const status = processId === undefined ? undefined : this.processManager.status(processId);
+    const exit: CapabilityExit = {
+      exitCode: status !== undefined && status.ok ? status.value.exitCode ?? null : null,
+    };
+    record.lastExit = exit;
+    const waiters = record.exitWaiters.splice(0);
+    for (const waiter of waiters) waiter(exit);
+
     const state = this.lifecycle.health(record.manifest.id)?.state;
     if (state === 'STARTING') {
       // Reported through the `start` hook; counting happens there.
@@ -612,8 +640,31 @@ export class CapabilitySupervisor {
     if (state !== 'ACTIVE' && state !== 'WARM_IDLE') return;
     record.processId = undefined;
     record.pipes = undefined;
+    // A `burst` worker's own exit is the end of its run, not a crash: the
+    // registry writes the verdict, and only a port that cannot express
+    // completion has to report it as a death.
+    if (record.manifest.activation === 'burst' && this.lifecycle.complete !== undefined) {
+      this.lifecycle.complete(record.manifest.id, exit.exitCode);
+      return;
+    }
     this.recordFailure(record, 'worker-exited');
     this.lifecycle.fail(record.manifest.id, 'worker-exited');
+  }
+
+  /** The last exit this id's own listener delivered, if it has exited once. */
+  public lastExit(manifest: CapabilityManifest): CapabilityExit | undefined {
+    return this.records.get(manifest.id)?.lastExit;
+  }
+
+  /**
+   * Resolves with the next exit of this id. A caller holds the lease that keeps
+   * the worker alive, so it races this against its own deadline; nothing here
+   * starts or stops anything.
+   */
+  public waitForExit(manifest: CapabilityManifest): Promise<CapabilityExit> {
+    const record = this.records.get(manifest.id);
+    if (record === undefined) return Promise.reject(new Error(`capability ${manifest.id} has no worker registration`));
+    return new Promise((resolve) => { record.exitWaiters.push(resolve); });
   }
 
   private discardLateStart(record: WorkerRecord, late: Result<{ readonly processId: string }>, attempt: number): void {

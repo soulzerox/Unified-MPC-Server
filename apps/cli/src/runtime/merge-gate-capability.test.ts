@@ -311,6 +311,50 @@ describe('merge gate capability runner', () => {
     await waitUntil(() => processes.stops.length === 1, 'the aborted gate to be stopped');
   });
 
+  it('settles a critical-pressure eviction as a closed gate', async () => {
+    const processes = new FakeProcesses();
+    let tier: 'normal' | 'critical' = 'normal';
+    const probe = {
+      sample: (): {
+        state: 'normal' | 'critical';
+        totalMemoryBytes: number;
+        availableMemoryBytes: number;
+        availableRatio: number;
+        processRssBytes: number;
+        sampledAtMs: number;
+      } => ({
+        state: tier,
+        totalMemoryBytes: 1,
+        availableMemoryBytes: 1,
+        availableRatio: 0.9,
+        processRssBytes: 1,
+        sampledAtMs: 0,
+      }),
+    };
+    const runner = createMergeGateCommandRunner({
+      workspaceRoots: async () => [ROOT],
+      processManager: processes,
+      probe,
+    });
+
+    const run = runner.run(command, ROOT);
+    await processes.waitForStart();
+    await tick();
+    // A healthy host never touches a running gate.
+    await runner.sweepPressure();
+    expect(processes.stops).toHaveLength(0);
+
+    tier = 'critical';
+    await runner.sweepPressure();
+
+    const result = await run;
+    expect(result.unavailable).toBe(true);
+    expect(result.stderr).toContain('aborted');
+    // The mark was written while leased; the release then stops the worker.
+    await waitUntil(() => processes.stops.length === 1, 'the reclaimed gate to be stopped');
+    await runner.close();
+  });
+
   it('is registered under one id with a burst manifest', async () => {
     const processes = new FakeProcesses();
     const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [ROOT], processManager: processes });

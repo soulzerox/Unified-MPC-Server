@@ -135,6 +135,15 @@ export function skillVersionBlocker(submittedSkillVersion, bundledSkillVersion) 
   return `findings used skill version ${JSON.stringify(submittedSkillVersion)}, bundled version is ${bundledSkillVersion}`;
 }
 
+/**
+ * A hand-copied hash is the usual cause of this mismatch, not a changed skill,
+ * and the bare message made the two indistinguishable. Both values are quoted as
+ * JSON so a typo — or a non-string — is visible in the refusal itself.
+ */
+export function skillShaMismatchBlocker(subject, submittedSha, bundledSha) {
+  return `${subject} with a different version of the bundled review skill (${JSON.stringify(submittedSha)}, bundled ${JSON.stringify(bundledSha)})`;
+}
+
 export function findReviewReceipt(receipts, headSha) {
   const matches = receipts.filter((receipt) => receipt?.headSha === headSha && receipt?.role === 'reviewer');
   if (matches.length === 0) return undefined;
@@ -177,7 +186,7 @@ export function evaluateReviewEvidence({ receipt, capsule, headReceiptCount, cor
     blockers.push(`review receipt used skill version ${String(receipt.skillVersion)}, bundled version is ${skill.skillVersion}`);
   }
   if (receipt.skillSha256 !== skill.skillSha256) {
-    blockers.push(`review receipt was produced with a different version of the bundled review skill (receipt ${String(receipt.skillSha256)}, expected ${skill.skillSha256})`);
+    blockers.push(skillShaMismatchBlocker('review receipt was produced', receipt.skillSha256, skill.skillSha256));
   }
 
   if (!Array.isArray(receipt.findings)) {

@@ -24,6 +24,7 @@ import {
   reviewFingerprint,
   reviewVerdict,
   selectVerificationReceipt,
+  skillShaMismatchBlocker,
   skillVersionBlocker,
   summarizeReviewBacklog,
   validateFindings,
@@ -268,10 +269,13 @@ test('a review from another skill version is stale', () => {
   assert.match(evaluate({ skill: { ...SKILL, skillVersion: 2 } }).blockers.join('\n'), /bundled version is 2/);
   const stale = evaluate({ skill: { ...SKILL, skillSha256: 'sha256:' + 'd'.repeat(64) } }).blockers.join('\n');
   assert.match(stale, /different version of the bundled review skill/);
-  // Both values are named so a typo in the findings file is distinguishable from
-  // a genuinely stale receipt without reading the gate source.
-  assert.ok(stale.includes(`receipt ${SKILL.skillSha256}`));
-  assert.ok(stale.includes(`expected sha256:${'d'.repeat(64)}`));
+  assert.ok(stale.includes(skillShaMismatchBlocker('review receipt was produced', SKILL.skillSha256, 'sha256:' + 'd'.repeat(64))));
+  // The helper is the only source of both refusals, so a typo in the findings
+  // file is named with the value it wrote, next to the expected one.
+  assert.equal(
+    skillShaMismatchBlocker('findings were produced', `sha256:${'a'.repeat(64)}`, `sha256:${'c'.repeat(64)}`),
+    `findings were produced with a different version of the bundled review skill ("sha256:${'a'.repeat(64)}", bundled "sha256:${'c'.repeat(64)}")`,
+  );
   assert.match(evaluate({ receipt: receipt({ skillId: 'other-review' }) }).blockers.join('\n'), /used skill 'other-review'/);
 });
 

@@ -14,6 +14,7 @@ import {
   findReviewReceipt,
   reviewFingerprint,
   reviewVerdict,
+  skillShaMismatchBlocker,
   skillVersionBlocker,
   validateFindings,
 } from './workflow-gate-core.mjs';
@@ -58,6 +59,7 @@ export {
   findReviewReceipt,
   reviewFingerprint,
   reviewVerdict,
+  skillShaMismatchBlocker,
   skillVersionBlocker,
   validateFindings,
 } from './workflow-gate-core.mjs';
@@ -702,10 +704,8 @@ async function recordCommand(options) {
   if (submitted.skill_id !== skill.skillId) blockers.push(`findings used skill '${String(submitted.skill_id)}'`);
   const skillVersionMessage = skillVersionBlocker(submitted.skill_version, skill.skillVersion);
   if (skillVersionMessage !== undefined) blockers.push(skillVersionMessage);
-  // A hand-copied hash is the usual cause, so name both values: a reviewer that
-  // read the right skill sees at once that the file, not the skill, is wrong.
   if (submitted.skill_sha256 !== skill.skillSha256) {
-    blockers.push(`findings were produced with a different version of the bundled review skill (submitted ${String(submitted.skill_sha256)}, expected ${skill.skillSha256})`);
+    blockers.push(skillShaMismatchBlocker('findings were produced', submitted.skill_sha256, skill.skillSha256));
   }
   if (submitted.diff_fingerprint !== capsule.diffFingerprint) blockers.push('findings fingerprint does not match the frozen capsule');
   if (fingerprint !== capsule.diffFingerprint) blockers.push('the PR diff changed after the capsule was frozen; run a fresh review');

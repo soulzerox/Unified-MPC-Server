@@ -49,8 +49,9 @@ itself, and it is worth being precise about what it does and does not own:
 - it runs the host-owned argv of each policy gate (`local_command`) through
   `execFile`, with a 20-minute deadline and a 4 MiB output bound;
 - it holds a #13 admission slot of class `verification_heavy` for the whole run,
-  so two verifications cannot overlap under the default ceiling and pressure is
-  part of the final admission answer;
+  and its default cost equals that class's ceiling, so two verifications cannot
+  hold a slot at the same time and pressure is part of the final admission
+  answer;
 - the durable attempt row, not the caller's transport, owns the run lifetime, so
   a client that disconnects does not cancel the gate and a queued attempt is
   promoted instead of restarted.
@@ -118,11 +119,13 @@ One supervised worker per gate run, in the path that already runs the gate:
   #999/#1005 already ship, so a chatty profile cannot ratchet parent memory;
 - the run holds a capability lease from the moment the worker starts until its
   receipt is written, so pressure cannot silently kill a live verification;
-- under `critical` pressure the phase-4 leased-worker path ends the lane that
-  holds the lease. That fails the verification **closed**: a killed or timed-out
-  command yields no exit code, the gate's outcome is `unavailable`, and the
-  receipt the writer appends is refused by every consumer, so the gate a caller
-  needs stays shut;
+- a lease forbids a kill, so `critical` pressure can only *ask*: the driver plans
+  an eviction, `reclaim` marks the pending stop, and it runs when the last lease
+  is released — and only for a lane this runtime owns, because a mark nobody can
+  release would schedule a stop that never runs. However the run ends, it ends
+  **closed**: a killed or timed-out command yields no exit code, the gate's
+  outcome is `unavailable`, and the receipt the writer appends is refused by every
+  consumer, so the gate a caller needs stays shut;
 - an unverifiable termination leaves the record `termination_unverified`, exactly
   like any other supervised worker, so nobody releases a process that may still
   be alive;
@@ -173,7 +176,8 @@ manifest, no lease and no supervisor record. The box measures the second thing.
 
 Run one `local_command` gate of the runtime verification as a supervised burst
 worker holding a capability lease, keep the durable attempt and the receipt
-writer exactly as they are, and let critical pressure evict it into a closed gate.
+writer exactly as they are, Let critical pressure be able to ask for its eviction, and let that request settle
+as a closed gate.
 That makes the manifest real, exercises lease + burst stop + pressure eviction on
 the run that already exists, and is the change that should tick #142's last box.
 

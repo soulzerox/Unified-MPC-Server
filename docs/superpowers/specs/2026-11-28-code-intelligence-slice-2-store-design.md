@@ -107,10 +107,12 @@ export interface StructuralRecordStore {
     readonly limit: number;
   }): Promise<Result<readonly SourceStructuralRecord[]>>;
 
-  /** Fingerprints only: the cheap "what changed" answer, no payload. */
-  readFingerprints(generationId: string): Promise<Result<readonly { readonly path: string; readonly fingerprint: string }[]>>;
-
-  deleteGeneration(generationId: string): Promise<Result<boolean>>;
+  /** Fingerprints only: the cheap "what changed" answer, no payload. Same bound as `readRecords`. */
+  readFingerprints(input: {
+    readonly generationId: string;
+    readonly paths?: readonly string[];
+    readonly limit: number;
+  }): Promise<Result<readonly { readonly path: string; readonly fingerprint: string }[]>>;
 }
 ```
 
@@ -133,9 +135,11 @@ The store refuses, it does not repair:
 
 Writing the same generation twice is refused, not merged. Two reasons:
 
-- the generation id **is** the content-addressed key, so a second write with a
-  different body is the same key with different bytes — exactly the case where
-  silently overwriting loses the evidence someone already read;
+- the id is **identity-addressed**, not content-addressed: it names the tree the
+  records describe. A second write for the same identity is therefore either a
+  retry after a lost response or a re-extraction that disagrees with the stored
+  one, and the store cannot tell them apart — so it keeps what it has and refuses
+  the write. A retrying caller reads the generation back instead of writing again;
 - a consumer that pinned the generation would otherwise see its data change
   underneath it.
 
@@ -153,13 +157,18 @@ generation and the base ref's generation coexist, which is required: they are
 different evidence, and #131's cross-Goal rule is that a consumer must not blur
 them.
 
-Deletion is a later slice, and it must be reference-aware (#131: "Cleanup is
-reference-aware and cannot remove shared evidence still used by another
-Project/Goal"). Slice 2 therefore ships **no automatic retention**:
+Deletion is not part of this slice **and no deletion API ships with it**. #131
+requires cleanup to be reference-aware ("Cleanup is reference-aware and cannot
+remove shared evidence still used by another Project/Goal"), and slice 2 has no
+reference graph to consult, so the store offers no way to delete a generation at
+all rather than offer a way that cannot check. The tables carry `ON DELETE
+CASCADE` on the records, which is a migration detail the later slice will use, not
+a capability this one exposes.
+
+Slice 2 therefore ships **no retention at all**:
 
 - nothing is pruned on write;
-- `deleteGeneration` is an explicit call, and it is the caller's job to know the
-  generation is unreferenced;
+- there is no `deleteGeneration` in the interface to call by mistake;
 - the store exposes `file_count` and `written_at` per generation so a future
   retention policy has the data it needs without a schema change.
 
@@ -171,7 +180,7 @@ evidence a Goal may be reading. A note in the code marks the ceiling
 ## Size bound
 
 A record payload is a few kilobytes at most (symbols and import specifiers, no
-contents, no absolute paths), and `readRecords` requires an explicit `limit`, so
+contents, no absolute paths), and both read methods require an explicit `limit`, so
 callers cannot pull a whole monorepo into one result by accident. There is no
 `limit: Infinity` escape hatch; a caller that wants everything pages by path.
 
@@ -195,8 +204,7 @@ callers cannot pull a whole monorepo into one result by accident. There is no
 - a record whose identity differs from the write is refused;
 - duplicate paths in one write are refused;
 - a malformed fingerprint is refused;
-- `readFingerprints` returns the same set as `readRecords` without payloads;
-- `deleteGeneration` removes the generation and its records (cascade), and a
-  deleted generation reads as `undefined`;
-- `readRecords` respects `limit` and the `paths` filter;
+- `readFingerprints` returns the same page as `readRecords` for the same `limit`
+  and `paths`, without payloads;
+- `readRecords` and `readFingerprints` respect `limit` and the `paths` filter;
 - the migration is idempotent (applied twice on one database is a no-op).

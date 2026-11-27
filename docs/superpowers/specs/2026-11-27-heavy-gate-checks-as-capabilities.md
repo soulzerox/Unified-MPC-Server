@@ -31,16 +31,17 @@ matters, because the first reading produces dead data and a false claim.
 
 The three CLI adapters split by weight. Only local verification is heavy: it
 builds the workspace, runs its test suites and can take minutes. `review:pr` and
-`merge:pr` are not — they spawn `git`/`gh` for a handful of reads and write a
-receipt.
+`merge:pr` are not — they read a diff and a receipt, or run `gh pr merge
+--match-head-commit` and read the resulting commit.
 
 None of the three is a capability, even when the caller reaches it through
-Unified's shell tool. In that case the child is a durable shell task: its pid is
-recorded, it can be cancelled, stopped and resumed, it survives restarts through
-the durable store, and #13's `heavy-headroom` plus the heavy-job queue decide
-whether it may start. What it never becomes is a manifest, a registry lease or a
-supervisor record, so pressure has no capability to evict on memory grounds and
-nothing accounts for its RSS.
+Unified's shell tool. A shell command there becomes a durable task only when the
+caller declares an `admission_class`: then its pid and state row are written, it
+can be cancelled and stopped (there is no resume — the local runner refuses that
+operation), a parked row is re-attached after a restart, and #13's
+`heavy-headroom` plus the heavy-job queue decide whether it may start. What it
+never becomes is a manifest, a registry lease or a supervisor record, so pressure
+has no capability to evict on memory grounds and nothing accounts for its RSS.
 
 The runtime merge verification is the one heavy gate Unified already executes
 itself, and it is worth being precise about what it does and does not own:

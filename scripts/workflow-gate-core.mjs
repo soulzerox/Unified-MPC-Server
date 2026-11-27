@@ -177,7 +177,7 @@ export function evaluateReviewEvidence({ receipt, capsule, headReceiptCount, cor
     blockers.push(`review receipt used skill version ${String(receipt.skillVersion)}, bundled version is ${skill.skillVersion}`);
   }
   if (receipt.skillSha256 !== skill.skillSha256) {
-    blockers.push('review receipt was produced with a different version of the bundled review skill');
+    blockers.push(`review receipt was produced with a different version of the bundled review skill (receipt ${String(receipt.skillSha256)}, expected ${skill.skillSha256})`);
   }
 
   if (!Array.isArray(receipt.findings)) {

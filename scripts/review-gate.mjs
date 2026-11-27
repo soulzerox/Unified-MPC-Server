@@ -520,8 +520,26 @@ export function renderCapsuleMarkdown(capsule) {
     '## Output',
     '',
     'Write one findings JSON document with `head_sha`, `capsule_id`, `skill_id`,',
-    '`skill_version`, `skill_sha256`, `diff_fingerprint`, `reviewer` and `findings`,',
-    'then run:',
+    '`skill_version`, `skill_sha256`, `diff_fingerprint`, `reviewer` and `findings`.',
+    'These are the exact values the recorder compares, so copy them, not a hash',
+    'from a prompt:',
+    '',
+    '```json',
+    '{',
+    `  "head_sha": "${capsule.headSha}",`,
+    `  "capsule_id": "${capsule.capsuleId}",`,
+    `  "skill_id": "${capsule.skill.id}",`,
+    `  "skill_version": ${capsule.skill.version},`,
+    `  "skill_sha256": "${capsule.skill.sha256}",`,
+    `  "diff_fingerprint": "${capsule.diffFingerprint}",`,
+    '  "findings": []',
+    '}',
+    '```',
+    '',
+    '`reviewer` is optional metadata and is not compared; a wrong `skill_sha256` is',
+    'refused as a different review skill, which is what a hand-copied hash usually is.',
+    '',
+    'Then run:',
     '',
     `\`\`\`sh`,
     `corepack pnpm@10.15.0 review:pr record --pr ${capsule.prNumber} --findings <file>`,
@@ -684,7 +702,11 @@ async function recordCommand(options) {
   if (submitted.skill_id !== skill.skillId) blockers.push(`findings used skill '${String(submitted.skill_id)}'`);
   const skillVersionMessage = skillVersionBlocker(submitted.skill_version, skill.skillVersion);
   if (skillVersionMessage !== undefined) blockers.push(skillVersionMessage);
-  if (submitted.skill_sha256 !== skill.skillSha256) blockers.push('findings were produced with a different version of the bundled review skill');
+  // A hand-copied hash is the usual cause, so name both values: a reviewer that
+  // read the right skill sees at once that the file, not the skill, is wrong.
+  if (submitted.skill_sha256 !== skill.skillSha256) {
+    blockers.push(`findings were produced with a different version of the bundled review skill (submitted ${String(submitted.skill_sha256)}, expected ${skill.skillSha256})`);
+  }
   if (submitted.diff_fingerprint !== capsule.diffFingerprint) blockers.push('findings fingerprint does not match the frozen capsule');
   if (fingerprint !== capsule.diffFingerprint) blockers.push('the PR diff changed after the capsule was frozen; run a fresh review');
   const directory = capsuleDirectory(pr.headRefOid, pr.number);

@@ -165,11 +165,17 @@ here.
 
 That makes one caller contract load-bearing: the caller must extract the tree the
 identity describes (a checkout at `commit_sha`), not a worktree with overlay edits
-on top. Records carry the identity they were extracted under and a fingerprint of
-the bytes read, so a mislabelled extraction shows up as fingerprints that disagree
-with the base generation rather than as a silent relabelling — but it is still a
-caller error the store cannot detect, and it is stated here so a later slice does
-not assume the store enforces it.
+on top. The store cannot enforce it, and it cannot detect it either when the
+identity has no stored generation yet — there is nothing to compare against, and
+the wrong bytes would become that identity's generation.
+
+What the store does guarantee is that a mislabelled extraction can never coexist
+with the correct one: an identity has exactly one stored generation, so if the
+correct generation was written first the mislabelled write is refused outright, and
+if it was not, a later correct extraction hits that same refusal. Detecting the
+second case needs a comparison the store does not do — re-extracting the described
+tree and checking the stored fingerprints — which is the caller's job and not
+implemented by this slice.
 
 Deletion is not part of this slice **and no deletion API ships with it**. #131
 requires cleanup to be reference-aware ("Cleanup is reference-aware and cannot

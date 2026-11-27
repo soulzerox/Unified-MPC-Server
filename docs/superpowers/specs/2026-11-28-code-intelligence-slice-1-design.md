@@ -169,8 +169,8 @@ that a capability lane would otherwise be wrapping before it exists.
   kept, so a consumer must treat `parseError` as the authority, not an empty
   `symbols` array.
 - **A cross-Goal leak.** Every record carries the identity it was extracted under
-  and a fingerprint of the bytes read, so a consumer comparing generations sees a
-  differing fingerprint instead of mistaking one tree's file for another's. The
-  extractor cannot tell whether the bytes it was handed belong to that identity:
-  a caller that reads a worktree with uncommitted overlay edits is labelling the
-  extraction incorrectly, and the fingerprint is what makes that visible.
+  and a fingerprint of the bytes read, so what a record claims about a tree is
+  always re-derivable and comparable. The extractor cannot tell whether the bytes
+  it was handed belong to that identity: a caller that reads a worktree with
+  uncommitted overlay edits is labelling the extraction incorrectly, and only
+  comparing against a fresh extraction of the described tree detects it.

@@ -62,6 +62,9 @@
       "path": "./packages/search/tsconfig.typecheck.json"
     },
     {
+      "path": "./packages/code-intelligence/tsconfig.typecheck.json"
+    },
+    {
       "path": "./packages/thai-rag/tsconfig.typecheck.json"
     }
   ]

@@ -25,23 +25,39 @@ matters, because the first reading produces dead data and a false claim.
 | local verification | `scripts/local-verify.mjs` (`verify:local`) | the host: an agent shell command or a person |
 | exact-head review | `scripts/review-gate.mjs` (`review:pr capsule/record`) | the host, plus a separate reviewer context |
 | merge (CLI) | `scripts/guarded-merge.mjs` (`merge:pr`) | the host |
-| merge (runtime) | `GuardedMergeService` + `evaluateMergeEvidence` | Unified, in-process, and cheap |
+| merge verification (runtime) | `apps/cli/src/runtime/merge-verification-runner.ts` via `merge_verification_run` | Unified: it `execFile`s each `local_command` gate of the repository policy |
+| merge (runtime decision) | `GuardedMergeService` + `evaluateMergeEvidence` | Unified, in-process, and cheap |
 | close | `apps/cli/src/commands/gate.ts` (`gate check --phase close`) | Unified, in-process, and cheap |
 
-Only the three CLI adapters are heavy: they build the workspace, run its test
-suites, and can take minutes. All three are spawned by the caller, so Unified
-owns neither their process nor their lifetime. Their RSS belongs to the host
-shell; nothing registers them, leases them or evicts them.
+The three CLI adapters are heavy: they build the workspace, run its test suites,
+and can take minutes. All three are spawned by the caller, so Unified owns
+neither their process nor their lifetime. Their RSS belongs to the host shell.
 
-When the caller reaches the shell through Unified, the *request* is already
-admitted by #13: `heavy-headroom` bounds how many heavy jobs run beside each
-other and the heavy-job queue parks the rest. That admission decides whether a
-job starts now. It does not own the process that runs it, and it has no view of
-the child's RSS.
+The runtime merge verification is the one heavy gate Unified already executes
+itself, and it is worth being precise about what it does and does not own:
 
-The runtime merge gate and the close gate are capability-shaped already in the
-sense that matters: they are decisions taken in-process, so there is nothing to
-spawn.
+- it runs the host-owned argv of each policy gate (`local_command`) through
+  `execFile`, with a 20-minute deadline and a 4 MiB output bound;
+- it holds a #13 admission slot of class `verification_heavy` for the whole run,
+  so two verifications cannot overlap under the default ceiling and pressure is
+  part of the final admission answer;
+- the durable attempt row, not the caller's transport, owns the run lifetime, so
+  a client that disconnects does not cancel the gate and a queued attempt is
+  promoted instead of restarted.
+
+What it does **not** have is a capability identity. No manifest, no registry
+lease, no supervisor record: the child is invisible to `registry.snapshot()`, so
+pressure cannot evict a running verification, nothing accounts for its RSS, and
+no capability transition or recycle count describes it. It is admitted heavy
+work, not a supervised worker.
+
+When a caller reaches the *other* three gates through Unified's shell, the same
+split applies one level up: `heavy-headroom` and the heavy-job queue decide
+whether the request starts now, and the host's shell process is what runs it, so
+Unified still owns neither its lifetime nor its memory.
+
+The runtime merge decision and the close gate are capability-shaped in the sense
+that matters: they are decisions taken in-process, so there is nothing to spawn.
 
 ## What the manifest can already say
 
@@ -76,28 +92,38 @@ Two of those values are decisions rather than defaults:
   the receipt already carries, and would demand a generation the caller does not
   have for a check that writes no workspace state.
 
-## Decision 1 — no dormant manifests
+## Decision 1 — no dormant manifests, and no new runner
 
 A manifest that nothing starts is dead data plus a false claim: the registry
 would report a `COLD` capability, and #142's box would look satisfied while the
-work still ran in the host shell. Gate-check manifests land with the runner that
-spawns them, in the same change that makes the box true.
+work still ran somewhere the registry cannot see. Gate-check manifests land with
+the code that starts them, in the same change that makes the box true.
+
+That code exists. `merge_verification_run` is already the Unified-owned heavy
+gate execution path; what it lacks is a capability identity. So the work is to
+give that path a manifest, a lease and a supervisor record, not to build a second
+runner beside it.
 
 ## Decision 2 — what must exist before the box is true
 
-One Unified-owned runner for one heavy gate profile:
+One supervised worker per gate run, in the path that already runs the gate:
 
-- it spawns the profile as a `burst` native worker under the phase-2 supervisor,
-  with the stdio tee that #999/#1005 already bound, so a chatty profile cannot
-  ratchet parent memory;
+- the `local_command` gate's argv is spawned as a `burst` native worker under the
+  phase-2 supervisor instead of `execFile`, with the bounded stdio tee that
+  #999/#1005 already ship, so a chatty profile cannot ratchet parent memory;
 - the run holds a capability lease from the moment the worker starts until its
-  receipt is written, so pressure cannot silently kill a live check;
+  receipt is written, so pressure cannot silently kill a live verification;
 - under `critical` pressure the phase-4 leased-worker path ends the lane that
-  holds the lease. That fails the check **closed**: no receipt is written, the
-  worker's exit is not a verdict, and the gate a caller needs stays shut;
+  holds the lease. That fails the verification **closed**: no receipt is written,
+  the durable attempt settles without a verdict, and the gate a caller needs
+  stays shut;
 - an unverifiable termination leaves the record `termination_unverified`, exactly
   like any other supervised worker, so nobody releases a process that may still
-  be alive.
+  be alive;
+- the #13 `verification_heavy` admission stays where it is. It answers whether the
+  run may start; the capability answers what owns the child and when it dies. The
+  two are not merged, and the durable attempt keeps owning the run lifetime so a
+  client that disconnects still cannot cancel a live verification.
 
 The receipt stays the truth. A killed, crashed or unverified run produces no
 receipt, and "no receipt" already means "gate closed" in every consumer, so
@@ -111,21 +137,35 @@ both: it is heavy enough to queue, and expensive enough to own. Merging the two
 would make the queue into a second lifecycle authority, which is the state the
 capability registry was built to replace.
 
+## Reading the phase-1 claim
+
+`capability-registry.ts` says a manifest plus the registry "is enough to declare a
+gate check on-demand (#142)". That sentence is about *declarability*: the
+contract can express a gate check, and the registry enforces the lease and
+transition rules without a child process. It is true and stays true.
+
+It is not the same claim as #142's box, which says the check *is* an on-demand
+capability. Declaring something on-demand and running it on-demand differ by the
+supervisor: today the only heavy gate Unified runs is admitted heavy work with no
+manifest, no lease and no supervisor record. The box measures the second thing.
+
 ## What this leaves open
 
-- The runner above does not exist. Until it does, the three CLI adapters stay
-  host-executed, #142's last box stays unticked, and this item is recorded as
-  planned rather than landed.
-- Which profiles count as heavy is a per-project answer: `verify:local` is the
-  reference, a docs-only profile is not heavy at all. The runner should take the
-  profile the gate names, not a hard-coded command.
+- The three CLI adapters (`verify:local`, `review:pr`, `merge:pr`) stay
+  host-executed. Moving them under the runtime would change how the reference
+  workflow runs, which is a larger change than making the existing runtime path a
+  capability.
+- Which profiles count as heavy is a per-project answer: the runtime gate argv is
+  host-owned per repository policy, and a docs-only profile is not heavy at all.
+  The capability should take the gate's own argv, never a hard-coded command.
 - Warm-model reuse is out of scope: a gate check does not need the embedding
   model, and #133 keeps model lifecycle in the provider that owns it.
 
 ## Smallest honest first step
 
-Run **one** profile (`verify:local`) in a single supervised burst worker, stream
-its bounded output to the caller, and let the existing receipt writer stay the
-only source of a verdict. That alone makes the manifests real, exercises lease +
-burst stop + pressure eviction on a real workload, and lets #142 close its last
-box without pretending the other profiles are done.
+Run one `local_command` gate of the runtime verification as a supervised burst
+worker holding a capability lease, keep the durable attempt and the receipt
+writer exactly as they are, and let critical pressure evict it into a closed gate.
+That makes the manifest real, exercises lease + burst stop + pressure eviction on
+the run that already exists, and is the change that should tick #142's last box.
+

@@ -35,13 +35,14 @@ builds the workspace, runs its test suites and can take minutes. `review:pr` and
 --match-head-commit` and read the resulting commit.
 
 None of the three is a capability, even when the caller reaches it through
-Unified's shell tool. A shell command there becomes a durable task only when the
-caller declares an `admission_class`: then its pid and state row are written, it
-can be cancelled and stopped (there is no resume — the local runner refuses that
-operation), a parked row is re-attached after a restart, and #13's
-`heavy-headroom` plus the heavy-job queue decide whether it may start. What it
-never becomes is a manifest, a registry lease or a supervisor record, so pressure
-has no capability to evict on memory grounds and nothing accounts for its RSS.
+Unified's shell tool. There, any request that is not a foreground run becomes a
+durable task: the backend writes the row and the child's pid, so it can be
+cancelled and stopped, its state is reconciled after a restart, and there is no
+resume — the local runner refuses that operation. Declaring an `admission_class`
+adds #13 heavy admission on top: `heavy-headroom`, the heavy-job queue and
+re-attachment of a parked row. What the child never becomes is a manifest, a
+registry lease or a supervisor record, so pressure has no capability to evict on
+memory grounds and nothing accounts for its RSS.
 
 The runtime merge verification is the one heavy gate Unified already executes
 itself, and it is worth being precise about what it does and does not own:
@@ -49,9 +50,8 @@ itself, and it is worth being precise about what it does and does not own:
 - it runs the host-owned argv of each policy gate (`local_command`) through
   `execFile`, with a 20-minute deadline and a 4 MiB output bound;
 - it holds a #13 admission slot of class `verification_heavy` for the whole run,
-  and its default cost equals that class's ceiling, so two verifications cannot
-  hold a slot at the same time and pressure is part of the final admission
-  answer;
+  so heavy admission and pressure are part of the answer before the gate starts
+  and cannot be re-decided while it runs;
 - the durable attempt row, not the caller's transport, owns the run lifetime, so
   a client that disconnects does not cancel the gate and a queued attempt is
   promoted instead of restarted.

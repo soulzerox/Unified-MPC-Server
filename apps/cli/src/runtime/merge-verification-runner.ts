@@ -32,8 +32,9 @@ import type { GitHubApiReader } from './github-merge-observer.js';
 import { observeOpenPullRequest, type OpenPullRequestSubject } from './github-pull-request-subject.js';
 import { githubRepositoryFromRemote } from './github-remote.js';
 
-const LOCAL_GATE_TIMEOUT_MS = 20 * 60_000;
-const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
+/** The whole-run cap for one local gate, shared with the supervised runner. */
+export const LOCAL_GATE_TIMEOUT_MS = 20 * 60_000;
+export const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_EVIDENCE_CHARS = 3_500;
 const SHA_PATTERN = /^[a-f0-9]{40,64}$/i;
 const CLEAN_LLM_REVIEW_MARKER = '[merge-review:clean]';

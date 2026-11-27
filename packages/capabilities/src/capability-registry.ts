@@ -172,11 +172,12 @@ const ALLOWED_TRANSITIONS: Readonly<Record<CapabilityState, readonly CapabilityS
   REGISTERED: ['COLD'],
   COLD: ['STARTING'],
   STARTING: ['ACTIVE', 'FAILED'],
-  // Phase 2 adds exactly two edges: a real worker can die on its own, and an
-  // unverified kill has to be recorded. The supervisor writes both through
-  // `fail(id, reason)`; neither is reachable from a requested stop.
-  // `COLD` is the completed `burst` edge: a worker that ended its own run is
-  // finished, not dead, and the supervisor reports the code with `complete`.
+  // Phase 2 adds four edges. A real worker can die on its own and an unverified
+  // kill has to be recorded, both written through `fail(id, reason)`; neither is
+  // reachable from a requested stop. `COLD` is the completed `burst` edge: a
+  // worker that ended its own run is finished, not dead, and the supervisor
+  // reports the code with `complete`. A requested stop still writes only
+  // `STOPPING -> COLD`.
   ACTIVE: ['WARM_IDLE', 'STOPPING', 'COLD', 'FAILED'],
   WARM_IDLE: ['ACTIVE', 'STOPPING', 'COLD', 'FAILED'],
   STOPPING: ['COLD', 'FAILED'],
@@ -552,8 +553,9 @@ export class CapabilityRegistry implements CapabilityLifecyclePort {
     const record = this.records.get(id);
     if (record === undefined) return invalid(`capability ${id} is not registered`);
     if (record.state !== 'ACTIVE' && record.state !== 'WARM_IDLE') {
-      // A completion after a stop or a death is the same no-op `fail` refuses:
-      // neither writer may move a terminal state anywhere else.
+      // A completion after a stop or a death writes nothing: `COLD` and `FAILED`
+      // are terminal for this writer too. Unlike `fail`, this is not shared with
+      // a requested stop — `fail` deliberately still writes `STOPPING -> FAILED`.
       return ok(undefined);
     }
     record.lastExitCode = exitCode;

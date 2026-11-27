@@ -132,6 +132,7 @@ import { createGitHubApiReader, createGitHubMergeObservationPort, type GitHubApi
 import { createAuthoritativeMergeSubjectSource } from './github-pull-request-subject.js';
 import { canonicalRefForBranch, createCanonicalMergeAdvance } from './canonical-merge-advance.js';
 import { createMergeVerificationRunPort } from './merge-verification-runner.js';
+import { createMergeGateCommandRunner } from './merge-gate-capability.js';
 import { createMergeVerificationStatusPort } from './merge-verification-status.js';
 import { projectIndexJobHistory } from './index-job-history-projection.js';
 import { createRuntimePromotionTaskReconciliation } from './runtime-promotion-task-reconciliation.js';
@@ -918,6 +919,13 @@ export function createStdioMcpRuntime(
     workspaces: workspaceRepository,
     attempts: mergeAttemptRepository,
     admission: resourceAdmissionController,
+    // A heavy local gate is a supervised `burst` worker: its own exit is the
+    // verdict, so the registry and the crash window account for it. The
+    // `verification_heavy` admission above still decides whether it may run.
+    commandRunner: createMergeGateCommandRunner({
+      workspaceRoots: async (): Promise<readonly string[]> =>
+        (await activeWorkspaces()).map((entry) => entry.realRootPath),
+    }),
   });
   const mergeReconciliationCore = new MergeReconciliationService(
     mergeReceiptRepository,

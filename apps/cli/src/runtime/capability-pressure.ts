@@ -205,7 +205,8 @@ export function createCapabilityPressureDriver(options: CapabilityPressureDriver
  * is a registration failure reported at boot, not at first call.
  */
 export function createWorkerCwdResolver(options: {
-  readonly installRoot: string;
+  /** Absent for a worker that may only run in a registered workspace. */
+  readonly installRoot?: string;
   readonly workspaceRoots: () => Promise<readonly string[]>;
   /**
    * Runtime-owned roots the provider itself creates (its sources root). Not user
@@ -218,8 +219,10 @@ export function createWorkerCwdResolver(options: {
     if (resolved === undefined) {
       return err(appError('INVALID_INPUT', `capability worker cwd ${requested} cannot be resolved`, false));
     }
-    const installRoot = await realpath(options.installRoot).catch(() => options.installRoot);
-    if (resolved === installRoot) return ok(resolved);
+    if (options.installRoot !== undefined) {
+      const installRoot = await realpath(options.installRoot).catch(() => options.installRoot);
+      if (resolved === installRoot) return ok(resolved);
+    }
     for (const extra of options.extraRoots ?? []) {
       if (await realpath(extra).catch(() => extra) === resolved) return ok(resolved);
     }
@@ -228,7 +231,7 @@ export function createWorkerCwdResolver(options: {
       const canonical = await realpath(root).catch(() => root);
       if (canonical === resolved) return ok(resolved);
     }
-    return err(appError('PERMISSION_DENIED', `capability worker cwd ${resolved} is neither the provider install root nor a registered workspace`, false));
+    return err(appError('PERMISSION_DENIED', `capability worker cwd ${resolved} is outside every allowed capability worker root`, false));
   };
 }
 

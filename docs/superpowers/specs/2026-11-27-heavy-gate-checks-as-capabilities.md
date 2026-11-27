@@ -176,8 +176,21 @@ manifest, no lease and no supervisor record. The box measures the second thing.
 
 Run one `local_command` gate of the runtime verification as a supervised burst
 worker holding a capability lease, keep the durable attempt and the receipt
-writer exactly as they are, Let critical pressure be able to ask for its eviction, and let that request settle
-as a closed gate.
-That makes the manifest real, exercises lease + burst stop + pressure eviction on
-the run that already exists, and is the change that should tick #142's last box.
+writer exactly as they are, let critical pressure be able to ask for its
+eviction, and let that request settle as a closed gate. That makes the manifest
+real, exercises lease + burst stop + pressure eviction on the run that already
+exists, and is the change that should tick #142's last box.
+
+Sliced, because a gate that cannot read a verdict cannot be wired safely:
+
+1. **exit as verdict** (merged, #1015): `complete(id, exitCode)` writes
+   `ACTIVE|WARM_IDLE -> COLD` and keeps the code, and `waitForExit` answers a wait
+   that begins after the exit. Identity and lease without this would only produce
+   a gate that fails closed on every run.
+2. **wiring** (this change): `merge-gate-capability.ts` replaces the `execFile`
+   runner with a leased burst worker for one gate command, so the durable
+   attempt, the receipt writer and `verification_heavy` admission stay exactly as
+   they are.
+3. **pressure** (open): a `critical` sample may ask for that lane's eviction, and
+   the request settles as a closed gate rather than a killed run.
 

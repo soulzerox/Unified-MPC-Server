@@ -474,9 +474,13 @@ the code: a non-zero exit is still a completed run whose verdict the gate layer
 reads, and only a port without `complete` falls back to the `worker-exited`
 death above. The exit code itself comes from `status(processId).exitCode` — the
 subscription is dropped first, so the id is captured before `unsubscribe`.
-`lastExit(id)` and `waitForExit(id)` expose the same fact to a leaseholder that
-started the worker; neither starts nor stops anything, and the caller races the
-promise against its own deadline.
+`lastExit(manifest)` and `waitForExit(manifest)` expose the same fact to a
+leaseholder that started the worker; neither starts nor stops anything, and the
+caller races the promise against its own deadline. `waitForExit` answers from
+`lastExit` when the current attempt already exited, so a fast burst cannot be
+missed by a caller that starts first and waits second, and it never answers with
+an older attempt's code. An exit delivered inside `STARTING` still takes the
+start-failure path: the spawn has not resolved, so there is no verdict to read.
 
 `onExit` fires from `handleClose`, which also runs for a kill the manager was
 asked to perform, so the listener is a reporter with a guard rather than a

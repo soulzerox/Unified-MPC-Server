@@ -113,7 +113,10 @@ export interface CapabilityLifecyclePort {
 
 /** The outcome of a worker's own exit, as the supervisor observed it. */
 export interface CapabilityExit {
-  /** Absent when the manager could not report one; never guessed from a signal. */
+  /**
+   * `null` when the manager delivered the exit without a code. Never guessed
+   * from a signal, and never confused with `0`.
+   */
   readonly exitCode: number | null;
 }
 
@@ -165,6 +168,8 @@ interface WorkerRecord {
   unsubscribe?: (() => void) | undefined;
   /** The last exit this record's own listener delivered. */
   lastExit?: CapabilityExit | undefined;
+  /** The attempt `lastExit` belongs to, so an older run's code cannot be read as this one's. */
+  lastExitAttempt?: number | undefined;
   /** Callers waiting for the next exit of this record. */
   readonly exitWaiters: Array<(exit: CapabilityExit) => void>;
 }
@@ -628,6 +633,7 @@ export class CapabilitySupervisor {
       exitCode: status !== undefined && status.ok ? status.value.exitCode ?? null : null,
     };
     record.lastExit = exit;
+    record.lastExitAttempt = record.starts;
     const waiters = record.exitWaiters.splice(0);
     for (const waiter of waiters) waiter(exit);
 
@@ -657,13 +663,18 @@ export class CapabilitySupervisor {
   }
 
   /**
-   * Resolves with the next exit of this id. A caller holds the lease that keeps
-   * the worker alive, so it races this against its own deadline; nothing here
-   * starts or stops anything.
+   * Resolves with the exit of this id's current attempt. A worker that finished
+   * before the wait began is already answered from `lastExit` — a caller that
+   * starts a burst worker and only then waits must not miss a fast exit. A code
+   * from an older attempt is not this attempt's exit. Nothing here starts or
+   * stops anything; the caller races the promise against its own deadline.
    */
   public waitForExit(manifest: CapabilityManifest): Promise<CapabilityExit> {
     const record = this.records.get(manifest.id);
     if (record === undefined) return Promise.reject(new Error(`capability ${manifest.id} has no worker registration`));
+    if (record.lastExit !== undefined && record.lastExitAttempt === record.starts) {
+      return Promise.resolve(record.lastExit);
+    }
     return new Promise((resolve) => { record.exitWaiters.push(resolve); });
   }
 

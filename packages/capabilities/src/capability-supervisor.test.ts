@@ -13,6 +13,7 @@ import {
 } from './capability-registry.js';
 import {
   CapabilitySupervisor,
+  type CapabilityExit,
   type CapabilityLifecyclePort,
   type CapabilityProcessPort,
   type EvictionCandidate,
@@ -987,6 +988,43 @@ describe('capability supervisor burst completion', () => {
 
     expect(lifecycle.completions).toEqual([]);
     expect(lifecycle.failures).toEqual([{ id: 'worker', reason: 'worker-exited' }]);
+  });
+
+  it('answers a wait that begins after the exit already happened', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const burst = manifest({ activation: 'burst' });
+    await supervisor.register(burst, spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(burst);
+
+    processes.exitCode = 0;
+    processes.fireExit('proc-0');
+
+    // A fast burst can finish before the leaseholder starts waiting.
+    await expect(supervisor.waitForExit(burst)).resolves.toEqual({ exitCode: 0 });
+  });
+
+  it('does not answer a wait with the exit of an older attempt', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    const burst = manifest({ activation: 'burst' });
+    await supervisor.register(burst, spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(burst);
+    processes.exitCode = 0;
+    processes.fireExit('proc-0');
+
+    await supervisor.start(burst);
+    let settled = false;
+    const waiting = supervisor.waitForExit(burst).then((exit): CapabilityExit => {
+      settled = true;
+      return exit;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    processes.exitCode = 1;
+    processes.fireExit('proc-1');
+    await expect(waiting).resolves.toEqual({ exitCode: 1 });
   });
 
   it('refuses to wait on an id with no registration', async () => {

@@ -106,6 +106,7 @@ export {
 export {
   CapabilitySupervisor,
   type CapabilityLifecyclePort,
+  type CapabilityExit,
   type CapabilityProcessPort,
   type CapabilitySupervisorOptions,
   type CapabilityWorkerHealth,

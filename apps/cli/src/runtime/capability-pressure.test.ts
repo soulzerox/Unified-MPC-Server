@@ -599,10 +599,13 @@ describe('thai-rag capability runtime', () => {
     for (let attempt = 0; attempt < 50 && runtime.value.registry.snapshot()[0]?.state !== 'WARM_IDLE'; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    // The lane dropping its lease leaves a warm worker, not a cold one: that is
-    // the TTL the sweep reclaims, and it is the only path back to no residency.
+    // The lane dropping its lease leaves a warm worker, not a cold one. Three
+    // things reclaim it: the idle TTL sweep, a memory-pressure reclaim, or a
+    // shutdown. `close()` is the one that must not leave a child behind, so it
+    // is asserted here.
     expect(runtime.value.registry.snapshot()[0]).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
     await runtime.value.close();
+    expect(runtime.value.registry.health(THAI_RAG_WORKER_ID)?.state).toBe('COLD');
   });
 
   it('refuses a registration whose cwd is outside the allowlist', async () => {

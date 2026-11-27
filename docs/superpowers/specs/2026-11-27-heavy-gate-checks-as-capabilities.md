@@ -191,6 +191,8 @@ Sliced, because a gate that cannot read a verdict cannot be wired safely:
    runner with a leased burst worker for one gate command, so the durable
    attempt, the receipt writer and `verification_heavy` admission stay exactly as
    they are.
-3. **pressure** (open): a `critical` sample may ask for that lane's eviction, and
-   the request settles as a closed gate rather than a killed run.
+3. **pressure** (this change): the gate runtime owns its own sweep, so a
+   `critical` sample marks the leased gate id, `requestEviction` aborts the
+   running gate, and the run settles as `unavailable` — a closed gate, not a
+   killed run and not a receipt built around a half-executed check.
 

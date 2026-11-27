@@ -13,7 +13,9 @@ import {
   type ResolveWorkerCwd,
 } from '@unified-mpc/capabilities';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
+import type { ResourcePressureProbe } from '@unified-mpc/workspace';
 
+import { createCapabilityPressureDriver, type CapabilityPressureDriver } from './capability-pressure.js';
 import {
   LOCAL_GATE_TIMEOUT_MS,
   MAX_COMMAND_OUTPUT_BYTES,
@@ -48,7 +50,16 @@ import {
  *   order the registry allows — a lease forbids a kill while it is held;
  * - `close()` aborts any run still in flight, because a detached worker must not
  *   outlive the runtime and keep writing into a checkout the next verification is
- *   about to inspect.
+ *   about to inspect;
+ * - `critical` pressure may ask for this lane's eviction: the sweep marks the
+ *   leased id, `requestEviction` aborts the running gate, and the gate settles as
+ *   `unavailable` — a closed gate, not a killed receipt;
+ * - one gate at a time is deliberate. `verification_heavy` admits a single
+ *   exact-head verification, so a second concurrent lane reports `unavailable`
+ *   instead of starting a second worker on the one id;
+ * - evidence can be empty for a gate so fast that it exits between `acquire` and
+ *   the pipes read: the exit code is still its verdict, and the supervisor clears
+ *   `record.pipes` on exit, so there is no stream left to drain.
  */
 
 export const MERGE_GATE_CAPABILITY_ID = 'merge-verification-gate';
@@ -77,12 +88,21 @@ export interface MergeGateCommandRunnerOptions {
   readonly timeoutMs?: number;
   /** Injected only so a test can avoid spawning a real child. */
   readonly processManager?: CapabilityProcessPort;
+  /** Injected only so a test can drive the pressure tier without real memory. */
+  readonly probe?: ResourcePressureProbe;
+  /** Injected only so a test can keep the sweep off the real clock. */
+  readonly pressureIntervalMs?: number;
   /** A release the registry refused has no caller to return to. */
   readonly onError?: (error: unknown) => void;
 }
 
 /** A gate runner that can also stop the worker it owns at host shutdown. */
 export interface MergeGateCommandRunner extends VerificationCommandRunner {
+  /**
+   * One pressure sweep, the same tick the interval runs: warm-idle reclaim, then
+   * a `critical` mark on this lane's leased id, which settles as a closed gate.
+   */
+  sweepPressure(): Promise<void>;
   /** Aborts in-flight gates, waits briefly for their leases, then sweeps. */
   close(): Promise<void>;
 }
@@ -91,17 +111,25 @@ interface MergeGateRuntime {
   readonly registry: CapabilityRegistry;
   readonly supervisor: CapabilitySupervisor;
   readonly manifest: CapabilityManifest;
+  readonly driver: CapabilityPressureDriver;
 }
 
 export function createMergeGateCommandRunner(options: MergeGateCommandRunnerOptions): MergeGateCommandRunner {
   const timeoutMs = options.timeoutMs ?? LOCAL_GATE_TIMEOUT_MS;
   let runtime: Promise<Result<MergeGateRuntime>> | undefined;
   const ensureRuntime = (): Promise<Result<MergeGateRuntime>> => {
-    runtime ??= createMergeGateRuntime(options);
+    runtime ??= createMergeGateRuntime(options, abortActive);
     return runtime;
   };
   const running = new Set<Promise<unknown>>();
   const controllers = new Set<AbortController>();
+  // `true` only when a gate was actually running, so a release request never
+  // claims an eviction it did not perform.
+  const abortActive = (): boolean => {
+    if (controllers.size === 0) return false;
+    for (const controller of controllers) controller.abort(new Error('merge gate lane was reclaimed'));
+    return true;
+  };
 
   return {
     async run(command, cwd, signal): Promise<VerificationCommandResult> {
@@ -121,12 +149,19 @@ export function createMergeGateCommandRunner(options: MergeGateCommandRunnerOpti
         controllers.delete(controller);
       }
     },
+    async sweepPressure(): Promise<void> {
+      const gate = await ensureRuntime();
+      if (gate.ok) await gate.value.driver.tick();
+    },
     async close(): Promise<void> {
       for (const controller of controllers) controller.abort(new Error('merge gate runtime is closing'));
       await withDeadline(Promise.allSettled([...running]).then(() => undefined), CLOSE_DEADLINE_MS);
       if (runtime === undefined) return;
       const gate = await runtime.catch(() => undefined);
-      if (gate?.ok === true) await gate.value.supervisor.shutdown().catch(() => undefined);
+      if (gate?.ok === true) {
+        gate.value.driver.close();
+        await gate.value.supervisor.shutdown().catch(() => undefined);
+      }
     },
   };
 }
@@ -135,7 +170,10 @@ export function createMergeGateCommandRunner(options: MergeGateCommandRunnerOpti
  * One registry, one supervisor, one registration, built on first use so a host
  * that never runs a local gate never pays for them.
  */
-async function createMergeGateRuntime(options: MergeGateCommandRunnerOptions): Promise<Result<MergeGateRuntime>> {
+async function createMergeGateRuntime(
+  options: MergeGateCommandRunnerOptions,
+  abortActive: () => boolean,
+): Promise<Result<MergeGateRuntime>> {
   const holder: { supervisor?: CapabilitySupervisor } = {};
   const registry = new CapabilityRegistry({
     start: (manifest: CapabilityManifest): Promise<Result<void>> =>
@@ -152,7 +190,23 @@ async function createMergeGateRuntime(options: MergeGateCommandRunnerOptions): P
 
   const registered = await registry.register(MERGE_GATE_MANIFEST);
   if (!registered.ok) return err(registered.error);
-  return ok({ registry, supervisor, manifest: registered.value });
+  // The gate lane is the only leased id this runtime owns, and the only way a
+  // `critical` sweep can end it is the caller's own abort: a lease still forbids
+  // a kill, and the release that follows is what stops the worker.
+  const driver = createCapabilityPressureDriver({
+    registry,
+    supervisor,
+    ...(options.probe === undefined ? {} : { probe: options.probe }),
+    ...(options.pressureIntervalMs === undefined ? {} : { intervalMs: options.pressureIntervalMs }),
+    requestEviction: async (id: string): Promise<boolean> =>
+      id === MERGE_GATE_CAPABILITY_ID && abortActive(),
+    ownsLeasedWorker: (id: string): boolean => id === MERGE_GATE_CAPABILITY_ID,
+    onError: options.onError ?? ((error: unknown): void => {
+      process.stderr.write(`merge gate pressure sweep failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    }),
+  });
+  driver.start();
+  return ok({ registry, supervisor, manifest: registered.value, driver });
 }
 
 /**

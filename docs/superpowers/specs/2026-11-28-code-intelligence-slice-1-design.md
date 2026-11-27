@@ -168,5 +168,9 @@ that a capability lane would otherwise be wrapping before it exists.
   "no symbols" from "not read". Whatever the recovering parser still produced is
   kept, so a consumer must treat `parseError` as the authority, not an empty
   `symbols` array.
-- **A cross-Goal leak.** Records carry the identity they were extracted under, so
-  a Goal overlay's file can never be served as the base ref's file.
+- **A cross-Goal leak.** Every record carries the identity it was extracted under
+  and a fingerprint of the bytes read, so what a record claims about a tree is
+  always re-derivable and comparable. The extractor cannot tell whether the bytes
+  it was handed belong to that identity: a caller that reads a worktree with
+  uncommitted overlay edits is labelling the extraction incorrectly, and only
+  comparing against a fresh extraction of the described tree detects it.

@@ -188,8 +188,8 @@ function build(options: {
 const spec = { executable: '/usr/bin/node', args: ['--version'], cwd: 'sub' };
 
 describe('capability supervisor registration', () => {
-  it('refuses a non-in-process manifest with no spec, and a spec for an id registered twice', async () => {
-    const { supervisor } = build();
+  it('refuses a non-in-process manifest with no spec, and replaces a spec only while idle', async () => {
+    const { supervisor, lifecycle, processes } = build();
     const worker = manifest();
 
     const missing = await supervisor.register(worker);
@@ -197,7 +197,26 @@ describe('capability supervisor registration', () => {
     expect(missing.ok ? '' : missing.error.message).toContain('needs a worker spec');
 
     expect((await supervisor.register(worker, spec)).ok).toBe(true);
-    expect((await supervisor.register(worker, spec)).ok).toBe(false);
+    // A second registration of an idle id replaces the spec: a gate check's argv is
+    // the host's per run, and a fresh id per run would leak records instead.
+    expect((await supervisor.register(worker, { ...spec, args: ['--version', '--help'] })).ok).toBe(true);
+
+    lifecycle.set('worker', 'STARTING');
+    await supervisor.start(worker);
+
+    expect(processes.specs.at(-1)?.args).toEqual(['--version', '--help']);
+  });
+
+  it('refuses to replace the spec of a worker that is live or possibly live', async () => {
+    const { supervisor, lifecycle } = build();
+    await supervisor.register(manifest(), spec);
+    lifecycle.set('worker', 'ACTIVE');
+    await supervisor.start(manifest());
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.error.message).toContain('already has a worker registration');
   });
 
   it('refuses an in-process manifest that carries a spec', async () => {

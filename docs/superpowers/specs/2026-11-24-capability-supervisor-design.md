@@ -635,9 +635,11 @@ Unit tests in `packages/capabilities`, with a fake `CapabilityProcessPort` (the
 structural type above), a
 fake clock and a constant pressure:
 
-1. `register` refuses a non-`in-process` manifest with no spec, refuses a spec
-   for an id registered twice, and refuses a spec whose `resolveWorkerCwd`
-   rejects the requested path (escaping `..`, relative, or outside every root);
+1. `register` refuses a non-`in-process` manifest with no spec, replaces the
+   spec of an id whose worker is idle (a gate check's argv is per run) while
+   refusing one that is live or possibly live, and refuses a spec whose
+   `resolveWorkerCwd` rejects the requested path (escaping `..`, relative, or
+   outside every root);
 2. start failure (fake spawn error, a start that exceeds `startupTimeoutMs`, and
    a supervisor `start` that returns `err`) leaves the registry in `FAILED`; the
    `err` case is the regression the old `Promise<void>` option could not express,

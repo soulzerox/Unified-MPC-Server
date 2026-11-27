@@ -232,12 +232,19 @@ export class CapabilitySupervisor {
   }
 
   /**
-   * Declares how a non-in-process capability is spawned. One spec per id. Async
-   * because it awaits `resolveWorkerCwd` once and stores the resolved path, so no
-   * spec exists with an untrusted `cwd`.
+   * Declares how a non-in-process capability is spawned. One spec per id at a
+   * time: registering an id again replaces the spec, but only while no worker is
+   * known to be alive, so a per-run argv (a gate check's host-owned command) does
+   * not force a fresh id per run. A live or possibly-live worker keeps its spec:
+   * `processId` is written before `start` resolves, and an unrequested exit clears
+   * it, so the only records this refuses are ones a new worker would race.
+   *
+   * Async because it awaits `resolveWorkerCwd` once and stores the resolved path,
+   * so no spec exists with an untrusted `cwd`.
    */
   public async register(manifest: CapabilityManifest, spec?: CapabilityWorkerSpec): Promise<Result<void>> {
-    if (this.records.has(manifest.id) || this.registering.has(manifest.id)) {
+    const existing = this.records.get(manifest.id);
+    if (this.registering.has(manifest.id) || (existing !== undefined && !this.idleForReplacement(existing))) {
       return conflict(`capability ${manifest.id} already has a worker registration`);
     }
     if (manifest.runtimeKind === 'in-process') {
@@ -515,6 +522,20 @@ export class CapabilitySupervisor {
       stopUnverified: false,
       pendingDeath: false,
     };
+  }
+
+  /**
+   * Whether a re-registration may replace this record's spec without racing a
+   * worker. `processId` is written before `start` resolves and an unrequested
+   * exit clears it, so "no id and no subscription" is exactly "nothing of this
+   * record can still be running". An unverified stop and a death still being
+   * reported keep their spec for the same reason.
+   */
+  private idleForReplacement(record: WorkerRecord): boolean {
+    return record.processId === undefined
+      && record.subscribedProcessId === undefined
+      && record.stopUnverified !== true
+      && record.pendingDeath !== true;
   }
 
   private subscribe(record: WorkerRecord, processId: string, attempt: number): void {

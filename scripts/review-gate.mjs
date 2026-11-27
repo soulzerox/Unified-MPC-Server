@@ -14,7 +14,7 @@ import {
   findReviewReceipt,
   reviewFingerprint,
   reviewVerdict,
-  skillVersionBlocker,
+  findingsIdentityBlockers,
   validateFindings,
 } from './workflow-gate-core.mjs';
 
@@ -55,9 +55,11 @@ export {
   RECORDABLE_STATUSES,
   SEVERITIES,
   evaluateReviewEvidence,
+  findingsIdentityBlockers,
   findReviewReceipt,
   reviewFingerprint,
   reviewVerdict,
+  skillShaMismatchBlocker,
   skillVersionBlocker,
   validateFindings,
 } from './workflow-gate-core.mjs';
@@ -695,19 +697,13 @@ async function recordCommand(options) {
   // trusting whatever the capsule froze.
   const blockers = verificationGateBlockers({ verification, headSha: pr.headRefOid });
 
-  if (submitted.head_sha !== pr.headRefOid) {
-    blockers.push(`findings were written for ${String(submitted.head_sha).slice(0, 12)}, current PR head is ${pr.headRefOid.slice(0, 12)}; run a fresh review`);
-  }
-  if (submitted.capsule_id !== capsule.capsuleId) blockers.push('findings do not reference the frozen capsule for this head');
-  if (submitted.skill_id !== skill.skillId) blockers.push(`findings used skill '${String(submitted.skill_id)}'`);
-  const skillVersionMessage = skillVersionBlocker(submitted.skill_version, skill.skillVersion);
-  if (skillVersionMessage !== undefined) blockers.push(skillVersionMessage);
-  // A hand-copied hash is the usual cause, so name both values: a reviewer that
-  // read the right skill sees at once that the file, not the skill, is wrong.
-  if (submitted.skill_sha256 !== skill.skillSha256) {
-    blockers.push(`findings were produced with a different version of the bundled review skill (submitted ${String(submitted.skill_sha256)}, expected ${skill.skillSha256})`);
-  }
-  if (submitted.diff_fingerprint !== capsule.diffFingerprint) blockers.push('findings fingerprint does not match the frozen capsule');
+  blockers.push(...findingsIdentityBlockers({
+    submitted,
+    headSha: pr.headRefOid,
+    capsuleId: capsule.capsuleId,
+    skill,
+    diffFingerprint: capsule.diffFingerprint,
+  }));
   if (fingerprint !== capsule.diffFingerprint) blockers.push('the PR diff changed after the capsule was frozen; run a fresh review');
   const directory = capsuleDirectory(pr.headRefOid, pr.number);
   const [patch, filesText] = await Promise.all([

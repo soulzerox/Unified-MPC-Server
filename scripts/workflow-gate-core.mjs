@@ -135,6 +135,43 @@ export function skillVersionBlocker(submittedSkillVersion, bundledSkillVersion) 
   return `findings used skill version ${JSON.stringify(submittedSkillVersion)}, bundled version is ${bundledSkillVersion}`;
 }
 
+/** JSON.stringify(undefined) is `undefined`, so a missing field would render bare. */
+function quoted(value) {
+  const text = JSON.stringify(value);
+  return text === undefined ? 'undefined (missing)' : text;
+}
+
+/**
+ * A hand-copied hash is the usual cause of this mismatch, not a changed skill,
+ * and the bare message made the two indistinguishable. Both values are quoted so
+ * a typo — or a non-string — is visible in the refusal itself.
+ */
+export function skillShaMismatchBlocker(subject, submittedSha, bundledSha) {
+  return `${subject} with a different version of the bundled review skill (${quoted(submittedSha)}, bundled ${quoted(bundledSha)})`;
+}
+
+/**
+ * The identity checks a submitted findings document must pass before it can
+ * become a receipt. They live here rather than inline in `recordCommand` so the
+ * refusal text — the part that made #1012's typo hard to diagnose — is a tested
+ * unit instead of an untested literal on a CLI path no test can invoke.
+ */
+export function findingsIdentityBlockers({ submitted, headSha, capsuleId, skill, diffFingerprint }) {
+  const blockers = [];
+  if (submitted.head_sha !== headSha) {
+    blockers.push(`findings were written for ${String(submitted.head_sha).slice(0, 12)}, current PR head is ${String(headSha).slice(0, 12)}; run a fresh review`);
+  }
+  if (submitted.capsule_id !== capsuleId) blockers.push('findings do not reference the frozen capsule for this head');
+  if (submitted.skill_id !== skill.skillId) blockers.push(`findings used skill '${String(submitted.skill_id)}'`);
+  const skillVersionMessage = skillVersionBlocker(submitted.skill_version, skill.skillVersion);
+  if (skillVersionMessage !== undefined) blockers.push(skillVersionMessage);
+  if (submitted.skill_sha256 !== skill.skillSha256) {
+    blockers.push(skillShaMismatchBlocker('findings were produced', submitted.skill_sha256, skill.skillSha256));
+  }
+  if (submitted.diff_fingerprint !== diffFingerprint) blockers.push('findings fingerprint does not match the frozen capsule');
+  return blockers;
+}
+
 export function findReviewReceipt(receipts, headSha) {
   const matches = receipts.filter((receipt) => receipt?.headSha === headSha && receipt?.role === 'reviewer');
   if (matches.length === 0) return undefined;
@@ -177,7 +214,7 @@ export function evaluateReviewEvidence({ receipt, capsule, headReceiptCount, cor
     blockers.push(`review receipt used skill version ${String(receipt.skillVersion)}, bundled version is ${skill.skillVersion}`);
   }
   if (receipt.skillSha256 !== skill.skillSha256) {
-    blockers.push(`review receipt was produced with a different version of the bundled review skill (receipt ${String(receipt.skillSha256)}, expected ${skill.skillSha256})`);
+    blockers.push(skillShaMismatchBlocker('review receipt was produced', receipt.skillSha256, skill.skillSha256));
   }
 
   if (!Array.isArray(receipt.findings)) {

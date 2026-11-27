@@ -124,8 +124,10 @@ that needs it adds `latestForRef(ref)` with its own documented staleness.
 The store refuses, it does not repair:
 
 - records whose `identity` differs from the write's identity are an
-  `INVALID_INPUT` refusal (a store that silently relabels records is how a Goal
-  overlay file ends up served as the base ref's file);
+  `INVALID_INPUT` refusal: one generation describes one tree, so a caller mixing
+  identities is a bug the store must not persist. This is not the overlay guard —
+  an admitted Goal shares the base identity (see the reconciliation section) — it
+  only keeps a write honest about what it is writing;
 - two records with the same `path` in one generation are refused, because slice 1
   already collapses duplicates and a store must not invent an ordering rule;
 - a fingerprint that is not `sha256:<64 hex>` is refused, so a caller cannot

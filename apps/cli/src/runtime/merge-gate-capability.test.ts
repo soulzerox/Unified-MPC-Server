@@ -232,6 +232,29 @@ describe('merge gate capability runner', () => {
     }
   });
 
+  it('skips a PATH entry that is a directory, as execFile did', async () => {
+    const root = await temporaryRoot('gate-workspaces-');
+    const decoy = await temporaryRoot('gate-decoy-');
+    const scripts = await temporaryRoot('gate-real-');
+    await mkdir(path.join(decoy, 'fake-gate'));
+    await writeFile(path.join(scripts, 'fake-gate'), '#!/bin/sh\nexit 0\n');
+    await chmod(path.join(scripts, 'fake-gate'), 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${decoy}${path.delimiter}${scripts}${path.delimiter}${previousPath ?? ''}`;
+    const processes = new FakeProcesses();
+    const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [root], processManager: processes });
+    try {
+      const run = runner.run({ executable: 'fake-gate', args: [] }, root);
+      await processes.waitForStart();
+      await tick();
+      processes.fireExit();
+      await expect(run).resolves.toMatchObject({ exitCode: 0 });
+      expect(processes.specs[0]?.executable).toBe(path.join(scripts, 'fake-gate'));
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
   it('reports unavailable when a bare executable is not on PATH', async () => {
     const processes = new FakeProcesses();
     const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [ROOT], processManager: processes });
@@ -260,7 +283,10 @@ describe('merge gate capability runner', () => {
 
   it('refuses a sibling root that only shares a prefix with the workspace', async () => {
     const root = await temporaryRoot('gate-root-');
-    const sibling = await temporaryRoot('gate-root-sibling-');
+    // A bare `startsWith(root)` would accept this: it differs by one character.
+    const sibling = `${root}-sibling`;
+    await mkdir(sibling, { recursive: true });
+    temporaryRoots.push(sibling);
     const processes = new FakeProcesses();
     const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [root], processManager: processes });
 

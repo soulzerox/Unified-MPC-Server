@@ -1,5 +1,5 @@
 import { constants as fsConstants } from 'node:fs';
-import { access, realpath } from 'node:fs/promises';
+import { access, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 
@@ -195,6 +195,10 @@ async function resolveExecutable(executable: string, cwd: string): Promise<strin
 }
 
 async function isExecutable(candidate: string): Promise<boolean> {
+  // `X_OK` alone accepts a directory, which `execFile` would have skipped in
+  // favour of the real executable further down `PATH`.
+  const stats = await stat(candidate).catch(() => undefined);
+  if (stats === undefined || !stats.isFile()) return false;
   return access(candidate, fsConstants.X_OK).then(() => true, () => false);
 }
 

@@ -1,3 +1,6 @@
+import { constants as fsConstants } from 'node:fs';
+import { access, realpath } from 'node:fs/promises';
+import path from 'node:path';
 import type { Readable } from 'node:stream';
 
 import {
@@ -7,10 +10,10 @@ import {
   type CapabilityManifestInput,
   type CapabilityProcessPort,
   type CapabilityWorkerSpec,
+  type ResolveWorkerCwd,
 } from '@unified-mpc/capabilities';
-import { err, ok, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
 
-import { createWorkerCwdResolver } from './capability-pressure.js';
 import {
   LOCAL_GATE_TIMEOUT_MS,
   MAX_COMMAND_OUTPUT_BYTES,
@@ -33,15 +36,19 @@ import {
  *
  * - the lease is held for the whole run, so a pressure mark can only complete
  *   after this caller lets go, never under a running gate;
- * - the worker runs only in a registered workspace root, because that is where
- *   `runLocalGate` resolved the exact-head checkout to;
+ * - the gate's own command shape is preserved: a PATH-resolved executable is
+ *   resolved to the absolute path the supervisor requires, and a nested
+ *   `cwdRelative` is accepted as long as it stays inside a registered workspace;
  * - a non-zero exit is a *verdict*, not a crash: it never counts toward the crash
  *   loop, so a failing gate stays runnable;
  * - capture is bounded and non-destructive: reading past the limit stops
  *   appending but keeps draining, so a chatty gate cannot block on a full pipe;
  * - a timeout or a client abort returns `unavailable` and lets the lease go in
  *   `finally`; with `idleTtlMs: 0` that release *is* the stop, which is the only
- *   order the registry allows — a lease forbids a kill while it is held.
+ *   order the registry allows — a lease forbids a kill while it is held;
+ * - `close()` aborts any run still in flight, because a detached worker must not
+ *   outlive the runtime and keep writing into a checkout the next verification is
+ *   about to inspect.
  */
 
 export const MERGE_GATE_CAPABILITY_ID = 'merge-verification-gate';
@@ -62,7 +69,10 @@ export const MERGE_GATE_MANIFEST: CapabilityManifestInput = {
 };
 
 export interface MergeGateCommandRunnerOptions {
-  /** The roots a gate may run in; a gate's cwd is always one of these. */
+  /**
+   * Every workspace root a gate may run in. A gate's cwd is always a root the
+   * exact-head verifier could have accepted, or a directory inside one.
+   */
   readonly workspaceRoots: () => Promise<readonly string[]>;
   readonly timeoutMs?: number;
   /** Injected only so a test can avoid spawning a real child. */
@@ -71,25 +81,52 @@ export interface MergeGateCommandRunnerOptions {
   readonly onError?: (error: unknown) => void;
 }
 
+/** A gate runner that can also stop the worker it owns at host shutdown. */
+export interface MergeGateCommandRunner extends VerificationCommandRunner {
+  /** Aborts in-flight gates, waits briefly for their leases, then sweeps. */
+  close(): Promise<void>;
+}
+
 interface MergeGateRuntime {
   readonly registry: CapabilityRegistry;
   readonly supervisor: CapabilitySupervisor;
   readonly manifest: CapabilityManifest;
 }
 
-export function createMergeGateCommandRunner(options: MergeGateCommandRunnerOptions): VerificationCommandRunner {
+export function createMergeGateCommandRunner(options: MergeGateCommandRunnerOptions): MergeGateCommandRunner {
   const timeoutMs = options.timeoutMs ?? LOCAL_GATE_TIMEOUT_MS;
   let runtime: Promise<Result<MergeGateRuntime>> | undefined;
   const ensureRuntime = (): Promise<Result<MergeGateRuntime>> => {
     runtime ??= createMergeGateRuntime(options);
     return runtime;
   };
+  const running = new Set<Promise<unknown>>();
+  const controllers = new Set<AbortController>();
 
   return {
     async run(command, cwd, signal): Promise<VerificationCommandResult> {
-      const gate = await ensureRuntime();
-      if (!gate.ok) return unavailable(`merge gate capability is unavailable: ${gate.error.message}`);
-      return runGate(gate.value, command, cwd, timeoutMs, signal, options.onError);
+      const controller = new AbortController();
+      controllers.add(controller);
+      const signals = signal === undefined ? [controller.signal] : [signal, controller.signal];
+      const task = (async (): Promise<VerificationCommandResult> => {
+        const gate = await ensureRuntime();
+        if (!gate.ok) return unavailable(`merge gate capability is unavailable: ${gate.error.message}`);
+        return runGate(gate.value, command, cwd, timeoutMs, signals, options.onError);
+      })();
+      running.add(task);
+      try {
+        return await task;
+      } finally {
+        running.delete(task);
+        controllers.delete(controller);
+      }
+    },
+    async close(): Promise<void> {
+      for (const controller of controllers) controller.abort(new Error('merge gate runtime is closing'));
+      await withDeadline(Promise.allSettled([...running]).then(() => undefined), CLOSE_DEADLINE_MS);
+      if (runtime === undefined) return;
+      const gate = await runtime.catch(() => undefined);
+      if (gate?.ok === true) await gate.value.supervisor.shutdown().catch(() => undefined);
     },
   };
 }
@@ -108,8 +145,7 @@ async function createMergeGateRuntime(options: MergeGateCommandRunnerOptions): P
   });
   const supervisor = new CapabilitySupervisor({
     lifecycle: registry,
-    // No install root: a merge gate only ever runs in a registered workspace.
-    resolveWorkerCwd: createWorkerCwdResolver({ workspaceRoots: options.workspaceRoots }),
+    resolveWorkerCwd: createGateCwdResolver(options.workspaceRoots),
     ...(options.processManager === undefined ? {} : { processManager: options.processManager }),
   });
   holder.supervisor = supervisor;
@@ -119,19 +155,64 @@ async function createMergeGateRuntime(options: MergeGateCommandRunnerOptions): P
   return ok({ registry, supervisor, manifest: registered.value });
 }
 
+/**
+ * A gate may run in the workspace root or in a `cwdRelative` directory the merge
+ * policy names, so a descendant is allowed while a sibling, a parent or a
+ * symlinked escape is not. `createWorkerCwdResolver` stays equality-only for the
+ * provider, whose launch is always the root it wired.
+ */
+function createGateCwdResolver(workspaceRoots: () => Promise<readonly string[]>): ResolveWorkerCwd {
+  return async (requested: string): Promise<Result<string>> => {
+    const resolved = await realpath(requested).catch(() => undefined);
+    if (resolved === undefined) {
+      return err(appError('INVALID_INPUT', `capability worker cwd ${requested} cannot be resolved`, false));
+    }
+    for (const root of await workspaceRoots().catch(() => [] as readonly string[])) {
+      const canonical = await realpath(root).catch(() => root);
+      const prefix = canonical.endsWith(path.sep) ? canonical : `${canonical}${path.sep}`;
+      if (resolved === canonical || resolved.startsWith(prefix)) return ok(resolved);
+    }
+    return err(appError('PERMISSION_DENIED', `capability worker cwd ${resolved} is not inside a registered workspace`, false));
+  };
+}
+
+/**
+ * `execFile` resolved a bare name through `PATH`; the supervisor refuses it, so
+ * the same resolution happens here rather than narrowing what a policy may say.
+ */
+async function resolveExecutable(executable: string, cwd: string): Promise<string | undefined> {
+  if (path.isAbsolute(executable)) return executable;
+  if (executable.includes(path.sep) || (path.sep === '\\' && executable.includes('/'))) {
+    return path.resolve(cwd, executable);
+  }
+  for (const entry of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (entry.length === 0) continue;
+    const candidate = path.join(entry, executable);
+    if (await isExecutable(candidate)) return candidate;
+    if (process.platform === 'win32' && await isExecutable(`${candidate}.exe`)) return `${candidate}.exe`;
+  }
+  return undefined;
+}
+
+async function isExecutable(candidate: string): Promise<boolean> {
+  return access(candidate, fsConstants.X_OK).then(() => true, () => false);
+}
+
 async function runGate(
   runtime: MergeGateRuntime,
   command: { readonly executable: string; readonly args: readonly string[] },
   cwd: string,
   timeoutMs: number,
-  signal: AbortSignal | undefined,
+  signals: readonly AbortSignal[],
   onError: ((error: unknown) => void) | undefined,
 ): Promise<VerificationCommandResult> {
   const { registry, supervisor, manifest } = runtime;
+  const executable = await resolveExecutable(command.executable, cwd);
+  if (executable === undefined) return unavailable(`merge gate executable ${command.executable} could not be resolved on PATH`);
   // The argv is the run's, not the capability's: one registration, one worker per
   // gate command, and the supervisor replaces it only when nothing can still run.
   const spec: CapabilityWorkerSpec = {
-    executable: command.executable,
+    executable,
     args: [...command.args],
     cwd,
     // The gate's own output is the evidence, so the pipes must reach this caller.
@@ -157,12 +238,12 @@ async function runGate(
       timer.unref();
     });
     const aborted = new Promise<'aborted'>((resolve) => {
-      if (signal?.aborted === true) {
+      if (signals.some((signal) => signal.aborted)) {
         resolve('aborted');
         return;
       }
       onAbort = (): void => resolve('aborted');
-      signal?.addEventListener('abort', onAbort, { once: true });
+      for (const signal of signals) signal.addEventListener('abort', onAbort, { once: true });
     });
     const outcome = await Promise.race([
       supervisor.waitForExit(manifest).then((exit) => ({ kind: 'exit' as const, exit })),
@@ -188,7 +269,9 @@ async function runGate(
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
-    if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort);
+    if (onAbort !== undefined) {
+      for (const signal of signals) signal.removeEventListener('abort', onAbort);
+    }
     const released = lease.release();
     if (!released.ok) onError?.(released.error);
   }
@@ -203,6 +286,9 @@ function unavailable(message: string): VerificationCommandResult {
  * what it has. A gate that closed its streams already ends at once.
  */
 const STREAM_DRAIN_TIMEOUT_MS = 2_000;
+
+/** How long `close()` waits for an aborted gate to release its lease. */
+const CLOSE_DEADLINE_MS = 10_000;
 
 interface CapturedOutput {
   text(): string;

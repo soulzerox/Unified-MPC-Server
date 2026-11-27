@@ -1,6 +1,9 @@
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CapabilityProcessPort } from '@unified-mpc/capabilities';
 import { ok, type Result } from '@unified-mpc/domain';
@@ -102,6 +105,18 @@ class FakeProcesses implements CapabilityProcessPort {
 
 const command = { executable: '/usr/bin/node', args: ['-e', 'process.exit(0)'] } as const;
 
+const temporaryRoots: string[] = [];
+
+async function temporaryRoot(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  temporaryRoots.push(root);
+  return root;
+}
+
+afterEach(async (): Promise<void> => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -194,6 +209,80 @@ describe('merge gate capability runner', () => {
     expect(result.unavailable).toBe(true);
     expect(result.stderr).toContain('capability worker cwd');
     expect(processes.specs).toHaveLength(0);
+  });
+
+  it('resolves a PATH-provided executable, which execFile used to resolve too', async () => {
+    const root = await temporaryRoot('gate-workspaces-');
+    const scripts = await temporaryRoot('gate-path-');
+    await writeFile(path.join(scripts, 'fake-gate'), '#!/bin/sh\nexit 0\n');
+    await chmod(path.join(scripts, 'fake-gate'), 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${scripts}${path.delimiter}${previousPath ?? ''}`;
+    const processes = new FakeProcesses();
+    const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [root], processManager: processes });
+    try {
+      const run = runner.run({ executable: 'fake-gate', args: [] }, root);
+      await processes.waitForStart();
+      await tick();
+      processes.fireExit();
+      await expect(run).resolves.toMatchObject({ exitCode: 0 });
+      expect(processes.specs[0]?.executable).toBe(path.join(scripts, 'fake-gate'));
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
+  it('reports unavailable when a bare executable is not on PATH', async () => {
+    const processes = new FakeProcesses();
+    const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [ROOT], processManager: processes });
+
+    const result = await runner.run({ executable: 'gate-that-does-not-exist', args: [] }, ROOT);
+
+    expect(result.unavailable).toBe(true);
+    expect(result.stderr).toContain('could not be resolved on PATH');
+    expect(processes.specs).toHaveLength(0);
+  });
+
+  it('accepts a nested cwdRelative inside the workspace, as the policy allows', async () => {
+    const root = await temporaryRoot('gate-nested-');
+    const nested = path.join(root, 'apps', 'cli');
+    await mkdir(nested, { recursive: true });
+    const processes = new FakeProcesses();
+    const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [root], processManager: processes });
+
+    const run = runner.run(command, nested);
+    await processes.waitForStart();
+    await tick();
+    processes.fireExit();
+    await expect(run).resolves.toMatchObject({ exitCode: 0 });
+    expect(processes.specs[0]?.cwd).toBe(await realpath(nested));
+  });
+
+  it('refuses a sibling root that only shares a prefix with the workspace', async () => {
+    const root = await temporaryRoot('gate-root-');
+    const sibling = await temporaryRoot('gate-root-sibling-');
+    const processes = new FakeProcesses();
+    const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [root], processManager: processes });
+
+    const result = await runner.run(command, sibling);
+
+    expect(result.unavailable).toBe(true);
+    expect(processes.specs).toHaveLength(0);
+  });
+
+  it('aborts an in-flight gate on close so the worker does not outlive the runtime', async () => {
+    const processes = new FakeProcesses();
+    const runner = createMergeGateCommandRunner({ workspaceRoots: async () => [ROOT], processManager: processes });
+
+    const run = runner.run(command, ROOT);
+    await processes.waitForStart();
+    await tick();
+    await runner.close();
+
+    const result = await run;
+    expect(result.unavailable).toBe(true);
+    expect(result.stderr).toContain('aborted');
+    await waitUntil(() => processes.stops.length === 1, 'the aborted gate to be stopped');
   });
 
   it('is registered under one id with a burst manifest', async () => {

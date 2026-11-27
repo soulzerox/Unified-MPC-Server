@@ -176,8 +176,9 @@ const ALLOWED_TRANSITIONS: Readonly<Record<CapabilityState, readonly CapabilityS
   // kill has to be recorded, both written through `fail(id, reason)`; neither is
   // reachable from a requested stop. `COLD` is the completed `burst` edge: a
   // worker that ended its own run is finished, not dead, and the supervisor
-  // reports the code with `complete`. A requested stop still writes only
-  // `STOPPING -> COLD`.
+  // reports the code with `complete`. A requested stop enters `STOPPING` and
+  // leaves it as `COLD` when the hook verified the kill, or as `FAILED` when it
+  // could not.
   ACTIVE: ['WARM_IDLE', 'STOPPING', 'COLD', 'FAILED'],
   WARM_IDLE: ['ACTIVE', 'STOPPING', 'COLD', 'FAILED'],
   STOPPING: ['COLD', 'FAILED'],

@@ -207,6 +207,13 @@ export class CapabilitySupervisor {
   /** Ids whose `register` is awaiting `resolveWorkerCwd`, so two can never both win. */
   private readonly registering = new Set<string>();
 
+  /**
+   * Ids whose `start` is between the spawn request and the recorded process id.
+   * `ProcessManager.start` awaits executable resolution before it calls
+   * `onCreated`, so during that window the record still looks idle.
+   */
+  private readonly starting = new Set<string>();
+
   private readonly now: () => number;
 
   private readonly crashWindowMs: number;
@@ -236,20 +243,30 @@ export class CapabilitySupervisor {
    * time: registering an id again replaces the spec, but only while no worker is
    * known to be alive, so a per-run argv (a gate check's host-owned command) does
    * not force a fresh id per run. A live or possibly-live worker keeps its spec:
-   * `processId` is written before `start` resolves, and an unrequested exit clears
-   * it, so the only records this refuses are ones a new worker would race.
+   * `processId` is written before `start` resolves and an unrequested exit clears
+   * it; a start that is between the spawn request and that write is tracked by
+   * `starting`, because `ProcessManager.start` awaits executable resolution first.
+   * Both are re-checked after the `cwd` await, so a worker that appeared while the
+   * path was resolving keeps its record. The crash window survives a replacement:
+   * it belongs to the capability, not to one command.
    *
    * Async because it awaits `resolveWorkerCwd` once and stores the resolved path,
    * so no spec exists with an untrusted `cwd`.
    */
   public async register(manifest: CapabilityManifest, spec?: CapabilityWorkerSpec): Promise<Result<void>> {
     const existing = this.records.get(manifest.id);
-    if (this.registering.has(manifest.id) || (existing !== undefined && !this.idleForReplacement(existing))) {
+    const replaceable = existing !== undefined && this.idleForReplacement(existing);
+    if (this.registering.has(manifest.id) || (existing !== undefined && !replaceable)) {
       return conflict(`capability ${manifest.id} already has a worker registration`);
     }
     if (manifest.runtimeKind === 'in-process') {
       if (spec !== undefined) {
         return invalid(`capability ${manifest.id} is in-process and cannot have a worker spec`);
+      }
+      // An in-process capability has no spec to replace, so a second
+      // registration stays the conflict it always was.
+      if (existing !== undefined) {
+        return conflict(`capability ${manifest.id} already has a worker registration`);
       }
       this.records.set(manifest.id, this.newRecord(manifest));
       return ok(undefined);
@@ -270,9 +287,25 @@ export class CapabilitySupervisor {
     try {
       const resolvedCwd = await this.resolveWorkerCwd(spec.cwd);
       if (!resolvedCwd.ok) return resolvedCwd;
+      // A `start` may have claimed the id while the path was resolving; its
+      // worker is live (or about to be), so replacing the record now would
+      // strand it.
+      const current = this.records.get(manifest.id);
+      if (current !== existing
+        || this.starting.has(manifest.id)
+        || (current !== undefined && !this.idleForReplacement(current))) {
+        return conflict(`capability ${manifest.id} already has a worker registration`);
+      }
 
       this.records.set(manifest.id, {
+        // The crash window belongs to the capability, not to one command: a
+        // per-run argv must not launder a crash loop, and `starts` stays monotonic
+        // so a listener from an older attempt can still tell it is stale.
         ...this.newRecord(manifest),
+        ...(existing === undefined ? {} : {
+          starts: existing.starts,
+          crashTimes: [...existing.crashTimes],
+        }),
         spec: {
           executable: spec.executable,
           args: [...spec.args],
@@ -320,54 +353,59 @@ export class CapabilitySupervisor {
     };
 
     const attempt = record.starts;
-    const spawn = this.processManager.start(startOptions, undefined, (process) => {
-      // The pipes are the attempt's, not the id's: a late spawn from an
-      // abandoned attempt must not hand its streams to the live worker.
-      if (spec.exposeStdio === true && attempt === record.starts
-        && process.stdin !== undefined && process.stdout !== undefined && process.stderr !== undefined) {
-        record.pipes = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr };
+    this.starting.add(manifest.id);
+    try {
+      const spawn = this.processManager.start(startOptions, undefined, (process) => {
+        // The pipes are the attempt's, not the id's: a late spawn from an
+        // abandoned attempt must not hand its streams to the live worker.
+        if (spec.exposeStdio === true && attempt === record.starts
+          && process.stdin !== undefined && process.stdout !== undefined && process.stderr !== undefined) {
+          record.pipes = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr };
+        }
+        this.subscribe(record, process.processId, attempt);
+      });
+      const outcome = await raceDeadline(spawn, manifest.startupTimeoutMs);
+      if (!outcome.settled) {
+        // `onCreated` may already have handed this attempt's pipes over; a caller
+        // must never reach a process this attempt is about to discard.
+        if (attempt === record.starts) record.pipes = undefined;
+        this.recordFailure(record, 'start-failed');
+        void spawn.then(
+          (late) => this.discardLateStart(record, late, attempt),
+          () => undefined,
+        );
+        return err(appError('PROCESS_TIMEOUT', `capability ${manifest.id} did not spawn inside ${manifest.startupTimeoutMs}ms`, true, { reason: 'start_timeout' }));
       }
-      this.subscribe(record, process.processId, attempt);
-    });
-    const outcome = await raceDeadline(spawn, manifest.startupTimeoutMs);
-    if (!outcome.settled) {
-      // `onCreated` may already have handed this attempt's pipes over; a caller
-      // must never reach a process this attempt is about to discard.
-      if (attempt === record.starts) record.pipes = undefined;
-      this.recordFailure(record, 'start-failed');
-      void spawn.then(
-        (late) => this.discardLateStart(record, late, attempt),
-        () => undefined,
-      );
-      return err(appError('PROCESS_TIMEOUT', `capability ${manifest.id} did not spawn inside ${manifest.startupTimeoutMs}ms`, true, { reason: 'start_timeout' }));
-    }
-    const started = outcome.value;
-    if (!started.ok) {
-      // `onCreated` runs before the start promise settles, so a spawn that then
-      // fails has already subscribed; leaving it registered would let this
-      // attempt's close report a death inside a later attempt's start. Scoped to
-      // this attempt for the same reason the listener is.
-      if (attempt === record.starts) {
-        this.unsubscribe(record);
+      const started = outcome.value;
+      if (!started.ok) {
+        // `onCreated` runs before the start promise settles, so a spawn that then
+        // fails has already subscribed; leaving it registered would let this
+        // attempt's close report a death inside a later attempt's start. Scoped to
+        // this attempt for the same reason the listener is.
+        if (attempt === record.starts) {
+          this.unsubscribe(record);
+          record.pipes = undefined;
+        }
+        this.recordFailure(record, 'start-failed');
+        return started;
+      }
+      if (record.pendingDeath) {
+        // The registry writes `ACTIVE` only after this hook resolves, so a death
+        // delivered from `onCreated` is reported here instead of being dropped.
+        record.pendingDeath = false;
         record.pipes = undefined;
+        this.unsubscribe(record);
+        this.recordFailure(record, 'worker-exited');
+        void this.processManager.stop(started.value.processId);
+        return err(appError('CONFLICT', `capability ${manifest.id} exited before its start completed`, true, { reason: 'worker_exited' }));
       }
-      this.recordFailure(record, 'start-failed');
-      return started;
-    }
-    if (record.pendingDeath) {
-      // The registry writes `ACTIVE` only after this hook resolves, so a death
-      // delivered from `onCreated` is reported here instead of being dropped.
-      record.pendingDeath = false;
-      record.pipes = undefined;
-      this.unsubscribe(record);
-      this.recordFailure(record, 'worker-exited');
-      void this.processManager.stop(started.value.processId);
-      return err(appError('CONFLICT', `capability ${manifest.id} exited before its start completed`, true, { reason: 'worker_exited' }));
-    }
 
-    record.processId = started.value.processId;
-    record.stopUnverified = false;
-    return ok(undefined);
+      record.processId = started.value.processId;
+      record.stopUnverified = false;
+      return ok(undefined);
+    } finally {
+      this.starting.delete(manifest.id);
+    }
   }
 
   /**
@@ -561,6 +599,9 @@ export class CapabilitySupervisor {
 
   private onWorkerExit(record: WorkerRecord): void {
     this.unsubscribe(record);
+    // A replaced record no longer owns this id: a spawn or exit an abandoned
+    // attempt still owes must not fail the worker that took its place.
+    if (this.records.get(record.manifest.id) !== record) return;
     const state = this.lifecycle.health(record.manifest.id)?.state;
     if (state === 'STARTING') {
       // Reported through the `start` hook; counting happens there.

@@ -208,11 +208,12 @@ export class CapabilitySupervisor {
   private readonly registering = new Set<string>();
 
   /**
-   * Ids whose `start` is between the spawn request and the recorded process id.
-   * `ProcessManager.start` awaits executable resolution before it calls
-   * `onCreated`, so during that window the record still looks idle.
+   * How many `start` calls per id are between the spawn request and the recorded
+   * process id. `ProcessManager.start` awaits executable resolution before it
+   * calls `onCreated`, so during that window the record still looks idle. Counted
+   * rather than flagged, so one start leaving cannot clear another's window.
    */
-  private readonly starting = new Set<string>();
+  private readonly starting = new Map<string, number>();
 
   private readonly now: () => number;
 
@@ -239,16 +240,17 @@ export class CapabilitySupervisor {
   }
 
   /**
-   * Declares how a non-in-process capability is spawned. One spec per id at a
-   * time: registering an id again replaces the spec, but only while no worker is
-   * known to be alive, so a per-run argv (a gate check's host-owned command) does
-   * not force a fresh id per run. A live or possibly-live worker keeps its spec:
-   * `processId` is written before `start` resolves and an unrequested exit clears
-   * it; a start that is between the spawn request and that write is tracked by
-   * `starting`, because `ProcessManager.start` awaits executable resolution first.
-   * Both are re-checked after the `cwd` await, so a worker that appeared while the
-   * path was resolving keeps its record. The crash window survives a replacement:
-   * it belongs to the capability, not to one command.
+   * Declares how a non-in-process capability is spawned. One registration per id
+   * at a time: registering an id again replaces the whole record — manifest and
+   * spec — but only while nothing of the previous record can still run, so a
+   * per-run argv (a gate check's host-owned command) does not force a fresh id per
+   * run. A live or possibly-live worker keeps its record: `processId` is written
+   * before `start` resolves and an unrequested exit clears it; a start that is
+   * between the spawn request and that write is tracked by `starting`, because
+   * `ProcessManager.start` awaits executable resolution first. Both are re-checked
+   * after the `cwd` await, so a worker that appeared while the path was resolving
+   * keeps its record. The crash window survives a replacement: it belongs to the
+   * capability, not to one command.
    *
    * Async because it awaits `resolveWorkerCwd` once and stores the resolved path,
    * so no spec exists with an untrusted `cwd`.
@@ -298,14 +300,10 @@ export class CapabilitySupervisor {
       }
 
       this.records.set(manifest.id, {
-        // The crash window belongs to the capability, not to one command: a
-        // per-run argv must not launder a crash loop, and `starts` stays monotonic
-        // so a listener from an older attempt can still tell it is stale.
+        // The crash window belongs to the capability, not to one command, so a
+        // per-run argv cannot launder a crash loop.
         ...this.newRecord(manifest),
-        ...(existing === undefined ? {} : {
-          starts: existing.starts,
-          crashTimes: [...existing.crashTimes],
-        }),
+        ...(existing === undefined ? {} : { crashTimes: [...existing.crashTimes] }),
         spec: {
           executable: spec.executable,
           args: [...spec.args],
@@ -353,7 +351,7 @@ export class CapabilitySupervisor {
     };
 
     const attempt = record.starts;
-    this.starting.add(manifest.id);
+    this.starting.set(manifest.id, (this.starting.get(manifest.id) ?? 0) + 1);
     try {
       const spawn = this.processManager.start(startOptions, undefined, (process) => {
         // The pipes are the attempt's, not the id's: a late spawn from an
@@ -404,7 +402,9 @@ export class CapabilitySupervisor {
       record.stopUnverified = false;
       return ok(undefined);
     } finally {
-      this.starting.delete(manifest.id);
+      const remaining = (this.starting.get(manifest.id) ?? 1) - 1;
+      if (remaining > 0) this.starting.set(manifest.id, remaining);
+      else this.starting.delete(manifest.id);
     }
   }
 
@@ -563,11 +563,12 @@ export class CapabilitySupervisor {
   }
 
   /**
-   * Whether a re-registration may replace this record's spec without racing a
-   * worker. `processId` is written before `start` resolves and an unrequested
-   * exit clears it, so "no id and no subscription" is exactly "nothing of this
-   * record can still be running". An unverified stop and a death still being
-   * reported keep their spec for the same reason.
+   * Whether a re-registration may replace this record without racing a worker.
+   * `ProcessManager.start` calls `onCreated` — and so subscribes here — before its
+   * promise settles, so a start that timed out leaves `processId` unset while a
+   * live child is still subscribed; `subscribedProcessId` is what refuses that
+   * replacement. `processId` covers a started worker, an unverified stop keeps the
+   * id it named, and `pendingDeath` covers a death still being reported.
    */
   private idleForReplacement(record: WorkerRecord): boolean {
     return record.processId === undefined

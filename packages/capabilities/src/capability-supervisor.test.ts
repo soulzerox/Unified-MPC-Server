@@ -188,7 +188,7 @@ function build(options: {
 const spec = { executable: '/usr/bin/node', args: ['--version'], cwd: 'sub' };
 
 describe('capability supervisor registration', () => {
-  it('refuses a non-in-process manifest with no spec, and replaces a spec only while idle', async () => {
+  it('refuses a non-in-process manifest with no spec, and replaces a registration only while idle', async () => {
     const { supervisor, lifecycle, processes } = build();
     const worker = manifest();
 
@@ -266,7 +266,42 @@ describe('capability supervisor registration', () => {
     expect((await replacement).ok).toBe(false);
   });
 
-  it('does not let a spawn an abandoned attempt still owes fail the replaced record', async () => {    const { supervisor, lifecycle, processes } = build();
+  it('refuses a replacement while a spawn that timed out still owns a subscription', async () => {
+    const { supervisor, lifecycle, processes } = build();
+    await supervisor.register(manifest({ startupTimeoutMs: 5 }), spec);
+    lifecycle.set('worker', 'STARTING');
+
+    // `onCreated` arrives before the start promise settles, so a timeout leaves a
+    // live, subscribed child behind with no `processId` and no in-flight start.
+    processes.configure({
+      start: (_spec, onCreated): Promise<Result<ManagedProcess>> => new Promise((): void => {
+        onCreated?.(managedProcess('proc-stuck', 'running'));
+      }),
+    });
+    expect((await supervisor.start(manifest({ startupTimeoutMs: 5 }))).ok).toBe(false);
+
+    const refused = await supervisor.register(manifest(), { ...spec, args: ['--other'] });
+
+    expect(refused.ok).toBe(false);
+  });
+
+  it('carries the crash window across a replacement so a per-run argv cannot launder a crash loop', async () => {
+    const { supervisor, processes } = build({ maxCrashRestarts: 1 });
+    await supervisor.register(manifest(), spec);
+    processes.configure({ start: async () => err(appError('CONFLICT', 'spawn refused')) });
+    expect((await supervisor.start(manifest())).ok).toBe(false);
+
+    // Replacing the record is allowed — nothing of it can still run — but the
+    // failure still counts against the capability.
+    expect((await supervisor.register(manifest(), { ...spec, args: ['--other'] })).ok).toBe(true);
+    const refused = await supervisor.start(manifest());
+
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? '' : refused.error.message).toContain('crash loop');
+  });
+
+  it('does not let a spawn an abandoned attempt still owes fail the replaced record', async () => {
+    const { supervisor, lifecycle, processes } = build();
     await supervisor.register(manifest({ startupTimeoutMs: 5 }), spec);
 
     // A start that never settles leaves an abandoned attempt behind; the late
@@ -302,6 +337,13 @@ describe('capability supervisor registration', () => {
     const registered = await supervisor.register(manifest({ runtimeKind: 'in-process' }), spec);
 
     expect(registered.ok).toBe(false);
+  });
+
+  it('keeps the conflict for a second in-process registration', async () => {
+    const { supervisor } = build();
+
+    expect((await supervisor.register(manifest({ runtimeKind: 'in-process' }))).ok).toBe(true);
+    expect((await supervisor.register(manifest({ runtimeKind: 'in-process' }))).ok).toBe(false);
   });
 
   it('refuses a blank argv element, a relative executable and a rejected cwd', async () => {

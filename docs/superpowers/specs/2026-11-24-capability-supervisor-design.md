@@ -207,7 +207,9 @@ export interface CapabilityWorkerHealth {
 
 export class CapabilitySupervisor {
   /**
-   * Declares how a non-in-process capability is spawned. One spec per id.
+   * Declares how a non-in-process capability is spawned. Registering an id again
+   * replaces its record — manifest and spec — but only while nothing of the
+   * previous record can still run; the crash window carries over.
    * Async because it awaits `resolveWorkerCwd` once and stores the resolved
    * path, so no spec exists with an untrusted `cwd`.
    */

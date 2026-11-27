@@ -38,15 +38,21 @@ capability lane later without changing the record format.
 ## Slice 1 contract
 
 ```text
-resolveCanonicalSourceIdentity(...)  -> identity (repository, manifest, revision, commit,
-                                                   tree, ref)  [existing]
-        |
+resolveCanonicalSourceIdentity(...) -> CanonicalSourceResolution  [existing]
+        |  only `status: 'bound'` carries an identity
         v
 extractStructuralRecords({ repositoryRoot, identity, files })  [new, pure]
         |
         v
 readonly SourceStructuralRecord[]   (sorted, stable, no absolute paths)
 ```
+
+The resolver answers a tagged union, not a bare identity: `absent` (`no_repository`
+or `no_canonical_ref`) and `goal_unadmitted` are legitimate non-bound states. Slice 1
+does **not** invent an identity for those — extraction is only defined for a `bound`
+resolution, and a caller with `absent` has nothing to extract against yet, while a
+`goal_unadmitted` caller keeps indexing without a canonical claim, exactly as
+`resolveCanonicalSourceIdentity` documents.
 
 ### Record shape
 

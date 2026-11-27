@@ -539,6 +539,72 @@ describe('thai-rag capability runtime', () => {
     await runtime.value.close();
   });
 
+  it('boots with no heavy worker resident, and spawns one only for a lease', async () => {
+    const installRoot = await dir();
+    await mkdir(path.join(installRoot, 'venv'));
+    const spawns: string[] = [];
+    const processes: CapabilityProcessPort = {
+      start: async (spec, _signal, onCreated) => {
+        spawns.push(spec.executable);
+        const pipes = fakeWorkerPipes();
+        const spawned = {
+          processId: `proc-${spawns.length}`,
+          executable: spec.executable,
+          args: spec.args,
+          cwd: spec.cwd,
+          state: 'running' as const,
+          startedAt: new Date(0).toISOString(),
+          stdin: pipes.stdin,
+          stdout: pipes.stdout,
+          stderr: pipes.stderr,
+        };
+        onCreated?.(spawned);
+        return ok(spawned);
+      },
+      stop: async () => ok(undefined),
+      status: (processId) => ok({
+        processId,
+        executable: '/usr/bin/node',
+        args: [],
+        cwd: installRoot,
+        state: 'running',
+        startedAt: new Date(0).toISOString(),
+      }),
+      onExit: () => () => {},
+    };
+    const launch = {
+      executable: path.join(installRoot, 'venv', 'bin', 'python3'),
+      args: [path.join(installRoot, 'thai_rag_context_mcp.py')],
+      cwd: installRoot,
+    };
+    const runtime = await createThaiRagCapabilityRuntime({
+      installRoot,
+      workspaceRoots: async () => [],
+      launch,
+      processManager: processes,
+    });
+    expect(runtime.ok).toBe(true);
+    if (!runtime.ok) return;
+
+    // Registration is boot work; residency is not. Nothing is spawned, so a core
+    // that boots with the provider configured still pays no worker RSS.
+    expect(spawns).toHaveLength(0);
+    expect(runtime.value.registry.health(THAI_RAG_WORKER_ID)).toMatchObject({ state: 'COLD', leaseCount: 0 });
+
+    const session = await runtime.value.factory.connect({ command: launch.executable, args: [...launch.args], cwd: launch.cwd });
+    expect(spawns).toEqual([launch.executable]);
+    expect(runtime.value.registry.health(THAI_RAG_WORKER_ID)).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
+
+    await session.close();
+    for (let attempt = 0; attempt < 50 && runtime.value.registry.snapshot()[0]?.state !== 'WARM_IDLE'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The lane dropping its lease leaves a warm worker, not a cold one: that is
+    // the TTL the sweep reclaims, and it is the only path back to no residency.
+    expect(runtime.value.registry.snapshot()[0]).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
+    await runtime.value.close();
+  });
+
   it('refuses a registration whose cwd is outside the allowlist', async () => {
     const installRoot = await dir();
     const foreign = await dir();

@@ -415,6 +415,49 @@ describe('capability registry', () => {
     expect(registry.health('a')?.state).toBe('COLD');
   });
 
+  it('gives two concurrent acquirers one start and one warm window', async () => {
+    let now = 0;
+    let startCalls = 0;
+    let finishStart: (() => void) | undefined;
+    const starting = new Promise<Result<void>>((resolve) => {
+      finishStart = (): void => resolve(ok(undefined));
+    });
+    const registry = new CapabilityRegistry({
+      now: (): number => now,
+      start: (): Promise<Result<void>> => {
+        startCalls += 1;
+        return starting;
+      },
+    });
+    await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 5_000 });
+
+    // Both callers arrive while the worker is still `STARTING`: the second one
+    // joins the in-flight start instead of asking for a second worker.
+    const first = registry.acquire('a');
+    const second = registry.acquire('a');
+    expect(startCalls).toBe(1);
+    finishStart?.();
+
+    const leases = await Promise.all([first, second]);
+    if (!leases[0].ok || !leases[1].ok) throw new Error('expected both leases');
+    expect(startCalls).toBe(1);
+    expect(registry.health('a')).toMatchObject({ state: 'ACTIVE', leaseCount: 2 });
+    expect(states(registry, 'a').filter((state) => state === 'STARTING')).toHaveLength(1);
+
+    leases[0].value.release();
+    // One caller leaving must not open the warm window under the other one.
+    expect(registry.health('a')).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
+    leases[1].value.release();
+    expect(registry.health('a')).toMatchObject({ state: 'WARM_IDLE', leaseCount: 0 });
+
+    now += 1_000;
+    const third = await registry.acquire('a');
+    expect(third.ok).toBe(true);
+    expect(startCalls).toBe(1);
+    expect(registry.health('a')).toMatchObject({ state: 'ACTIVE', leaseCount: 1 });
+    if (third.ok) third.value.release();
+  });
+
   it('stops on the last release without an idle window when the TTL is zero', async () => {
     const registry = new CapabilityRegistry();
     await registry.register({ id: 'a', provides: ['t'], idleTtlMs: 0 });

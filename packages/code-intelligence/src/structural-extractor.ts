@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { TextDecoder } from 'node:util';
 
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
@@ -89,6 +90,17 @@ function refuse(file: string, reason: string): Result<never> {
   return err(appError('INVALID_INPUT', `structural extraction refused ${file}: ${reason}`));
 }
 
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+/** `undefined` when the bytes are not valid UTF-8, never a U+FFFD-substituted string. */
+function decodeUtf8(bytes: Uint8Array): string | undefined {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
 /** `a/b`, never `a\b` and never an absolute path. */
 function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join('/').replace(/^\.\//, '');
@@ -101,6 +113,15 @@ function isInside(root: string, candidate: string): boolean {
 
 function languageFor(file: string): { readonly language: StructuralLanguage; readonly kind: ts.ScriptKind } | undefined {
   return SCRIPT_KINDS[path.extname(file).toLowerCase()];
+}
+
+/**
+ * Code-unit order. `localeCompare` would make the output depend on the process
+ * locale (ICU puts `äpple` before `zebra` in `en`, after it in `sv_SE`), which
+ * contradicts the contract's "nothing reads the environment".
+ */
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function lineOf(source: ts.SourceFile, position: number): number {
@@ -186,8 +207,8 @@ function collectSymbols(source: ts.SourceFile): readonly StructuralSymbol[] {
   return symbols.sort(
     (left, right) =>
       left.startLine - right.startLine ||
-      left.container.localeCompare(right.container) ||
-      left.name.localeCompare(right.name),
+      compareText(left.container, right.container) ||
+      compareText(left.name, right.name),
   );
 }
 
@@ -220,7 +241,7 @@ function collectImports(source: ts.SourceFile): readonly StructuralImport[] {
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return imports.sort((left, right) => left.startLine - right.startLine || left.specifier.localeCompare(right.specifier));
+  return imports.sort((left, right) => left.startLine - right.startLine || compareText(left.specifier, right.specifier));
 }
 
 function parseErrorOf(source: ts.SourceFile): string | undefined {
@@ -275,7 +296,7 @@ export async function extractStructuralRecords(
   }
 
   const records: SourceStructuralRecord[] = [];
-  for (const file of [...options.files].sort((left, right) => left.localeCompare(right))) {
+  for (const file of [...options.files].sort(compareText)) {
     const requested = path.resolve(realRoot, file);
     if (!isInside(realRoot, requested)) return refuse(file, 'the path is outside the admitted repository root');
 
@@ -288,10 +309,17 @@ export async function extractStructuralRecords(
     if (stats === undefined) return refuse(file, 'the path is not readable');
     if (!stats.isFile()) return refuse(file, 'the path is not a regular file');
 
-    const contents = await readFile(realFile, 'utf8').catch(() => undefined);
-    if (contents === undefined) return refuse(file, 'the path is not readable as UTF-8');
+    const bytes = await readFile(realFile).catch(() => undefined);
+    if (bytes === undefined) return refuse(file, 'the path is not readable');
+    // `readFile(file, 'utf8')` silently substitutes U+FFFD for invalid bytes, so
+    // the fingerprint would describe lossy text and the UTF-8 refusal below could
+    // never fire. A fatal decode keeps both honest.
+    const contents = decodeUtf8(bytes);
+    if (contents === undefined) return refuse(file, 'the path is not valid UTF-8');
 
-    const record = extractStructuralRecord({ path: toPosix(path.relative(realRoot, realFile)), identity: options.identity, contents });
+    // The record names the admitted path, not its target: an in-tree symlink must
+    // stay visible under the name the caller asked for.
+    const record = extractStructuralRecord({ path: toPosix(path.relative(realRoot, requested)), identity: options.identity, contents });
     if (!record.ok) return record;
     records.push(record.value);
   }

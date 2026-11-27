@@ -137,6 +137,37 @@ describe('structural extractor', () => {
     expect(absolute).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
   });
 
+  it('sorts paths by code unit, not the process locale', async () => {
+    const base = await root();
+    await writeFile(path.join(base, 'zebra.ts'), 'export const z = 1;\n');
+    await writeFile(path.join(base, 'äpple.ts'), 'export const a = 1;\n');
+
+    const result = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['äpple.ts', 'zebra.ts'] });
+    if (!result.ok) throw new Error(result.error.message);
+
+    // `localeCompare` under `en` puts `äpple` before `zebra`; code-unit order does not.
+    expect(result.value.map((record) => record.path)).toEqual(['zebra.ts', 'äpple.ts']);
+  });
+
+  it('refuses a file that is not valid UTF-8 instead of hashing substituted text', async () => {
+    const base = await root();
+    await writeFile(path.join(base, 'broken.ts'), Buffer.from([0x65, 0x78, 0x70, 0xff, 0x0a]));
+
+    const result = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['broken.ts'] });
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('keeps the admitted path for an in-tree symlink', async () => {
+    const base = await root();
+    await writeFile(path.join(base, 'real.ts'), 'export const x = 1;\n');
+    await symlink(path.join(base, 'real.ts'), path.join(base, 'link.ts'));
+
+    const result = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['link.ts'] });
+    if (!result.ok) throw new Error(result.error.message);
+
+    expect(result.value.map((record) => record.path)).toEqual(['link.ts']);
+  });
+
   it('refuses a symlink that escapes the admitted root', async () => {
     const base = await root();
     const elsewhere = await root();

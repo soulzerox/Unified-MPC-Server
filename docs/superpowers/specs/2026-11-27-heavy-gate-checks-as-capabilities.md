@@ -29,9 +29,11 @@ matters, because the first reading produces dead data and a false claim.
 | merge (runtime decision) | `GuardedMergeService` + `evaluateMergeEvidence` | Unified, in-process, and cheap |
 | close | `apps/cli/src/commands/gate.ts` (`gate check --phase close`) | Unified, in-process, and cheap |
 
-The three CLI adapters are heavy: they build the workspace, run its test suites,
-and can take minutes. All three are spawned by the caller, so Unified owns
-neither their process nor their lifetime. Their RSS belongs to the host shell.
+The three CLI adapters split by weight. Only local verification is heavy: it
+builds the workspace, runs its test suites and can take minutes. `review:pr` and
+`merge:pr` are not — they spawn `git`/`gh` for a handful of reads and write a
+receipt. All three are spawned by the caller, so Unified owns neither their
+process nor their lifetime; the heavy one's RSS belongs to the host shell.
 
 The runtime merge verification is the one heavy gate Unified already executes
 itself, and it is worth being precise about what it does and does not own:
@@ -51,10 +53,11 @@ pressure cannot evict a running verification, nothing accounts for its RSS, and
 no capability transition or recycle count describes it. It is admitted heavy
 work, not a supervised worker.
 
-When a caller reaches the *other* three gates through Unified's shell, the same
-split applies one level up: `heavy-headroom` and the heavy-job queue decide
-whether the request starts now, and the host's shell process is what runs it, so
-Unified still owns neither its lifetime nor its memory.
+When a caller reaches `verify:local` through Unified's shell, the same split
+applies one level up: `heavy-headroom` and the heavy-job queue decide whether the
+request starts now, and the host's shell process is what runs it, so Unified still
+owns neither its lifetime nor its memory. `review:pr` and `merge:pr` are not heavy
+enough to need that either.
 
 The runtime merge decision and the close gate are capability-shaped in the sense
 that matters: they are decisions taken in-process, so there is nothing to spawn.
@@ -114,9 +117,10 @@ One supervised worker per gate run, in the path that already runs the gate:
 - the run holds a capability lease from the moment the worker starts until its
   receipt is written, so pressure cannot silently kill a live verification;
 - under `critical` pressure the phase-4 leased-worker path ends the lane that
-  holds the lease. That fails the verification **closed**: no receipt is written,
-  the durable attempt settles without a verdict, and the gate a caller needs
-  stays shut;
+  holds the lease. That fails the verification **closed**: a killed or timed-out
+  command yields no exit code, the gate's outcome is `unavailable`, and the
+  receipt the writer appends is refused by every consumer, so the gate a caller
+  needs stays shut;
 - an unverifiable termination leaves the record `termination_unverified`, exactly
   like any other supervised worker, so nobody releases a process that may still
   be alive;
@@ -125,9 +129,11 @@ One supervised worker per gate run, in the path that already runs the gate:
   two are not merged, and the durable attempt keeps owning the run lifetime so a
   client that disconnects still cannot cancel a live verification.
 
-The receipt stays the truth. A killed, crashed or unverified run produces no
-receipt, and "no receipt" already means "gate closed" in every consumer, so
-eviction can never be mistaken for approval.
+The verdict is the truth, and eviction cannot forge one. A killed or unverified
+run either writes no receipt at all or writes one whose gate outcome is
+`unavailable`: `evaluateMergeEvidence` refuses an unavailable gate, and
+`workflow-gate-core.mjs` refuses a CLI receipt that is missing or not
+`mergeReady`. Pressure can close a gate but never approve one.
 
 ## Decision 3 — admission and residency stay separate
 
@@ -152,9 +158,9 @@ manifest, no lease and no supervisor record. The box measures the second thing.
 ## What this leaves open
 
 - The three CLI adapters (`verify:local`, `review:pr`, `merge:pr`) stay
-  host-executed. Moving them under the runtime would change how the reference
-  workflow runs, which is a larger change than making the existing runtime path a
-  capability.
+  host-executed, and only `verify:local` is heavy enough to be worth a worker.
+  Moving it under the runtime would change how the reference workflow runs, which
+  is a larger change than making the existing runtime path a capability.
 - Which profiles count as heavy is a per-project answer: the runtime gate argv is
   host-owned per repository policy, and a docs-only profile is not heavy at all.
   The capability should take the gate's own argv, never a hard-coded command.

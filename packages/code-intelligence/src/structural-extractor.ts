@@ -17,8 +17,9 @@ import ts from 'typescript';
  *
  * Three properties carry the slice:
  *
- * - a record carries the identity it was extracted under, so a Goal overlay's
- *   file can never be served as the base ref's file;
+ * - a record carries the identity it was extracted under and a fingerprint of the
+ *   bytes read, so what it claims about a tree is always comparable; the extractor
+ *   cannot tell whether the bytes handed to it belong to that identity;
  * - a file that fails to parse is a record with `parseError`, never a dropped
  *   file, because "no symbols" and "not read" must stay distinguishable;
  * - the same tree and identity produce byte-identical output, so downstream

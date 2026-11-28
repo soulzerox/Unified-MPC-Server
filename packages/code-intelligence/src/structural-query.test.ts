@@ -64,7 +64,13 @@ describe('structural query', () => {
 
     const prefixed = findSymbols(records, { pathPrefix: 'src/', limit: 10 });
     if (!prefixed.ok) throw new Error(prefixed.error.message);
+    // `src/c.ts` parses to no symbols, so a prefix that matches only a broken file
+    // is an empty page, not an error.
     expect(prefixed.value.items).toEqual([]);
+
+    const matchedPrefix = findSymbols(records, { pathPrefix: 'a', limit: 10 });
+    if (!matchedPrefix.ok) throw new Error(matchedPrefix.error.message);
+    expect(matchedPrefix.value.items.map((hit) => hit.path)).toEqual(['a.ts', 'a.ts']);
 
     const kind = findSymbols(records, { kind: 'not-a-kind' as never, limit: 10 });
     expect(kind).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
@@ -106,6 +112,15 @@ describe('structural query', () => {
     if (!summary.ok) throw new Error(summary.error.message);
     expect(summary.value).toMatchObject({ fileCount: 3, symbolCount: 3, unparsedCount: 1, truncated: false });
     expect(summary.value.languages).toEqual([{ language: 'typescript', fileCount: 3, symbolCount: 3 }]);
+
+    // The bounded part of the summary is its language breakdown, so a limit of 1
+    // over two languages must say so instead of reading as the complete list.
+    const twoLanguages = [...records, record({ path: 'd.js', language: 'javascript', symbols: [symbol()] })];
+    const bounded = repoSummary(twoLanguages, { limit: 1 });
+    if (!bounded.ok) throw new Error(bounded.error.message);
+    expect(bounded.value.truncated).toBe(true);
+    expect(bounded.value.languages).toHaveLength(1);
+    expect(bounded.value.fileCount).toBe(4);
   });
 
   it('returns imports in line order, respects the limit, and keeps them attached to the file', () => {

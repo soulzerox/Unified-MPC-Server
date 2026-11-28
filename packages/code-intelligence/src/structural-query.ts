@@ -111,7 +111,7 @@ function validateLimit(limit: unknown): Result<number> {
 }
 
 /** Records arrive sorted by the store; an array a caller built may not be. */
-function byPath(records: readonly SourceRecord[]): readonly SourceRecord[] {
+function byPath(records: readonly StructuralRecordView[]): readonly StructuralRecordView[] {
   return [...records].sort((left, right) => compareCodeUnit(left.path, right.path));
 }
 
@@ -121,10 +121,13 @@ function compareCodeUnit(left: string, right: string): number {
   return left < right ? -1 : 1;
 }
 
-/** The subset every query reads; a stored record satisfies it. */
-type SourceRecord = Pick<SourceStructuralRecord, 'path' | 'language' | 'symbols' | 'imports' | 'parseError'>;
+/** The subset every query reads; a stored record satisfies it. Exported so a caller can name it. */
+export type StructuralRecordView = Pick<
+  SourceStructuralRecord,
+  'path' | 'language' | 'symbols' | 'imports' | 'parseError'
+>;
 
-function hitsOf(records: readonly SourceRecord[], matches: (record: SourceRecord) => boolean): SymbolHit[] {
+function hitsOf(records: readonly StructuralRecordView[], matches: (record: StructuralRecordView) => boolean): SymbolHit[] {
   const hits: SymbolHit[] = [];
   for (const record of byPath(records)) {
     if (!matches(record)) continue;
@@ -151,7 +154,7 @@ function paginate<T>(items: readonly T[], limit: number): QueryPage<T> {
 }
 
 /** Symbols whose name, kind, exported flag and path match every supplied filter. */
-export function findSymbols(records: readonly SourceRecord[], query: SymbolQuery): Result<QueryPage<SymbolHit>> {
+export function findSymbols(records: readonly StructuralRecordView[], query: SymbolQuery): Result<QueryPage<SymbolHit>> {
   const limit = validateLimit(query.limit);
   if (!limit.ok) return limit;
   if (query.kind !== undefined && !SYMBOL_KINDS.has(query.kind)) {
@@ -170,7 +173,7 @@ export function findSymbols(records: readonly SourceRecord[], query: SymbolQuery
 
 /** Exact, case-sensitive definitions. A prefix or a substring is not a definition. */
 export function definitionsOf(
-  records: readonly SourceRecord[],
+  records: readonly StructuralRecordView[],
   query: { readonly name: string; readonly limit: number },
 ): Result<QueryPage<SymbolHit>> {
   if (typeof query.name !== 'string' || query.name.length === 0) {
@@ -180,7 +183,7 @@ export function definitionsOf(
 }
 
 /** One file's symbols and imports, or `undefined` when the records do not carry it. */
-export function outlineOf(records: readonly SourceRecord[], query: OutlineQuery): Result<FileOutline | undefined> {
+export function outlineOf(records: readonly StructuralRecordView[], query: OutlineQuery): Result<FileOutline | undefined> {
   if (typeof query.path !== 'string' || query.path.length === 0) {
     return invalid('a file outline needs a path');
   }
@@ -210,7 +213,7 @@ export function outlineOf(records: readonly SourceRecord[], query: OutlineQuery)
 
 /** One file's imports in line order. */
 export function importsOf(
-  records: readonly SourceRecord[],
+  records: readonly StructuralRecordView[],
   query: PathQuery,
 ): Result<QueryPage<StructuralImport> | undefined> {
   const limit = validateLimit(query.limit);
@@ -228,7 +231,7 @@ export function importsOf(
  * and claiming a resolution needs the provenance levels #131 names. Every hit is
  * therefore `heuristic`, and the caller must treat it as a lead, not a proof.
  */
-export function dependentsOf(records: readonly SourceRecord[], query: PathQuery): Result<QueryPage<DependentHit>> {
+export function dependentsOf(records: readonly StructuralRecordView[], query: PathQuery): Result<QueryPage<DependentHit>> {
   const limit = validateLimit(query.limit);
   if (!limit.ok) return limit;
   if (typeof query.path !== 'string' || query.path.length === 0) {
@@ -247,7 +250,7 @@ export function dependentsOf(records: readonly SourceRecord[], query: PathQuery)
 }
 
 /** Counts per language, with unparsed files kept distinct from files without symbols. */
-export function repoSummary(records: readonly SourceRecord[], query: SummaryQuery): Result<RepoSummary> {
+export function repoSummary(records: readonly StructuralRecordView[], query: SummaryQuery): Result<RepoSummary> {
   const limit = validateLimit(query.limit);
   if (!limit.ok) return limit;
 

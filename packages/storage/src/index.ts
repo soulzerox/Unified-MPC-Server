@@ -46,3 +46,5 @@ export * from './migrations/merge-verification-attempt-base-branch-migration.js'
 export * from './migrations/merge-verification-attempt-queue-migration.js';
 export * from './merge-reconciliation-repository.js';
 export * from './migrations/merge-reconciliation-migration.js';
+export * from './structural-record-repository.js';
+export * from './migrations/structural-record-migration.js';

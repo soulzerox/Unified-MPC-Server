@@ -58,6 +58,7 @@ import { WORKSPACE_JOURNAL_GOAL_CORRELATION_MIGRATION_SQL } from './migrations/w
 import { DEFERRED_HANDLE_MIGRATION_SQL } from './migrations/deferred-handle-migration.js';
 import { DEFERRED_HANDLE_PROVIDER_MIGRATION_SQL } from './migrations/deferred-handle-provider-migration.js';
 import { WORKSPACE_JOURNAL_MIGRATION_SQL } from './migrations/workspace-journal-migration.js';
+import { STRUCTURAL_RECORD_MIGRATION_SQL } from './migrations/structural-record-migration.js';
 
 export type SqliteCompactionResult =
   | {
@@ -120,7 +121,7 @@ export interface Migration {
  * than duplicating a migration literal. Adding a newer migration without
  * advancing this value intentionally keeps those tests red.
  */
-export const CURRENT_SCHEMA_MIGRATION_ID = '050_journal_goal_correlation' as const;
+export const CURRENT_SCHEMA_MIGRATION_ID = '051_structural_records' as const;
 
 export const INITIAL_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -212,6 +213,7 @@ export class SqliteDatabase {
       reclaimFreePages: true,
     });
     this.applyMigration({ id: '050_journal_goal_correlation', sql: WORKSPACE_JOURNAL_GOAL_CORRELATION_MIGRATION_SQL });
+    this.applyMigration({ id: '051_structural_records', sql: STRUCTURAL_RECORD_MIGRATION_SQL });
   }
 
   private ensureDirectory(): void {

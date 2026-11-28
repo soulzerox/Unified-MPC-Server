@@ -317,6 +317,9 @@ importers:
       '@unified-mpc/audit':
         specifier: workspace:*
         version: link:../audit
+      '@unified-mpc/code-intelligence':
+        specifier: workspace:*
+        version: link:../code-intelligence
       '@unified-mpc/domain':
         specifier: workspace:*
         version: link:../domain

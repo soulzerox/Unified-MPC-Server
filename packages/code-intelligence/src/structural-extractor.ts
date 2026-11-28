@@ -113,9 +113,20 @@ function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join('/').replace(/^\.\//, '');
 }
 
-function isInside(root: string, candidate: string): boolean {
+/**
+ * Why `candidate` is not a file under `root`, or `undefined` when it is.
+ *
+ * Compared by path *segment*: `relative === '..'` and `..${sep}` escape, but a
+ * legal `..foo.ts` merely starts with two dots. The root itself is not a file in
+ * the root, so it gets its own reason instead of "outside the root".
+ */
+function containmentFailure(root: string, candidate: string): string | undefined {
   const relative = path.relative(root, candidate);
-  return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
+  if (relative.length === 0) return 'the path is the admitted repository root, not a file in it';
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+    return 'the path is outside the admitted repository root';
+  }
+  return undefined;
 }
 
 function languageFor(file: string): { readonly language: StructuralLanguage; readonly kind: ts.ScriptKind } | undefined {
@@ -308,8 +319,13 @@ export async function extractStructuralRecords(
   // file, so it contributes one record.
   const admitted = new Map<string, string>();
   for (const file of options.files) {
+    // `path.resolve(root, absolute)` would silently accept an absolute path that
+    // points inside the root, which contradicts the documented contract, so an
+    // absolute input is refused before resolution.
+    if (path.isAbsolute(file)) return refuse(file, 'the path is absolute; only repo-relative paths are admitted');
     const requested = path.resolve(realRoot, file);
-    if (!isInside(realRoot, requested)) return refuse(file, 'the path is outside the admitted repository root');
+    const notInside = containmentFailure(realRoot, requested);
+    if (notInside !== undefined) return refuse(file, notInside);
     admitted.set(toPosix(path.relative(realRoot, requested)), requested);
   }
 
@@ -317,7 +333,8 @@ export async function extractStructuralRecords(
   for (const [admittedPath, requested] of [...admitted].sort((left, right) => compareText(left[0], right[0]))) {
     const realFile = await realpath(requested).catch(() => undefined);
     if (realFile === undefined) return refuse(admittedPath, 'the path does not exist');
-    if (!isInside(realRoot, realFile)) return refuse(admittedPath, 'the path resolves outside the admitted repository root');
+    const notInside = containmentFailure(realRoot, realFile);
+    if (notInside !== undefined) return refuse(admittedPath, 'the path resolves outside the admitted repository root');
     // `realpath` resolves `..` that a symlink introduced, so the check above must
     // run again on the resolved path — a link inside the tree can still point out.
     const stats = await stat(realFile).catch(() => undefined);

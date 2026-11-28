@@ -138,6 +138,51 @@ describe('structural extractor', () => {
     expect(absolute).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
   });
 
+  it('refuses an absolute path even when it resolves inside the admitted root', async () => {
+    const base = await root();
+    await writeFile(path.join(base, 'a.ts'), 'export const a = 1;\n');
+
+    const absolute = await extractStructuralRecords({
+      repositoryRoot: base,
+      identity,
+      files: [path.join(base, 'a.ts')],
+    });
+    expect(absolute).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    if (absolute.ok) throw new Error('expected a refusal');
+    expect(absolute.error.message).toMatch(/absolute/);
+  });
+
+  it('admits a legal file whose name starts with two dots, and refuses the root itself', async () => {
+    const base = await root();
+    await writeFile(path.join(base, '..foo.ts'), 'export const foo = 1;\n');
+
+    const dotted = await extractStructuralRecords({ repositoryRoot: base, identity, files: ['..foo.ts'] });
+    if (!dotted.ok) throw new Error(dotted.error.message);
+    expect(dotted.value.map((record) => record.path)).toEqual(['..foo.ts']);
+
+    const itself = await extractStructuralRecords({ repositoryRoot: base, identity, files: [''] });
+    expect(itself).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    if (itself.ok) throw new Error('expected a refusal');
+    expect(itself.error.message).toMatch(/root/);
+  });
+
+  it('admits an in-root file when the repository root is reached through a symlink', async () => {
+    const base = await root();
+    const linked = `${base}-link`;
+    await symlink(base, linked);
+    created.push(linked);
+    await writeFile(path.join(base, 'a.ts'), 'export const a = 1;\n');
+    const elsewhere = await root();
+    await writeFile(path.join(elsewhere, 'outside.ts'), 'export const x = 1;\n');
+
+    const inRoot = await extractStructuralRecords({ repositoryRoot: linked, identity, files: ['a.ts'] });
+    if (!inRoot.ok) throw new Error(inRoot.error.message);
+    expect(inRoot.value.map((record) => record.path)).toEqual(['a.ts']);
+
+    const escaping = await extractStructuralRecords({ repositoryRoot: linked, identity, files: ['../outside.ts'] });
+    expect(escaping).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
   it('orders records by the path they carry, not by the raw input', async () => {
     const base = await root();
     await writeFile(path.join(base, 'a.ts'), 'export const a = 1;\n');

@@ -29,11 +29,16 @@ anything:
 |---|---|
 | `git status --porcelain` is empty | uncommitted bytes cannot be attributed to a commit |
 | `git rev-parse HEAD` equals `identity.commit_sha` | a clean checkout of another commit is the wrong tree |
-| `git rev-parse HEAD^{tree}` equals `identity.tree_oid` | the generation id derives from commit and tree, so both must match |
 | `repositoryRoot` is the worktree toplevel | a subdirectory's relative paths would read as repository paths |
 
-Only when all four hold do the index, the worktree and the identity agree. Commit, then
+Only when all three hold do the index, the worktree and the identity agree. Commit, then
 index.
+
+`identity.tree_oid` is deliberately not verified here. It is Unified's content-tree hash
+over the canonical manifest entries (`computeTreeOid`), not Git's tree object, so checking
+it would mean re-hashing every file in the workspace — work the canonical resolver already
+did when it advanced the revision. The commit check pins the content, and the tree claim
+stays the resolver's to keep.
 
 ## Contract
 
@@ -45,8 +50,8 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 ```
 
 - only the eight `STRUCTURAL_SOURCE_EXTENSION` extensions survive, case-insensitively;
-  that pattern is one module shared with the extractor's admission gate and the specifier
-  heuristic;
+  that pattern is one module shared by discovery and the specifier heuristic, while the
+  extractor's language table remains the extraction gate;
 - duplicates collapse and the result is code-unit sorted, the order every query
   documents;
 - a producer that is not a Git worktree is `INVALID_INPUT` from Git with its message,

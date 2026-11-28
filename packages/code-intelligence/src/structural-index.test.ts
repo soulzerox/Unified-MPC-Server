@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +8,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
-import { appError, ok } from '@unified-mpc/domain';
+import { appError, computeTreeOid, ok } from '@unified-mpc/domain';
 
 import { buildStructuralGeneration, discoverStructuralFiles, indexStructuralWorkspace } from './structural-index.js';
 import type {
@@ -53,8 +54,13 @@ async function committedRepo(
   await run('git', ['add', '.'], { cwd: root });
   await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', '-c', 'commit.gpgsign=false', 'commit', '-qnm', 'init'], { cwd: root });
   const { stdout: head } = await run('git', ['rev-parse', 'HEAD'], { cwd: root });
-  const { stdout: tree } = await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: root });
-  return { root, identity: { ...identity, commit_sha: head.trim(), tree_oid: tree.trim() } };
+  const entries = await Promise.all(
+    Object.entries(files).map(async ([path, contents]) => ({
+      path,
+      contentHash: createHash('sha256').update(contents, 'utf8').digest('hex'),
+    })),
+  );
+  return { root, identity: { ...identity, commit_sha: head.trim(), tree_oid: computeTreeOid(entries) } };
 }
 
 function fakeStore(): { store: StructuralRecordStore; writes: WriteStructuralGenerationInput[] } {
@@ -204,12 +210,7 @@ describe('structural file discovery', () => {
       store,
       identity,
       repositoryRoot: root,
-      readWorktree: async () => ok({
-        head: identity.commit_sha,
-        tree: identity.tree_oid,
-        toplevel: root,
-        dirty: true,
-      }),
+      readWorktree: async () => ok({ head: identity.commit_sha, toplevel: root, dirty: true }),
     });
     expect(dirty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(writes).toHaveLength(0);
@@ -233,19 +234,6 @@ describe('structural file discovery', () => {
     const wrong = await indexStructuralWorkspace({
       store,
       identity: { ...head, commit_sha: 'f'.repeat(40) },
-      repositoryRoot: root,
-    });
-    expect(wrong).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
-    expect(writes).toHaveLength(0);
-  });
-
-  it('refuses a tree that is not the identity tree, because the generation id derives from it', async () => {
-    const { root, identity: head } = await committedRepo({ 'a.ts': 'export const a = 1;\n' });
-    const { store, writes } = fakeStore();
-
-    const wrong = await indexStructuralWorkspace({
-      store,
-      identity: { ...head, tree_oid: 'f'.repeat(40) },
       repositoryRoot: root,
     });
     expect(wrong).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });

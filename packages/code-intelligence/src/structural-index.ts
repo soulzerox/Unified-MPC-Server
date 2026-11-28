@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
 
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
@@ -103,33 +104,57 @@ export async function discoverStructuralFiles(
   return ok([...sources].sort());
 }
 
-/** `files` is discovery's output here, so it is omitted from the input rather than ignored. */
-/** Reports the worktree's uncommitted changes; injected so the gate is testable. */
-export type StructuralWorktreeStatus = (repositoryRoot: string) => Promise<Result<string>>;
+/** What the checkout says about itself: the commit it is on, its root, and whether it is clean. */
+export interface StructuralWorktreeState {
+  readonly head: string;
+  readonly toplevel: string;
+  readonly dirty: boolean;
+}
 
+/** Injected so the identity gate is testable without spawning Git. */
+export type StructuralWorktreeReader = (repositoryRoot: string) => Promise<Result<StructuralWorktreeState>>;
+
+/** `files` is discovery's output here, so it is omitted from the input rather than ignored. */
 export interface IndexStructuralWorkspaceInput extends Omit<BuildStructuralGenerationInput, 'files'> {
   readonly listFiles?: StructuralFileLister;
-  /** Defaults to `git status --porcelain`. */
-  readonly readStatus?: StructuralWorktreeStatus;
+  /** Defaults to `git rev-parse HEAD`, `git rev-parse --show-toplevel`, `git status --porcelain`. */
+  readonly readWorktree?: StructuralWorktreeReader;
 }
 
 /**
  * Discovery plus extraction for a whole checkout: the path a caller usually wants.
  *
- * A dirty worktree is refused. The index lists files and the extractor fingerprints the
- * bytes on disk, so uncommitted content written under a commit identity would be
- * evidence for a tree that never existed — and an immutable generation cannot be
- * corrected later. Index a clean checkout, or commit first.
+ * Three refusals make the stored generation attributable to its identity:
+ *
+ * - the worktree must be clean, because extraction fingerprints bytes on disk and
+ *   uncommitted content would be evidence for a tree that never existed;
+ * - `HEAD` must be the identity's commit, because a clean checkout of a different
+ *   commit would store those bytes under the wrong immutable id;
+ * - the root must be the worktree toplevel, because indexing a subdirectory would
+ *   record subdirectory-relative paths as if they were repository-relative.
  */
 export async function indexStructuralWorkspace(
   input: IndexStructuralWorkspaceInput,
 ): Promise<Result<StructuralGeneration>> {
-  const status = await (input.readStatus ?? gitWorktreeStatus)(input.repositoryRoot);
-  if (!status.ok) return status;
-  if (status.value.trim().length > 0) {
+  const worktree = await (input.readWorktree ?? gitWorktreeState)(input.repositoryRoot);
+  if (!worktree.ok) return worktree;
+  if (worktree.value.dirty) {
     return err(appError(
       'INVALID_INPUT',
       'structural indexing needs a clean worktree: uncommitted changes cannot be attributed to the identity',
+    ));
+  }
+  if (worktree.value.head !== input.identity.commit_sha) {
+    return err(appError(
+      'INVALID_INPUT',
+      `structural indexing refused: worktree HEAD ${worktree.value.head} is not the identity commit ${input.identity.commit_sha}`,
+    ));
+  }
+  const root = await realpath(input.repositoryRoot).catch(() => undefined);
+  if (root === undefined || root !== worktree.value.toplevel) {
+    return err(appError(
+      'INVALID_INPUT',
+      'structural indexing needs the worktree toplevel as repositoryRoot',
     ));
   }
 
@@ -144,18 +169,29 @@ export async function indexStructuralWorkspace(
   return buildStructuralGeneration({ ...input, files: discovered.value });
 }
 
-function gitWorktreeStatus(repositoryRoot: string): Promise<Result<string>> {
+async function gitWorktreeState(repositoryRoot: string): Promise<Result<StructuralWorktreeState>> {
+  const head = await gitText(repositoryRoot, ['rev-parse', 'HEAD']);
+  if (!head.ok) return head;
+  const toplevel = await gitText(repositoryRoot, ['rev-parse', '--show-toplevel']);
+  if (!toplevel.ok) return toplevel;
+  const status = await gitText(repositoryRoot, ['status', '--porcelain', '--ignore-submodules']);
+  if (!status.ok) return status;
+  const resolvedRoot = await realpath(toplevel.value).catch(() => toplevel.value);
+  return ok({ head: head.value, toplevel: resolvedRoot, dirty: status.value.trim().length > 0 });
+}
+
+function gitText(repositoryRoot: string, args: readonly string[]): Promise<Result<string>> {
   return new Promise((resolve) => {
     execFile(
       'git',
-      ['status', '--porcelain', '--ignore-submodules'],
-      { cwd: repositoryRoot, maxBuffer: 8 * 1024 * 1024 },
+      [...args],
+      { cwd: repositoryRoot, maxBuffer: 8 * 1024 * 1024, timeout: 30_000 },
       (error, stdout) => {
         if (error !== null) {
           resolve(err(appError('INVALID_INPUT', `structural indexing refused ${repositoryRoot}: ${error.message}`)));
           return;
         }
-        resolve(ok(stdout));
+        resolve(ok(stdout.trim()));
       },
     );
   });
@@ -166,7 +202,7 @@ function gitListedFiles(repositoryRoot: string): Promise<Result<readonly string[
     execFile(
       'git',
       ['ls-files', '-z', '--cached'],
-      { cwd: repositoryRoot, maxBuffer: 8 * 1024 * 1024 },
+      { cwd: repositoryRoot, maxBuffer: 8 * 1024 * 1024, timeout: 30_000 },
       (error, stdout) => {
         if (error !== null) {
           resolve(err(appError('INVALID_INPUT', `structural discovery refused ${repositoryRoot}: ${error.message}`)));

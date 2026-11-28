@@ -22,9 +22,16 @@ it — and the store cannot correct an immutable generation.
 
 The index alone is not enough to make that true, because extraction fingerprints the bytes
 on disk: a staged edit is in the index and not in the commit, and the byte could differ
-from both. So `indexStructuralWorkspace` refuses a worktree with uncommitted changes
-(`git status --porcelain`) before it discovers anything. On a clean checkout the index, the
-worktree and the identity agree, and only then is a generation attributable. Commit, then
+from both. So `indexStructuralWorkspace` checks the checkout itself before it discovers
+anything:
+
+| check | refusal |
+|---|---|
+| `git status --porcelain` is empty | uncommitted bytes cannot be attributed to a commit |
+| `git rev-parse HEAD` equals `identity.commit_sha` | a clean checkout of another commit is the wrong tree |
+| `repositoryRoot` is the worktree toplevel | a subdirectory's relative paths would read as repository paths |
+
+Only when all three hold do the index, the worktree and the identity agree. Commit, then
 index.
 
 ## Contract
@@ -47,16 +54,13 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
   structural evidence, and that is an answer. `indexStructuralWorkspace` is the one that
   refuses an empty generation, because storing it would be immutable evidence that the
   tree has no code;
-- `indexStructuralWorkspace` refuses a dirty worktree: the identity names a commit, and
-  uncommitted bytes cannot be attributed to it;
+- `indexStructuralWorkspace` refuses a dirty worktree, a `HEAD` that is not the
+  identity's commit, and a root that is not the worktree toplevel;
 - `listFiles` is injectable so the filter and order are testable without spawning Git.
 
 ## Non-goals and known edges
 
 - **Submodules and sparse checkouts** are Git's answer, taken as given.
-- **A tracked file missing from the worktree** is still listed, and extraction refuses
-  it. That is a stale checkout, and refusing beats silently dropping evidence for a
-  file the repository says exists.
 - **Uncommitted work is refused, not silently skipped.** Indexing needs a clean
   checkout; commit first.
 - **No parallelism or progress.** Extraction is still one sequential call; the worker

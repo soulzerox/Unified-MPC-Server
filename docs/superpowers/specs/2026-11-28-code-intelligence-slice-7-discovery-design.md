@@ -29,9 +29,10 @@ anything:
 |---|---|
 | `git status --porcelain` is empty | uncommitted bytes cannot be attributed to a commit |
 | `git rev-parse HEAD` equals `identity.commit_sha` | a clean checkout of another commit is the wrong tree |
+| `git rev-parse HEAD^{tree}` equals `identity.tree_oid` | the generation id derives from commit and tree, so both must match |
 | `repositoryRoot` is the worktree toplevel | a subdirectory's relative paths would read as repository paths |
 
-Only when all three hold do the index, the worktree and the identity agree. Commit, then
+Only when all four hold do the index, the worktree and the identity agree. Commit, then
 index.
 
 ## Contract
@@ -60,7 +61,7 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 
 ## Non-goals and known edges
 
-- **Submodules and sparse checkouts** are Git's answer, taken as given.
+- **Submodules** are Git's answer, taken as given.
 - **Uncommitted work is refused, not silently skipped.** Indexing needs a clean
   checkout; commit first.
 - **`assume-unchanged` and `skip-worktree` are invisible to `git status`.** A file

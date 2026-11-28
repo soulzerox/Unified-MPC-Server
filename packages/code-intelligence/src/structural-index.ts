@@ -109,6 +109,8 @@ export async function discoverStructuralFiles(
 /** What the checkout says about itself: the commit it is on, its root, and whether it is clean. */
 export interface StructuralWorktreeState {
   readonly head: string;
+  /** `HEAD^{tree}`, the other half of the identity's claim about this tree. */
+  readonly tree: string;
   readonly toplevel: string;
   readonly dirty: boolean;
 }
@@ -119,7 +121,7 @@ export type StructuralWorktreeReader = (repositoryRoot: string) => Promise<Resul
 /** `files` is discovery's output here, so it is omitted from the input rather than ignored. */
 export interface IndexStructuralWorkspaceInput extends Omit<BuildStructuralGenerationInput, 'files'> {
   readonly listFiles?: StructuralFileLister;
-  /** Defaults to `git rev-parse HEAD`, `git rev-parse --show-toplevel`, `git status --porcelain`. */
+  /** Defaults to `git rev-parse HEAD`, `HEAD^{tree}`, `--show-toplevel`, `git status --porcelain`. */
   readonly readWorktree?: StructuralWorktreeReader;
 }
 
@@ -130,8 +132,9 @@ export interface IndexStructuralWorkspaceInput extends Omit<BuildStructuralGener
  *
  * - the worktree must be clean, because extraction fingerprints bytes on disk and
  *   uncommitted content would be evidence for a tree that never existed;
- * - `HEAD` must be the identity's commit, because a clean checkout of a different
- *   commit would store those bytes under the wrong immutable id;
+ * - `HEAD` must be the identity's commit and its tree must be the identity's tree,
+ *   because a clean checkout of a different tree would store those bytes under the
+ *   wrong immutable id — and the generation id is derived from both fields;
  * - the root must be the worktree toplevel, because indexing a subdirectory would
  *   record subdirectory-relative paths as if they were repository-relative.
  */
@@ -150,6 +153,12 @@ export async function indexStructuralWorkspace(
     return err(appError(
       'INVALID_INPUT',
       `structural indexing refused: worktree HEAD ${worktree.value.head} is not the identity commit ${input.identity.commit_sha}`,
+    ));
+  }
+  if (worktree.value.tree !== input.identity.tree_oid) {
+    return err(appError(
+      'INVALID_INPUT',
+      `structural indexing refused: worktree tree ${worktree.value.tree} is not the identity tree ${input.identity.tree_oid}`,
     ));
   }
   const root = await realpath(input.repositoryRoot).catch(() => undefined);
@@ -174,12 +183,14 @@ export async function indexStructuralWorkspace(
 async function gitWorktreeState(repositoryRoot: string): Promise<Result<StructuralWorktreeState>> {
   const head = await gitText(repositoryRoot, ['rev-parse', 'HEAD']);
   if (!head.ok) return head;
+  const tree = await gitText(repositoryRoot, ['rev-parse', 'HEAD^{tree}']);
+  if (!tree.ok) return tree;
   const toplevel = await gitText(repositoryRoot, ['rev-parse', '--show-toplevel']);
   if (!toplevel.ok) return toplevel;
   const status = await gitText(repositoryRoot, ['status', '--porcelain', '--ignore-submodules']);
   if (!status.ok) return status;
   const resolvedRoot = await realpath(toplevel.value).catch(() => toplevel.value);
-  return ok({ head: head.value, toplevel: resolvedRoot, dirty: status.value.trim().length > 0 });
+  return ok({ head: head.value, tree: tree.value, toplevel: resolvedRoot, dirty: status.value.trim().length > 0 });
 }
 
 function gitText(repositoryRoot: string, args: readonly string[]): Promise<Result<string>> {

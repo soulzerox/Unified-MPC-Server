@@ -51,9 +51,10 @@ async function committedRepo(
   const root = await repo(files);
   await run('git', ['init', '-q'], { cwd: root });
   await run('git', ['add', '.'], { cwd: root });
-  await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'init'], { cwd: root });
-  const { stdout } = await run('git', ['rev-parse', 'HEAD'], { cwd: root });
-  return { root, identity: { ...identity, commit_sha: stdout.trim() } };
+  await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', '-c', 'commit.gpgsign=false', 'commit', '-qnm', 'init'], { cwd: root });
+  const { stdout: head } = await run('git', ['rev-parse', 'HEAD'], { cwd: root });
+  const { stdout: tree } = await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: root });
+  return { root, identity: { ...identity, commit_sha: head.trim(), tree_oid: tree.trim() } };
 }
 
 function fakeStore(): { store: StructuralRecordStore; writes: WriteStructuralGenerationInput[] } {
@@ -203,7 +204,12 @@ describe('structural file discovery', () => {
       store,
       identity,
       repositoryRoot: root,
-      readWorktree: async () => ok({ head: identity.commit_sha, toplevel: root, dirty: true }),
+      readWorktree: async () => ok({
+        head: identity.commit_sha,
+        tree: identity.tree_oid,
+        toplevel: root,
+        dirty: true,
+      }),
     });
     expect(dirty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(writes).toHaveLength(0);
@@ -227,6 +233,19 @@ describe('structural file discovery', () => {
     const wrong = await indexStructuralWorkspace({
       store,
       identity: { ...head, commit_sha: 'f'.repeat(40) },
+      repositoryRoot: root,
+    });
+    expect(wrong).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(writes).toHaveLength(0);
+  });
+
+  it('refuses a tree that is not the identity tree, because the generation id derives from it', async () => {
+    const { root, identity: head } = await committedRepo({ 'a.ts': 'export const a = 1;\n' });
+    const { store, writes } = fakeStore();
+
+    const wrong = await indexStructuralWorkspace({
+      store,
+      identity: { ...head, tree_oid: 'f'.repeat(40) },
       repositoryRoot: root,
     });
     expect(wrong).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });

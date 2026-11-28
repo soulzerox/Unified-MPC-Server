@@ -149,7 +149,8 @@ describe('structural file discovery', () => {
   it('refuses a directory git cannot read', async () => {
     // A path that does not exist makes Git fail before it can look at any parent, so
     // the refusal does not depend on whether the temp directory sits inside a repo.
-    const missing = join(tmpdir(), 'structural-discovery-missing-dir');
+    const missing = await mkdtemp(join(tmpdir(), 'structural-discovery-missing-'));
+    await rm(missing, { recursive: true, force: true });
     const discovered = await discoverStructuralFiles({ repositoryRoot: missing });
     expect(discovered).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
   });
@@ -158,6 +159,7 @@ describe('structural file discovery', () => {
     const root = await repo({ 'notes.md': '# notes\n' });
     await run('git', ['init', '-q'], { cwd: root });
     await run('git', ['add', 'notes.md'], { cwd: root });
+    await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'init'], { cwd: root });
     const { store, writes } = fakeStore();
 
     const empty = await indexStructuralWorkspace({ store, identity, repositoryRoot: root });
@@ -173,14 +175,28 @@ describe('structural file discovery', () => {
     expect(writes).toHaveLength(0);
   });
 
-  it('indexes a whole checkout in one call', async () => {
+  it('indexes a clean checkout in one call', async () => {
     const root = await repo({ 'src/a.ts': 'export const a = 1;\n', 'src/b.ts': 'export const b = 2;\n' });
     await run('git', ['init', '-q'], { cwd: root });
     await run('git', ['add', 'src'], { cwd: root });
+    await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'init'], { cwd: root });
     const { store, writes } = fakeStore();
 
     const built = await indexStructuralWorkspace({ store, identity, repositoryRoot: root });
     if (!built.ok) throw new Error(built.error.message);
     expect(writes[0]?.records.map((record) => record.path)).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  it('refuses a worktree whose content is not the identity it would be stored under', async () => {
+    const root = await repo({ 'a.ts': 'export const a = 1;\n', 'b.ts': 'export const b = 2;\n' });
+    await run('git', ['init', '-q'], { cwd: root });
+    await run('git', ['add', 'a.ts'], { cwd: root });
+    await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'init'], { cwd: root });
+    await run('git', ['add', 'b.ts'], { cwd: root });
+    const { store, writes } = fakeStore();
+
+    const dirty = await indexStructuralWorkspace({ store, identity, repositoryRoot: root });
+    expect(dirty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(writes).toHaveLength(0);
   });
 });

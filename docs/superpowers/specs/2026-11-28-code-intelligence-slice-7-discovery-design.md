@@ -18,10 +18,14 @@ git ls-files -z --cached
 
 Only files in the index are evidence. The canonical identity is a commit and a tree, so a
 record written for an untracked file would be attributed to a commit that never carried
-it — and the store cannot correct an immutable generation. An uncommitted edit is
-therefore not evidence until it is committed; commit, then index. The index is also
-deterministic per commit, where `--others` would have pulled in per-machine
-`core.excludesFile` and `.git/info/exclude` variation.
+it — and the store cannot correct an immutable generation.
+
+The index alone is not enough to make that true, because extraction fingerprints the bytes
+on disk: a staged edit is in the index and not in the commit, and the byte could differ
+from both. So `indexStructuralWorkspace` refuses a worktree with uncommitted changes
+(`git status --porcelain`) before it discovers anything. On a clean checkout the index, the
+worktree and the identity agree, and only then is a generation attributable. Commit, then
+index.
 
 ## Contract
 
@@ -43,6 +47,8 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
   structural evidence, and that is an answer. `indexStructuralWorkspace` is the one that
   refuses an empty generation, because storing it would be immutable evidence that the
   tree has no code;
+- `indexStructuralWorkspace` refuses a dirty worktree: the identity names a commit, and
+  uncommitted bytes cannot be attributed to it;
 - `listFiles` is injectable so the filter and order are testable without spawning Git.
 
 ## Non-goals and known edges
@@ -51,7 +57,7 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 - **A tracked file missing from the worktree** is still listed, and extraction refuses
   it. That is a stale checkout, and refusing beats silently dropping evidence for a
   file the repository says exists.
-- **Uncommitted work is invisible.** A generation describes the index, so a dirty
-  worktree's edits and new files are not evidence until they are committed.
+- **Uncommitted work is refused, not silently skipped.** Indexing needs a clean
+  checkout; commit first.
 - **No parallelism or progress.** Extraction is still one sequential call; the worker
   slice owns concurrency.

@@ -123,3 +123,4 @@ export {
   type CapabilityDescriptor,
   type CapabilityPermission,
 } from './capability-descriptors.js';
+export * from './code-intelligence-capability.js';

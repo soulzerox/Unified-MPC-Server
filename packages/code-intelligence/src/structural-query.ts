@@ -157,6 +157,12 @@ function paginate<T>(items: readonly T[], limit: number): QueryPage<T> {
 export function findSymbols(records: readonly StructuralRecordView[], query: SymbolQuery): Result<QueryPage<SymbolHit>> {
   const limit = validateLimit(query.limit);
   if (!limit.ok) return limit;
+  if (query.name !== undefined && typeof query.name !== 'string') {
+    return invalid('structural query name must be a string');
+  }
+  if (query.exported !== undefined && typeof query.exported !== 'boolean') {
+    return invalid('structural query exported must be a boolean');
+  }
   if (query.kind !== undefined && !SYMBOL_KINDS.has(query.kind)) {
     return invalid(`structural query kind ${String(query.kind)} is not a symbol kind`);
   }

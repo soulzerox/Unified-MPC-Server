@@ -72,9 +72,17 @@ describe('structural query', () => {
     if (!matchedPrefix.ok) throw new Error(matchedPrefix.error.message);
     expect(matchedPrefix.value.items.map((hit) => hit.path)).toEqual(['a.ts', 'a.ts']);
 
-    // A `null` pathPrefix used to throw out of the `Result` contract.
-    const nullPrefix = findSymbols(records, { pathPrefix: null as never, limit: 10 });
-    expect(nullPrefix).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    // A `null` pathPrefix used to throw out of the `Result` contract; a non-string
+    // name or non-boolean exported used to return a quietly empty page.
+    for (const bad of [
+      { pathPrefix: null as never },
+      { name: null as never },
+      { name: 3 as never },
+      { exported: 'yes' as never },
+    ]) {
+      const refused = findSymbols(records, { ...bad, limit: 10 });
+      expect(refused, JSON.stringify(bad)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    }
 
     const kind = findSymbols(records, { kind: 'not-a-kind' as never, limit: 10 });
     expect(kind).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });

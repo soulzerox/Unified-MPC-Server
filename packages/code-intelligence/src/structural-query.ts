@@ -160,8 +160,9 @@ export function findSymbols(records: readonly StructuralRecordView[], query: Sym
   if (query.kind !== undefined && !SYMBOL_KINDS.has(query.kind)) {
     return invalid(`structural query kind ${String(query.kind)} is not a symbol kind`);
   }
-  if (query.pathPrefix !== undefined && query.pathPrefix.length === 0) {
-    return invalid('structural query pathPrefix must not be empty');
+  if (query.pathPrefix !== undefined
+    && (typeof query.pathPrefix !== 'string' || query.pathPrefix.length === 0)) {
+    return invalid('structural query pathPrefix must be a non-empty string');
   }
 
   const hits = hitsOf(records, (record) => query.pathPrefix === undefined || record.path.startsWith(query.pathPrefix))
@@ -284,8 +285,8 @@ export function repoSummary(records: readonly StructuralRecordView[], query: Sum
  * Whether a stored specifier names `path` without resolving it.
  *
  * A relative specifier is compared by suffix after dropping `./` and any `../`
- * segments it is relative to, and an extension-less specifier also matches the four
- * extensions a TypeScript source can live under. Both rules are guesses, which is
+ * segments it is relative to, and an extension-less specifier also matches the eight
+ * extensions a source can live under. Both rules are guesses, which is
  * why the hit is labelled heuristic.
  */
 const SOURCE_EXTENSION = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;

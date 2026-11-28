@@ -10,6 +10,13 @@
         "development": "./src/index.ts",
         "default": "./dist/index.js"
       }
+    },
+    "./structural-record-store": {
+      "types": "./src/structural-record-store.ts",
+      "import": {
+        "development": "./src/structural-record-store.ts",
+        "default": "./dist/structural-record-store.js"
+      }
     }
   },
   "dependencies": {

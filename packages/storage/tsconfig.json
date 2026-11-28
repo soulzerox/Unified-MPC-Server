@@ -7,11 +7,26 @@
     "outDir": "dist"
   },
   "references": [
-    { "path": "../audit" },
-    { "path": "../domain" },
-    { "path": "../shared" },
-    { "path": "../workspace" }
+    {
+      "path": "../audit"
+    },
+    {
+      "path": "../domain"
+    },
+    {
+      "path": "../shared"
+    },
+    {
+      "path": "../workspace"
+    },
+    {
+      "path": "../code-intelligence"
+    }
   ],
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ]
 }

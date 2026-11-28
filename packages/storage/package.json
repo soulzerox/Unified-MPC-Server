@@ -16,7 +16,8 @@
     "@unified-mpc/audit": "workspace:*",
     "@unified-mpc/domain": "workspace:*",
     "@unified-mpc/shared": "workspace:*",
-    "@unified-mpc/workspace": "workspace:*"
+    "@unified-mpc/workspace": "workspace:*",
+    "@unified-mpc/code-intelligence": "workspace:*"
   },
   "scripts": {
     "test": "vitest run --fileParallelism=false",

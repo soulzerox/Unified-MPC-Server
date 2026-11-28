@@ -18,6 +18,9 @@
     },
     {
       "path": "../workspace/tsconfig.typecheck.json"
+    },
+    {
+      "path": "../code-intelligence/tsconfig.typecheck.json"
     }
   ]
 }

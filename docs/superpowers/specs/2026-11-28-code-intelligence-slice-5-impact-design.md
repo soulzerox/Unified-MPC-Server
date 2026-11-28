@@ -41,7 +41,15 @@ Rules:
   list cannot read as a complete one.
 - **every list is bounded.** `changedPaths` set semantics: duplicates collapse, output
   is sorted by code unit. `limit` bounds targets, symbols, dependents and missing
-  paths, and `truncated` reports the cut.
+  paths; `truncated` reports a cut to targets or missing paths, and each target carries
+  its own `symbolsTruncated` / `dependentsTruncated`. The dependent budget is spent on
+  distinct files: the query reads to `MAX_QUERY_LIMIT`, dedupes, then pages, because
+  paging first would let two specifiers from one file consume the budget and drop a
+  distinct file that fits.
+- **`limit` bounds the answer, not the work.** The scan is one pass per changed path
+  over the records the caller already holds, so cost grows with
+  `changedPaths × records`; the bound is on what comes back, which is what a caller
+  budgets.
 
 Refused with `INVALID_INPUT`: a non-array or empty `changedPaths`, an empty or
 non-string entry, and a `limit` outside `1..MAX_QUERY_LIMIT`.

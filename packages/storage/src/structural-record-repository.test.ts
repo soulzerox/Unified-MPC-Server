@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
-import type { SourceStructuralRecord } from '@unified-mpc/code-intelligence';
+import { buildStructuralGeneration, type SourceStructuralRecord } from '@unified-mpc/code-intelligence';
 import { SqliteDatabase } from './database.js';
 import { SqliteStructuralRecordStore } from './structural-record-repository.js';
 import { STRUCTURAL_RECORD_MIGRATION_SQL } from './migrations/structural-record-migration.js';
@@ -309,6 +313,43 @@ describe('SqliteStructuralRecordStore', () => {
     const database = new SqliteDatabase(':memory:');
     try {
       expect(() => database.connection.exec(STRUCTURAL_RECORD_MIGRATION_SQL)).not.toThrow();
+    } finally {
+      database.close();
+    }
+  });
+});
+
+describe('structural generation composition', () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it('extracts a real tree and stores it under the identity that was read', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'structural-compose-'));
+    roots.push(root);
+    await writeFile(join(root, 'a.ts'), 'export const a = 1;\n', 'utf8');
+    await writeFile(join(root, 'b.ts'), 'import { a } from "./a.js";\nexport const b = a;\n', 'utf8');
+
+    const { database, store: records } = store();
+    try {
+      const built = await buildStructuralGeneration({
+        store: records,
+        identity,
+        repositoryRoot: root,
+        files: ['a.ts', 'b.ts'],
+      });
+      if (!built.ok) throw new Error(built.error.message);
+
+      const reread = await records.readGeneration(identity);
+      if (!reread.ok) throw new Error(reread.error.message);
+      expect(reread.value).toMatchObject({ generationId: built.value.generationId, fileCount: 2 });
+
+      const stored = await records.readRecords({ generationId: built.value.generationId, limit: 10 });
+      if (!stored.ok) throw new Error(stored.error.message);
+      expect(stored.value.map((record) => record.path)).toEqual(['a.ts', 'b.ts']);
+      expect(stored.value[1]?.imports[0]?.specifier).toBe('./a.js');
     } finally {
       database.close();
     }

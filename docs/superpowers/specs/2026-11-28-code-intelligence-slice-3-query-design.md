@@ -33,24 +33,30 @@ compiler.
 ## Shape
 
 ```ts
+interface QueryPage<T> { items: readonly T[]; truncated: boolean }
+
 findSymbols(records, { name?, kind?, exported?, pathPrefix?, limit })
-  -> readonly SymbolHit[]        // { path, name, kind, container, startLine, endLine, exported }
+  -> Result<QueryPage<SymbolHit>>   // SymbolHit = { path, name, kind, container, startLine, endLine, exported }
 
 definitionsOf(records, { name, limit })
-  -> readonly SymbolHit[]        // exact, case-sensitive name match
+  -> Result<QueryPage<SymbolHit>>   // exact, case-sensitive name match
 
-outlineOf(records, { path })     // one file
-  -> Result<FileOutline | undefined>   // symbols by line, imports, parseError?
+outlineOf(records, { path })     // one file, so no limit: it is not a list
+  -> Result<FileOutline | undefined>   // { path, language, symbols, imports, parseError? }
 
 importsOf(records, { path, limit })
-  -> Result<readonly StructuralImport[]>
+  -> Result<QueryPage<StructuralImport> | undefined>
 
 dependentsOf(records, { path, limit })
-  -> readonly DependentHit[]     // { path, specifier, resolution: 'heuristic' }
+  -> Result<QueryPage<DependentHit>>   // { path, specifier, resolution: 'heuristic' }
 
 repoSummary(records, { limit })
-  -> RepoSummary                 // per-language file/symbol counts, unparsed count
+  -> Result<RepoSummary>   // { fileCount, symbolCount, unparsedCount, languages, truncated }
 ```
+
+`RepoSummary` carries its own `truncated` because its per-language breakdown is the
+bounded part: a consumer must be able to tell a complete language list from the
+first `limit` of them.
 
 Every function takes records the caller already has. Nothing here reads the disk,
 opens a database or knows a generation id; the caller passes the generation it read,
@@ -62,9 +68,14 @@ page. The query surface never asks the store for "everything".
 
 ## Rules that carry the slice
 
-1. **Bounded.** Every query returns at most `limit` entries, and a `limit` outside
-   `1..MAX` is `INVALID_INPUT`, exactly like the store's reads. There is no
-   "unbounded" overload; `repoSummary`'s `limit` bounds the per-language breakdown.
+1. **Bounded.** Every query that returns a list takes a mandatory `limit` and
+   returns at most that many entries; a `limit` outside `1..MAX_QUERY_LIMIT` is
+   `INVALID_INPUT`. `MAX_QUERY_LIMIT = 2000` is exported by this module so the
+   bound is nameable from outside — it is the same number the store uses for a page,
+   but the store's constant is private to `packages/storage`, and slice 3 must not
+   depend on that package to state it. There is no "unbounded" overload, and
+   `repoSummary`'s `limit` bounds its per-language breakdown, which is why
+   `RepoSummary` reports `truncated` itself.
 2. **Deterministic order.** `path` by code unit, then `startLine`, then `name`. No
    `localeCompare`, no score, no recency. Two callers with the same records and the
    same query get the same list, which is what makes a review citation stable.
@@ -80,6 +91,15 @@ page. The query surface never asks the store for "everything".
    not claim to resolve `./b.js` to `b.ts`; that mapping needs a resolution slice
    with its own provenance (`syntax-derived` / `name-resolved` / `type-resolved`).
    Reporting a heuristic hit as resolved is the upstream failure mode #131 names.
+
+   The comparison is stated so the answer is decidable: strip leading `./` and any
+   `../` segments from the specifier, then a hit is a hit when — after also dropping
+   one source extension (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`) from both sides —
+   the specifier equals the target, or the target ends with `/<specifier>`. So
+   `./a.js` and `./a` both name `a.ts`, and `../lib/util.js` names
+   `lib/util.ts`; nothing else does. Extension stripping *is* a small resolution
+   step, which is exactly why the result is labelled `heuristic` and never
+   `name-resolved`.
 6. **No contents.** Results carry names, kinds, ranges and specifiers — never file
    bytes or comments.
 

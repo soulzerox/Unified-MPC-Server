@@ -7,7 +7,6 @@ import { appError, err, ok, type Result } from '@unified-mpc/domain';
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
 import ts from 'typescript';
 
-import { STRUCTURAL_SOURCE_EXTENSION } from './structural-source-pattern.js';
 
 /**
  * Slice 1 of the Code Intelligence subsystem (#131).
@@ -132,9 +131,8 @@ function containmentFailure(root: string, candidate: string): string | undefined
 }
 
 function languageFor(file: string): { readonly language: StructuralLanguage; readonly kind: ts.ScriptKind } | undefined {
-  // The pattern is the admission gate; the table only names the language. A pattern
-  // that grows an extension without a table row must fail closed, not extract as TS.
-  if (!STRUCTURAL_SOURCE_EXTENSION.test(file)) return undefined;
+  // The table is the extraction gate: an extension without a row cannot be extracted,
+  // so the shared pattern and this table must grow together, not silently disagree.
   return SCRIPT_KINDS[path.extname(file).toLowerCase()];
 }
 

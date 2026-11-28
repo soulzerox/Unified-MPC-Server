@@ -33,8 +33,9 @@ buildStructuralGeneration({ store, identity, repositoryRoot, files })
 
 ## Non-goals
 
-- **No filesystem walk.** `files` is the caller's discovery result. Ignore rules,
-  `.gitignore` semantics and worktree policy belong to the caller, not here.
+- **No filesystem walk.** `files` is the caller's discovery result. Ignore rules and
+  worktree policy are not this function's: the composite that discovers files from Git
+  and checks the checkout is `indexStructuralWorkspace` (slice 7).
 - **No incremental update.** The store is identity-addressed and immutable: one
   generation is one full extraction, and a partial refresh needs a new identity.
 - **No parallel extraction or progress reporting.** That is the worker slice's job;

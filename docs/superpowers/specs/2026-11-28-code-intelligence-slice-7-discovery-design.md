@@ -34,6 +34,12 @@ anything:
 Only when all three hold do the index, the worktree and the identity agree. Commit, then
 index.
 
+`identity.tree_oid` is deliberately not verified here. It is Unified's content-tree hash
+over the canonical manifest entries (`computeTreeOid`), not Git's tree object, so checking
+it would mean re-hashing every file in the workspace — work the canonical resolver already
+did when it advanced the revision. The commit check pins the content, and the tree claim
+stays the resolver's to keep.
+
 ## Contract
 
 ```text
@@ -44,8 +50,8 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 ```
 
 - only the eight `STRUCTURAL_SOURCE_EXTENSION` extensions survive, case-insensitively;
-  that pattern is one module shared with the extractor's admission gate and the specifier
-  heuristic;
+  that pattern is one module shared by discovery and the specifier heuristic, while the
+  extractor's language table remains the extraction gate;
 - duplicates collapse and the result is code-unit sorted, the order every query
   documents;
 - a producer that is not a Git worktree is `INVALID_INPUT` from Git with its message,
@@ -60,8 +66,11 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 
 ## Non-goals and known edges
 
-- **Submodules and sparse checkouts** are Git's answer, taken as given.
+- **Submodules** are Git's answer, taken as given.
 - **Uncommitted work is refused, not silently skipped.** Indexing needs a clean
   checkout; commit first.
+- **`assume-unchanged` and `skip-worktree` are invisible to `git status`.** A file
+  marked that way can hold modified bytes that the gate accepts. Do not mark source
+  files you intend to index; the subsystem cannot see through Git's own advice.
 - **No parallelism or progress.** Extraction is still one sequential call; the worker
   slice owns concurrency.

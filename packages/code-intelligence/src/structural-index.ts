@@ -17,11 +17,13 @@ import type { StructuralGeneration, StructuralRecordStore } from './structural-r
  * admitted files, then write them under one canonical identity, which is the durable
  * unit the store already defines.
  *
- * It is deliberately not a filesystem walker: `files` is the caller's discovery result,
- * so this stays free of ignore rules, `.gitignore` semantics and worktree policy. It is
- * not incremental either — the store is identity-addressed and immutable, so one
- * generation is one full extraction, and a partial update would need a new identity,
- * not a merge.
+ * `buildStructuralGeneration` is not a filesystem walker: `files` is the caller's
+ * discovery result, so that function stays free of ignore rules and worktree policy. The
+ * worktree policy lives in `indexStructuralWorkspace` below, which is the composite that
+ * discovers files from Git and refuses a checkout that is not the identity it would be
+ * stored under. Neither is incremental — the store is identity-addressed and immutable,
+ * so one generation is one full extraction, and a partial update would need a new
+ * identity, not a merge.
  *
  * Paths are not deduplicated here. The extractor admits a path by its repo-relative
  * form, so `./a.ts` and `a.ts` are one file and contribute one record; a raw-string
@@ -117,7 +119,7 @@ export type StructuralWorktreeReader = (repositoryRoot: string) => Promise<Resul
 /** `files` is discovery's output here, so it is omitted from the input rather than ignored. */
 export interface IndexStructuralWorkspaceInput extends Omit<BuildStructuralGenerationInput, 'files'> {
   readonly listFiles?: StructuralFileLister;
-  /** Defaults to `git rev-parse HEAD`, `git rev-parse --show-toplevel`, `git status --porcelain`. */
+  /** Defaults to `git rev-parse HEAD`, `--show-toplevel`, `git status --porcelain`. */
   readonly readWorktree?: StructuralWorktreeReader;
 }
 
@@ -132,6 +134,12 @@ export interface IndexStructuralWorkspaceInput extends Omit<BuildStructuralGener
  *   commit would store those bytes under the wrong immutable id;
  * - the root must be the worktree toplevel, because indexing a subdirectory would
  *   record subdirectory-relative paths as if they were repository-relative.
+ *
+ * `identity.tree_oid` is not checked here. It is a content-tree hash over the resolver's
+ * manifest entries, not Git's tree object, so recomputing it would mean re-hashing every
+ * file in the workspace that the canonical resolver already hashed. A clean worktree at
+ * the identity commit makes the on-disk bytes that commit's content; the tree claim is
+ * the resolver's to keep.
  */
 export async function indexStructuralWorkspace(
   input: IndexStructuralWorkspaceInput,

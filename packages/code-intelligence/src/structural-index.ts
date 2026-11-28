@@ -74,11 +74,17 @@ export interface DiscoverStructuralFilesInput {
 /**
  * The source files a generation should carry.
  *
- * `git ls-files` is the ignore engine, not a parser here: the repository already
- * decides what is tracked and what is ignored, and re-implementing that for one
- * subsystem is how two answers to "which files exist" start. Untracked-but-not-ignored
- * files are included, because a generation describes the tree on disk, not the last
- * commit.
+ * `git ls-files --cached` is the authority: the index is what the canonical identity's
+ * commit and tree describe, so re-implementing `.gitignore` for one subsystem is how two
+ * answers to "which files exist" start.
+ *
+ * Uncommitted files are deliberately not evidence. A record written for a file that only
+ * exists in one developer's worktree would be attributed to a commit that never carried
+ * it, and the store cannot correct an immutable generation. Commit the file, then index.
+ *
+ * An empty result is an answer, not an error: a tree with no source files has no
+ * structural evidence, and the composite `indexStructuralWorkspace` refuses to store
+ * that as a generation.
  */
 export async function discoverStructuralFiles(
   input: DiscoverStructuralFilesInput,
@@ -121,7 +127,7 @@ function gitListedFiles(repositoryRoot: string): Promise<Result<readonly string[
   return new Promise((resolve) => {
     execFile(
       'git',
-      ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      ['ls-files', '-z', '--cached'],
       { cwd: repositoryRoot, maxBuffer: 64 * 1024 * 1024 },
       (error, stdout) => {
         if (error !== null) {

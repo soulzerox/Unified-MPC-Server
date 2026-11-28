@@ -6,19 +6,22 @@ Issue: #131 (rollout item 4 glue: which files exist at all).
 
 ## The decision
 
-The repository already knows which files are tracked and which are ignored. A
-subsystem that walks the tree with its own `.gitignore` parser answers "which files
-exist" a second time, and the two answers drift the first time a pattern is unusual.
+The repository already knows which files a commit carries. A subsystem that walks the
+tree with its own `.gitignore` parser answers "which files exist" a second time, and the
+two answers drift the first time a pattern is unusual.
 
-So discovery asks Git:
+So discovery asks Git for the index:
 
 ```text
-git ls-files -z --cached --others --exclude-standard
+git ls-files -z --cached
 ```
 
-`--cached` includes tracked files, `--others --exclude-standard` includes untracked
-files that are not ignored. A generation then describes the tree on disk, not the last
-commit, and an ignored build artefact never enters evidence.
+Only files in the index are evidence. The canonical identity is a commit and a tree, so a
+record written for an untracked file would be attributed to a commit that never carried
+it — and the store cannot correct an immutable generation. An uncommitted edit is
+therefore not evidence until it is committed; commit, then index. The index is also
+deterministic per commit, where `--others` would have pulled in per-machine
+`core.excludesFile` and `.git/info/exclude` variation.
 
 ## Contract
 
@@ -29,14 +32,17 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
   = discoverStructuralFiles -> buildStructuralGeneration
 ```
 
-- only the eight `STRUCTURAL_SOURCE_EXTENSION` extensions survive; that pattern is one
-  module shared with the extractor's admission gate and the specifier heuristic;
+- only the eight `STRUCTURAL_SOURCE_EXTENSION` extensions survive, case-insensitively;
+  that pattern is one module shared with the extractor's admission gate and the specifier
+  heuristic;
 - duplicates collapse and the result is code-unit sorted, the order every query
   documents;
 - a producer that is not a Git worktree is `INVALID_INPUT` from Git with its message,
   not an empty list;
-- a checkout with no source files is `INVALID_INPUT`, because an empty generation would
-  be immutable evidence that the tree has no code;
+- `discoverStructuralFiles` may return `ok([])`: a tree with no source files has no
+  structural evidence, and that is an answer. `indexStructuralWorkspace` is the one that
+  refuses an empty generation, because storing it would be immutable evidence that the
+  tree has no code;
 - `listFiles` is injectable so the filter and order are testable without spawning Git.
 
 ## Non-goals and known edges
@@ -45,5 +51,7 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 - **A tracked file missing from the worktree** is still listed, and extraction refuses
   it. That is a stale checkout, and refusing beats silently dropping evidence for a
   file the repository says exists.
+- **Uncommitted work is invisible.** A generation describes the index, so a dirty
+  worktree's edits and new files are not evidence until they are committed.
 - **No parallelism or progress.** Extraction is still one sequential call; the worker
   slice owns concurrency.

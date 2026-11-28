@@ -121,16 +121,16 @@ describe('structural generation builder', () => {
 
 describe('structural file discovery', () => {
   it('keeps only source files, dedupes them and orders them by code unit', async () => {
-    const listed = ['b.ts', 'a.ts', 'README.md', 'c.mts', 'b.ts', 'dist/d.js', ''];
+    const listed = ['b.ts', 'a.ts', 'README.md', 'c.mts', 'b.ts', 'dist/d.js', 'UP.TS', ''];
     const discovered = await discoverStructuralFiles({
       repositoryRoot: '/nowhere',
       listFiles: async () => ok(listed),
     });
     if (!discovered.ok) throw new Error(discovered.error.message);
-    expect(discovered.value).toEqual(['a.ts', 'b.ts', 'c.mts', 'dist/d.js']);
+    expect(discovered.value).toEqual(['UP.TS', 'a.ts', 'b.ts', 'c.mts', 'dist/d.js']);
   });
 
-  it('asks git which files exist, so ignored files stay out and untracked ones stay in', async () => {
+  it('asks git which committed files exist, so ignored and uncommitted files stay out', async () => {
     const root = await repo({
       '.gitignore': 'ignored.ts\n',
       'a.ts': 'export const a = 1;\n',
@@ -143,7 +143,7 @@ describe('structural file discovery', () => {
 
     const discovered = await discoverStructuralFiles({ repositoryRoot: root });
     if (!discovered.ok) throw new Error(discovered.error.message);
-    expect(discovered.value).toEqual(['a.ts', 'untracked.ts']);
+    expect(discovered.value).toEqual(['a.ts']);
   });
 
   it('refuses a directory git cannot read', async () => {

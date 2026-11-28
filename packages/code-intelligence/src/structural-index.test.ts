@@ -83,16 +83,27 @@ describe('structural generation builder', () => {
     expect(writes[0]?.identity).toEqual(identity);
   });
 
-  it('refuses an empty generation and duplicate paths without touching the store', async () => {
+  it('refuses an empty generation and a non-path entry without touching the store', async () => {
     const root = await repo({ 'a.ts': 'export const a = 1;\n' });
     const { store, writes } = fakeStore();
 
     const empty = await buildStructuralGeneration({ store, identity, repositoryRoot: root, files: [] });
     expect(empty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
 
-    const twice = await buildStructuralGeneration({ store, identity, repositoryRoot: root, files: ['a.ts', 'a.ts'] });
-    expect(twice).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    for (const files of [[''], [3 as never], 'a.ts' as never]) {
+      const refused = await buildStructuralGeneration({ store, identity, repositoryRoot: root, files: files as never });
+      expect(refused).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    }
     expect(writes).toHaveLength(0);
+  });
+
+  it('lets the extractor collapse two spellings of one path into one record', async () => {
+    const root = await repo({ 'a.ts': 'export const a = 1;\n' });
+    const { store, writes } = fakeStore();
+
+    const built = await buildStructuralGeneration({ store, identity, repositoryRoot: root, files: ['a.ts', './a.ts'] });
+    if (!built.ok) throw new Error(built.error.message);
+    expect(writes[0]?.records.map((record) => record.path)).toEqual(['a.ts']);
   });
 
   it('surfaces an extraction refusal and writes nothing', async () => {

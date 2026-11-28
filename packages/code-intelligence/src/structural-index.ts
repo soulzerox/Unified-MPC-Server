@@ -18,6 +18,11 @@ import type { StructuralGeneration, StructuralRecordStore } from './structural-r
  * not incremental either — the store is identity-addressed and immutable, so one
  * generation is one full extraction, and a partial update would need a new identity,
  * not a merge.
+ *
+ * Paths are not deduplicated here. The extractor admits a path by its repo-relative
+ * form, so `./a.ts` and `a.ts` are one file and contribute one record; a raw-string
+ * check here would refuse a pair the extractor already understands, and refusing
+ * nothing is better than a rule that disagrees with the reader.
  */
 export interface BuildStructuralGenerationInput {
   readonly store: StructuralRecordStore;
@@ -39,9 +44,10 @@ export async function buildStructuralGeneration(
   if (input.files.length === 0) {
     return err(appError('INVALID_INPUT', 'a structural generation needs at least one file'));
   }
-  const duplicates = duplicatedPaths(input.files);
-  if (duplicates.length > 0) {
-    return err(appError('INVALID_INPUT', `structural generation has duplicate paths: ${duplicates.join(', ')}`));
+  for (const file of input.files) {
+    if (typeof file !== 'string' || file.length === 0) {
+      return err(appError('INVALID_INPUT', 'every structural generation path must be a non-empty string'));
+    }
   }
 
   const records = await extractStructuralRecords({
@@ -51,15 +57,4 @@ export async function buildStructuralGeneration(
   });
   if (!records.ok) return records;
   return input.store.writeGeneration({ identity: input.identity, records: records.value });
-}
-
-function duplicatedPaths(files: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const duplicates = new Set<string>();
-  for (const file of files) {
-    if (typeof file !== 'string') continue;
-    if (seen.has(file)) duplicates.add(file);
-    seen.add(file);
-  }
-  return [...duplicates].sort((left, right) => (left === right ? 0 : left < right ? -1 : 1));
 }

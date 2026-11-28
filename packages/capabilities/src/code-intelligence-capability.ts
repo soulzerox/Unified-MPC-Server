@@ -18,8 +18,10 @@ import type {
  * separate lane by the slice that supervises workers instead of being smuggled in
  * under a `small` cost class here.
  *
- * `requires: ['shared-evidence']` is the #131 dependency made explicit: a query is
- * answered from a stored generation, so this lane is meaningless without one.
+ * `requires: [SHARED_EVIDENCE_CAPABILITY_ID]` is the #131 dependency made explicit:
+ * a query is answered from a stored generation, so this lane is meaningless without
+ * one. The dependency is the exported id, not a repeated literal, so renaming the
+ * capability cannot leave a dependency the registry fails to resolve at runtime.
  */
 export const SHARED_EVIDENCE_CAPABILITY_ID = 'shared-evidence';
 
@@ -49,7 +51,7 @@ export const CODE_INTELLIGENCE_MANIFEST: CapabilityManifestInput = {
   id: CODE_INTELLIGENCE_CAPABILITY_ID,
   version: 1,
   provides: [...CODE_INTELLIGENCE_PROVIDES],
-  requires: ['shared-evidence'],
+  requires: [SHARED_EVIDENCE_CAPABILITY_ID],
   runtimeKind: 'in-process',
   activation: 'on-demand',
   costClass: 'small',
@@ -71,11 +73,18 @@ export async function registerCodeIntelligenceCapability(
   registry: CapabilityRegistry,
 ): Promise<Result<CapabilityManifest>> {
   const evidence = await registry.register(SHARED_EVIDENCE_MANIFEST);
-  if (!evidence.ok && !isAlreadyRegistered(evidence.error.message)) return evidence;
+  if (!evidence.ok && !isAlreadyRegistered(evidence.error)) return evidence;
   return registry.register(CODE_INTELLIGENCE_MANIFEST);
 }
 
-/** A second registration is a no-op for the caller, not a failure to report twice. */
-function isAlreadyRegistered(message: string): boolean {
-  return message.includes('is already registered');
+/**
+ * `register` answers `CONFLICT` for exactly one condition — the id is already in the
+ * registry — so the helper tolerates that code and nothing else. Matching the error
+ * message would have made the behaviour depend on prose.
+ *
+ * The lane itself is not tolerated: a second call still returns `CONFLICT`, because
+ * that is the truth and a caller that wants idempotence can say so.
+ */
+function isAlreadyRegistered(error: { readonly code?: string }): boolean {
+  return error.code === 'CONFLICT';
 }

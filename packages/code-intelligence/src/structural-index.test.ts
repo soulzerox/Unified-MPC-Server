@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
-import { ok } from '@unified-mpc/domain';
+import { appError, ok } from '@unified-mpc/domain';
 
 import { buildStructuralGeneration, discoverStructuralFiles, indexStructuralWorkspace } from './structural-index.js';
 import type {
@@ -152,6 +152,25 @@ describe('structural file discovery', () => {
     const missing = join(tmpdir(), 'structural-discovery-missing-dir');
     const discovered = await discoverStructuralFiles({ repositoryRoot: missing });
     expect(discovered).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('refuses a checkout with no source files and passes a lister failure through', async () => {
+    const root = await repo({ 'notes.md': '# notes\n' });
+    await run('git', ['init', '-q'], { cwd: root });
+    await run('git', ['add', 'notes.md'], { cwd: root });
+    const { store, writes } = fakeStore();
+
+    const empty = await indexStructuralWorkspace({ store, identity, repositoryRoot: root });
+    expect(empty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+
+    const failed = await indexStructuralWorkspace({
+      store,
+      identity,
+      repositoryRoot: root,
+      listFiles: async () => ({ ok: false, error: appError('INVALID_INPUT', 'git is not installed') }),
+    });
+    expect(failed).toMatchObject({ ok: false, error: { message: 'git is not installed' } });
+    expect(writes).toHaveLength(0);
   });
 
   it('indexes a whole checkout in one call', async () => {

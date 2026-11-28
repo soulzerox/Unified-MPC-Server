@@ -97,7 +97,8 @@ export async function discoverStructuralFiles(
   return ok([...sources].sort());
 }
 
-export interface IndexStructuralWorkspaceInput extends BuildStructuralGenerationInput {
+/** `files` is discovery's output here, so it is omitted from the input rather than ignored. */
+export interface IndexStructuralWorkspaceInput extends Omit<BuildStructuralGenerationInput, 'files'> {
   readonly listFiles?: StructuralFileLister;
 }
 

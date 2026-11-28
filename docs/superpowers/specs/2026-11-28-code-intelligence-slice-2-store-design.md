@@ -131,7 +131,27 @@ The store refuses, it does not repair:
 - two records with the same `path` in one generation are refused, because slice 1
   already collapses duplicates and a store must not invent an ordering rule;
 - a fingerprint that is not `sha256:<64 hex>` is refused, so a caller cannot
-  write a generation that a later equality check will not mean anything for.
+  write a generation that a later equality check will not mean anything for;
+- a `path` that is not canonical repo-relative is refused, judged **by segment**:
+  absolute paths, `../x`, `src/../../x`, `a/./b` and `a//b` are `INVALID_INPUT`,
+  while `..foo.ts` is a legal name and a literal backslash on POSIX is one segment,
+  not a separator. Slice 1 can emit such a name, so the store must not treat a
+  legal filename as an escape;
+- an **empty** extraction is refused: an identity has exactly one generation and
+  there is no delete, so accepting a zero-file generation would forbid the real
+  extraction for that identity forever.
+
+Reads are bounded and fail closed: `limit` must be an integer in `1..2000`, a
+`paths` filter may carry at most 2000 entries (one SQL placeholder each), and a
+`generationId` that names no stored generation is `INVALID_INPUT` rather than an
+empty page — because an empty generation cannot exist, "no rows" means the id is
+wrong, not that the tree is empty.
+
+A generation may hold more records than one `limit` allows, so both reads take an
+exclusive keyset cursor, `afterPath`: "give me the next page after this path". An
+offset would re-read shifting rows, while the order here is immutable, so the last
+path of a page is the whole cursor. A generation read by a build that does not know
+its stored `schema_version` is refused instead of being interpreted as if it did.
 
 ## Immutability and re-extraction
 

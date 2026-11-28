@@ -193,6 +193,103 @@ describe('SqliteStructuralRecordStore', () => {
     }
   });
 
+  it('fails closed on an unknown generation, an empty filter, a bad filter path and an out-of-range limit', async () => {
+    const { database, store: records } = store();
+    try {
+      const written = await records.writeGeneration({ identity, records: [record()] });
+      if (!written.ok) throw new Error(written.error.message);
+      const generationId = written.value.generationId;
+
+      const unknown = await records.readRecords({ generationId: 'sha256:' + '0'.repeat(64), limit: 10 });
+      expect(unknown).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+
+      // `paths: []` must not reach SQL as `IN ()`.
+      const empty = await records.readRecords({ generationId, limit: 10, paths: [] });
+      if (!empty.ok) throw new Error(empty.error.message);
+      expect(empty.value).toEqual([]);
+
+      for (const bad of [
+        { limit: 2_001 },
+        { limit: 1.5 },
+        { limit: Number.NaN },
+        { limit: 10, paths: ['../x.ts'] },
+        { limit: 10, paths: ['a/./b.ts'] },
+      ]) {
+        const refused = await records.readRecords({ generationId, limit: bad.limit, ...(bad.paths === undefined ? {} : { paths: bad.paths }) });
+        expect(refused, JSON.stringify(bad)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it('pages past a cursor so a generation larger than one limit is still fully readable', async () => {
+    const { database, store: records } = store();
+    try {
+      const written = await records.writeGeneration({
+        identity,
+        records: [
+          record({ path: 'a.ts' }),
+          record({ path: 'b.ts' }),
+          record({ path: 'c.ts' }),
+        ],
+      });
+      if (!written.ok) throw new Error(written.error.message);
+      const generationId = written.value.generationId;
+
+      const first = await records.readRecords({ generationId, limit: 2 });
+      if (!first.ok) throw new Error(first.error.message);
+      expect(first.value.map((entry) => entry.path)).toEqual(['a.ts', 'b.ts']);
+
+      const second = await records.readFingerprints({ generationId, limit: 2, afterPath: 'b.ts' });
+      if (!second.ok) throw new Error(second.error.message);
+      expect(second.value.map((entry) => entry.path)).toEqual(['c.ts']);
+
+      const beyond = await records.readRecords({ generationId, limit: 2, afterPath: 'c.ts' });
+      if (!beyond.ok) throw new Error(beyond.error.message);
+      expect(beyond.value).toEqual([]);
+
+      const badCursor = await records.readRecords({ generationId, limit: 2, afterPath: '../x.ts' });
+      expect(badCursor).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('refuses to read records written under a schema version this build does not know', async () => {
+    const { database, store: records } = store();
+    try {
+      const written = await records.writeGeneration({ identity, records: [record()] });
+      if (!written.ok) throw new Error(written.error.message);
+      database.connection
+        .prepare('UPDATE structural_record_generations SET schema_version = ? WHERE generation_id = ?')
+        .run(2, written.value.generationId);
+
+      const read = await records.readRecords({ generationId: written.value.generationId, limit: 10 });
+      expect(read).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+      const generation = await records.readGeneration(identity);
+      expect(generation).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    } finally {
+      database.close();
+    }
+  });
+
+  it('accepts a POSIX filename containing a literal backslash, which the extractor can produce', async () => {
+    const { database, store: records } = store();
+    try {
+      // On Linux `path.sep` is `/`, so `toPosix` leaves `a\b.ts` untouched: it is
+      // one repo-relative segment, not a Windows separator.
+      const written = await records.writeGeneration({ identity, records: [record({ path: 'a\\b.ts' })] });
+      if (!written.ok) throw new Error(written.error.message);
+
+      const page = await records.readRecords({ generationId: written.value.generationId, limit: 10 });
+      if (!page.ok) throw new Error(page.error.message);
+      expect(page.value.map((entry) => entry.path)).toEqual(['a\\b.ts']);
+    } finally {
+      database.close();
+    }
+  });
+
   it('keeps a parse error on the record instead of dropping it', async () => {
     const { database, store: records } = store();
     try {

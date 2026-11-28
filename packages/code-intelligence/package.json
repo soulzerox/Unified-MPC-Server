@@ -17,6 +17,13 @@
         "development": "./src/structural-record-store.ts",
         "default": "./dist/structural-record-store.js"
       }
+    },
+    "./structural-query": {
+      "types": "./src/structural-query.ts",
+      "import": {
+        "development": "./src/structural-query.ts",
+        "default": "./dist/structural-query.js"
+      }
     }
   },
   "dependencies": {

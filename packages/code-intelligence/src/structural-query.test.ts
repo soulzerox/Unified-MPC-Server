@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SourceStructuralRecord, StructuralImport, StructuralSymbol } from './structural-extractor.js';
-import { definitionsOf, dependentsOf, findSymbols, importsOf, outlineOf, repoSummary } from './structural-query.js';
+import { definitionsOf, dependentsOf, findSymbols, impactOf, importsOf, outlineOf, repoSummary } from './structural-query.js';
 
 function symbol(overrides: Partial<StructuralSymbol> = {}): StructuralSymbol {
   return { name: 'thing', kind: 'function', startLine: 1, endLine: 1, container: '', exported: true, ...overrides };
@@ -171,5 +171,56 @@ describe('structural query', () => {
     expect(first.value).toEqual(second.value);
     // The input order is not the output order: `b.ts` was first in the fixture.
     expect(first.value.items[0]?.path).toBe('a.ts');
+  });
+});
+
+describe('structural impact', () => {
+  it('names the changed file definitions and the files that import it, one hop only', () => {
+    const impact = impactOf(records, { changedPaths: ['a.ts'], limit: 10 });
+    if (!impact.ok) throw new Error(impact.error.message);
+
+    expect(impact.value.basis).toBe('imports-only');
+    expect(impact.value.truncated).toBe(false);
+    const [target] = impact.value.targets;
+    if (target === undefined) throw new Error('expected one target');
+    expect(target.path).toBe('a.ts');
+    expect(target.symbols.map((hit) => hit.startLine)).toEqual([1, 9]);
+    // `src/c.ts` names `./a.js` and `./a`; the file is one lead, not two.
+    expect(target.dependents.map((hit) => hit.path)).toEqual(['src/c.ts']);
+    expect(target.dependentsTruncated).toBe(false);
+  });
+
+  it('reports a changed path the generation does not carry instead of calling it unaffected', () => {
+    const impact = impactOf(records, { changedPaths: ['gone.ts', 'b.ts'], limit: 10 });
+    if (!impact.ok) throw new Error(impact.error.message);
+
+    expect(impact.value.missingPaths).toEqual(['gone.ts']);
+    expect(impact.value.targets.map((target) => target.path)).toEqual(['b.ts']);
+  });
+
+  it('carries a parse error through, because a partial symbol list is not a complete one', () => {
+    const impact = impactOf(records, { changedPaths: ['src/c.ts'], limit: 10 });
+    if (!impact.ok) throw new Error(impact.error.message);
+    expect(impact.value.targets[0]).toMatchObject({ path: 'src/c.ts', symbols: [], parseError: 'line 1: } expected.' });
+  });
+
+  it('bounds every list it returns and says when it did', () => {
+    const impact = impactOf(records, { changedPaths: ['a.ts', 'b.ts'], limit: 1 });
+    if (!impact.ok) throw new Error(impact.error.message);
+
+    expect(impact.value.targets).toHaveLength(1);
+    expect(impact.value.truncated).toBe(true);
+    expect(impact.value.targets[0]?.symbolsTruncated).toBe(true);
+  });
+
+  it('refuses an empty change set and a non-path entry, and dedupes repeats', () => {
+    for (const changedPaths of [[], [''], [3 as never], 'a.ts' as never]) {
+      expect(impactOf(records, { changedPaths: changedPaths as never, limit: 10 }))
+        .toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    }
+
+    const deduped = impactOf(records, { changedPaths: ['b.ts', 'b.ts'], limit: 10 });
+    if (!deduped.ok) throw new Error(deduped.error.message);
+    expect(deduped.value.targets).toHaveLength(1);
   });
 });

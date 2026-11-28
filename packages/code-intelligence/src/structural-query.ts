@@ -308,3 +308,100 @@ function specifierNames(specifier: string, target: string): boolean {
   // against the repo-relative target is the closest a guess can get.
   return target.endsWith(`/${normalised}`) || targetStem.endsWith(`/${specifierStem}`);
 }
+
+export interface ImpactQuery {
+  /** Repo-relative paths whose change the caller wants to understand. */
+  readonly changedPaths: readonly string[];
+  /** Per-list bound: targets, each target's symbols, each target's dependents, missing paths. */
+  readonly limit: number;
+}
+
+export interface ImpactTarget {
+  readonly path: string;
+  /** Definitions the changed file carries, so a caller can name what moved. */
+  readonly symbols: readonly SymbolHit[];
+  readonly symbolsTruncated: boolean;
+  /** Files whose stored specifier names this path. One entry per file, not per import. */
+  readonly dependents: readonly DependentHit[];
+  readonly dependentsTruncated: boolean;
+  /** Present when the changed file could not be parsed; its symbol list is then partial. */
+  readonly parseError?: string;
+}
+
+export interface ImpactReport {
+  /**
+   * Always `imports-only`: slice 1 stores symbols and un-resolved specifiers, not
+   * call/reference/extends edges, so this is not a transitive blast radius and does
+   * not claim to be one.
+   */
+  readonly basis: 'imports-only';
+  readonly targets: readonly ImpactTarget[];
+  /** Changed paths the records do not carry, so the caller knows the picture is partial. */
+  readonly missingPaths: readonly string[];
+  readonly truncated: boolean;
+}
+
+/**
+ * Bounded impact for a set of changed files, using only what slice 1 stored.
+ *
+ * The useful question a pre-edit or review flow asks is "what is around this change".
+ * This answers the part the records can support — the changed file's definitions and
+ * the files that import it — and says `imports-only` instead of implying callers,
+ * references or a transitive closure that would need edge resolution.
+ *
+ * One hop, no depth, no ranking: a dependent is a lead, like `dependentsOf`.
+ */
+export function impactOf(records: readonly StructuralRecordView[], query: ImpactQuery): Result<ImpactReport> {
+  const limit = validateLimit(query.limit);
+  if (!limit.ok) return limit;
+  if (!Array.isArray(query.changedPaths)) return invalid('impact needs a list of changed paths');
+  if (query.changedPaths.length === 0) return invalid('impact needs at least one changed path');
+  for (const path of query.changedPaths) {
+    if (typeof path !== 'string' || path.length === 0) {
+      return invalid('every changed path must be a non-empty string');
+    }
+  }
+
+  const changed = [...new Set(query.changedPaths)].sort(compareCodeUnit);
+  const targets: ImpactTarget[] = [];
+  const missingPaths: string[] = [];
+
+  for (const path of changed) {
+    const outline = outlineOf(records, { path });
+    if (!outline.ok) return outline;
+    if (outline.value === undefined) {
+      missingPaths.push(path);
+      continue;
+    }
+
+    const dependents = dependentsOf(records, { path, limit: limit.value });
+    if (!dependents.ok) return dependents;
+    const seen = new Set<string>();
+    const unique: DependentHit[] = [];
+    const dependentsTruncated = dependents.value.truncated;
+    for (const hit of dependents.value.items) {
+      if (seen.has(hit.path)) continue;
+      seen.add(hit.path);
+      unique.push(hit);
+    }
+
+    const symbols = paginate(outline.value.symbols, limit.value);
+    targets.push({
+      path,
+      symbols: symbols.items,
+      symbolsTruncated: symbols.truncated,
+      dependents: unique,
+      dependentsTruncated,
+      ...(outline.value.parseError === undefined ? {} : { parseError: outline.value.parseError }),
+    });
+  }
+
+  const boundedTargets = paginate(targets, limit.value);
+  const boundedMissing = paginate(missingPaths, limit.value);
+  return ok({
+    basis: 'imports-only',
+    targets: boundedTargets.items,
+    missingPaths: boundedMissing.items,
+    truncated: boundedTargets.truncated || boundedMissing.truncated,
+  });
+}

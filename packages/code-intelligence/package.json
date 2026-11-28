@@ -18,6 +18,13 @@
         "default": "./dist/structural-record-store.js"
       }
     },
+    "./structural-index": {
+      "types": "./src/structural-index.ts",
+      "import": {
+        "development": "./src/structural-index.ts",
+        "default": "./dist/structural-index.js"
+      }
+    },
     "./structural-query": {
       "types": "./src/structural-query.ts",
       "import": {

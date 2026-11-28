@@ -74,7 +74,7 @@ function validateRecordPath(recordPath: unknown): Result<string> {
   if (typeof recordPath !== 'string' || recordPath.length === 0) {
     return invalid('a structural record needs a path');
   }
-  if (path.isAbsolute(recordPath) || recordPath.includes('\\')) {
+  if (path.isAbsolute(recordPath)) {
     return invalid(`structural record path ${recordPath} is not repo-relative`);
   }
   // Segment-wise: `..foo.ts` is a legal name, but `.`, `..` and an empty segment
@@ -110,7 +110,12 @@ export class SqliteStructuralRecordStore implements StructuralRecordStore {
       const row = this.database.connection
         .prepare('SELECT * FROM structural_record_generations WHERE generation_id = ?')
         .get(structuralGenerationId(identity));
-      return Promise.resolve(ok(row === undefined ? undefined : toGeneration(row)));
+      if (row === undefined) return Promise.resolve(ok(undefined));
+      const version = (row as { readonly schema_version?: unknown }).schema_version;
+      if (version !== STRUCTURAL_RECORD_SCHEMA_VERSION) {
+        return Promise.resolve(invalid(`structural generation was stored with schema version ${String(version)}; this build reads version ${STRUCTURAL_RECORD_SCHEMA_VERSION}`));
+      }
+      return Promise.resolve(ok(toGeneration(row)));
     } catch (error) {
       return Promise.resolve(err(appError('INTERNAL_ERROR', `structural generation read failed: ${describe(error)}`)));
     }
@@ -232,11 +237,34 @@ export class SqliteStructuralRecordStore implements StructuralRecordStore {
     });
   }
 
-  private bound(input: ReadStructuralRecordsInput): Result<{ generationId: string; limit: number; paths?: readonly string[] }> {
+  private bound(input: ReadStructuralRecordsInput): Result<{
+    generationId: string;
+    limit: number;
+    paths?: readonly string[];
+    afterPath?: string;
+  }> {
     const generationId = validateGenerationId(input.generationId);
     if (!generationId.ok) return generationId;
     const limit = validateLimit(input.limit);
     if (!limit.ok) return limit;
+    // Fail closed: an empty generation cannot exist (the write path refuses one),
+    // so a page with no rows means the id is wrong, not that the tree is empty.
+    const known = this.database.connection
+      .prepare('SELECT schema_version FROM structural_record_generations WHERE generation_id = ?')
+      .get(generationId.value);
+    if (known === undefined) {
+      return invalid(`structural generation ${generationId.value} is not stored`);
+    }
+    // A generation is immutable, so its schema version is too: reading it with a
+    // build that does not know that version would be a silent misread.
+    const storedVersion = (known as { readonly schema_version?: unknown }).schema_version;
+    if (storedVersion !== STRUCTURAL_RECORD_SCHEMA_VERSION) {
+      return invalid(`structural generation ${generationId.value} was stored with schema version ${String(storedVersion)}; this build reads version ${STRUCTURAL_RECORD_SCHEMA_VERSION}`);
+    }
+    if (input.afterPath !== undefined) {
+      const cursor = validateRecordPath(input.afterPath);
+      if (!cursor.ok) return cursor;
+    }
     if (input.paths !== undefined) {
       // Bounded by the same ceiling as `limit`: one placeholder per path, so an
       // unbounded filter would turn into SQLITE_TOOMANYVARIABLES (an internal
@@ -253,21 +281,33 @@ export class SqliteStructuralRecordStore implements StructuralRecordStore {
       generationId: generationId.value,
       limit: limit.value,
       ...(input.paths === undefined ? {} : { paths: input.paths }),
+      ...(input.afterPath === undefined ? {} : { afterPath: input.afterPath }),
     });
   }
 
   private rows(
-    input: { readonly generationId: string; readonly limit: number; readonly paths?: readonly string[] },
+    input: {
+      readonly generationId: string;
+      readonly limit: number;
+      readonly paths?: readonly string[];
+      readonly afterPath?: string;
+    },
     columns: string,
   ): readonly Record<string, unknown>[] {
     const base = `SELECT ${columns} FROM structural_records WHERE generation_id = ?`;
     if (input.paths !== undefined && input.paths.length === 0) return [];
     const placeholders = input.paths === undefined ? '' : ` AND path IN (${input.paths.map(() => '?').join(', ')})`;
+    const cursor = input.afterPath === undefined ? '' : ' AND path > ?';
     // BINARY collation is byte order: deterministic and locale-free, unlike a
     // text collation that would depend on how SQLite was built.
     const rows = this.database.connection
-      .prepare(`${base}${placeholders} ORDER BY path COLLATE BINARY LIMIT ?`)
-      .all(input.generationId, ...(input.paths ?? []), input.limit);
+      .prepare(`${base}${placeholders}${cursor} ORDER BY path COLLATE BINARY LIMIT ?`)
+      .all(
+        input.generationId,
+        ...(input.paths ?? []),
+        ...(input.afterPath === undefined ? [] : [input.afterPath]),
+        input.limit,
+      );
     return rows.filter(isRecord);
   }
 }

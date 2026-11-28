@@ -334,7 +334,7 @@ export async function extractStructuralRecords(
     const realFile = await realpath(requested).catch(() => undefined);
     if (realFile === undefined) return refuse(admittedPath, 'the path does not exist');
     const notInside = containmentFailure(realRoot, realFile);
-    if (notInside !== undefined) return refuse(admittedPath, 'the path resolves outside the admitted repository root');
+    if (notInside !== undefined) return refuse(admittedPath, `the resolved path: ${notInside}`);
     // `realpath` resolves `..` that a symlink introduced, so the check above must
     // run again on the resolved path — a link inside the tree can still point out.
     const stats = await stat(realFile).catch(() => undefined);

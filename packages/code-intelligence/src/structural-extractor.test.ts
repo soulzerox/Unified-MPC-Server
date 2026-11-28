@@ -167,13 +167,15 @@ describe('structural extractor', () => {
   });
 
   it('admits an in-root file when the repository root is reached through a symlink', async () => {
-    const base = await root();
-    const linked = `${base}-link`;
+    const parent = await root();
+    const base = path.join(parent, 'tree');
+    const linked = path.join(parent, 'link');
+    await mkdir(base);
     await symlink(base, linked);
-    created.push(linked);
     await writeFile(path.join(base, 'a.ts'), 'export const a = 1;\n');
-    const elsewhere = await root();
-    await writeFile(path.join(elsewhere, 'outside.ts'), 'export const x = 1;\n');
+    // Reachable *and* outside: without this the escaping case would only prove
+    // that a missing file is refused, not that containment is judged.
+    await writeFile(path.join(parent, 'outside.ts'), 'export const x = 1;\n');
 
     const inRoot = await extractStructuralRecords({ repositoryRoot: linked, identity, files: ['a.ts'] });
     if (!inRoot.ok) throw new Error(inRoot.error.message);
@@ -181,6 +183,8 @@ describe('structural extractor', () => {
 
     const escaping = await extractStructuralRecords({ repositoryRoot: linked, identity, files: ['../outside.ts'] });
     expect(escaping).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    if (escaping.ok) throw new Error('expected a refusal');
+    expect(escaping.error.message).toMatch(/outside the admitted repository root/);
   });
 
   it('orders records by the path they carry, not by the raw input', async () => {

@@ -44,6 +44,14 @@ export interface WriteStructuralGenerationInput {
 export interface ReadStructuralRecordsInput {
   readonly generationId: string;
   readonly paths?: readonly string[];
+  /**
+   * Exclusive keyset cursor: only records whose path sorts after this one.
+   *
+   * A generation may hold more records than one `limit` allows, so paging is how a
+   * caller reads all of them — an offset would re-read shifting rows, and the order
+   * is immutable here, so "after this path" is the whole cursor.
+   */
+  readonly afterPath?: string;
   /** Required, and bounded: a caller pages instead of pulling a whole repository. */
   readonly limit: number;
 }

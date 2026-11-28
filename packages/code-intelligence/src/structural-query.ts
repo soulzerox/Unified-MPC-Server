@@ -1,5 +1,6 @@
 import { appError, err, ok, type Result } from '@unified-mpc/domain';
 
+import { STRUCTURAL_SOURCE_EXTENSION } from './structural-source-pattern.js';
 import type {
   SourceStructuralRecord,
   StructuralImport,
@@ -295,13 +296,11 @@ export function repoSummary(records: readonly StructuralRecordView[], query: Sum
  * extensions a source can live under. Both rules are guesses, which is
  * why the hit is labelled heuristic.
  */
-const SOURCE_EXTENSION = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
-
 function specifierNames(specifier: string, target: string): boolean {
   const normalised = specifier.replace(/^(\.\.\/)+/, '').replace(/^\.\//, '');
   if (normalised.length === 0) return false;
-  const specifierStem = normalised.replace(SOURCE_EXTENSION, '');
-  const targetStem = target.replace(SOURCE_EXTENSION, '');
+  const specifierStem = normalised.replace(STRUCTURAL_SOURCE_EXTENSION, '');
+  const targetStem = target.replace(STRUCTURAL_SOURCE_EXTENSION, '');
   if (normalised === target || normalised === targetStem) return true;
   if (specifierStem === target || specifierStem === targetStem) return true;
   // A specifier may be written relative to its own directory, so a suffix match

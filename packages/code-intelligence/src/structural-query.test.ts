@@ -213,6 +213,42 @@ describe('structural impact', () => {
     expect(impact.value.targets[0]?.symbolsTruncated).toBe(true);
   });
 
+  it('spends the dependent budget on distinct files, not on repeated specifiers', () => {
+    // `a.ts` is imported twice by the same file and once more by another.
+    const many = [
+      record({ path: 'a.ts', symbols: [symbol()] }),
+      record({
+        path: 'c.ts',
+        symbols: [],
+        imports: [
+          { specifier: './a.js', kind: 'static', startLine: 1 },
+          { specifier: './a', kind: 'dynamic', startLine: 3 },
+        ],
+      }),
+      record({ path: 'd.ts', symbols: [], imports: [{ specifier: './a.js', kind: 'static', startLine: 1 }] }),
+    ];
+
+    const impact = impactOf(many, { changedPaths: ['a.ts'], limit: 2 });
+    if (!impact.ok) throw new Error(impact.error.message);
+    const [target] = impact.value.targets;
+    if (target === undefined) throw new Error('expected one target');
+    expect(target.dependents.map((hit) => hit.path)).toEqual(['c.ts', 'd.ts']);
+    expect(target.dependentsTruncated).toBe(false);
+
+    const tight = impactOf(many, { changedPaths: ['a.ts'], limit: 1 });
+    if (!tight.ok) throw new Error(tight.error.message);
+    expect(tight.value.targets[0]?.dependents.map((hit) => hit.path)).toEqual(['c.ts']);
+    expect(tight.value.targets[0]?.dependentsTruncated).toBe(true);
+  });
+
+  it('says when the missing-path list itself was cut', () => {
+    const impact = impactOf(records, { changedPaths: ['gone-a.ts', 'gone-b.ts'], limit: 1 });
+    if (!impact.ok) throw new Error(impact.error.message);
+
+    expect(impact.value.missingPaths).toHaveLength(1);
+    expect(impact.value.truncated).toBe(true);
+  });
+
   it('refuses an empty change set and a non-path entry, and dedupes repeats', () => {
     for (const changedPaths of [[], [''], [3 as never], 'a.ts' as never]) {
       expect(impactOf(records, { changedPaths: changedPaths as never, limit: 10 }))

@@ -374,23 +374,26 @@ export function impactOf(records: readonly StructuralRecordView[], query: Impact
       continue;
     }
 
-    const dependents = dependentsOf(records, { path, limit: limit.value });
+    // Read to the hard ceiling, then dedupe, then page: paging first would spend the
+    // budget on repeated specifiers from one file and drop a distinct file that fits.
+    const dependents = dependentsOf(records, { path, limit: MAX_QUERY_LIMIT });
     if (!dependents.ok) return dependents;
     const seen = new Set<string>();
-    const unique: DependentHit[] = [];
-    const dependentsTruncated = dependents.value.truncated;
+    const distinct: DependentHit[] = [];
     for (const hit of dependents.value.items) {
       if (seen.has(hit.path)) continue;
       seen.add(hit.path);
-      unique.push(hit);
+      distinct.push(hit);
     }
+    const unique = paginate(distinct, limit.value);
+    const dependentsTruncated = dependents.value.truncated || unique.truncated;
 
     const symbols = paginate(outline.value.symbols, limit.value);
     targets.push({
       path,
       symbols: symbols.items,
       symbolsTruncated: symbols.truncated,
-      dependents: unique,
+      dependents: unique.items,
       dependentsTruncated,
       ...(outline.value.parseError === undefined ? {} : { parseError: outline.value.parseError }),
     });

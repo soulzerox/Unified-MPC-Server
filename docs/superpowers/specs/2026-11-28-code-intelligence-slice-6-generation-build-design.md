@@ -18,9 +18,12 @@ buildStructuralGeneration({ store, identity, repositoryRoot, files })
   -> Result<StructuralGeneration>
 ```
 
-1. `files` must be a non-empty array with no duplicates. An empty generation would
+1. `files` must be a non-empty array of non-empty strings. An empty generation would
    state "this tree has no code" as immutable evidence, and the store refuses a
-   rewrite, so the mistake could never be corrected.
+   rewrite, so the mistake could never be corrected. Paths are *not* deduplicated
+   here: the extractor admits a path by its repo-relative form, so `./a.ts` and
+   `a.ts` are one file and contribute one record. A raw-string check would refuse a
+   pair the reader already understands.
 2. Extraction is delegated to `extractStructuralRecords`, so the slice inherits its
    refusals: an absolute path, one escaping the root, an unsupported language, a
    non-regular file and invalid UTF-8 are `INVALID_INPUT`, and nothing is written.

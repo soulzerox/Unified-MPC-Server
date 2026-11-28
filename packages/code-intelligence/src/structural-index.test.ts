@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,8 +7,9 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
-import { appError, computeTreeOid, ok } from '@unified-mpc/domain';
+import { appError, ok } from '@unified-mpc/domain';
 
+import { extractStructuralRecords } from './structural-extractor.js';
 import { buildStructuralGeneration, discoverStructuralFiles, indexStructuralWorkspace } from './structural-index.js';
 import type {
   ReadStructuralRecordsInput,
@@ -54,13 +54,9 @@ async function committedRepo(
   await run('git', ['add', '.'], { cwd: root });
   await run('git', ['-c', 'user.email=a@b', '-c', 'user.name=a', '-c', 'commit.gpgsign=false', 'commit', '-qnm', 'init'], { cwd: root });
   const { stdout: head } = await run('git', ['rev-parse', 'HEAD'], { cwd: root });
-  const entries = await Promise.all(
-    Object.entries(files).map(async ([path, contents]) => ({
-      path,
-      contentHash: createHash('sha256').update(contents, 'utf8').digest('hex'),
-    })),
-  );
-  return { root, identity: { ...identity, commit_sha: head.trim(), tree_oid: computeTreeOid(entries) } };
+  // This layer never verifies `tree_oid` (it is the resolver's content-tree hash), so the
+  // fixture only needs a plausible value; the commit is what the gate checks.
+  return { root, identity: { ...identity, commit_sha: head.trim(), tree_oid: 'c'.repeat(64) } };
 }
 
 function fakeStore(): { store: StructuralRecordStore; writes: WriteStructuralGenerationInput[] } {
@@ -251,5 +247,28 @@ describe('structural file discovery', () => {
     });
     expect(subdir).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(writes).toHaveLength(0);
+  });
+});
+
+describe('source extension coupling', () => {
+  it('admits exactly the extensions the extractor table can extract', async () => {
+    const extensions = ['ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs'];
+    const root = await repo(Object.fromEntries(
+      extensions.map((extension) => [`src/file.${extension}`, 'export const value = 1;\n']),
+    ));
+    await run('git', ['init', '-q'], { cwd: root });
+    await run('git', ['add', 'src'], { cwd: root });
+
+    const discovered = await discoverStructuralFiles({ repositoryRoot: root });
+    if (!discovered.ok) throw new Error(discovered.error.message);
+    expect(discovered.value).toEqual(extensions.map((extension) => `src/file.${extension}`).sort());
+
+    const extracted = await extractStructuralRecords({
+      repositoryRoot: root,
+      identity,
+      files: discovered.value,
+    });
+    if (!extracted.ok) throw new Error(extracted.error.message);
+    expect(extracted.value).toHaveLength(extensions.length);
   });
 });

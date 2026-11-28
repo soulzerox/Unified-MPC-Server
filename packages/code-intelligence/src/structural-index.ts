@@ -1,7 +1,10 @@
+import { execFile } from 'node:child_process';
+
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
-import { appError, err, type Result } from '@unified-mpc/domain';
+import { appError, err, ok, type Result } from '@unified-mpc/domain';
 
 import { extractStructuralRecords } from './structural-extractor.js';
+import { STRUCTURAL_SOURCE_EXTENSION } from './structural-source-pattern.js';
 import type { StructuralGeneration, StructuralRecordStore } from './structural-record-store.js';
 
 /**
@@ -57,4 +60,75 @@ export async function buildStructuralGeneration(
   });
   if (!records.ok) return records;
   return input.store.writeGeneration({ identity: input.identity, records: records.value });
+}
+
+/** Lists repository files; injected so discovery is testable without a Git binary. */
+export type StructuralFileLister = (repositoryRoot: string) => Promise<Result<readonly string[]>>;
+
+export interface DiscoverStructuralFilesInput {
+  readonly repositoryRoot: string;
+  /** Defaults to `git ls-files --cached --others --exclude-standard`. */
+  readonly listFiles?: StructuralFileLister;
+}
+
+/**
+ * The source files a generation should carry.
+ *
+ * `git ls-files` is the ignore engine, not a parser here: the repository already
+ * decides what is tracked and what is ignored, and re-implementing that for one
+ * subsystem is how two answers to "which files exist" start. Untracked-but-not-ignored
+ * files are included, because a generation describes the tree on disk, not the last
+ * commit.
+ */
+export async function discoverStructuralFiles(
+  input: DiscoverStructuralFilesInput,
+): Promise<Result<readonly string[]>> {
+  const listed = await (input.listFiles ?? gitListedFiles)(input.repositoryRoot);
+  if (!listed.ok) return listed;
+
+  // A `Set` collapses one path reached twice, and the default `.sort()` is code-unit
+  // order, which is the order every other query documents.
+  const sources = new Set<string>();
+  for (const file of listed.value) {
+    if (typeof file === 'string' && file.length > 0 && STRUCTURAL_SOURCE_EXTENSION.test(file)) {
+      sources.add(file);
+    }
+  }
+  return ok([...sources].sort());
+}
+
+export interface IndexStructuralWorkspaceInput extends BuildStructuralGenerationInput {
+  readonly listFiles?: StructuralFileLister;
+}
+
+/** Discovery plus extraction for a whole checkout: the path a caller usually wants. */
+export async function indexStructuralWorkspace(
+  input: IndexStructuralWorkspaceInput,
+): Promise<Result<StructuralGeneration>> {
+  const discovered = await discoverStructuralFiles({
+    repositoryRoot: input.repositoryRoot,
+    ...(input.listFiles === undefined ? {} : { listFiles: input.listFiles }),
+  });
+  if (!discovered.ok) return discovered;
+  if (discovered.value.length === 0) {
+    return err(appError('INVALID_INPUT', 'structural discovery found no source files under the repository root'));
+  }
+  return buildStructuralGeneration({ ...input, files: discovered.value });
+}
+
+function gitListedFiles(repositoryRoot: string): Promise<Result<readonly string[]>> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { cwd: repositoryRoot, maxBuffer: 64 * 1024 * 1024 },
+      (error, stdout) => {
+        if (error !== null) {
+          resolve(err(appError('INVALID_INPUT', `structural discovery refused ${repositoryRoot}: ${error.message}`)));
+          return;
+        }
+        resolve(ok(stdout.split('\0').filter((file) => file.length > 0)));
+      },
+    );
+  });
 }

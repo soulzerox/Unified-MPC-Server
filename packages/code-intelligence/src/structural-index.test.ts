@@ -1,13 +1,15 @@
+import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { CanonicalSourceIdentity } from '@unified-mpc/workspace';
 import { ok } from '@unified-mpc/domain';
 
-import { buildStructuralGeneration } from './structural-index.js';
+import { buildStructuralGeneration, discoverStructuralFiles, indexStructuralWorkspace } from './structural-index.js';
 import type {
   ReadStructuralRecordsInput,
   StructuralFingerprint,
@@ -26,6 +28,7 @@ const identity: CanonicalSourceIdentity = {
   ref: 'refs/heads/main',
 };
 
+const run = promisify(execFile);
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -113,5 +116,52 @@ describe('structural generation builder', () => {
     const escaped = await buildStructuralGeneration({ store, identity, repositoryRoot: root, files: ['../outside.ts'] });
     expect(escaped).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(writes).toHaveLength(0);
+  });
+});
+
+describe('structural file discovery', () => {
+  it('keeps only source files, dedupes them and orders them by code unit', async () => {
+    const listed = ['b.ts', 'a.ts', 'README.md', 'c.mts', 'b.ts', 'dist/d.js', ''];
+    const discovered = await discoverStructuralFiles({
+      repositoryRoot: '/nowhere',
+      listFiles: async () => ok(listed),
+    });
+    if (!discovered.ok) throw new Error(discovered.error.message);
+    expect(discovered.value).toEqual(['a.ts', 'b.ts', 'c.mts', 'dist/d.js']);
+  });
+
+  it('asks git which files exist, so ignored files stay out and untracked ones stay in', async () => {
+    const root = await repo({
+      '.gitignore': 'ignored.ts\n',
+      'a.ts': 'export const a = 1;\n',
+      'ignored.ts': 'export const ignored = 1;\n',
+      'untracked.ts': 'export const u = 1;\n',
+      'notes.md': '# notes\n',
+    });
+    await run('git', ['init', '-q'], { cwd: root });
+    await run('git', ['add', 'a.ts', '.gitignore'], { cwd: root });
+
+    const discovered = await discoverStructuralFiles({ repositoryRoot: root });
+    if (!discovered.ok) throw new Error(discovered.error.message);
+    expect(discovered.value).toEqual(['a.ts', 'untracked.ts']);
+  });
+
+  it('refuses a directory git cannot read', async () => {
+    // A path that does not exist makes Git fail before it can look at any parent, so
+    // the refusal does not depend on whether the temp directory sits inside a repo.
+    const missing = join(tmpdir(), 'structural-discovery-missing-dir');
+    const discovered = await discoverStructuralFiles({ repositoryRoot: missing });
+    expect(discovered).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('indexes a whole checkout in one call', async () => {
+    const root = await repo({ 'src/a.ts': 'export const a = 1;\n', 'src/b.ts': 'export const b = 2;\n' });
+    await run('git', ['init', '-q'], { cwd: root });
+    await run('git', ['add', 'src'], { cwd: root });
+    const { store, writes } = fakeStore();
+
+    const built = await indexStructuralWorkspace({ store, identity, repositoryRoot: root });
+    if (!built.ok) throw new Error(built.error.message);
+    expect(writes[0]?.records.map((record) => record.path)).toEqual(['src/a.ts', 'src/b.ts']);
   });
 });

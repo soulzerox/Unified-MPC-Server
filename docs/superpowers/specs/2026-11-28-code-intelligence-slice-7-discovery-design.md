@@ -63,5 +63,8 @@ indexStructuralWorkspace({ store, identity, repositoryRoot, listFiles? })
 - **Submodules and sparse checkouts** are Git's answer, taken as given.
 - **Uncommitted work is refused, not silently skipped.** Indexing needs a clean
   checkout; commit first.
+- **`assume-unchanged` and `skip-worktree` are invisible to `git status`.** A file
+  marked that way can hold modified bytes that the gate accepts. Do not mark source
+  files you intend to index; the subsystem cannot see through Git's own advice.
 - **No parallelism or progress.** Extraction is still one sequential call; the worker
   slice owns concurrency.

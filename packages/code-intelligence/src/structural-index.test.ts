@@ -195,6 +195,20 @@ describe('structural file discovery', () => {
     expect(writes[0]?.records.map((record) => record.path)).toEqual(['src/a.ts', 'src/b.ts']);
   });
 
+  it('refuses through the injected reader, so the gate is testable without Git', async () => {
+    const root = await repo({ 'a.ts': 'export const a = 1;\n' });
+    const { store, writes } = fakeStore();
+
+    const dirty = await indexStructuralWorkspace({
+      store,
+      identity,
+      repositoryRoot: root,
+      readWorktree: async () => ok({ head: identity.commit_sha, toplevel: root, dirty: true }),
+    });
+    expect(dirty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(writes).toHaveLength(0);
+  });
+
   it('refuses a dirty worktree, because its bytes are not in any commit yet', async () => {
     const { root, identity: head } = await committedRepo({ 'a.ts': 'export const a = 1;\n' });
     await writeFile(join(root, 'b.ts'), 'export const b = 2;\n', 'utf8');
